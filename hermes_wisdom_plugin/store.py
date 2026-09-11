@@ -1,9 +1,12 @@
 """Profile-scoped crash-safe SQLite state for Collective Wisdom."""
 
+# The extracted store intentionally retains the pinned, broad persistence API.
+# pylint: disable=line-too-long,missing-function-docstring,too-many-arguments
+# pylint: disable=too-many-lines,too-many-locals,too-many-public-methods
+
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 import uuid
@@ -11,9 +14,6 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
-
-from hermes_constants import get_hermes_home
-
 
 SCHEMA_VERSION = 12
 
@@ -27,9 +27,245 @@ def filesystem_identity(path: Path) -> str | None:
     return f"{stat.st_dev}:{stat.st_ino}" if stat.st_ino else None
 
 
+class UnsupportedSchemaError(RuntimeError):
+    """The database is not an exact current-schema profile store."""
+
+
+class WisdomConflict(RuntimeError):
+    """A local store operation conflicts with its expected profile generation."""
+
+    exit_code = 5
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.status = None
+        self.code = code
+
+
+CURRENT_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS local_skill (
+  id TEXT PRIMARY KEY,
+  canonical_path TEXT NOT NULL,
+  fs_identity TEXT,
+  current_hash TEXT,
+  source_kind TEXT NOT NULL,
+  deleted_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_skill_fs_identity
+  ON local_skill(fs_identity) WHERE fs_identity IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS local_skill_active_path
+  ON local_skill(canonical_path) WHERE deleted_at IS NULL;
+CREATE TABLE IF NOT EXISTS snapshot (
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  tree_json TEXT NOT NULL DEFAULT '{}',
+  skill_text TEXT,
+  PRIMARY KEY(skill_id, content_hash),
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS candidate (
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  qualification TEXT NOT NULL,
+  state TEXT NOT NULL,
+  suggested_at TEXT,
+  dismissed_at TEXT,
+  PRIMARY KEY(skill_id, content_hash, qualification),
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS local_draft (
+  id TEXT PRIMARY KEY,
+  skill_id TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  overlay_path TEXT NOT NULL,
+  draft_commit TEXT,
+  server_revision TEXT,
+  state TEXT NOT NULL,
+  description TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  description_hash TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS review_receipt (
+  id TEXT PRIMARY KEY,
+  draft_id TEXT NOT NULL UNIQUE,
+  server_revision TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  description_hash TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  consumed_at TEXT,
+  FOREIGN KEY(draft_id) REFERENCES local_draft(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS installation_identity (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  installation_id TEXT NOT NULL,
+  verified_org_id TEXT,
+  verified_at TEXT,
+  disclosure_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS managed_install (
+  skill_id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version > 0),
+  content_hash TEXT NOT NULL,
+  baseline_json TEXT NOT NULL,
+  target_path TEXT NOT NULL UNIQUE,
+  update_mode TEXT NOT NULL,
+  state TEXT NOT NULL,
+  installed_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS operation_journal (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS operation_journal_one_pending
+  ON operation_journal(kind,entity_id) WHERE state='pending';
+CREATE TABLE IF NOT EXISTS usage_day (
+  skill_id TEXT NOT NULL,
+  day_local TEXT NOT NULL,
+  timezone_name TEXT NOT NULL,
+  use_count INTEGER NOT NULL CHECK(use_count >= 0),
+  PRIMARY KEY(skill_id, timezone_name, day_local),
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS refinement (
+  skill_id TEXT NOT NULL,
+  from_hash TEXT NOT NULL,
+  to_hash TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  structural_json TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY(skill_id, to_hash),
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stability_job (
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  state TEXT NOT NULL,
+  evaluated_at TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  PRIMARY KEY(skill_id, content_hash),
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS local_event (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  session_id TEXT,
+  task_id TEXT,
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  qualification TEXT NOT NULL,
+  organization_id TEXT,
+  qualification_sequence INTEGER,
+  payload_json TEXT NOT NULL,
+  state TEXT NOT NULL,
+  telegram_delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS local_event_org_identity
+  ON local_event(kind,COALESCE(organization_id,''),skill_id,
+  content_hash,qualification);
+CREATE UNIQUE INDEX IF NOT EXISTS local_event_org_qualification_sequence
+  ON local_event(organization_id,qualification_sequence)
+  WHERE kind='wisdom.candidate' AND qualification_sequence IS NOT NULL;
+CREATE TABLE IF NOT EXISTS local_event_delivery (
+  event_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  delivered_at TEXT NOT NULL,
+  PRIMARY KEY(event_id, surface),
+  FOREIGN KEY(event_id) REFERENCES local_event(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS wisdom_organization (
+  organization_id TEXT PRIMARY KEY,
+  display_name TEXT,
+  resolved INTEGER NOT NULL DEFAULT 0,
+  checked_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feed_state (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  cursor TEXT,
+  updated_at TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0,
+  organization_id TEXT,
+  installation_id TEXT,
+  resume_required INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS feed_event (
+  event_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  skill_id TEXT NOT NULL,
+  version INTEGER,
+  installation_id TEXT,
+  update_mode TEXT,
+  payload_json TEXT NOT NULL,
+  cadence TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  local_seen_at TEXT,
+  telegram_delivered_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feed_event_delivery (
+  event_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  delivered_at TEXT NOT NULL,
+  PRIMARY KEY(event_id, surface),
+  FOREIGN KEY(event_id) REFERENCES feed_event(event_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS operation_lock (
+  entity_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS professionalism_review (
+  id TEXT PRIMARY KEY,
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  author_description_hash TEXT NOT NULL,
+  package_json TEXT NOT NULL,
+  author_description TEXT NOT NULL,
+  state TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  result_json TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(skill_id, content_hash, author_description_hash)
+);
+CREATE INDEX IF NOT EXISTS professionalism_review_queue
+  ON professionalism_review(state, available_at);
+"""
+
+
 class WisdomStore:
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = root or (get_hermes_home() / "wisdom")
+    """Profile-local SQLite persistence rooted in host-provided plugin data."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
         self.path = self.root / "wisdom.db"
         self._lock = threading.RLock()
         self._prepare()
@@ -41,484 +277,53 @@ class WisdomStore:
         except OSError:
             pass
         with self.transaction() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS schema_meta (
-                  key TEXT PRIMARY KEY,
-                  value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS local_skill (
-                  id TEXT PRIMARY KEY,
-                  canonical_path TEXT NOT NULL,
-                  fs_identity TEXT,
-                  current_hash TEXT,
-                  source_kind TEXT NOT NULL,
-                  deleted_at TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS local_skill_fs_identity
-                  ON local_skill(fs_identity) WHERE fs_identity IS NOT NULL;
-                CREATE UNIQUE INDEX IF NOT EXISTS local_skill_active_path
-                  ON local_skill(canonical_path) WHERE deleted_at IS NULL;
-                CREATE TABLE IF NOT EXISTS snapshot (
-                  skill_id TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  captured_at TEXT NOT NULL,
-                  tree_json TEXT NOT NULL DEFAULT '{}',
-                  skill_text TEXT,
-                  PRIMARY KEY(skill_id, content_hash),
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS candidate (
-                  skill_id TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  qualification TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  suggested_at TEXT,
-                  dismissed_at TEXT,
-                  PRIMARY KEY(skill_id, content_hash, qualification),
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS local_draft (
-                  id TEXT PRIMARY KEY,
-                  skill_id TEXT NOT NULL,
-                  source_hash TEXT NOT NULL,
-                  overlay_path TEXT NOT NULL,
-                  draft_commit TEXT,
-                  server_revision TEXT,
-                  state TEXT NOT NULL,
-                  description TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  description_hash TEXT NOT NULL,
-                  manifest_hash TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS review_receipt (
-                  id TEXT PRIMARY KEY,
-                  draft_id TEXT NOT NULL UNIQUE,
-                  server_revision TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  description_hash TEXT NOT NULL,
-                  manifest_hash TEXT NOT NULL,
-                  reviewed_at TEXT NOT NULL,
-                  consumed_at TEXT,
-                  FOREIGN KEY(draft_id) REFERENCES local_draft(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS installation_identity (
-                  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                  installation_id TEXT NOT NULL,
-                  verified_org_id TEXT,
-                  verified_at TEXT,
-                  disclosure_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS managed_install (
-                  skill_id TEXT PRIMARY KEY,
-                  org_id TEXT NOT NULL,
-                  slug TEXT NOT NULL,
-                  version INTEGER NOT NULL CHECK(version > 0),
-                  content_hash TEXT NOT NULL,
-                  baseline_json TEXT NOT NULL,
-                  target_path TEXT NOT NULL UNIQUE,
-                  update_mode TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  installed_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS operation_journal (
-                  id TEXT PRIMARY KEY,
-                  kind TEXT NOT NULL,
-                  entity_id TEXT NOT NULL,
-                  phase TEXT NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  UNIQUE(kind, entity_id, state)
-                );
-                CREATE TABLE IF NOT EXISTS usage_day (
-                  skill_id TEXT NOT NULL,
-                  day_local TEXT NOT NULL,
-                  timezone_name TEXT NOT NULL,
-                  use_count INTEGER NOT NULL CHECK(use_count >= 0),
-                  PRIMARY KEY(skill_id, timezone_name, day_local),
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS refinement (
-                  skill_id TEXT NOT NULL,
-                  from_hash TEXT NOT NULL,
-                  to_hash TEXT NOT NULL,
-                  classification TEXT NOT NULL,
-                  structural_json TEXT NOT NULL,
-                  recorded_at TEXT NOT NULL,
-                  PRIMARY KEY(skill_id, to_hash),
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS stability_job (
-                  skill_id TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  due_at TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  evaluated_at TEXT,
-                  session_id TEXT,
-                  task_id TEXT,
-                  PRIMARY KEY(skill_id, content_hash),
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS local_event (
-                  id TEXT PRIMARY KEY,
-                  kind TEXT NOT NULL,
-                  session_id TEXT,
-                  task_id TEXT,
-                  skill_id TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  qualification TEXT NOT NULL,
-                  organization_id TEXT,
-                  qualification_sequence INTEGER,
-                  payload_json TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  telegram_delivered_at TEXT,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS local_event_delivery (
-                  event_id TEXT NOT NULL,
-                  surface TEXT NOT NULL,
-                  delivered_at TEXT NOT NULL,
-                  PRIMARY KEY(event_id, surface),
-                  FOREIGN KEY(event_id) REFERENCES local_event(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS wisdom_organization (
-                  organization_id TEXT PRIMARY KEY,
-                  display_name TEXT,
-                  resolved INTEGER NOT NULL DEFAULT 0,
-                  checked_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS feed_state (
-                  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                  cursor TEXT,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS feed_event (
-                  event_id TEXT PRIMARY KEY,
-                  kind TEXT NOT NULL,
-                  skill_id TEXT NOT NULL,
-                  version INTEGER,
-                  installation_id TEXT,
-                  update_mode TEXT,
-                  payload_json TEXT NOT NULL,
-                  cadence TEXT NOT NULL,
-                  due_at TEXT NOT NULL,
-                  local_seen_at TEXT,
-                  telegram_delivered_at TEXT,
-                  created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS feed_event_delivery (
-                  event_id TEXT NOT NULL,
-                  surface TEXT NOT NULL,
-                  delivered_at TEXT NOT NULL,
-                  PRIMARY KEY(event_id, surface),
-                  FOREIGN KEY(event_id) REFERENCES feed_event(event_id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS operation_lock (
-                  entity_id TEXT PRIMARY KEY,
-                  owner TEXT NOT NULL,
-                  expires_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS professionalism_review (
-                  id TEXT PRIMARY KEY,
-                  skill_id TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  author_description_hash TEXT NOT NULL,
-                  package_json TEXT NOT NULL,
-                  author_description TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  attempts INTEGER NOT NULL DEFAULT 0,
-                  available_at TEXT NOT NULL,
-                  lease_owner TEXT,
-                  lease_expires_at TEXT,
-                  result_json TEXT,
-                  last_error TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  UNIQUE(skill_id, content_hash, author_description_hash)
-                );
-                CREATE INDEX IF NOT EXISTS professionalism_review_queue
-                  ON professionalism_review(state, available_at);
-                """
-            )
-            columns = {
-                str(row[1])
-                for row in db.execute("PRAGMA table_info(snapshot)").fetchall()
-            }
-            if "tree_json" not in columns:
+            if self._existing_schema_version(db) is None:
+                self._create_current_schema(db)
                 db.execute(
-                    "ALTER TABLE snapshot ADD COLUMN tree_json TEXT NOT NULL DEFAULT '{}'"
+                    "INSERT INTO schema_meta(key,value) VALUES('schema_version',?)",
+                    (str(SCHEMA_VERSION),),
                 )
-            if "skill_text" not in columns:
-                db.execute("ALTER TABLE snapshot ADD COLUMN skill_text TEXT")
-            stability_columns = {
-                str(row[1])
-                for row in db.execute("PRAGMA table_info(stability_job)").fetchall()
-            }
-            if "session_id" not in stability_columns:
-                db.execute("ALTER TABLE stability_job ADD COLUMN session_id TEXT")
-            if "task_id" not in stability_columns:
-                db.execute("ALTER TABLE stability_job ADD COLUMN task_id TEXT")
-            usage_columns = {
-                str(row[1])
-                for row in db.execute("PRAGMA table_info(usage_day)").fetchall()
-            }
-            if "day_local" not in usage_columns:
-                # V4 recorded UTC calendar dates. Preserve those private
-                # counters in a distinct UTC bucket so a configured local
-                # timezone never combines them with business-day evidence.
-                db.executescript(
-                    """
-                    ALTER TABLE usage_day RENAME TO usage_day_v4;
-                    CREATE TABLE usage_day (
-                      skill_id TEXT NOT NULL,
-                      day_local TEXT NOT NULL,
-                      timezone_name TEXT NOT NULL,
-                      use_count INTEGER NOT NULL CHECK(use_count >= 0),
-                      PRIMARY KEY(skill_id, timezone_name, day_local),
-                      FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                    );
-                    INSERT INTO usage_day(skill_id,day_local,timezone_name,use_count)
-                      SELECT skill_id,day_utc,'UTC',use_count FROM usage_day_v4;
-                    DROP TABLE usage_day_v4;
-                    """
-                )
-            candidate_sql = str(
-                db.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='candidate'"
-                ).fetchone()[0]
-            ).replace("\n", " ")
-            if (
-                "PRIMARY KEY(skill_id, content_hash, qualification)"
-                not in candidate_sql
-            ):
-                db.executescript(
-                    """
-                    ALTER TABLE candidate RENAME TO candidate_v1;
-                    CREATE TABLE candidate (
-                      skill_id TEXT NOT NULL,
-                      content_hash TEXT NOT NULL,
-                      qualification TEXT NOT NULL,
-                      state TEXT NOT NULL,
-                      suggested_at TEXT,
-                      dismissed_at TEXT,
-                      PRIMARY KEY(skill_id, content_hash, qualification),
-                      FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                    );
-                    INSERT INTO candidate
-                      SELECT skill_id,content_hash,qualification,state,suggested_at,dismissed_at
-                      FROM candidate_v1;
-                    DROP TABLE candidate_v1;
-                    """
-                )
-            event_columns = {
-                str(row[1])
-                for row in db.execute("PRAGMA table_info(local_event)").fetchall()
-            }
-            if "qualification" not in event_columns:
-                db.executescript(
-                    """
-                    ALTER TABLE local_event RENAME TO local_event_v2;
-                    CREATE TABLE local_event (
-                      id TEXT PRIMARY KEY,
-                      kind TEXT NOT NULL,
-                      session_id TEXT,
-                      task_id TEXT,
-                      skill_id TEXT NOT NULL,
-                      content_hash TEXT NOT NULL,
-                      qualification TEXT NOT NULL,
-                      payload_json TEXT NOT NULL,
-                      state TEXT NOT NULL,
-                      telegram_delivered_at TEXT,
-                      created_at TEXT NOT NULL,
-                      UNIQUE(kind, skill_id, content_hash, qualification),
-                      FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                    );
-                    INSERT INTO local_event
-                      SELECT id,kind,session_id,task_id,skill_id,content_hash,
-                        COALESCE(json_extract(payload_json,'$.qualification'),'legacy'),
-                        payload_json,state,NULL,created_at
-                      FROM local_event_v2;
-                    DROP TABLE local_event_v2;
-                    """
-                )
-                event_columns.add("telegram_delivered_at")
-            if "telegram_delivered_at" not in event_columns:
-                db.execute(
-                    "ALTER TABLE local_event ADD COLUMN telegram_delivered_at TEXT"
-                )
-            if "organization_id" not in event_columns:
-                db.execute("ALTER TABLE local_event ADD COLUMN organization_id TEXT")
-            if "qualification_sequence" not in event_columns:
-                db.execute(
-                    "ALTER TABLE local_event ADD COLUMN qualification_sequence INTEGER"
-                )
-            organization_columns = {
-                str(row[1])
-                for row in db.execute(
-                    "PRAGMA table_info(wisdom_organization)"
-                ).fetchall()
-            }
-            if "resolved" not in organization_columns:
-                db.execute(
-                    "ALTER TABLE wisdom_organization "
-                    "ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0"
-                )
-            db.execute("SAVEPOINT wisdom_feed_schema")
-            feed_columns = {
-                str(row[1]) for row in db.execute("PRAGMA table_info(feed_state)")
-            }
-            if "generation" not in feed_columns:
-                db.execute(
-                    "ALTER TABLE feed_state ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
-                )
-            active_org = db.execute(
-                "SELECT verified_org_id FROM installation_identity WHERE singleton=1"
-            ).fetchone()
-            active_org_id = str(active_org[0]) if active_org and active_org[0] else None
-            scope_columns = {
-                "organization_id": "TEXT",
-                "installation_id": "TEXT",
-                "resume_required": "INTEGER NOT NULL DEFAULT 0",
-            }
-            for column, definition in scope_columns.items():
-                if column not in feed_columns:
-                    db.execute(f"ALTER TABLE feed_state ADD COLUMN {column} {definition}")
-            if any(column not in feed_columns for column in scope_columns):
-                # A persisted feed without a verified team is suspended, even
-                # on older profiles that predate generation fencing.
-                db.execute(
-                    """UPDATE feed_state SET organization_id=?,
-                    installation_id=(SELECT installation_id FROM installation_identity WHERE singleton=1),
-                    resume_required=CASE WHEN ? IS NULL THEN 1 ELSE 0 END""",
-                    (active_org_id, active_org_id),
-                )
-            db.execute("RELEASE SAVEPOINT wisdom_feed_schema")
-            if active_org_id:
-                sequence_row = db.execute(
-                    "SELECT COALESCE(MAX(qualification_sequence),0) FROM local_event "
-                    "WHERE kind='wisdom.candidate' AND organization_id=?",
-                    (active_org_id,),
-                ).fetchone()
-                sequence = int(sequence_row[0]) if sequence_row else 0
-                legacy_events = db.execute(
-                    "SELECT id FROM local_event WHERE kind='wisdom.candidate' "
-                    "AND qualification_sequence IS NULL ORDER BY created_at,id"
-                ).fetchall()
-                for event in legacy_events:
-                    sequence += 1
-                    db.execute(
-                        "UPDATE local_event SET organization_id=?,qualification_sequence=? "
-                        "WHERE id=?",
-                        (active_org_id, sequence, event["id"]),
-                    )
-            event_sql = str(
-                db.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' "
-                    "AND name='local_event'"
-                ).fetchone()[0]
-            ).replace("\n", " ")
-            if "UNIQUE(kind, skill_id, content_hash, qualification)" in event_sql:
-                db.executescript(
-                    """
-                    CREATE TEMP TABLE local_event_delivery_v9 AS
-                      SELECT * FROM local_event_delivery;
-                    CREATE TABLE local_event_v9 (
-                      id TEXT PRIMARY KEY,
-                      kind TEXT NOT NULL,
-                      session_id TEXT,
-                      task_id TEXT,
-                      skill_id TEXT NOT NULL,
-                      content_hash TEXT NOT NULL,
-                      qualification TEXT NOT NULL,
-                      organization_id TEXT,
-                      qualification_sequence INTEGER,
-                      payload_json TEXT NOT NULL,
-                      state TEXT NOT NULL,
-                      telegram_delivered_at TEXT,
-                      created_at TEXT NOT NULL,
-                      FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-                    );
-                    INSERT INTO local_event_v9
-                      SELECT id,kind,session_id,task_id,skill_id,content_hash,
-                        qualification,organization_id,qualification_sequence,
-                        payload_json,state,telegram_delivered_at,created_at
-                      FROM local_event;
-                    DROP TABLE local_event;
-                    ALTER TABLE local_event_v9 RENAME TO local_event;
-                    INSERT OR IGNORE INTO local_event_delivery
-                      SELECT * FROM local_event_delivery_v9;
-                    DROP TABLE local_event_delivery_v9;
-                    """
-                )
-            db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS local_event_org_identity "
-                "ON local_event(kind,COALESCE(organization_id,''),skill_id,"
-                "content_hash,qualification)"
-            )
-            db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS local_event_org_qualification_sequence "
-                "ON local_event(organization_id,qualification_sequence) "
-                "WHERE kind='wisdom.candidate' AND qualification_sequence IS NOT NULL"
-            )
-            # Seed the transport-neutral delivery ledger from pre-v7 Telegram
-            # timestamps. Keeping the legacy columns during the migration
-            # window preserves older readers while Slack gains independent
-            # delivery state.
-            db.execute(
-                "INSERT OR IGNORE INTO local_event_delivery(event_id,surface,delivered_at) "
-                "SELECT id,'telegram',telegram_delivered_at FROM local_event "
-                "WHERE telegram_delivered_at IS NOT NULL"
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO feed_event_delivery(event_id,surface,delivered_at) "
-                "SELECT event_id,'telegram',telegram_delivered_at FROM feed_event "
-                "WHERE telegram_delivered_at IS NOT NULL"
-            )
-            journal_sql = str(
-                db.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='operation_journal'"
-                ).fetchone()[0]
-            ).replace("\n", " ")
-            if "UNIQUE(kind, entity_id, state)" in journal_sql:
-                db.executescript(
-                    """
-                    ALTER TABLE operation_journal RENAME TO operation_journal_v2;
-                    CREATE TABLE operation_journal (
-                      id TEXT PRIMARY KEY,
-                      kind TEXT NOT NULL,
-                      entity_id TEXT NOT NULL,
-                      phase TEXT NOT NULL,
-                      payload_json TEXT NOT NULL,
-                      state TEXT NOT NULL,
-                      created_at TEXT NOT NULL,
-                      updated_at TEXT NOT NULL
-                    );
-                    INSERT INTO operation_journal SELECT * FROM operation_journal_v2;
-                    DROP TABLE operation_journal_v2;
-                    """
-                )
-            db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS operation_journal_one_pending "
-                "ON operation_journal(kind,entity_id) WHERE state='pending'"
-            )
-            from .mediation_store import create_schema
-
-            create_schema(db)
-            db.execute(
-                "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
         self._secure_database_files()
+
+    @staticmethod
+    def _create_current_schema(db: sqlite3.Connection) -> None:
+        for statement in CURRENT_SCHEMA_SQL.split(";"):
+            if statement.strip():
+                db.execute(statement)
+
+    @staticmethod
+    def _existing_schema_version(db: sqlite3.Connection) -> int | None:
+        tables = {
+            str(row[0])
+            for row in db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        if not tables:
+            return None
+        if "schema_meta" not in tables:
+            raise UnsupportedSchemaError(
+                "Refusing existing unversioned Wisdom database; start with a fresh profile"
+            )
+        row = db.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if row is None:
+            raise UnsupportedSchemaError(
+                "Refusing Wisdom database without a schema version"
+            )
+        try:
+            version = int(row[0])
+        except (TypeError, ValueError) as exc:
+            raise UnsupportedSchemaError(
+                f"Invalid Wisdom schema version: {row[0]!r}"
+            ) from exc
+        if version != SCHEMA_VERSION:
+            raise UnsupportedSchemaError(
+                f"Unsupported Wisdom schema version {version}; expected {SCHEMA_VERSION}"
+            )
+        return version
 
     def _secure_database_files(self) -> None:
         for path in (
@@ -1593,8 +1398,6 @@ class WisdomStore:
             "SELECT generation FROM feed_state WHERE singleton=1"
         ).fetchone()
         if (int(row[0]) if row else 0) != expected:
-            from .client import WisdomConflict
-
             raise WisdomConflict(
                 "Wisdom account changed while fetching the feed; sign in and retry",
                 code="account_session_changed",

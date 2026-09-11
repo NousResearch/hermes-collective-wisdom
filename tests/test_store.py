@@ -1,10 +1,76 @@
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=missing-module-docstring,too-few-public-methods
+
 import sqlite3
 import os
 from pathlib import Path
 
 import pytest
 
-from hermes_wisdom.store import SCHEMA_VERSION, WisdomStore
+from hermes_wisdom_plugin.store import (
+    SCHEMA_VERSION,
+    UnsupportedSchemaError,
+    WisdomConflict,
+    WisdomStore,
+)
+
+
+def test_profile_store_requires_explicit_host_data_root():
+    with pytest.raises(TypeError):
+        WisdomStore()  # pylint: disable=no-value-for-parameter
+
+
+def test_profile_store_uses_host_context_data_directory(tmp_path: Path):
+    class State:
+        data_dir = tmp_path / "profile-data"
+
+    class HostContext:
+        state = State()
+
+    hostctx = HostContext()
+    store = WisdomStore(hostctx.state.data_dir)
+
+    assert store.root == hostctx.state.data_dir
+    assert store.path == hostctx.state.data_dir / "wisdom.db"
+
+
+def test_profile_store_refuses_unversioned_existing_database(tmp_path: Path):
+    root = tmp_path / "profile-data"
+    root.mkdir()
+    with sqlite3.connect(root / "wisdom.db") as db:
+        db.execute("CREATE TABLE legacy_state(value TEXT NOT NULL)")
+        db.execute("INSERT INTO legacy_state VALUES('do not adopt')")
+
+    with pytest.raises(UnsupportedSchemaError, match="unversioned"):
+        WisdomStore(root)
+
+    with sqlite3.connect(root / "wisdom.db") as db:
+        assert db.execute("SELECT value FROM legacy_state").fetchone()[0] == "do not adopt"
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='local_skill'"
+        ).fetchone()[0] == 0
+
+
+def test_profile_store_refuses_unsupported_schema_version(tmp_path: Path):
+    root = tmp_path / "profile-data"
+    root.mkdir()
+    with sqlite3.connect(root / "wisdom.db") as db:
+        db.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        db.execute("INSERT INTO schema_meta VALUES('schema_version', ?)", ("11",))
+
+    with pytest.raises(UnsupportedSchemaError, match="Unsupported Wisdom schema version 11"):
+        WisdomStore(root)
+
+
+def test_feed_generation_conflict_keeps_public_error_contract(tmp_path: Path):
+    store = WisdomStore(tmp_path / "profile-data")
+
+    with store.transaction() as db:
+        with pytest.raises(WisdomConflict) as raised:
+            store.check_feed_generation(db, expected=1)
+
+    assert raised.value.code == "account_session_changed"
+    assert raised.value.exit_code == 5
 
 
 def test_profile_store_permissions_identity_and_rename(tmp_path: Path):
@@ -58,7 +124,9 @@ def test_delete_recreate_does_not_inherit_identity(tmp_path: Path):
 def test_rename_falls_back_to_unambiguous_content_hash_without_filesystem_identity(
     monkeypatch, tmp_path: Path
 ):
-    monkeypatch.setattr("hermes_wisdom.store.filesystem_identity", lambda _path: None)
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.store.filesystem_identity", lambda _path: None
+    )
     store = WisdomStore(tmp_path / "wisdom")
     original = tmp_path / "original"
     original.mkdir()
@@ -76,7 +144,9 @@ def test_rename_falls_back_to_unambiguous_content_hash_without_filesystem_identi
 
 
 def test_ambiguous_content_hash_move_creates_new_identity(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr("hermes_wisdom.store.filesystem_identity", lambda _path: None)
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.store.filesystem_identity", lambda _path: None
+    )
     store = WisdomStore(tmp_path / "wisdom")
     for name in ("one", "two"):
         path = tmp_path / name
@@ -241,7 +311,7 @@ def test_identity_rotation_is_atomic_with_org_activation(tmp_path: Path):
     assert store.active_org_id() == "org-2"
 
 
-def test_schema_v9_tracks_profile_local_usage_surface_delivery_reviews_and_notices(
+def test_current_schema_tracks_profile_local_usage_surface_delivery_reviews_and_notices(
     tmp_path: Path,
 ):
     store = WisdomStore(tmp_path / "wisdom")
@@ -271,6 +341,15 @@ def test_schema_v9_tracks_profile_local_usage_surface_delivery_reviews_and_notic
         version = db.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0]
+        feed_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(feed_state)").fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
     assert "skill_text" in snapshot_columns
     assert {"session_id", "task_id"} <= stability_columns
     assert {"day_local", "timezone_name"} <= usage_columns
@@ -287,6 +366,17 @@ def test_schema_v9_tracks_profile_local_usage_surface_delivery_reviews_and_notic
         "lease_expires_at",
         "result_json",
     } <= review_columns
+    assert {
+        "generation",
+        "organization_id",
+        "installation_id",
+        "resume_required",
+    } <= feed_columns
+    assert {
+        "local_event_org_identity",
+        "local_event_org_qualification_sequence",
+        "operation_journal_one_pending",
+    } <= indexes
     assert version == str(SCHEMA_VERSION)
 
 
@@ -338,133 +428,8 @@ def test_candidate_sequence_is_atomic_idempotent_and_scoped_by_organization(
     }
 
 
-def test_schema_v9_backfills_active_organization_events_chronologically(
-    tmp_path: Path,
-):
-    root = tmp_path / "wisdom"
-    store = WisdomStore(root)
-    store.installation_identity()
-    store.verify_installation_identity("org-1")
-    event_ids: list[str] = []
-    for index, name in enumerate(("older", "newer"), start=1):
-        path = tmp_path / name
-        path.mkdir()
-        (path / "SKILL.md").write_text(name, encoding="utf-8")
-        skill_id = store.register_skill(
-            path, content_hash=f"sha256:{name}", source_kind="local"
-        )
-        event_id = store.emit_local_event(
-            kind="wisdom.candidate",
-            skill_id=skill_id,
-            content_hash=f"sha256:{name}",
-            payload={"skill_name": name},
-            session_id="session-1",
-            task_id=f"task-{index}",
-            qualification="high_usage",
-        )
-        assert event_id is not None
-        event_ids.append(event_id)
-    with store.transaction() as db:
-        db.execute("DROP INDEX local_event_org_qualification_sequence")
-        db.execute(
-            "UPDATE local_event SET organization_id=NULL,qualification_sequence=NULL"
-        )
-        db.execute(
-            "UPDATE local_event SET created_at='2026-01-01T00:00:00+00:00' WHERE id=?",
-            (event_ids[0],),
-        )
-        db.execute(
-            "UPDATE local_event SET created_at='2026-01-02T00:00:00+00:00' WHERE id=?",
-            (event_ids[1],),
-        )
-
-    migrated = WisdomStore(root)
-    events = list(reversed(migrated.local_events(kind="wisdom.candidate")))
-    assert [event["id"] for event in events] == event_ids
-    assert [event["qualification_sequence"] for event in events] == [1, 2]
-    assert {event["organization_id"] for event in events} == {"org-1"}
 
 
-def test_schema_v9_rebuilds_legacy_event_identity_without_losing_delivery(
-    tmp_path: Path,
-):
-    root = tmp_path / "wisdom"
-    root.mkdir()
-    database = root / "wisdom.db"
-    with sqlite3.connect(database) as db:
-        db.executescript(
-            """
-            PRAGMA foreign_keys=ON;
-            CREATE TABLE local_skill (
-              id TEXT PRIMARY KEY,
-              canonical_path TEXT NOT NULL,
-              fs_identity TEXT,
-              current_hash TEXT,
-              source_kind TEXT NOT NULL,
-              deleted_at TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE installation_identity (
-              singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-              installation_id TEXT NOT NULL,
-              verified_org_id TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE local_event (
-              id TEXT PRIMARY KEY,
-              kind TEXT NOT NULL,
-              session_id TEXT,
-              task_id TEXT,
-              skill_id TEXT NOT NULL,
-              content_hash TEXT NOT NULL,
-              qualification TEXT NOT NULL,
-              payload_json TEXT NOT NULL,
-              state TEXT NOT NULL,
-              telegram_delivered_at TEXT,
-              created_at TEXT NOT NULL,
-              UNIQUE(kind, skill_id, content_hash, qualification),
-              FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-            );
-            CREATE TABLE local_event_delivery (
-              event_id TEXT NOT NULL,
-              surface TEXT NOT NULL,
-              delivered_at TEXT NOT NULL,
-              PRIMARY KEY(event_id, surface),
-              FOREIGN KEY(event_id) REFERENCES local_event(id) ON DELETE CASCADE
-            );
-            INSERT INTO local_skill VALUES(
-              'skill-1','/tmp/skill',NULL,'sha256:content','local',NULL,
-              '2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00'
-            );
-            INSERT INTO installation_identity VALUES(
-              1,'hwi_test','org-1','2026-01-01T00:00:00+00:00',
-              '2026-01-01T00:00:00+00:00'
-            );
-            INSERT INTO local_event VALUES(
-              'event-1','wisdom.candidate','session-1','task-1','skill-1',
-              'sha256:content','high_usage','{"skill_name":"skill"}',
-              'unread',NULL,'2026-01-01T00:00:00+00:00'
-            );
-            INSERT INTO local_event_delivery VALUES(
-              'event-1','telegram','2026-01-01T00:01:00+00:00'
-            );
-            """
-        )
-
-    store = WisdomStore(root)
-
-    with store.transaction() as db:
-        event = db.execute(
-            "SELECT organization_id,qualification_sequence FROM local_event "
-            "WHERE id='event-1'"
-        ).fetchone()
-        delivery = db.execute(
-            "SELECT surface FROM local_event_delivery WHERE event_id='event-1'"
-        ).fetchone()
-    assert tuple(event) == ("org-1", 1)
-    assert delivery["surface"] == "telegram"
 
 
 def test_professionalism_review_queue_is_hash_bound_idempotent_and_leased(
@@ -539,43 +504,6 @@ def test_candidate_delivery_is_independent_per_surface(tmp_path: Path):
     ] == [event_id]
 
 
-def test_schema_v7_preserves_v4_usage_in_an_explicit_utc_bucket(tmp_path: Path):
-    root = tmp_path / "wisdom"
-    root.mkdir()
-    with sqlite3.connect(root / "wisdom.db") as db:
-        db.executescript(
-            """
-            CREATE TABLE local_skill (
-              id TEXT PRIMARY KEY,
-              canonical_path TEXT NOT NULL,
-              fs_identity TEXT,
-              current_hash TEXT,
-              source_kind TEXT NOT NULL,
-              deleted_at TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE usage_day (
-              skill_id TEXT NOT NULL,
-              day_utc TEXT NOT NULL,
-              use_count INTEGER NOT NULL,
-              PRIMARY KEY(skill_id, day_utc),
-              FOREIGN KEY(skill_id) REFERENCES local_skill(id) ON DELETE CASCADE
-            );
-            INSERT INTO local_skill VALUES(
-              'skill-1','/tmp/skill',NULL,NULL,'local',NULL,'now','now'
-            );
-            INSERT INTO usage_day VALUES('skill-1','2026-08-03',2);
-            """
-        )
-
-    store = WisdomStore(root)
-
-    with store.transaction() as db:
-        row = db.execute(
-            "SELECT day_local,timezone_name,use_count FROM usage_day"
-        ).fetchone()
-    assert tuple(row) == ("2026-08-03", "UTC", 2)
 
 
 def test_telegram_delivery_is_session_scoped_without_consuming_candidate(
@@ -626,46 +554,6 @@ def test_telegram_delivery_is_session_scoped_without_consuming_candidate(
     ] == [event_id]
 
 
-def test_v7_seeds_legacy_telegram_delivery_into_surface_ledger(tmp_path: Path):
-    root = tmp_path / "wisdom"
-    store = WisdomStore(root)
-    skill_path = tmp_path / "skill"
-    skill_path.mkdir()
-    (skill_path / "SKILL.md").write_text("hello", encoding="utf-8")
-    skill_id = store.register_skill(
-        skill_path, content_hash="sha256:source", source_kind="local"
-    )
-    event_id = store.emit_local_event(
-        kind="wisdom.candidate",
-        skill_id=skill_id,
-        content_hash="sha256:source",
-        payload={"skill_name": "skill"},
-        session_id="session-1",
-        task_id="task-1",
-        qualification="high_usage",
-    )
-    with store.transaction() as db:
-        db.execute("DELETE FROM local_event_delivery")
-        db.execute(
-            "UPDATE local_event SET telegram_delivered_at='2026-08-01T00:00:00Z' "
-            "WHERE id=?",
-            (event_id,),
-        )
-
-    migrated = WisdomStore(root)
-
-    assert (
-        migrated.pending_surface_events(
-            kind="wisdom.candidate", session_id="session-1", surface="telegram"
-        )
-        == []
-    )
-    assert [
-        item["id"]
-        for item in migrated.pending_surface_events(
-            kind="wisdom.candidate", session_id="session-1", surface="slack"
-        )
-    ] == [event_id]
 
 
 def test_feed_delivery_is_independent_per_surface(tmp_path: Path):
