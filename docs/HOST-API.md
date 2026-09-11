@@ -4,6 +4,10 @@ Audited against Agent `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
 See [SOURCES.md](SOURCES.md) for immutable source notation. Proposed interfaces
 below are **not present or implemented** by this repository today.
 
+A partial command-only implementation now exists on the separate Agent draft
+branch, not in released Agent: [H1 evidence](verification/H1-commands.md).
+It does not implement the full H1/H2 boundary and does not enable this plugin.
+
 ## Reuse Existing Interfaces
 
 | Need | Existing API / source | Constraint |
