@@ -22,12 +22,16 @@ Allowed implementation states are `Planned`, `In progress`, `Implemented`, and `
 | CW-M0-001 | Codex / Sol | Bootstrap on main | [Local scaffold evidence](verification/M0.md) |
 | CW-M0-002 | Codex / Sol | Bootstrap on main | [Tracker validation](verification/M0.md) |
 | CW-M0-003 | Codex / Sol | Bootstrap on main | [Quality checks and CI boundary](verification/M0.md) |
+| CW-M1-001, CW-M1-002, CW-M1-003 | Sol / host integration owner | Pending, codex/plugin-trusted-context | Command-context extraction underway; no host acceptance yet |
+| CW-M2-001 | Sol / entitlement extraction | Pending, codex/first-release-foundation | Extraction in progress; native wiring and live acceptance pending |
+| CW-M2-003 | Sol / store extraction | Pending, codex/first-release-foundation | Fresh-schema extraction in progress; host integration pending |
+| CW-M2-004 | Sol / contract extraction | Pending, codex/first-release-foundation | Contract/hash extraction in progress; client boundary remains pending |
 
 ## Release Boundaries
 
 | Release | Milestones | Points | Current state |
 | --- | --- | ---: | --- |
-| First release | M0-M8: CLI, TUI, Telegram, Slack, contracts, service, and live acceptance | 66 | M0 implemented and locally verified; M1-M8 planned; no live acceptance run |
+| First release | M0-M8: CLI, TUI, Telegram, Slack, contracts, service, and live acceptance | 66 | M0 complete; first extraction and generic-host slices underway; no live acceptance run |
 | Future UI | M9-M12: shared UI backend, Desktop, Dashboard, packaging, and UI E2E | 31 | Planned; all automated/live checks not run |
 | Full goal | M0-M12 | 97 | 62 stable feature records |
 

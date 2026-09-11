@@ -7,6 +7,12 @@ Agent into an external, opt-in plugin.
 intentionally inert. It registers no commands, tools, hooks, background tasks,
 or UI. It does not read credentials, contact services, or change skills.
 
+First-release extraction is now underway on `codex/first-release-foundation`.
+The native entrypoint remains inert until the required host and authorization
+boundaries are integrated. See the [execution tasks](docs/FIRST-RELEASE.md) and
+[reference parity ledger](docs/PARITY.md); extracted unit tests are not live
+feature acceptance.
+
 ## Roadmap
 
 - First release: CLI, TUI, Telegram, and Slack.
