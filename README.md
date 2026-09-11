@@ -4,14 +4,18 @@ Private development repository for extracting Collective Wisdom from Hermes
 Agent into an external, opt-in plugin.
 
 **Status: first-release extraction in progress; not ready for use.** The native
-entrypoint remains intentionally inert until the required host and authorization
-boundaries are integrated. It registers no commands, tools, hooks, background
+entrypoint remains intentionally inert until plugin-side authorization and
+workflow wiring are integrated using existing host APIs. It registers no commands, tools, hooks, background
 tasks, or UI and does not read credentials, contact services, or change skills.
 
 Work is on `codex/first-release-foundation`. See the
 [execution tasks](docs/FIRST-RELEASE.md) and
 [reference parity ledger](docs/PARITY.md); extracted unit tests are not live
 feature acceptance.
+
+Agent PR #108645 is not a dependency. Keep integration in this plugin, including
+entitlement and proactive delivery; report any insurmountable API gap before
+proposing another Agent change. Existing host command surfaces stay unchanged.
 
 ## Roadmap
 

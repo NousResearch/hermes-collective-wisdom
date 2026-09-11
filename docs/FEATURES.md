@@ -22,7 +22,7 @@ Allowed implementation states are `Planned`, `In progress`, `Implemented`, and `
 | CW-M0-001 | Codex / Sol | Bootstrap on main | [Local scaffold evidence](verification/M0.md) |
 | CW-M0-002 | Codex / Sol | Bootstrap on main | [Tracker validation](verification/M0.md) |
 | CW-M0-003 | Codex / Sol | Bootstrap on main | [Quality checks and CI boundary](verification/M0.md) |
-| CW-M1-001, CW-M1-002, CW-M1-003 | Sol / host integration owner | [Agent PR 108645 (draft)](https://github.com/NousResearch/hermes-agent/pull/108645) | [Command-context tests](verification/H1-commands.md); actor/tool/lifecycle integration pending |
+| CW-M1-001, CW-M1-002, CW-M1-003 | Sol / plugin integration owner | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Revised requirement](FIRST-RELEASE.md#simplification-requirement-2026-09-12); [historical host experiment](verification/H1-commands.md) is not a prerequisite or evidence for the plugin-only approach |
 | CW-M2-001 | Sol / entitlement extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Pure entitlement checks](verification/F1-entitlement.md); native wiring and live acceptance pending |
 | CW-M2-003 | Sol / store extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Fresh store tests](verification/F1-store.md); settings and host integration pending |
 | CW-M2-004 | Sol / contract extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Contract/hash extraction](verification/F2.md), [wire builders](verification/F2-wire.md), [package kernel](verification/F2-package.md), [bounded discovery client](verification/F2-client.md); host and full client integration pending |
@@ -32,7 +32,7 @@ Allowed implementation states are `Planned`, `In progress`, `Implemented`, and `
 
 | Release | Milestones | Points | Current state |
 | --- | --- | ---: | --- |
-| First release | M0-M8: CLI, TUI, Telegram, Slack, contracts, service, and live acceptance | 66 | M0 complete; first extraction and generic-host slices underway; no live acceptance run |
+| First release | M0-M8: CLI, TUI, Telegram, Slack, contracts, service, and live acceptance | 66 | M0 complete; extraction and plugin-only integration underway; no live acceptance run |
 | Future UI | M9-M12: shared UI backend, Desktop, Dashboard, packaging, and UI E2E | 31 | Planned; all automated/live checks not run |
 | Full goal | M0-M12 | 97 | 62 stable feature records |
 
@@ -46,17 +46,20 @@ Destination / scope: shared Python package, repository documentation contract, a
 | CW-M0-002 | Authoritative docs and feature tracker (shared planning) | 1 | - | `new:docs/FEATURES.md`; `new:docs/SOURCES.md` | Stable IDs, immutable sources, scope, dependencies, acceptance, estimates, owner/PR/evidence fields, and separate statuses are recorded; automated totals equal 97 overall and 66 for M0-M8. | Implemented | Passing | Not run |
 | CW-M0-003 | CI and quality baseline (shared repository) | 1 | CW-M0-001 | `new:.github/workflows/ci.yml`; `new:tests/` | Workflow defines Pylint, pytest, and build on Python 3.11/3.13 without live credentials; local checks pass. Consult linked evidence for remote CI separately. | Implemented | Passing | Not run |
 
-## M1 - Trusted Invocation And Events (13 SP)
+## M1 - Plugin Integration And Events (13 SP)
 
-Destination / scope: Agent runtime plus CLI/TUI and gateway invocation adapters; first-release surfaces only.
+Destination / scope: plugin adapters using existing Agent registration, routing,
+account readers, and native platform handlers. Host extensions are conditional
+on proven gaps, not a prerequisite. Baseline points remain provisional until the
+revised vertical slice is verified; no implementation is marked complete here.
 
 | ID | Feature | SP | Depends | Source | Acceptance | Impl | Auto | Live |
 | --- | --- | ---: | --- | --- | --- | --- | --- | --- |
-| CW-M1-001 | Trusted CLI/TUI invocation context | 3 | CW-M0-001 | `host:hermes_cli/`; `legacy:hermes_wisdom/service.py` | Agent CLI and TUI host code construct typed human-origin context from authenticated host state; prompt text cannot forge presenter identity, channel, or human origin. | In progress | Not run | Not run |
-| CW-M1-002 | Trusted Telegram/Slack invocation context | 2 | CW-M1-001 | `legacy:plugins/platforms/telegram/wisdom_adapter.py`; `legacy:plugins/platforms/slack/wisdom_adapter.py` | Agent gateway adapters bind authenticated platform, conversation, and user identifiers before runtime dispatch and reject incomplete or untrusted presenter context. | In progress | Not run | Not run |
-| CW-M1-003 | Context-aware command availability | 3 | CW-M1-001, CW-M1-002 | `legacy:gateway/wisdom_command.py`; `legacy:tools/wisdom_tool.py`; `host:hermes_cli/plugins.py` | Commands/tools appear only on supported human-facing surfaces with eligible context; subagents and background/tool-only contexts cannot present Wisdom UI or ask for consent. | In progress | Not run | Not run |
-| CW-M1-004 | Post-delivery non-human events | 2 | CW-M1-001 | `legacy:hermes_wisdom/consumption.py`; `host:hermes_cli/` | A delivered assistant response emits a typed post-delivery event from the Agent host lifecycle, never a fabricated user message or fake user continuation. | Planned | Not run | Not run |
-| CW-M1-005 | Idle non-human events | 2 | CW-M1-004 | `legacy:hermes_wisdom/weekly_queue.py`; `host:hermes_cli/` | Agent host idle transitions emit deduplicated typed events with explicit timestamps and context; no prompt injection or manual message insertion is required. | Planned | Not run | Not run |
+| CW-M1-001 | Existing CLI/TUI routing and account adapter | 3 | CW-M0-001 | `host:hermes_cli/`; `legacy:hermes_wisdom/service.py` | Plugin uses existing registration and reply-to-caller routing without core surface changes or a universal invocation context; version-tested account adapter reads current profile credentials, never model-supplied identity. | In progress | Not run | Not run |
+| CW-M1-002 | Native Telegram/Slack callback binding | 2 | CW-M1-001 | `legacy:plugins/platforms/telegram/wisdom_adapter.py`; `legacy:plugins/platforms/slack/wisdom_adapter.py` | Ordinary replies rely on host admission/routing; native callbacks bind the actual actor and original message/route to the operation, preserve group privacy, and reject another person's or profile's controls without core surface edits. | In progress | Not run | Not run |
+| CW-M1-003 | Plugin-owned availability enforcement | 3 | CW-M1-001, CW-M1-002 | `legacy:gateway/wisdom_command.py`; `legacy:tools/wisdom_tool.py`; `host:hermes_cli/plugins.py` | Installed/enabled plugin checks entitlement at load and before protected actions; unavailable commands may remain visible with a clear denial. No core menu/completion changes, auth-event hook dependency, or mid-turn toolset rebuild. Background checks are local and refresh-free. | In progress | Not run | Not run |
+| CW-M1-004 | Post-delivery non-human events | 2 | CW-M1-001 | `legacy:hermes_wisdom/consumption.py`; `host:hermes_cli/` | Plugin observes real delivery facts via existing lifecycle/native APIs and records typed events, never fabricated user messages. Report an insurmountable API gap before any Agent PR. | Planned | Not run | Not run |
+| CW-M1-005 | Idle non-human events | 2 | CW-M1-004 | `legacy:hermes_wisdom/weekly_queue.py`; `host:hermes_cli/` | Plugin uses existing lifecycle/native APIs for safe idle work with deduplication, timestamps and cancellation; no human-message injection or new Agent PR without a reported insurmountable gap. | Planned | Not run | Not run |
 | CW-M1-006 | Human-only presentation gate | 1 | CW-M1-003, CW-M1-004, CW-M1-005 | `legacy:hermes_wisdom/mediation.py`; `legacy:hermes_wisdom/mediation_store.py` | Post-delivery/idle processing may enqueue work, but presentation occurs only for an active eligible human surface; subagents cannot present and no event masquerades as human input. | Planned | Not run | Not run |
 
 ## M2 - Entitlement, Profile, Contracts (8 SP)
@@ -65,7 +68,7 @@ Destination / scope: local Agent persistence and pinned Gateway contract used by
 
 | ID | Feature | SP | Depends | Source | Acceptance | Impl | Auto | Live |
 | --- | --- | ---: | --- | --- | --- | --- | --- | --- |
-| CW-M2-001 | Entitlement state and auth expiry | 2 | CW-M1-001 | `legacy:hermes_wisdom/entitlement.py` | Entitlement is checked before each protected operation; expired or denied entitlement hides/disables protected surfaces and requires real host authentication before access returns. | In progress | Not run | Not run |
+| CW-M2-001 | Entitlement state and auth expiry | 2 | CW-M1-001 | `legacy:hermes_wisdom/entitlement.py` | Entitlement is checked before each protected operation; expiry denies execution and ownership changes invalidate cached state and pending approvals. First-release commands need not be hidden. Load-time or logged-in status alone never grants access; Gateway remains authoritative. | In progress | Not run | Not run |
 | CW-M2-002 | Disclosure and consent contract | 1 | CW-M2-001, CW-M1-006 | `legacy:hermes_wisdom/consent.py` | The user sees concise data-use and publication disclosure before enabling or submitting; refusal leaves the feature disabled without blocking unrelated Agent work. | Planned | Not run | Not run |
 | CW-M2-003 | Profile SQLite store and settings | 2 | CW-M0-001, CW-M2-002 | `legacy:hermes_wisdom/store.py`; `legacy:hermes_wisdom/preferences.py` | Versioned SQLite state persists profile, consent, existing policy, mute, and disclosure timestamps transactionally; a fresh install starts empty and performs no legacy migration. | In progress | Not run | Not run |
 | CW-M2-004 | Pinned contracts and package hashing | 2 | CW-M0-003 | `legacy:hermes_wisdom/contract.py`; `legacy:hermes_wisdom/package.py`; `new:contracts/` | OpenAPI, manifest schema, and canonical vectors are pinned to `docs/SOURCES.md`; canonical package/file hashes are deterministic and reject mutation. | In progress | Not run | Not run |

@@ -14,7 +14,9 @@ rejects an organization mismatch before I/O, sends authorization only in that
 request, disables redirects, and closes the streamed response.
 
 Availability remains owned by the credential-free entitlement claims reader.
-There is no public host account/request facade yet, so the native entrypoint
+Historical integration boundary at extraction time; a new host facade is no
+longer required. The next slice uses a version-tested plugin-side adapter over
+existing host readers. Until that adapter is verified, the native entrypoint
 remains inert and no private Hermes API is substituted.
 
 ## Provenance

@@ -1,5 +1,9 @@
 # H1 Command Context Slice
 
+Historical experiment only. Agent PR #108645 was rejected; its APIs and tests
+are not plugin release dependencies or evidence of plugin-only integration.
+The current requirement is in [FIRST-RELEASE.md](../FIRST-RELEASE.md).
+
 Date: 2026-09-12. Agent base:
 `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
 Reviewed command slice: `c4032ae225adc1bfa042c5a458ba38891baeddf9`.

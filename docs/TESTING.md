@@ -24,7 +24,8 @@ required beyond installing development dependencies.
 | Area | Required scenarios |
 | --- | --- |
 | Entitlement | Missing/malformed/expired/mismatched scopes; ordinary member allowed; nonmember/personal/out-of-cohort denied; no credential refresh on read |
-| Scope | Wrong actor/profile/account/org/chat/thread; rotated conversation; subagent/background cannot present; member cannot moderate |
+| Scope | Ordinary command results use host caller routing; callbacks reject wrong actor/profile/account/org/message/thread; proactive delivery rejects stale routes and subagent/background presentation; member cannot moderate |
+| Plugin-owned gate | Load while signed out, login after load, expiry and account/org/profile changes before execution; background checks never refresh; unavailable installed commands deny without core visibility changes or new auth hooks |
 | Discovery | Pagination/back navigation; exact version and checks; browse includes usable review/install controls |
 | Consent | Explicit confirmation only; duplicate callback; expiry/Recheck; source/version/manifest/description drift; completed states stay completed |
 | Install/update | Exact reviewed bytes; unavailable checks; partial compatibility; sensitive expansion; local modifications preserved; automatic-policy boundaries |

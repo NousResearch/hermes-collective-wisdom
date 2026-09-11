@@ -14,10 +14,18 @@ capability gates are not a sandbox against malicious Python code.
   Portal flag targeting controls newly issued scopes; Gateway checks requests.
 - Keep plugin enablement, feature opt-in, disclosure, and server entitlement
   distinct. Proactive qualification/reviews/delivery require all applicable gates.
-- Bind every operation to the profile, account, organization, session, surface,
-  actor, chat/thread, and conversation generation from trusted host context.
-- Only the active main user-facing session can surface recommendations or
-  consent. Subagents and background jobs cannot present or approve them.
+- Check current profile/account/org/scopes/expiry inside the plugin before
+  protected operations, not only at load. Ownership changes invalidate cached
+  state and pending approvals. Background availability checks never refresh.
+- Ordinary commands rely on existing host admission and reply-to-caller routing;
+  no new universal invocation context or core menu/completion gate is required.
+  Installed but unavailable commands may return a clear denial instead of hiding.
+- Native callbacks bind the actor, message/route, profile/account and exact
+  operation; the host account's entitlement is not authority for another person
+  to click a shared approval. Preserve host admission and group privacy.
+- Proactive recommendations and consent target only an eligible active main
+  user-facing session. Subagents/background jobs cannot present or approve them;
+  they are not ordinary command replies with an existing return route.
 - Members can use member-scoped operations. Policy management and moderation
   remain OWNER/ADMIN-only server operations; UI visibility is not enforcement.
 
