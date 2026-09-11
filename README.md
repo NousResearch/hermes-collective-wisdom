@@ -3,13 +3,13 @@
 Private development repository for extracting Collective Wisdom from Hermes
 Agent into an external, opt-in plugin.
 
-**Status: milestone 0, scaffold and planning only.** The plugin entrypoint is
-intentionally inert. It registers no commands, tools, hooks, background tasks,
-or UI. It does not read credentials, contact services, or change skills.
+**Status: first-release extraction in progress; not ready for use.** The native
+entrypoint remains intentionally inert until the required host and authorization
+boundaries are integrated. It registers no commands, tools, hooks, background
+tasks, or UI and does not read credentials, contact services, or change skills.
 
-First-release extraction is now underway on `codex/first-release-foundation`.
-The native entrypoint remains inert until the required host and authorization
-boundaries are integrated. See the [execution tasks](docs/FIRST-RELEASE.md) and
+Work is on `codex/first-release-foundation`. See the
+[execution tasks](docs/FIRST-RELEASE.md) and
 [reference parity ledger](docs/PARITY.md); extracted unit tests are not live
 feature acceptance.
 
@@ -38,8 +38,19 @@ python3.11 -m venv .venv
 .venv/bin/python -m build
 ```
 
-No running Hermes instance or live credentials are needed for scaffold checks.
+No running Hermes instance or live credentials are needed for isolated checks.
 An editable Python install alone does not install the native Hermes plugin.
+
+To additionally verify the development-only OpenAPI artifact from an existing
+Gateway checkout containing the pinned commit:
+
+```bash
+WISDOM_GATEWAY_DIR=/path/to/gateway .venv/bin/python -m pytest
+```
+
+Without that optional checkout, pytest explicitly skips the source-artifact
+check. The runtime schema/vector digest checks still run. This is not the
+four-repository release smoke, which remains a separate V1 gate.
 
 ## Native Plugin Loading
 
