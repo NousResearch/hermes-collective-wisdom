@@ -23,6 +23,9 @@ dev = [
 packages = ["hermes_wisdom_plugin"]
 include-package-data = false
 
+[tool.setuptools.package-data]
+hermes_wisdom_plugin = ["contracts/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The repository root is a native loader, not a normal Python test package.
