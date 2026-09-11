@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 
 from hermes_wisdom_plugin.store import (
+    SCHEMA_FAMILY,
     SCHEMA_VERSION,
     UnsupportedSchemaError,
-    WisdomConflict,
     WisdomStore,
 )
+from hermes_wisdom_plugin.errors import WisdomConflict, WisdomError
 
 
 def test_profile_store_requires_explicit_host_data_root():
@@ -41,7 +42,7 @@ def test_profile_store_refuses_unversioned_existing_database(tmp_path: Path):
         db.execute("CREATE TABLE legacy_state(value TEXT NOT NULL)")
         db.execute("INSERT INTO legacy_state VALUES('do not adopt')")
 
-    with pytest.raises(UnsupportedSchemaError, match="unversioned"):
+    with pytest.raises(UnsupportedSchemaError, match="schema marker"):
         WisdomStore(root)
 
     with sqlite3.connect(root / "wisdom.db") as db:
@@ -51,15 +52,93 @@ def test_profile_store_refuses_unversioned_existing_database(tmp_path: Path):
         ).fetchone()[0] == 0
 
 
-def test_profile_store_refuses_unsupported_schema_version(tmp_path: Path):
+def test_profile_store_refuses_old_feature_schema_v12(tmp_path: Path):
     root = tmp_path / "profile-data"
     root.mkdir()
     with sqlite3.connect(root / "wisdom.db") as db:
         db.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        db.execute("INSERT INTO schema_meta VALUES('schema_version', ?)", ("11",))
+        db.execute("INSERT INTO schema_meta VALUES('schema_version', '12')")
 
-    with pytest.raises(UnsupportedSchemaError, match="Unsupported Wisdom schema version 11"):
+    with pytest.raises(UnsupportedSchemaError, match="schema marker"):
         WisdomStore(root)
+
+
+def test_profile_store_refuses_current_version_without_family_marker(tmp_path: Path):
+    root = tmp_path / "profile-data"
+    root.mkdir()
+    with sqlite3.connect(root / "wisdom.db") as db:
+        db.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        db.execute(
+            "INSERT INTO schema_meta VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+
+    with pytest.raises(UnsupportedSchemaError, match="schema marker"):
+        WisdomStore(root)
+
+
+def test_profile_store_refuses_foreign_or_malformed_schema_marker(tmp_path: Path):
+    for name, family, version, match in (
+        ("foreign", "another.product.store", 1, "Foreign schema family"),
+        ("malformed", SCHEMA_FAMILY, "one", "expected integer 1"),
+    ):
+        root = tmp_path / name
+        root.mkdir()
+        with sqlite3.connect(root / "wisdom.db") as db:
+            db.execute(
+                "CREATE TABLE plugin_schema_identity("
+                "singleton INTEGER PRIMARY KEY, family TEXT, version)"
+            )
+            db.execute(
+                "INSERT INTO plugin_schema_identity VALUES(1,?,?)",
+                (family, version),
+            )
+
+        with pytest.raises(UnsupportedSchemaError, match=match):
+            WisdomStore(root)
+
+
+def test_profile_store_refuses_partial_marked_schema(tmp_path: Path):
+    root = tmp_path / "profile-data"
+    root.mkdir()
+    with sqlite3.connect(root / "wisdom.db") as db:
+        db.executescript(
+            """
+            CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE plugin_schema_identity(
+              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+              family TEXT NOT NULL,
+              version INTEGER NOT NULL CHECK(typeof(version) = 'integer' AND version > 0)
+            );
+            """
+        )
+        db.execute(
+            "INSERT INTO schema_meta VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        db.execute(
+            "INSERT INTO plugin_schema_identity VALUES(1,?,?)",
+            (SCHEMA_FAMILY, SCHEMA_VERSION),
+        )
+
+    with pytest.raises(UnsupportedSchemaError, match="schema objects"):
+        WisdomStore(root)
+
+
+def test_profile_store_reopens_full_current_plugin_schema(tmp_path: Path):
+    root = tmp_path / "profile-data"
+    first = WisdomStore(root)
+    installation_id = first.installation_identity()
+
+    reopened = WisdomStore(root)
+
+    assert reopened.installation_identity() == installation_id
+    with reopened.transaction() as db:
+        marker = db.execute(
+            "SELECT family,version,typeof(version) FROM plugin_schema_identity"
+        ).fetchone()
+    assert tuple(marker) == (SCHEMA_FAMILY, 1, "integer")
+    assert SCHEMA_VERSION == 1
 
 
 def test_feed_generation_conflict_keeps_public_error_contract(tmp_path: Path):
@@ -71,6 +150,7 @@ def test_feed_generation_conflict_keeps_public_error_contract(tmp_path: Path):
 
     assert raised.value.code == "account_session_changed"
     assert raised.value.exit_code == 5
+    assert isinstance(raised.value, WisdomError)
 
 
 def test_profile_store_permissions_identity_and_rename(tmp_path: Path):

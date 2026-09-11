@@ -31,21 +31,38 @@ paths before adaptation.
 - Made the profile root mandatory. The caller must pass
   `hostctx.state.data_dir`; the store creates `wisdom.db` directly inside that
   directory. There is no `~/.hermes/wisdom` fallback or private host import.
-- Replaced incremental ALTER/backfill logic with direct creation of schema v12.
-  Current store-owned columns, indexes, constraints, WAL behavior,
+- Replaced incremental ALTER/backfill logic with direct creation of the
+  source-current store-owned columns, indexes, and constraints under the
+  independently versioned plugin schema v1. WAL behavior,
   `BEGIN IMMEDIATE` transactions, the process-local reentrant lock, and
   directory/database permissions are retained.
-- Existing databases are accepted only when `schema_meta.schema_version` is
-  exactly 12. Unversioned, malformed, older, and newer schemas are refused
-  without creating or adopting current tables.
+- Added the non-secret schema family marker
+  `hermes_wisdom_plugin.profile_store` with an integer version column. Existing
+  databases are accepted only when the family is exact, plugin version is the
+  integer `1`, matching metadata is present, SQLite quick-check succeeds, and
+  every required table/index SQL definition matches the expected current
+  shape. Unmarked old feature databases, foreign/malformed markers, and
+  incomplete marked databases are refused without creating or adopting
+  current tables. Unrelated additional objects may coexist for future slices.
 - Retained the coherent store-owned tables and APIs, including
   `managed_install`, operation journals/locks, qualification state, local and
   feed delivery ledgers, drafts/receipts, and professionalism review state.
 - Removed the integration hook to `mediation_store.create_schema`; mediation
   tables are not used by `WisdomStore` methods and no fake replacement schema
   or stub was added.
-- Replaced the late private `.client.WisdomConflict` import with a local error
-  preserving the message, `account_session_changed` code, and exit code 5.
+- Selectively copied the exact `WisdomError`/`WisdomConflict` behavior from the
+  pinned client into `hermes_wisdom_plugin/errors.py`; the store imports that
+  shared class, preserving future client catch behavior, the
+  `account_session_changed` code, and exit code 5.
+
+Adapted outputs after this guard fix:
+
+- `hermes_wisdom_plugin/errors.py`: SHA-256
+  `375ef990e5338d8f702c330dbc553ccf444b2153768427ade8546b2ba2d31d67`
+- `hermes_wisdom_plugin/store.py`: SHA-256
+  `e94aa85f478219da68f2719ee7bf883a46fdfca4c3f31b36e58f2419c3634c13`
+- `tests/test_store.py`: SHA-256
+  `d945c1619ee15ef33636d0d0622bdc3bf8b39370944bbbdfd5e1e151729c9e48`
 
 ## Test Provenance
 
@@ -57,12 +74,16 @@ candidate reconciliation/sequence/editorial metadata, organization rotation,
 managed-install deactivation, professionalism leases, and independent
 Telegram/Slack/local feed delivery.
 
-Five extraction tests were added:
+Nine extraction/guard tests were added:
 
 - required explicit root;
 - use of `hostctx.state.data_dir` as the database root;
 - refusal of an unversioned existing database without adopting its state;
-- refusal of an unsupported schema version; and
+- refusal of an old feature database carrying schema version 12;
+- refusal of plugin version 1 metadata without the family marker;
+- refusal of foreign and malformed family/version markers;
+- refusal of a marked but incomplete schema;
+- successful reopen of a complete family-marked plugin schema v1; and
 - preservation of the feed-generation conflict error contract.
 
 These four migration-only source tests were intentionally retired because F1
@@ -85,14 +106,14 @@ PYTHONPATH="$PWD" /Users/shannon/Workspace/Nous/hermes-collective-wisdom/.venv/b
   -c 'import hermes_wisdom_plugin.store as s; print(s.__file__)'
 PYTHONPATH="$PWD" /Users/shannon/Workspace/Nous/hermes-collective-wisdom/.venv/bin/pytest
 PYTHONPATH="$PWD" /Users/shannon/Workspace/Nous/hermes-collective-wisdom/.venv/bin/pylint \
-  hermes_wisdom_plugin/store.py tests/test_store.py
+  hermes_wisdom_plugin/errors.py hermes_wisdom_plugin/store.py tests/test_store.py
 ```
 
 Results:
 
 - Import origin:
   `/Users/shannon/Workspace/Nous/hermes-collective-wisdom-store/hermes_wisdom_plugin/store.py`
-- Pytest: 26 passed, including 22 store tests.
+- Pytest: 30 passed, including 26 store tests.
 - Pylint: 10.00/10.
 - Live actions: not run; none are part of F1.
 

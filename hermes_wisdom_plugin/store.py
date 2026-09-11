@@ -15,7 +15,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 12
+from .errors import WisdomConflict
+
+
+SCHEMA_FAMILY = "hermes_wisdom_plugin.profile_store"
+SCHEMA_VERSION = 1
 
 
 def utc_now() -> str:
@@ -31,21 +35,15 @@ class UnsupportedSchemaError(RuntimeError):
     """The database is not an exact current-schema profile store."""
 
 
-class WisdomConflict(RuntimeError):
-    """A local store operation conflicts with its expected profile generation."""
-
-    exit_code = 5
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        super().__init__(message)
-        self.status = None
-        self.code = code
-
-
 CURRENT_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plugin_schema_identity (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  family TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(typeof(version) = 'integer' AND version > 0)
 );
 CREATE TABLE IF NOT EXISTS local_skill (
   id TEXT PRIMARY KEY,
@@ -283,6 +281,11 @@ class WisdomStore:
                     "INSERT INTO schema_meta(key,value) VALUES('schema_version',?)",
                     (str(SCHEMA_VERSION),),
                 )
+                db.execute(
+                    "INSERT INTO plugin_schema_identity(singleton,family,version) "
+                    "VALUES(1,?,?)",
+                    (SCHEMA_FAMILY, SCHEMA_VERSION),
+                )
         self._secure_database_files()
 
     @staticmethod
@@ -291,8 +294,8 @@ class WisdomStore:
             if statement.strip():
                 db.execute(statement)
 
-    @staticmethod
-    def _existing_schema_version(db: sqlite3.Connection) -> int | None:
+    @classmethod
+    def _existing_schema_version(cls, db: sqlite3.Connection) -> int | None:
         tables = {
             str(row[0])
             for row in db.execute(
@@ -302,28 +305,70 @@ class WisdomStore:
         }
         if not tables:
             return None
-        if "schema_meta" not in tables:
+        if "plugin_schema_identity" not in tables:
             raise UnsupportedSchemaError(
-                "Refusing existing unversioned Wisdom database; start with a fresh profile"
+                "Refusing database without the Collective Wisdom plugin schema marker"
             )
-        row = db.execute(
+        identity = db.execute(
+            "SELECT family,version,typeof(version) FROM plugin_schema_identity "
+            "WHERE singleton=1"
+        ).fetchone()
+        if identity is None:
+            raise UnsupportedSchemaError("Malformed Collective Wisdom plugin schema marker")
+        if identity[0] != SCHEMA_FAMILY:
+            raise UnsupportedSchemaError(
+                f"Foreign schema family {identity[0]!r}; expected {SCHEMA_FAMILY!r}"
+            )
+        if identity[2] != "integer" or identity[1] != SCHEMA_VERSION:
+            raise UnsupportedSchemaError(
+                f"Unsupported plugin schema version {identity[1]!r}; "
+                f"expected integer {SCHEMA_VERSION}"
+            )
+        if "schema_meta" not in tables:
+            raise UnsupportedSchemaError("Incomplete Collective Wisdom plugin schema")
+        metadata = db.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
-        if row is None:
+        if metadata is None or metadata[0] != str(SCHEMA_VERSION):
             raise UnsupportedSchemaError(
-                "Refusing Wisdom database without a schema version"
+                "Malformed Collective Wisdom plugin schema version metadata"
             )
+        check = db.execute("PRAGMA quick_check").fetchone()
+        if check is None or check[0] != "ok":
+            raise UnsupportedSchemaError(
+                f"Malformed Collective Wisdom plugin database: {check[0] if check else 'unknown'}"
+            )
+        cls._validate_current_schema(db)
+        return SCHEMA_VERSION
+
+    @classmethod
+    def _validate_current_schema(cls, db: sqlite3.Connection) -> None:
+        expected_db = sqlite3.connect(":memory:")
         try:
-            version = int(row[0])
-        except (TypeError, ValueError) as exc:
+            cls._create_current_schema(expected_db)
+            expected = cls._schema_objects(expected_db)
+        finally:
+            expected_db.close()
+        actual = cls._schema_objects(db)
+        invalid = sorted(
+            name for name, definition in expected.items() if actual.get(name) != definition
+        )
+        if invalid:
             raise UnsupportedSchemaError(
-                f"Invalid Wisdom schema version: {row[0]!r}"
-            ) from exc
-        if version != SCHEMA_VERSION:
-            raise UnsupportedSchemaError(
-                f"Unsupported Wisdom schema version {version}; expected {SCHEMA_VERSION}"
+                "Incomplete or incompatible Collective Wisdom plugin schema objects: "
+                + ", ".join(invalid)
             )
-        return version
+
+    @staticmethod
+    def _schema_objects(db: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+        rows = db.execute(
+            "SELECT type,name,sql FROM sqlite_master "
+            "WHERE type IN ('table','index') AND sql IS NOT NULL "
+            "AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        return {
+            str(row[1]): (str(row[0]), " ".join(str(row[2]).split())) for row in rows
+        }
 
     def _secure_database_files(self) -> None:
         for path in (
