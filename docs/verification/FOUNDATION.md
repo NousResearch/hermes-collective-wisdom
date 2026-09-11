@@ -65,6 +65,10 @@ not contact Gateway, Portal, or a live account.
 
 ## Not Completed
 
+The host experiment described below is historical. PR #108645 was rejected;
+current integration uses existing upstream APIs and a plugin-side account
+adapter. Its test counts do not establish plugin compatibility or a dependency.
+
 These kernels do not complete F1/F2/P1 or any user-facing workflow. Native
 registration remains inert. Host credential projection, settings/account wiring,
 complete authenticated client and preparation integration, consent,

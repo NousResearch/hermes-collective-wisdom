@@ -95,9 +95,11 @@ An actual authorized request may use the host's existing refresh policy;
 visibility and completion must never initiate refresh or network work.
 
 The extracted plugin client uses explicit providers in tests. That does not
-complete host integration. Registration stays inert until real adapters and
-their denial/expiry/profile-switch tests are in place. The early read-only
-slice does not waive disclosure/registration prerequisites from the old flow.
+complete workflow integration. The [account adapter](verification/F1-account.md)
+now passes denial/expiry/profile-switch checks against unmodified upstream.
+It uses `get_provider_auth_state` and the existing host decoder, not a new API.
+Registration remains inert pending controller, disclosure and operation wiring;
+the read-only slice does not waive those prerequisites from the old flow.
 
 ### H3: Post-Delivery and Idle-Session Integration
 

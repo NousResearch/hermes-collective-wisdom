@@ -56,6 +56,11 @@ Without that optional checkout, pytest explicitly skips the source-artifact
 check. The runtime schema/vector digest checks still run. This is not the
 four-repository release smoke, which remains a separate V1 gate.
 
+The [account compatibility probe](docs/verification/F1-account.md) additionally
+accepts `WISDOM_AGENT_DIR` pointing to an unmodified Agent checkout. It uses
+synthetic credentials in a temporary profile, never the current user's login.
+Without that checkout it explicitly skips; ordinary CI is not host/live E2E.
+
 ## Native Plugin Loading
 
 The repository uses the native Hermes directory layout: `plugin.yaml` and a

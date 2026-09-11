@@ -11,6 +11,7 @@ in historical documents.
 | Squash merge | `a6ee31f55aad08cc51ba348db2febacd541eec01` |
 | Revert | `0dcadf6f41c8e267a68d696d9adef009a691ca43` |
 | Audited current Agent | `31d0a2428e9db346d6781da66f5b37ff3e12def2` |
+| Plugin-only account/lifecycle re-audit | `bf51fee548ceaa28d2c299a41c0f65066c04c061` (unmodified upstream; not PR #108645) |
 | Gateway feature merge | PR 255, `1a1d0d7a71edb617d6d4aae453a2609080561874` |
 | Portal feature merge | PR 1022, `dc1cdb3449e89331244cc9cc132f842da44ab353` |
 | Observed Gateway main | `e90db09107fe674b72c7ff696f7e7fcd32dfd64c` |
