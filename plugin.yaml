@@ -1,0 +1,5 @@
+manifest_version: 2
+kind: standalone
+name: hermes-collective-wisdom
+version: 0.1.0.dev0
+description: "Inert native scaffold for the Hermes Collective Wisdom plugin."

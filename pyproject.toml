@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools==80.10.2", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-collective-wisdom"
+version = "0.1.0.dev0"
+description = "Inert native scaffold for the Hermes Collective Wisdom plugin."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.14"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "build==1.6.1",
+  "pylint==4.0.8",
+  "pytest==9.1.1",
+]
+
+[tool.setuptools]
+packages = ["hermes_wisdom_plugin"]
+include-package-data = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The repository root is a native loader, not a normal Python test package.
+addopts = "--confcutdir=tests"
+
+[tool.pylint.main]
+py-version = "3.11"
+
+[tool.pylint.format]
+max-line-length = 100
