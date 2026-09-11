@@ -139,7 +139,7 @@ def test_credentials_are_lazy_explicit_and_project_only_non_secret_org_context()
 
     assert not value.provider_calls
     assert value.organization_context() == WisdomOrganizationContext("org-1")
-    assert value.provider_calls == [True]
+    assert not value.provider_calls
     assert "test-token" not in repr(_credentials())
     assert value.session.calls == []
 
@@ -192,9 +192,11 @@ def test_provider_failures_do_not_expose_exception_messages():
     def fail():
         raise RuntimeError("private refresh token contents")
 
+    session = Session(Response(200, {"skills": [], "next_cursor": None}))
     with pytest.raises(WisdomAuthError) as raised:
-        WisdomClient(fail, "org-1").organization_context()
+        WisdomClient(fail, "org-1", session=session).list_skills()
     assert "private refresh" not in str(raised.value)
+    assert not session.calls
 
 
 def test_browse_preserves_cursor_limit_empty_page_and_strict_schema():

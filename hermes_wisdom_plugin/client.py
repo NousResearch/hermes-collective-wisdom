@@ -40,7 +40,7 @@ class WisdomGatewayCredentials:
 
 @dataclass(frozen=True, slots=True)
 class WisdomOrganizationContext:
-    """Non-secret organization context projected from current host credentials."""
+    """Non-secret organization binding configured for this client."""
 
     organization_id: str
 
@@ -158,9 +158,9 @@ class WisdomClient:
         return WisdomGatewayCredentials(base_url.rstrip("/"), token, org_id)
 
     def organization_context(self) -> WisdomOrganizationContext:
-        """Return the current non-secret host projection without network activity."""
+        """Return the configured organization binding without reading credentials."""
 
-        return WisdomOrganizationContext(self._credentials().organization_id)
+        return WisdomOrganizationContext(self.expected_organization_id)
 
     @staticmethod
     def _url(credentials: WisdomGatewayCredentials, path: str) -> str:
