@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,14 @@ import zipfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_CONTRACT_DIGESTS = {
+    "canonical-hash-vectors.v1.json": (
+        "eff9b596d1bd9c46eda287b7231b11c35e5c0ae3b193e645d5b0a421b7570974"
+    ),
+    "skill-manifest.schema.v1.json": (
+        "64d0010eada1d79fa16309e9fd715faf77b6186360ea0b095182b2bdaeec5714"
+    ),
+}
 
 
 def test_built_distributions_contain_native_and_python_surfaces(tmp_path: Path) -> None:
@@ -34,16 +43,26 @@ def test_built_distributions_contain_native_and_python_surfaces(tmp_path: Path) 
 
     sdist = next(dist_dir.glob("*.tar.gz"))
     wheel = next(dist_dir.glob("*.whl"))
+    sdist_root = "hermes_collective_wisdom-0.1.0.dev0"
 
     with tarfile.open(sdist, mode="r:gz") as archive:
         sdist_paths = {Path(name).as_posix() for name in archive.getnames()}
-    sdist_root = "hermes_collective_wisdom-0.1.0.dev0"
-    assert f"{sdist_root}/plugin.yaml" in sdist_paths
-    assert f"{sdist_root}/__init__.py" in sdist_paths
-    assert f"{sdist_root}/hermes_wisdom_plugin/__init__.py" in sdist_paths
-    assert f"{sdist_root}/docs/FEATURES.md" in sdist_paths
+        assert f"{sdist_root}/plugin.yaml" in sdist_paths
+        assert f"{sdist_root}/__init__.py" in sdist_paths
+        assert f"{sdist_root}/hermes_wisdom_plugin/__init__.py" in sdist_paths
+        assert f"{sdist_root}/docs/FEATURES.md" in sdist_paths
+        for filename, expected_digest in RUNTIME_CONTRACT_DIGESTS.items():
+            path = f"{sdist_root}/hermes_wisdom_plugin/contracts/{filename}"
+            assert path in sdist_paths
+            member = archive.extractfile(path)
+            assert member is not None
+            assert hashlib.sha256(member.read()).hexdigest() == expected_digest
 
     with zipfile.ZipFile(wheel) as archive:
         wheel_paths = set(archive.namelist())
-    assert "hermes_wisdom_plugin/__init__.py" in wheel_paths
-    assert not any(".data/data/__init__.py" in path for path in wheel_paths)
+        assert "hermes_wisdom_plugin/__init__.py" in wheel_paths
+        assert not any(".data/data/__init__.py" in path for path in wheel_paths)
+        for filename, expected_digest in RUNTIME_CONTRACT_DIGESTS.items():
+            path = f"hermes_wisdom_plugin/contracts/{filename}"
+            assert path in wheel_paths
+            assert hashlib.sha256(archive.read(path)).hexdigest() == expected_digest

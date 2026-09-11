@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 @dataclass(frozen=True)
 class ContractPin:
+    """Immutable revisions and digests for the cross-repository contract."""
+
     gateway_commit: str
     openapi_sha256: str
     manifest_schema_sha256: str
@@ -52,14 +54,20 @@ def org_directory_name(org_id: str) -> str:
 
 
 class StrictModel(BaseModel):
+    """Base contract model that rejects undeclared wire fields."""
+
     model_config = ConfigDict(extra="forbid")
 
 
 class HermesRequirement(StrictModel):
+    """Minimum compatible Hermes version."""
+
     minimum_version: str
 
 
 class ModelRequirement(StrictModel):
+    """Model capabilities required by a shared package."""
+
     capabilities: list[str] = Field(default_factory=list, max_length=64)
     minimum_context_window: int | None = Field(
         default=None, ge=1, le=9_007_199_254_740_991
@@ -67,6 +75,8 @@ class ModelRequirement(StrictModel):
 
 
 class ToolRequirement(StrictModel):
+    """Tool capability required by a shared package."""
+
     name: str
     minimum_version: str | None = None
     auto_install: Literal[False] = False
@@ -74,21 +84,29 @@ class ToolRequirement(StrictModel):
 
 
 class PluginRequirement(StrictModel):
+    """Plugin dependency required by a shared package."""
+
     id: str
     minimum_version: str | None = None
     required: bool = True
 
 
 class FilesystemRequirement(StrictModel):
+    """Declared filesystem access required by a shared package."""
+
     read: list[str] = Field(default_factory=list, max_length=64)
     write: list[str] = Field(default_factory=list, max_length=64)
 
 
 class NetworkRequirement(StrictModel):
+    """Declared network destinations required by a shared package."""
+
     destinations: list[str] = Field(default_factory=list, max_length=64)
 
 
 class RuntimeRequirement(StrictModel):
+    """Runtime capabilities required by a shared package."""
+
     shell: bool = False
     browser: bool = False
     code: bool = False
@@ -96,6 +114,8 @@ class RuntimeRequirement(StrictModel):
 
 
 class SystemSpecification(StrictModel):
+    """Complete runtime requirement contract for a shared package."""
+
     hermes: HermesRequirement
     platforms: list[str] = Field(default_factory=list, max_length=64)
     architectures: list[str] = Field(default_factory=list, max_length=64)
@@ -126,12 +146,16 @@ class SystemSpecification(StrictModel):
 
 
 class PackageManifest(StrictModel):
+    """Versioned manifest included in a shared package."""
+
     schema_version: Literal[1] = 1
     name: str = Field(min_length=1, max_length=512)
     requirements: SystemSpecification
 
 
 class ContentFile(StrictModel):
+    """Hash-addressed file declared by a package response."""
+
     path: str
     hash: str
     mode: Literal["file", "exec"]
@@ -146,25 +170,35 @@ class ContentFile(StrictModel):
 
 
 def sha256_address(data: bytes) -> str:
+    """Return the wire-format SHA-256 content address for exact bytes."""
+
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize a value as sorted, compact, UTF-8 JSON bytes."""
+
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
 
 
 def canonical_content_manifest(files: list[ContentFile]) -> bytes:
+    """Build the sorted canonical manifest committed by a content hash."""
+
     lines = sorted(f"{item.path} {item.mode} {item.hash}\n" for item in files)
     return "".join(lines).encode("utf-8")
 
 
 def derive_content_hash(files: list[ContentFile]) -> str:
+    """Derive a package content address from its canonical file manifest."""
+
     return sha256_address(canonical_content_manifest(files))
 
 
 def sanitize_author_description(raw: str) -> str:
+    """Canonicalize an author description using the Gateway's rules."""
+
     # Mirror gateway descriptionSanitizer.ts. html.unescape is intentionally
     # not used: the Gateway strips tags but does not decode entities.
     value = re.sub(r"<[^>]*>", "", raw)
@@ -183,6 +217,8 @@ def sanitize_author_description(raw: str) -> str:
 
 
 def author_description_hash(canonical_description: str) -> str:
+    """Hash a previously canonicalized author description."""
+
     return sha256_address(canonical_description.encode("utf-8"))
 
 
@@ -210,6 +246,8 @@ def parse_manifest_bytes(raw: bytes) -> PackageManifest:
 
 
 def load_manifest(path: Path) -> tuple[PackageManifest, bytes]:
+    """Read and validate a manifest while preserving its consented bytes."""
+
     raw = path.read_bytes()
     parsed = parse_manifest_bytes(raw)
     # The bytes themselves are consented. We validate but never rewrite them.
