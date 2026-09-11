@@ -149,5 +149,6 @@ def local_work_allowed(
             and org_id.strip()
             and is_entitled(read_claims, org_id, scope=scope, now=now)
         )
-    except (AttributeError, TypeError):
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Any malformed or failing caller-supplied gate is an availability denial.
         return False

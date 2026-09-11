@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from unittest.mock import Mock, PropertyMock
 
 import pytest
 
@@ -200,4 +201,13 @@ def test_local_work_requires_each_distinct_gate_and_matching_org() -> None:
 )
 def test_local_gate_values_must_be_explicit_booleans(gates: LocalWorkGates) -> None:
     """Truthy strings cannot impersonate explicit local gate decisions."""
+    assert not local_work_allowed(ClaimsReader(valid_claims()), gates, now=NOW)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("state unavailable"), ValueError("bad state")])
+def test_local_gate_reader_failures_deny_availability(error: Exception) -> None:
+    """Unexpected failures from a caller-supplied gate cannot escape as availability."""
+    gates = Mock(spec=LocalWorkGates)
+    type(gates).active_org_id = PropertyMock(side_effect=error)
+
     assert not local_work_allowed(ClaimsReader(valid_claims()), gates, now=NOW)

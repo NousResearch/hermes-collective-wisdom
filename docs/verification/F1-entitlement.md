@@ -14,7 +14,8 @@ caches no positive decision.
 Feature opt-in, disclosure acknowledgement, installation registration, and the
 active organization are separate explicit inputs. All must pass alongside a
 fresh matching entitlement before local work is allowed. Host administrator
-status and organization names have no bypass path.
+status and organization names have no bypass path. Malformed gate objects and
+exceptions raised while reading caller-supplied gate state fail closed.
 
 This extraction is runnable and tested, but it does **not** complete
 `CW-M2-001`. That tracker feature depends on `CW-M1-001`, and no host reader,
@@ -45,7 +46,7 @@ copied into the boundary.
 | `test_missing_malformed_expired_or_no_read_fails_closed` | Adapted; every malformed value row is retained, with missing and wrong boundary types added. |
 | `test_logout_and_token_replacement_have_no_positive_cache` | Adapted to claim absence/replacement; every operation rereads the provider. |
 | `test_no_refresh_or_runtime_resolution_for_gate` | Adapted to the read-only callable boundary; a refresh-capable spy remains untouched. |
-| `test_local_work_requires_opt_in_and_current_matching_org` | Partly adapted; all local gates and org/scope mismatch are asserted without copying the store/service. Service errors remain deferred. |
+| `test_local_work_requires_opt_in_and_current_matching_org` | Partly adapted; all local gates, org/scope mismatch, and broad gate-reader failure denial are asserted without copying the store/service. Service errors remain deferred. |
 | `test_tools_need_entitlement_and_config` | Deferred; command/tool availability registration belongs to parent host wiring. |
 | `test_setup_denied_before_network_for_ineligible_account` | Deferred; setup service is not part of F1. Parent must preserve the before-network assertion. |
 | `test_unentitled_status_does_not_probe_gateway` | Deferred; status/service transport is not part of F1. Parent must preserve the no-probe assertion. |
@@ -67,7 +68,7 @@ this worktree first on `PYTHONPATH`:
 | Command | Result |
 | --- | --- |
 | `PYTHONPATH=$PWD ../hermes-collective-wisdom/.venv/bin/python -m pylint hermes_wisdom_plugin/entitlement.py tests/test_entitlement.py` | Passed, 10.00/10 |
-| `PYTHONPATH=$PWD ../hermes-collective-wisdom/.venv/bin/python -m pytest tests/test_entitlement.py` | Passed, 27 tests |
+| `PYTHONPATH=$PWD ../hermes-collective-wisdom/.venv/bin/python -m pytest tests/test_entitlement.py` | Passed, 29 tests |
 
 No plugin registration, host installation, live authentication, network call,
 push, deployment, or production action was performed. Host integration, remote
