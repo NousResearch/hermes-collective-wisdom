@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 import requests
@@ -160,6 +162,71 @@ def test_each_request_uses_one_current_snapshot_without_redirects():
     assert request["timeout"] == 7.0
     assert request["stream"] is True
     assert request["allow_redirects"] is False
+
+
+def test_real_requests_session_reads_loopback_then_blocks_organization_change():
+    """The default transport sends one valid request and fences later org drift."""
+
+    received = []
+    response_body = json.dumps(
+        {"skills": [_summary()], "next_cursor": None}
+    ).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        """Serve one deterministic Wisdom discovery response."""
+
+        def do_GET(self):  # pylint: disable=invalid-name
+            """Record request metadata and return a valid discovery page."""
+
+            received.append(
+                {
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "accept": self.headers.get("Accept"),
+                }
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_request(self, code="-", size="-"):
+            """Keep the focused test output quiet."""
+
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    credentials = [
+        _credentials(base_url=f"http://127.0.0.1:{server.server_port}")
+    ]
+    value = WisdomClient(lambda: credentials[0], "org-1", timeout=2)
+    try:
+        result = value.list_skills(limit=1)
+        request_count = len(received)
+        credentials[0] = _credentials(
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            organization_id="other-org",
+        )
+        with pytest.raises(WisdomAuthError):
+            value.list_skills(limit=1)
+    finally:
+        value.session.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert result.skills[0].slug == "shared-skill"
+    assert received == [
+        {
+            "path": "/v1/sync/wisdom/skills?limit=1",
+            "authorization": "Bearer test-token",
+            "accept": "application/json",
+        }
+    ]
+    assert len(received) == request_count
 
 
 @pytest.mark.parametrize(

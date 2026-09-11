@@ -54,6 +54,9 @@ Adaptation tests add behavior absent from the mechanical source extraction:
   `Content-Length` and accumulated chunks;
 - JSON content-type, UTF-8/JSON, malformed header, stream-timeout, and response
   cleanup cases.
+- one stdlib loopback HTTP server exercise of the default real
+  `requests.Session`, including path/header/schema success followed by an
+  organization-provider change denied without a second server request.
 
 ## Deferred And Excluded
 
@@ -76,6 +79,7 @@ PYTHONPATH=$PWD ../hermes-collective-wisdom/.venv/bin/python -m pytest -q tests/
 PYTHONPATH=$PWD ../hermes-collective-wisdom/.venv/bin/python -m pylint hermes_wisdom_plugin/client.py tests/test_client.py
 ```
 
-Result: 41 focused tests passed and Pylint reported 10.00/10. `git diff
---check` also passed. These are isolated fake-transport checks, not native host
-integration, live Gateway acceptance, or content-verification evidence.
+Result: 42 focused tests passed and Pylint reported 10.00/10. `git diff
+--check` also passed. These are isolated fake and loopback transport checks,
+not native host integration, external Gateway acceptance, live-profile access,
+or content-verification evidence.
