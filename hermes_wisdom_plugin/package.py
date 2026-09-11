@@ -10,8 +10,7 @@ import stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-
-from tools.skills_sync_client import ObjectSet, build_commit, build_tree
+from typing import Protocol
 
 from .contract import (
     ContentFile,
@@ -30,7 +29,7 @@ from .contract import (
     sanitize_author_description,
     sha256_address,
 )
-from .editorial import apply_editorial_metadata_to_overlay
+from .wire import ObjectSet, build_commit, build_tree
 
 
 MAX_FILES = 32
@@ -85,11 +84,63 @@ PACKAGE_MANAGER_FILES = frozenset({
 
 
 class PackagePolicyError(ValueError):
-    pass
+    """Package bytes or paths violate the instruction-only policy."""
 
 
 @dataclass(frozen=True)
-class PreparedPackage:
+class PackageSecurityDecision:
+    """Host-owned guard result for the exact prepared overlay."""
+
+    allowed: bool | None
+
+
+class PackageHostProvider(Protocol):
+    """Supported host capabilities required during package preparation."""
+
+    @property
+    def hermes_version(self) -> str:
+        """Return the current host version used in generated manifests."""
+
+    def parse_skill_frontmatter(self, source: Path) -> dict[str, object]:
+        """Parse source SKILL.md metadata through the supported host API."""
+
+    def check_package_security(self, overlay: Path) -> PackageSecurityDecision:
+        """Run the host-owned guard against the exact prepared overlay."""
+
+
+class EditorialMetadataApplier(Protocol):  # pylint: disable=too-few-public-methods
+    """Plugin-owned callback for applying reviewed overlay presentation data."""
+
+    def __call__(
+        self,
+        overlay: Path,
+        *,
+        editorial_name: str | None,
+        editorial_description: str | None,
+    ) -> None:
+        """Apply reviewed editorial values without changing source bytes."""
+
+
+def _require_host_security(
+    host: PackageHostProvider, overlay: Path
+) -> None:
+    """Convert every invalid or unavailable guard outcome to a policy error."""
+
+    try:
+        security = host.check_package_security(overlay)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        raise PackagePolicyError("host package security guard is unavailable") from exc
+    if not isinstance(security, PackageSecurityDecision):
+        raise PackagePolicyError("host package security guard returned an invalid result")
+    if security.allowed is not True:
+        state = "blocked" if security.allowed is False else "unavailable"
+        raise PackagePolicyError(f"host package security guard is {state}")
+
+
+@dataclass(frozen=True)
+class PreparedPackage:  # pylint: disable=too-many-instance-attributes
+    """Validated owner-private package overlay and its exact wire objects."""
+
     source: Path
     overlay: Path
     source_hash: str
@@ -133,14 +184,12 @@ def _normalized_authoring_architecture(value: str) -> str:
     return value.strip()
 
 
-def _frontmatter(source: Path) -> dict[str, object]:
+def _frontmatter(
+    source: Path, host: PackageHostProvider
+) -> dict[str, object]:
     try:
-        from agent.skill_utils import parse_frontmatter
-
-        parsed, _body = parse_frontmatter(
-            (source / "SKILL.md").read_text(encoding="utf-8")
-        )
-    except Exception:
+        parsed = host.parse_skill_frontmatter(source)
+    except Exception:  # pylint: disable=broad-exception-caught
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -205,12 +254,13 @@ def _plugin_requirements(metadata: dict[str, object]) -> list[PluginRequirement]
     return requirements
 
 
-def infer_authoring_system_specification(
+def infer_authoring_system_specification(  # pylint: disable=unused-argument
     source: Path,
     *,
     hermes_version: str,
     system_name: str | None = None,
     machine: str | None = None,
+    frontmatter: dict[str, object] | None = None,
 ) -> SystemSpecification:
     """Build conservative owner-review defaults without exporting inventory.
 
@@ -218,7 +268,7 @@ def infer_authoring_system_specification(
     Skill-specific tool and plugin requirements come only from explicit
     frontmatter; the profile's complete enabled inventory is never consulted.
     """
-    frontmatter = _frontmatter(source)
+    frontmatter = frontmatter or {}
     metadata = _hermes_metadata(frontmatter)
 
     if "platforms" in frontmatter:
@@ -356,7 +406,9 @@ def _safe_relative(path: Path, root: Path) -> str:
     return rel
 
 
-def _validate_tree(root: Path, *, require_manifest: bool = True) -> list[Path]:
+def _validate_tree(  # pylint: disable=too-many-branches
+    root: Path, *, require_manifest: bool = True
+) -> list[Path]:
     if not root.is_dir() or root.is_symlink():
         raise PackagePolicyError("skill root must be a regular directory")
     entries: list[Path] = []
@@ -434,16 +486,20 @@ def _source_fingerprint(source: Path) -> str:
     return sha256_address("".join(records).encode("utf-8"))
 
 
-def prepare_package(
+def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     source: Path,
     *,
+    host: PackageHostProvider,
     overlay_root: Path,
     author_description: str,
     owner: str,
     installation_id: str,
     editorial_name: str | None = None,
     editorial_description: str | None = None,
+    editorial_applier: EditorialMetadataApplier | None = None,
 ) -> PreparedPackage:
+    """Create a guarded private overlay and its canonical wire objects."""
+
     source = source.resolve()
     source_hash = _source_fingerprint(source)
     target = overlay_root / source_hash.removeprefix("sha256:")
@@ -463,19 +519,20 @@ def prepare_package(
             dest.write_bytes(path.read_bytes())
             dest.chmod(0o600)
     if editorial_name is not None or editorial_description is not None:
-        apply_editorial_metadata_to_overlay(
+        if editorial_applier is None:
+            raise PackagePolicyError("plugin editorial metadata applier is required")
+        editorial_applier(
             target,
             editorial_name=editorial_name,
             editorial_description=editorial_description,
         )
     if not (target / "skill.manifest.json").exists():
-        from hermes_cli import __version__ as hermes_version
-
         generated = PackageManifest(
             name=source.name,
             requirements=infer_authoring_system_specification(
                 source,
-                hermes_version=hermes_version,
+                hermes_version=host.hermes_version,
+                frontmatter=_frontmatter(source, host),
             ),
         )
         (target / "skill.manifest.json").write_bytes(
@@ -492,6 +549,7 @@ def prepare_package(
         manifest, manifest_bytes = load_manifest(target / "skill.manifest.json")
     except (UnicodeDecodeError, ValueError) as exc:
         raise PackagePolicyError("package manifest is invalid") from exc
+    _require_host_security(host, target)
     description = sanitize_author_description(author_description)
     files = [
         ContentFile(
