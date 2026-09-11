@@ -333,11 +333,6 @@ class WisdomStore:
             raise UnsupportedSchemaError(
                 "Malformed Collective Wisdom plugin schema version metadata"
             )
-        check = db.execute("PRAGMA quick_check").fetchone()
-        if check is None or check[0] != "ok":
-            raise UnsupportedSchemaError(
-                f"Malformed Collective Wisdom plugin database: {check[0] if check else 'unknown'}"
-            )
         cls._validate_current_schema(db)
         return SCHEMA_VERSION
 

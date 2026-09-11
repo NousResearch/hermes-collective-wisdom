@@ -39,11 +39,13 @@ paths before adaptation.
 - Added the non-secret schema family marker
   `hermes_wisdom_plugin.profile_store` with an integer version column. Existing
   databases are accepted only when the family is exact, plugin version is the
-  integer `1`, matching metadata is present, SQLite quick-check succeeds, and
-  every required table/index SQL definition matches the expected current
-  shape. Unmarked old feature databases, foreign/malformed markers, and
-  incomplete marked databases are refused without creating or adopting
-  current tables. Unrelated additional objects may coexist for future slices.
+  integer `1`, matching metadata is present, and every required table/index SQL
+  definition matches the expected current shape. Unmarked old feature
+  databases, foreign/malformed markers, and incomplete marked databases are
+  refused without creating or adopting current tables. Unrelated additional
+  objects may coexist for future slices. Data-integrity scanning is not run on
+  normal store construction; an explicit recovery diagnostic remains future
+  work.
 - Retained the coherent store-owned tables and APIs, including
   `managed_install`, operation journals/locks, qualification state, local and
   feed delivery ledgers, drafts/receipts, and professionalism review state.
@@ -60,7 +62,7 @@ Adapted outputs after this guard fix:
 - `hermes_wisdom_plugin/errors.py`: SHA-256
   `375ef990e5338d8f702c330dbc553ccf444b2153768427ade8546b2ba2d31d67`
 - `hermes_wisdom_plugin/store.py`: SHA-256
-  `e94aa85f478219da68f2719ee7bf883a46fdfca4c3f31b36e58f2419c3634c13`
+  `232ad5ca4754d6cd247bfc35e95c10d89212771645fe89340378d690fae736e0`
 - `tests/test_store.py`: SHA-256
   `d945c1619ee15ef33636d0d0622bdc3bf8b39370944bbbdfd5e1e151729c9e48`
 
