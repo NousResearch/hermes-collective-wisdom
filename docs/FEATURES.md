@@ -25,7 +25,7 @@ Allowed implementation states are `Planned`, `In progress`, `Implemented`, and `
 | CW-M1-001, CW-M1-002, CW-M1-003 | Sol / host integration owner | [Agent PR 108645 (draft)](https://github.com/NousResearch/hermes-agent/pull/108645) | [Command-context tests](verification/H1-commands.md); actor/tool/lifecycle integration pending |
 | CW-M2-001 | Sol / entitlement extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Pure entitlement checks](verification/F1-entitlement.md); native wiring and live acceptance pending |
 | CW-M2-003 | Sol / store extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Fresh store tests](verification/F1-store.md); settings and host integration pending |
-| CW-M2-004 | Sol / contract extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Contract/hash extraction](verification/F2.md), [wire builders](verification/F2-wire.md); client/package preparation pending |
+| CW-M2-004 | Sol / contract extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Contract/hash extraction](verification/F2.md), [wire builders](verification/F2-wire.md), [package kernel](verification/F2-package.md), [bounded discovery client](verification/F2-client.md); host and full client integration pending |
 | CW-M5-001 | Sol / preflight extraction | [Plugin PR 1 (draft)](https://github.com/NousResearch/hermes-collective-wisdom/pull/1) | [Pure preflight tests](verification/P1-preflight.md); host guard and workflow integration pending |
 
 ## Release Boundaries

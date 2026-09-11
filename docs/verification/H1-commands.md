@@ -2,7 +2,7 @@
 
 Date: 2026-09-12. Agent base:
 `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
-Reviewed command slice: `2ad6e3190d1558760d495f0b72e391aa2404a73f`.
+Reviewed command slice: `c4032ae225adc1bfa042c5a458ba38891baeddf9`.
 Draft upstream PR: https://github.com/NousResearch/hermes-agent/pull/108645
 
 ## Available on the Draft Branch Only
@@ -19,6 +19,12 @@ Draft upstream PR: https://github.com/NousResearch/hermes-agent/pull/108645
 - Discovery-only contexts expire. A registered but unavailable command does not
   fall through into model handling. Availability errors omit exception messages
   and tracebacks from logs.
+- `register_cli_command(..., availability=predicate)` gates parser discovery
+  and the final parsed dispatch, including setup-only and nested handlers.
+- CLI/TUI local actor hints come from one usable, non-guest Nous credential
+  snapshot. Expired access plus a refresh token does not count as current access.
+  Subject, persisted actor, and profile mismatches fail closed; nothing refreshes.
+  This local hint is not a replacement for Gateway authorization.
 
 The plugin native entrypoint does not yet consume this API. No released host
 minimum is claimed from the existence of an unmerged development branch.
@@ -35,25 +41,30 @@ priority on PYTHONPATH. The reference environment was not modified.
 PYTHONPATH="$PWD:/path/to/reference-runtime/lib/python3.12/site-packages" \
   .venv/bin/python -m pytest -q \
   tests/hermes_cli/test_plugin_invocation.py \
+  tests/hermes_cli/test_plugin_cli_registration.py \
   tests/tui_gateway/test_plugin_command_context.py \
-  tests/gateway/test_unknown_command.py::test_plugin_command_receives_admitted_gateway_context \
-  tests/gateway/test_unknown_command.py::test_unavailable_registered_plugin_command_never_reaches_model \
-  tests/gateway/test_unknown_command.py::test_internal_gateway_context_is_background_and_anonymous \
+  tests/gateway/test_unknown_command.py \
   tests/hermes_cli/test_commands.py \
   tests/hermes_cli/test_completer_config_reads.py
 ```
 
-Result: **78 passed**. Pinned Ruff passed on all changed Python files;
+Result: **102 passed**. Pinned Ruff passed on the changed Python files;
 `git diff --check` also passed. An initial integrator attempt selected the wrong
 Python/site-packages combination and failed collection; the matched Python 3.12
 rerun above supersedes it. This is focused local evidence, not a fresh locked
-host environment, full Agent CI, or live messaging test.
+host environment or live messaging test.
+
+Full Linux CI at the earlier `2ad6e319` head reported 47,549 passed, one failure,
+and 455 skipped. The failure was an old-signature mock in the command-rewrite
+test. Commit `71f48b666e` replaces it with real plugin registration and checks
+both allowed and denied rewritten commands. The full file now passes locally;
+the new-head CI run must be checked separately.
 
 ## Remaining H1/H2 Work
 
-Tool context/availability, CLI subcommand availability, subagent tool bindings,
-and local authenticated-actor projection are not implemented. CLI/TUI actor
-fields remain absent rather than fabricating identity; actor-dependent consent
-must fail closed. Static platform command publication cannot evaluate a user
-context and hides gated commands. H2 post-delivery/idle lifecycle work is not
-implemented. H1 features therefore remain in progress, not accepted.
+Tool context/availability, subagent tool bindings, and the plugin-facing
+account/entitlement/request facade are not implemented. Actor-dependent consent
+must still reject incomplete context. Static platform command publication
+cannot evaluate a user context and hides gated commands. H2 post-delivery/idle
+lifecycle work is not implemented. H1 features therefore remain in progress,
+not accepted.

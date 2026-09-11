@@ -42,9 +42,10 @@ host guard.
 Editorial metadata is Wisdom business logic, not a host extension. When reviewed
 editorial values are present, preparation requires a separate plugin-owned
 `EditorialMetadataApplier`; values cannot silently disappear. The pure legacy
-editorial dependency closure includes YAML round-tripping, atomic writing, and
-model-assisted copy, so its extraction is explicitly deferred rather than
-mislabelled as host responsibility.
+editorial dependency closure includes frontmatter parsing, YAML round-tripping,
+and atomic writing. Its extraction is deferred rather than mislabelled as host
+responsibility. Model-assisted copy lives in the same source file but is not a
+dependency of overlay editing and need not be copied with that helper.
 
 The source behavior that treats a frontmatter-provider exception as an empty
 mapping is preserved. A future supported host adapter must not use that fallback

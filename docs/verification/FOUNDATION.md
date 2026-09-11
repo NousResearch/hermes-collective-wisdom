@@ -1,7 +1,7 @@
 # Foundation Integration Evidence
 
 Date: 2026-09-12. Plugin source at this verification:
-`fe81c44` on `codex/first-release-foundation`.
+`c9809a3` on `codex/first-release-foundation` (subsequent changes are docs only).
 Draft delivery PR: https://github.com/NousResearch/hermes-collective-wisdom/pull/1
 
 ## Integrated Code
@@ -15,9 +15,13 @@ Draft delivery PR: https://github.com/NousResearch/hermes-collective-wisdom/pull
 - Credential preflight and existing host-guard-result composition. This does
   not invoke a host guard or replace its enforcement.
 - Package-resource verification and a development-only pinned OpenAPI check.
+- Instruction-only package preparation/content verification and deterministic
+  compatibility evaluation, with explicit host guard and capability boundaries.
+- Read-only discovery client with bounded responses, per-request organization
+  binding, no redirects, and no ambient credential lookup.
 
 Source and test dispositions are in F1-entitlement.md, F1-store.md, F2.md,
-F2-wire.md, and P1-preflight.md in this directory. Schema initialization and
+F2-wire.md, F2-package.md, F2-client.md, and P1-preflight.md in this directory. Schema initialization and
 input adapters are documented changes; copied hashing/scanning rules retain
 their reference behavior. No legacy database was opened or migrated.
 
@@ -31,7 +35,7 @@ WISDOM_GATEWAY_DIR=/path/to/pinned-gateway-checkout .venv/bin/python -m pytest
 .venv/bin/python -m pip check
 ```
 
-Results: **102 passed**, Pylint **10.00/10**, no broken requirements.
+Results: **216 passed**, Pylint **10.00/10**, no broken requirements.
 The distribution test builds the sdist and wheel and checks packaged resource
 digests. The supplied Gateway checkout contains immutable contract revision
 `16bd05e81b134d1ab8bb230aade6f6de9010cae3`; the verifier reads that git object,
@@ -41,18 +45,35 @@ Without WISDOM_GATEWAY_DIR, the real OpenAPI-source test is explicitly skipped.
 Runtime artifact hashes, wire vectors, and the rejection test still execute.
 That normal CI skip does not establish the four-repository release gate.
 
-The earlier batch at `7ffb174b54681a578e86991acb046074ad6600f6` passed remote
-CI on Python 3.11 and 3.13 (run 34654819322). Newer-head CI must be checked
-separately; that earlier run is not evidence for subsequent store/preflight code.
+The earlier batch at `f9d22198227c472a5e2a282f588095885da72bd5` passed remote
+CI on Python 3.11 and 3.13 (run 34655621492). Newer-head CI must be checked
+separately; that earlier run is not evidence for subsequent client/package code.
+
+## Clean Wheel Check
+
+Built the wheel and installed it with runtime dependencies only into a fresh
+temporary Python 3.11 environment. With Python isolated mode (`-I`), imported
+all ten runtime modules, checked the packaged vector digest, and asserted that
+`hermes_wisdom`, `hermes_cli`, `agent`, and `tools` were not importable.
+Imports and `pip check` passed. The wheel SHA-256 was
+`592cb885c4abc13bbb320fa667a52296e6d85e383b3cadd9d2c47c4d8b6dc776`.
+This is package independence evidence, not clean-host workflow acceptance.
+
+The real loopback HTTP test additionally checks request path/header/schema
+behavior and rejects an organization switch before a second request. It does
+not contact Gateway, Portal, or a live account.
 
 ## Not Completed
 
 These kernels do not complete F1/F2/P1 or any user-facing workflow. Native
 registration remains inert. Host credential projection, settings/account wiring,
-full client/package preparation, consent, installation/setup/update/publication,
+complete authenticated client and preparation integration, consent,
+installation/setup/update/publication,
 qualification, mediation, native delivery/recovery, and H2 remain unfinished.
 The separate Agent H1 branch is a partial command-context implementation, not
-the complete trusted tool/lifecycle interface.
+the complete trusted tool/lifecycle interface. Its reviewed head is
+`c4032ae225adc1bfa042c5a458ba38891baeddf9`; the integrator reran 102 focused
+command/context tests. See H1-commands.md for full-CI history and limits.
 
 No plugin was enabled in a user profile, no gateway was restarted, and no live
 skill was installed, submitted or published. Live CLI/TUI/Telegram/Slack checks,
