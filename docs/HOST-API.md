@@ -57,6 +57,36 @@ The predicate is cheap and read-only. It must not refresh credentials or contact
 a model. Stale native platform menus cannot confer authority on an old command.
 Scope any polling/refresh to affected clients, not global configuration churn.
 
+### Account and Request Boundary: Confirmed H1 Gap
+
+The follow-up audit at the same Agent baseline found no supported plugin-facing
+account snapshot or authenticated request API. `get_config`/`set_config` and
+`ctx.state` are not credential APIs. An invocation's admitted messaging actor is
+also not an organization access token.
+
+Host-owned building blocks already exist:
+
+- `hermes_cli/auth_nous.py:get_nous_auth_status_local` is refresh-free, but is an
+  internal display projection without the organization/scope fields needed here.
+- `hermes_cli/nous_account.py:get_nous_portal_account_info` can fall through to a
+  refresh. It is not safe to call from completion or availability predicates.
+- Token decoding and `resolve_nous_runtime_credentials` remain host internals.
+  Local token claims are availability hints, not a substitute for Gateway's
+  verification and execution-time authorization.
+
+H1 still needs a narrow, host-owned, refresh-free account projection and a
+supported way to make authenticated Gateway requests. Bind both to the current
+profile/account; do not return refresh tokens or accept model-provided identity.
+Review the smallest host facade before selecting its public names. Do not add a
+generic network framework, extra credential store, or a plugin JWT parser.
+An actual authorized request may use the host's existing refresh policy;
+visibility and completion must never initiate refresh or network work.
+
+The extracted plugin client uses explicit providers in tests. That does not
+complete host integration. Registration stays inert until real facades and
+their denial/expiry/profile-switch tests are in place. The early read-only
+slice does not waive disclosure/registration prerequisites from the old flow.
+
 ### H3: Post-Delivery and Idle-Session Integration
 
 Expose host-owned post-response delivery facts and a safe idle-session work

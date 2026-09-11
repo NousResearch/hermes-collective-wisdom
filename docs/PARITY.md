@@ -28,6 +28,41 @@ are reference behaviors, not a compatibility requirement for already-sent demo
 cards. Fresh-plugin controls must have authenticated, scoped, expiring bindings;
 old/unknown tokens cannot authorize operations.
 
+### Read-Surface Extraction Detail
+
+The first command extraction must preserve these distinctions from
+`hermes_cli/subcommands/wisdom.py`, not conflate CLI and slash aliases:
+
+| CLI command | Arguments | Output |
+| --- | --- | --- |
+| `status` | `--json` | Service status; denied entitlement must not probe Gateway |
+| `list` | `--json` | Discovery response including cursor |
+| `browse` | optional query, `--json` | `skills` wrapper around filtered results |
+| `show` | required skill ID, `--json` | Detail including highest positive published version |
+| `versions` | required skill ID, `--json` | `versions` wrapper |
+
+Slash `list` aliases `browse`; its human-readable result uses five-item pages.
+Search traverses at most 100 pages, detects repeated cursors, and case-folds
+slug/author fields. Slug resolution requires exactly one match. Preserve private
+installation/compatibility details only on private surfaces: group discovery
+must not read device state. Back navigation must survive browse/show/versions.
+
+CLI JSON is indented by two spaces, key-sorted, Unicode-preserving, and uses
+`default=str`. Non-JSON dict/list output remains pretty JSON. Success exits 0;
+authentication/not-found/conflict/validation/generic errors exit 3/4/5/6/8 and
+retain the `ok`, `error`, `category` envelope. Interruption/declined interactive
+confirmation exits 7. Missing/invalid parser arguments retain argparse behavior.
+
+Source view types and text rendering are in `gateway/wisdom_command.py`:
+`WisdomCommandContext`, `WisdomAction`, `WisdomItem`, `WisdomView`,
+`_local_action_lines`, `render_local_view`, and `_attach_navigation`. Keep readable
+commands and Portal URLs in text fallback; never print opaque callback payloads.
+
+Install/update controls are deferred from an initial read-only development
+slice, **not excluded from release one**. Their source tests remain pending and
+must pass again when consumption is integrated. Do not claim browse parity or
+ship a release-one browse card without the planned install/review controls.
+
 ## Extraction Units and Reference Tests
 
 All units begin as **pending extraction**, except where a linked verification
