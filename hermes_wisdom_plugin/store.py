@@ -399,6 +399,35 @@ class WisdomStore:
                 db.close()
                 self._secure_database_files()
 
+    def get_metadata(self, key: str) -> dict[str, Any] | None:
+        """Read one plugin-owned JSON metadata record without changing its state."""
+        if key == "schema_version":
+            raise ValueError("schema_version is reserved")
+        with self.transaction() as db:
+            row = db.execute("SELECT value FROM schema_meta WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["value"])
+        if not isinstance(value, dict):
+            raise ValueError("invalid plugin metadata")
+        return value
+
+    def set_metadata(
+        self, key: str, value: dict[str, Any], *, _db: sqlite3.Connection | None = None
+    ) -> None:
+        """Persist metadata, optionally alongside its operation journal transaction."""
+        if key == "schema_version" or not isinstance(value, dict):
+            raise ValueError("invalid plugin metadata")
+        if _db is None:
+            with self.transaction() as db:
+                self.set_metadata(key, value, _db=db)
+            return
+        _db.execute(
+            "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, json.dumps(value, sort_keys=True, allow_nan=False)),
+        )
+
     def register_skill(
         self,
         path: Path,

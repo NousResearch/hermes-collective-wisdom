@@ -6,7 +6,7 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 import requests
@@ -93,10 +93,23 @@ class VersionDetail(WireModel):
     version: dict[str, Any]
 
 
-class WisdomClient:
-    """Read-only Collective Wisdom Gateway client."""
+class Capability(WireModel):
+    """The Gateway's advertised Sync features."""
 
-    def __init__(
+    features: list[str] = Field(max_length=256)
+
+
+class InstallationIdentity(WireModel):
+    """Acknowledgement of this account's installation registration."""
+
+    installation_id: str = Field(min_length=1, max_length=512)
+    state: Literal["active"]
+
+
+class WisdomClient:
+    """Bounded discovery and explicit installation-enrolment client."""
+
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         credential_provider: CredentialProvider,
         expected_organization_id: str,
@@ -104,6 +117,7 @@ class WisdomClient:
         timeout: float = 30.0,
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         session: requests.Session | None = None,
+        install_credential_provider: CredentialProvider | None = None,
     ) -> None:
         if not callable(credential_provider):
             raise TypeError("credential_provider must be callable")
@@ -118,13 +132,18 @@ class WisdomClient:
         if not _is_plain_int(max_response_bytes) or max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be a positive integer")
         self._credential_provider = credential_provider
+        self._install_credential_provider = install_credential_provider
+        self._closed = False
         self.timeout = normalized_timeout
         self.max_response_bytes = max_response_bytes
         self.session = session or requests.Session()
 
-    def _credentials(self) -> WisdomGatewayCredentials:
+    def _credentials(self, *, install: bool = False) -> WisdomGatewayCredentials:
         try:
-            credentials = self._credential_provider()
+            provider = self._install_credential_provider if install else self._credential_provider
+            if provider is None:
+                raise WisdomAuthError("Installation registration requires Wisdom install access")
+            credentials = provider()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             raise WisdomAuthError("Collective Wisdom credentials are unavailable") from exc
         if not isinstance(credentials, WisdomGatewayCredentials):
@@ -201,18 +220,29 @@ class WisdomClient:
                 "Collective Wisdom Gateway returned a malformed response"
             ) from exc
 
-    def _request(
+    def _request(  # pylint: disable=too-many-arguments,too-many-locals
         self,
         path: str,
         *,
         model: type[BaseModel],
         params: dict[str, Any] | None = None,
+        method: str = "GET",
+        json_body: dict[str, str] | None = None,
+        sync_root: bool = False,
+        install: bool = False,
     ) -> Any:
-        credentials = self._credentials()
+        if self._closed:
+            raise WisdomError("Collective Wisdom client is closed")
+        credentials = self._credentials(install=install)
+        request_options = {"json": json_body} if json_body is not None else {}
+        url = (
+            f"{credentials.base_url}/v1/sync/{path}"
+            if sync_root else self._url(credentials, path)
+        )
         try:
             response = self.session.request(
-                "GET",
-                self._url(credentials, path),
+                method,
+                url,
                 headers={
                     "Authorization": f"Bearer {credentials.access_token}",
                     "Accept": "application/json",
@@ -221,6 +251,7 @@ class WisdomClient:
                 timeout=self.timeout,
                 stream=True,
                 allow_redirects=False,
+                **request_options,
             )
             try:
                 body = self._read_response_body(response)
@@ -266,6 +297,29 @@ class WisdomClient:
             raise WisdomError(
                 "Collective Wisdom Gateway response failed schema validation"
             ) from exc
+
+    def capability(self) -> Capability:
+        """Read advertised capabilities through the same bounded transport."""
+        result = self._request("capabilities", model=Capability, sync_root=True)
+        if "wisdom" not in result.features:
+            raise WisdomAuthError("Gateway does not advertise Collective Wisdom")
+        return result
+
+    def register_identity(self, installation_id: str) -> InstallationIdentity:
+        """Register a reserved identity; authorization is read afresh for this POST."""
+        installation_id = _text(installation_id, "installation_id", _MAX_IDENTIFIER_BYTES)
+        result = self._request(
+            "installation-identities", model=InstallationIdentity,
+            method="POST", json_body={"installation_id": installation_id}, install=True,
+        )
+        if result.installation_id != installation_id:
+            raise WisdomError("Gateway acknowledged a different installation identity")
+        return result
+
+    def close(self) -> None:
+        """Dispose this invocation's owned transport and refuse further requests."""
+        self._closed = True
+        self.session.close()
 
     def list_skills(
         self, *, cursor: str | None = None, limit: int | None = None
