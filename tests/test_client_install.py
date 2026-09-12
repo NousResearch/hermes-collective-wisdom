@@ -121,7 +121,7 @@ def test_install_operations_use_fresh_install_credentials_and_validate_wire_data
     assert session.calls[3][0] == "DELETE"
 
 
-def test_content_rejects_additive_file_fields_and_invalid_base64():
+def test_content_tolerates_additive_fields_but_rejects_invalid_base64():
     response = _content_response()
     response["files"][0]["unexpected"] = True
     client = WisdomClient(
@@ -130,8 +130,8 @@ def test_content_rejects_additive_file_fields_and_invalid_base64():
         session=Session([response]),
         install_credential_provider=lambda: _credentials("install"),
     )
-    with pytest.raises(WisdomError, match="schema validation"):
-        client.content("skill", 1, installation_id="install", takedown_generation=0)
+    _, files = client.content("skill", 1, installation_id="install", takedown_generation=0)
+    assert len(files) == 2
 
     malformed = _content_response()
     malformed["files"][0]["content_base64"] = "%%%"

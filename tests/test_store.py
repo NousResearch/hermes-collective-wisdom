@@ -137,8 +137,8 @@ def test_profile_store_reopens_full_current_plugin_schema(tmp_path: Path):
         marker = db.execute(
             "SELECT family,version,typeof(version) FROM plugin_schema_identity"
         ).fetchone()
-    assert tuple(marker) == (SCHEMA_FAMILY, 1, "integer")
-    assert SCHEMA_VERSION == 1
+    assert tuple(marker) == (SCHEMA_FAMILY, 2, "integer")
+    assert SCHEMA_VERSION == 2
 
 
 def test_feed_generation_conflict_keeps_public_error_contract(tmp_path: Path):

@@ -96,40 +96,32 @@ class VersionDetail(WireModel):
     version: dict[str, Any]
 
 
-class VersionContentFile(BaseModel):
+class VersionContentFile(WireModel):
     """One exact blob in a published version response."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     path: str = Field(min_length=1, max_length=1024)
     mode: Literal["file", "exec"]
     hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
-    content_base64: str = Field(min_length=1)
+    content_base64: str = Field(max_length=349_528)
 
 
-class VersionContent(BaseModel):
+class VersionContent(WireModel):
     """Bounded, exact published package returned by the Gateway."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     commit: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     content_hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     files: list[VersionContentFile] = Field(max_length=32)
 
 
-class InstallationRecord(BaseModel):
+class InstallationRecord(WireModel):
     """Gateway acknowledgement for an installed version."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     installed_version: int = Field(gt=0)
     effective_update_mode: Literal["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"]
 
 
-class InstallationItem(BaseModel):
+class InstallationItem(WireModel):
     """One installation visible to the current installation identity."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     skill_id: str = Field(min_length=1, max_length=512)
     installed_version: int = Field(gt=0)
@@ -139,18 +131,14 @@ class InstallationItem(BaseModel):
     takedown_generation: int | None = Field(default=None, ge=0)
 
 
-class InstallationList(BaseModel):
+class InstallationList(WireModel):
     """Bounded installation listing response."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     installations: list[InstallationItem] = Field(max_length=10_000)
 
 
-class InstallationDeactivation(BaseModel):
+class InstallationDeactivation(WireModel):
     """Gateway acknowledgement for an installation deactivation."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     skill_id: str = Field(min_length=1, max_length=512)
     installation_id: str = Field(min_length=1, max_length=512)
