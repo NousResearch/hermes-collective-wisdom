@@ -291,6 +291,8 @@ def _render_status(value: object) -> str:
         str(data.get("state") or "").casefold(),
         "ready" if configured else "not configured",
     )
+    if not configured and state == "ready":
+        state = "not configured"
     return "\n".join(
         (
             "Collective Wisdom status",

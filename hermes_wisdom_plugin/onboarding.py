@@ -213,9 +213,12 @@ class Onboarding:
             self._assert_current_attempt(db, lock_owner, record)
             self.store.set_metadata(_METADATA_KEY, rotated, _db=db)
             db.execute(
-                "UPDATE operation_journal SET payload_json=?,updated_at=? "
+                "UPDATE operation_journal SET entity_id=?,payload_json=?,updated_at=? "
                 "WHERE id=? AND kind=?",
-                (json.dumps(rotated, sort_keys=True), _now(), operation_id, _OPERATION_KIND),
+                (
+                    rotated["installation_id"], json.dumps(rotated, sort_keys=True),
+                    _now(), operation_id, _OPERATION_KIND,
+                ),
             )
         return rotated
 
@@ -240,14 +243,7 @@ class Onboarding:
         try:
             owner = self._authorize_setup()
             previous = self._record()
-            if (
-                previous
-                and self._same_owner(previous, owner)
-                and previous.get("state") == "active"
-                and self.store.existing_installation_identity()
-                == previous.get("installation_id")
-                and self.store.active_org_id() == owner["organization_id"]
-            ):
+            if previous and self.status()["configured"] is True:
                 operation_id = _text(previous.get("operation_id"))
                 operation = self.store.operation(operation_id) if operation_id else None
                 if operation and operation.get("state") == "pending":

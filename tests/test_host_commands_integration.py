@@ -1,4 +1,6 @@
 """Clean-host integration probe for native Wisdom CLI and TUI commands."""
+# The isolated host subprocess deliberately carries its own wire fixtures.
+# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ EXPECTED_HOST_REVISION = "bf51fee548ceaa28d2c299a41c0f65066c04c061"
 PLUGIN_ID = "hermes-collective-wisdom"
 PROBE = r'''
 import base64
+import asyncio
 import contextlib
 import io
 import json
@@ -197,7 +200,9 @@ def registration_generation(manager):
     assert keys.count(("cli_command", "wisdom")) == 1
     assert keys.count(("command", "wisdom")) == 1
     assert sum(kind == "on_unload" for kind, _key in keys) == 1
-    assert len(keys) == len(set(keys)) == 3
+    # The host installs its generic tool-override policy even for command-only plugins.
+    assert sum(kind == "tool_override_policy" for kind, _key in keys) == 1
+    assert len(keys) == len(set(keys)) == 4, keys
     return manager._plugin_commands["wisdom"]["handler"].__self__
 
 
@@ -360,10 +365,49 @@ try:
     assert len(request_snapshot()) > slash_requests
     assert not runtime._children
 
+    # A host ContextVar keeps the parent bound while the child must receive the
+    # captured profile explicitly rather than inheriting an unrelated ambient env.
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    ambient_home = os.environ["HERMES_HOME"]
+    other_profile = HOME.parent / "empty-ambient-profile"
+    other_profile.mkdir()
+    profile_token = set_hermes_home_override(HOME)
+    os.environ["HERMES_HOME"] = str(other_profile)
+    context_requests = len(request_snapshot())
+    try:
+        assert get_hermes_home().resolve() == HOME
+        state = auth.get_provider_auth_state("nous") or {}
+        assert state.get("access_token") == ACTIVE_TOKEN, "host credential context was lost"
+        context_browse = run_slash(server_module, "/wisdom browse release", 6)
+        assert "release-notes" in context_browse, context_browse
+        assert len(request_snapshot()) > context_requests
+        from hermes_cli.plugins import resolve_plugin_command_result
+
+        async def resolve_from_running_loop():
+            handler = manager._plugin_commands["wisdom"]["handler"]
+            return resolve_plugin_command_result(handler("browse release"))
+
+        # The host's running-loop resolver uses a helper thread. The plugin must
+        # capture the calling ContextVar before returning its awaitable.
+        threaded_browse = asyncio.run(resolve_from_running_loop())
+        assert "release-notes" in threaded_browse, threaded_browse
+    finally:
+        os.environ["HERMES_HOME"] = ambient_home
+        reset_hermes_home_override(profile_token)
+    assert get_hermes_home().resolve() == HOME
+    assert not list(other_profile.rglob("nous_auth.json"))
+    assert not list(other_profile.rglob("wisdom.db"))
+    assert not runtime._children
+
     post_count = sum(item["method"] == "POST" for item in request_snapshot())
     state_before_slash_setup = state_snapshot(runtime.root)
     slash_setup = run_slash(
-        server_module, "/wisdom setup --accept-disclosure", 6
+        server_module, "/wisdom setup --accept-disclosure", 7
     )
     assert "hermes wisdom setup" in slash_setup
     assert sum(item["method"] == "POST" for item in request_snapshot()) == post_count
@@ -385,13 +429,13 @@ try:
 
     manager.discover_and_load(force=True)
     runtime = registration_generation(manager)
-    assert "Collective Wisdom" in run_slash(server_module, "/wisdom help", 7)
+    assert "Collective Wisdom" in run_slash(server_module, "/wisdom help", 8)
     assert not runtime._children
     assert not any(
         name == "hermes_wisdom" or name.startswith("hermes_wisdom.")
         for name in sys.modules
     )
-    print("clean-host Wisdom command integration passed")
+    print("clean-host Wisdom command integration passed", file=sys.__stdout__)
 finally:
     if server_module is not None:
         server_module._sessions.pop("wisdom-probe", None)
@@ -430,7 +474,7 @@ def test_clean_host_native_cli_and_tui_commands(tmp_path: Path) -> None:
     assert _git(agent_path, "rev-parse", "HEAD") == EXPECTED_HOST_REVISION
     assert _git(agent_path, "status", "--porcelain") == ""
 
-    profile = tmp_path / "profile"
+    profile = tmp_path / ".hermes" / "profiles" / "wisdom-probe"
     plugins = profile / "plugins"
     plugins.mkdir(parents=True)
     (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
@@ -469,6 +513,6 @@ def test_clean_host_native_cli_and_tui_commands(tmp_path: Path) -> None:
         timeout=90,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, f"{result.stderr}\nstdout:\n{result.stdout}"
     assert result.stdout.strip() == "clean-host Wisdom command integration passed"
     assert _git(agent_path, "status", "--porcelain") == ""

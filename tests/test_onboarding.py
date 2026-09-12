@@ -293,6 +293,7 @@ def test_identity_conflict_rotates_once_durably_before_retry(tmp_path):
     record = store.get_metadata("terminal_setup")
     assert record["installation_id"] == rotated_id
     assert record["conflict_rotated"] is True
+    assert store.operation(record["operation_id"])["entity_id"] == rotated_id
     assert store.operation(record["operation_id"])["payload"]["installation_id"] == rotated_id
 
     client.register_effects = [WisdomConflict("conflict", code="identity_conflict")]
@@ -301,6 +302,19 @@ def test_identity_conflict_rotates_once_durably_before_retry(tmp_path):
     assert client.calls[-1] == ("register", rotated_id)
     assert store.get_metadata("terminal_setup")["installation_id"] == rotated_id
     assert operation_count(store) == 1
+
+
+def test_explicit_setup_repairs_missing_disclosure_record(tmp_path):
+    """An old active marker alone must not short-circuit renewed consent."""
+    _account, store, client, onboarding = runtime(tmp_path)
+    onboarding.setup(True)
+    record = store.get_metadata("terminal_setup")
+    record.pop("disclosure_accepted_at")
+    store.set_metadata("terminal_setup", record)
+    assert onboarding.status()["configured"] is False
+    count = len(client.calls)
+    assert onboarding.setup(True)["configured"] is True
+    assert len(client.calls) > count
 
 
 @pytest.mark.parametrize(

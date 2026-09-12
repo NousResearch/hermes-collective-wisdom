@@ -326,6 +326,15 @@ def test_slash_status_uses_an_explicit_shared_chat_whitelist():
         assert private not in output
 
 
+def test_slash_status_does_not_call_previous_owner_setup_ready():
+    """An active record for another account is not current readiness."""
+    service = _Service()
+    service.status = lambda: {"configured": False, "state": "active", "reason": "owner_changed"}
+    output = run_slash("status", service)
+    assert "Setup: required" in output
+    assert "State: not configured" in output
+
+
 def test_slash_browse_omits_account_local_install_and_private_check_details():
     output = run_slash("browse incident", _Service())
 
