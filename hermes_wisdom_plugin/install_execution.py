@@ -67,6 +67,7 @@ class InstallExecutor:
                     raise PackagePolicyError(
                         "another install receipt is already pending for this skill"
                     )
+                self._repair_install_start(str(pending["id"]), payload)
                 self.store.assert_operation_lock(skill_id, lock)
                 return self._resume_install(str(pending["id"]), payload, lock)
             return self._start_install(plan, receipt, owner, lock, accept_partial)
@@ -88,6 +89,11 @@ class InstallExecutor:
             if pending:
                 payload = _operation_payload(pending)
                 self._require_payload_owner(payload, owner)
+                if payload.get("trash_path") is None:
+                    payload["trash_path"] = str(
+                        self._trash_path(str(pending["id"]), payload["slug"])
+                    )
+                    self.store.replace_operation_payload(str(pending["id"]), payload)
                 return self._resume_uninstall(str(pending["id"]), payload, lock)
             installation = self.store.installation(skill_id)
             if not installation:
@@ -219,7 +225,7 @@ class InstallExecutor:
         staging = self._staging_path(operation_id)
         payload["staging_path"] = str(staging)
         self.store.replace_operation_payload(operation_id, payload)
-        self.receipts.start(receipt, operation_id)
+        self._bind_install_receipt(receipt, operation_id)
         try:
             _write_staging(staging, verified.files)
             scan = self.host.scan(staging)
@@ -336,6 +342,24 @@ class InstallExecutor:
             self.store.advance(operation_id, "gateway_rejected", done=True)
             return result
         raise PackagePolicyError(f"unsupported install recovery phase: {phase}")
+
+    def _repair_install_start(self, operation_id: str, payload: dict) -> None:
+        if payload.get("staging_path") is None:
+            payload["staging_path"] = str(self._staging_path(operation_id))
+            self.store.replace_operation_payload(operation_id, payload)
+        self._bind_install_receipt(payload["receipt"], operation_id)
+
+    def _bind_install_receipt(self, receipt: str, operation_id: str) -> None:
+        metadata = self.store.get_metadata("install_receipt:" + receipt)
+        if not isinstance(metadata, dict):
+            # Protocol fakes may delegate binding entirely to the receipt object.
+            self.receipts.start(receipt, operation_id)
+            return
+        bound = metadata.get("operation_id")
+        if bound is None:
+            self.receipts.start(receipt, operation_id)
+        elif bound != operation_id:
+            raise WisdomConflict("Install receipt is already bound to another operation")
 
     def _resume_uninstall(self, operation_id: str, payload: dict, lock: str) -> dict:
         operation = self.store.operation(operation_id)

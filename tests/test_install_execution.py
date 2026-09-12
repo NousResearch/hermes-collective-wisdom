@@ -491,6 +491,73 @@ def test_real_store_and_receipt_complete_one_owner_bound_install(tmp_path):
     )["operation_id"])["phase"] == "gateway_recorded"
 
 
+def test_real_retry_repairs_unbound_install_journal_start(tmp_path, monkeypatch):
+    owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
+    store = WisdomStore(tmp_path / "state")
+    receipts = InstallReceipts(store, lambda: dict(owner))
+    plan = receipts.create({key: value for key, value in PLAN.items() if key != "receipt"})
+    value = InstallExecutor(
+        Client(), store, receipts, Reviewer(), Host(tmp_path / "skills"), lambda: dict(owner)
+    )
+    real_replace = store.replace_operation_payload
+    failed = False
+
+    def fail_once(operation_id, payload):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("payload commit interrupted")
+        real_replace(operation_id, payload)
+
+    monkeypatch.setattr(store, "replace_operation_payload", fail_once)
+    with pytest.raises(OSError, match="payload commit"):
+        value.apply(plan["receipt"])
+    pending = store.pending_operations()[0]
+    assert pending["phase"] == "staged"
+    assert pending["payload_json"].find('"staging_path": null') >= 0
+    assert receipts.store.get_metadata("install_receipt:" + plan["receipt"])[
+        "operation_id"
+    ] is None
+
+    result = value.apply(plan["receipt"])
+
+    assert result["installed"] is True
+    assert receipts.outcome(plan["receipt"]) == result
+
+
+def test_real_retry_repairs_uninstall_journal_without_trash_path(tmp_path, monkeypatch):
+    owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
+    store = WisdomStore(tmp_path / "state")
+    receipts = InstallReceipts(store, lambda: dict(owner))
+    plan = receipts.create({key: value for key, value in PLAN.items() if key != "receipt"})
+    value = InstallExecutor(
+        Client(), store, receipts, Reviewer(), Host(tmp_path / "skills"), lambda: dict(owner)
+    )
+    value.apply(plan["receipt"])
+    real_replace = store.replace_operation_payload
+    failed = False
+
+    def fail_uninstall_start(operation_id, payload):
+        nonlocal failed
+        operation = store.operation(operation_id)
+        if operation["kind"] == "uninstall" and not failed:
+            failed = True
+            raise OSError("trash payload interrupted")
+        real_replace(operation_id, payload)
+
+    monkeypatch.setattr(store, "replace_operation_payload", fail_uninstall_start)
+    with pytest.raises(OSError, match="trash payload"):
+        value.uninstall("skill-1")
+    pending = store.pending_operations()[0]
+    assert pending["phase"] == "staged"
+    assert pending["payload_json"].find('"trash_path": null') >= 0
+
+    result = value.uninstall("skill-1")
+
+    assert result["uninstalled"] is True
+    assert Path(result["recoverable_path"]).is_dir()
+
+
 def test_pending_install_must_match_exact_receipt(executor):
     value, _store, client, receipts, _current = executor
     client.record_error = RuntimeError("offline")
