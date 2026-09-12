@@ -19,7 +19,15 @@ from .errors import WisdomConflict
 
 
 SCHEMA_FAMILY = "hermes_wisdom_plugin.profile_store"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+_OWNER_KEYS = (
+    "profile_name",
+    "profile_home",
+    "account_id",
+    "organization_id",
+    "base_url",
+    "installation_id",
+)
 
 
 def utc_now() -> str:
@@ -29,6 +37,22 @@ def utc_now() -> str:
 def filesystem_identity(path: Path) -> str | None:
     stat = path.stat()
     return f"{stat.st_dev}:{stat.st_ino}" if stat.st_ino else None
+
+
+def _encode_owner(owner: dict[str, str] | None) -> str | None:
+    if owner is None:
+        return None
+    if not isinstance(owner, dict) or tuple(sorted(owner)) != tuple(sorted(_OWNER_KEYS)):
+        raise ValueError("invalid managed-install owner binding")
+    if any(not isinstance(owner[key], str) or not owner[key].strip() for key in _OWNER_KEYS):
+        raise ValueError("invalid managed-install owner binding")
+    return json.dumps(owner, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _decode_install_row(row: dict[str, Any]) -> None:
+    row["baseline"] = json.loads(row.pop("baseline_json"))
+    owner_json = row.pop("owner_json")
+    row["owner"] = json.loads(owner_json) if owner_json is not None else None
 
 
 class UnsupportedSchemaError(RuntimeError):
@@ -123,7 +147,8 @@ CREATE TABLE IF NOT EXISTS managed_install (
   update_mode TEXT NOT NULL,
   state TEXT NOT NULL,
   installed_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  owner_json TEXT
 );
 CREATE TABLE IF NOT EXISTS operation_journal (
   id TEXT PRIMARY KEY,
@@ -275,7 +300,8 @@ class WisdomStore:
         except OSError:
             pass
         with self.transaction() as db:
-            if self._existing_schema_version(db) is None:
+            existing_version = self._existing_schema_version(db)
+            if existing_version is None:
                 self._create_current_schema(db)
                 db.execute(
                     "INSERT INTO schema_meta(key,value) VALUES('schema_version',?)",
@@ -286,6 +312,17 @@ class WisdomStore:
                     "VALUES(1,?,?)",
                     (SCHEMA_FAMILY, SCHEMA_VERSION),
                 )
+            elif existing_version == 1:
+                db.execute("ALTER TABLE managed_install ADD COLUMN owner_json TEXT")
+                db.execute(
+                    "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+                    (str(SCHEMA_VERSION),),
+                )
+                db.execute(
+                    "UPDATE plugin_schema_identity SET version=? WHERE singleton=1",
+                    (SCHEMA_VERSION,),
+                )
+                self._validate_current_schema(db)
         self._secure_database_files()
 
     @staticmethod
@@ -319,22 +356,50 @@ class WisdomStore:
             raise UnsupportedSchemaError(
                 f"Foreign schema family {identity[0]!r}; expected {SCHEMA_FAMILY!r}"
             )
-        if identity[2] != "integer" or identity[1] != SCHEMA_VERSION:
+        if identity[2] != "integer" or identity[1] not in (1, SCHEMA_VERSION):
             raise UnsupportedSchemaError(
                 f"Unsupported plugin schema version {identity[1]!r}; "
-                f"expected integer {SCHEMA_VERSION}"
+                f"expected integer 1 or {SCHEMA_VERSION}"
             )
         if "schema_meta" not in tables:
             raise UnsupportedSchemaError("Incomplete Collective Wisdom plugin schema")
         metadata = db.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
-        if metadata is None or metadata[0] != str(SCHEMA_VERSION):
+        if metadata is None or metadata[0] != str(identity[1]):
             raise UnsupportedSchemaError(
                 "Malformed Collective Wisdom plugin schema version metadata"
             )
-        cls._validate_current_schema(db)
-        return SCHEMA_VERSION
+        if identity[1] == 1:
+            cls._validate_v1_schema(db)
+        else:
+            cls._validate_current_schema(db)
+        return int(identity[1])
+
+    @classmethod
+    def _validate_v1_schema(cls, db: sqlite3.Connection) -> None:
+        expected_db = sqlite3.connect(":memory:")
+        try:
+            v1_sql = CURRENT_SCHEMA_SQL.replace(
+                "  updated_at TEXT NOT NULL,\n  owner_json TEXT\n",
+                "  updated_at TEXT NOT NULL\n",
+                1,
+            )
+            for statement in v1_sql.split(";"):
+                if statement.strip():
+                    expected_db.execute(statement)
+            expected = cls._schema_objects(expected_db)
+        finally:
+            expected_db.close()
+        actual = cls._schema_objects(db)
+        invalid = sorted(
+            name for name, definition in expected.items() if actual.get(name) != definition
+        )
+        if invalid:
+            raise UnsupportedSchemaError(
+                "Incomplete or incompatible Collective Wisdom plugin schema objects: "
+                + ", ".join(invalid)
+            )
 
     @classmethod
     def _validate_current_schema(cls, db: sqlite3.Connection) -> None:
@@ -348,6 +413,23 @@ class WisdomStore:
         invalid = sorted(
             name for name, definition in expected.items() if actual.get(name) != definition
         )
+        if invalid == ["managed_install"]:
+            migrated_db = sqlite3.connect(":memory:")
+            try:
+                v1_sql = CURRENT_SCHEMA_SQL.replace(
+                    "  updated_at TEXT NOT NULL,\n  owner_json TEXT\n",
+                    "  updated_at TEXT NOT NULL\n",
+                    1,
+                )
+                migrated_db.executescript(v1_sql)
+                migrated_db.execute(
+                    "ALTER TABLE managed_install ADD COLUMN owner_json TEXT"
+                )
+                migrated = cls._schema_objects(migrated_db)["managed_install"]
+            finally:
+                migrated_db.close()
+            if actual.get("managed_install") == migrated:
+                invalid = []
         if invalid:
             raise UnsupportedSchemaError(
                 "Incomplete or incompatible Collective Wisdom plugin schema objects: "
@@ -1387,15 +1469,31 @@ class WisdomStore:
                 (entity_id, owner),
             )
 
+    def assert_operation_lock(self, entity_id: str, owner: str) -> None:
+        """Require an unexpired lease owned by the current operation."""
+
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT owner,expires_at FROM operation_lock WHERE entity_id=?",
+                (entity_id,),
+            ).fetchone()
+        if row is None or row["owner"] != owner or row["expires_at"] <= utc_now():
+            raise WisdomConflict("Collective Wisdom operation lease was lost")
+
     def record_install(self, values: dict[str, Any]) -> None:
         now = utc_now()
+        owner_json = _encode_owner(values.get("owner"))
         with self.transaction() as db:
             db.execute(
-                """INSERT INTO managed_install VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """INSERT INTO managed_install(
+                     skill_id,org_id,slug,version,content_hash,baseline_json,target_path,
+                     update_mode,state,installed_at,updated_at,owner_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(skill_id) DO UPDATE SET org_id=excluded.org_id,
                    slug=excluded.slug,version=excluded.version,content_hash=excluded.content_hash,
                    baseline_json=excluded.baseline_json,target_path=excluded.target_path,
-                   update_mode=excluded.update_mode,state=excluded.state,updated_at=excluded.updated_at""",
+                   update_mode=excluded.update_mode,state=excluded.state,
+                   updated_at=excluded.updated_at,owner_json=excluded.owner_json""",
                 (
                     values["skill_id"],
                     values["org_id"],
@@ -1408,30 +1506,44 @@ class WisdomStore:
                     values.get("state", "active"),
                     now,
                     now,
+                    owner_json,
                 ),
             )
 
-    def installations(self) -> list[dict[str, Any]]:
+    def installations(self, owner: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        owner_json = _encode_owner(owner)
         with self.transaction() as db:
+            query = "SELECT * FROM managed_install"
+            params: tuple[str, ...] = ()
+            if owner is not None:
+                query += " WHERE owner_json=?"
+                params = (owner_json,)
+            query += " ORDER BY slug"
             rows = [
                 dict(row)
-                for row in db.execute(
-                    "SELECT * FROM managed_install ORDER BY slug"
-                ).fetchall()
+                for row in db.execute(query, params).fetchall()
             ]
         for row in rows:
-            row["baseline"] = json.loads(row.pop("baseline_json"))
+            _decode_install_row(row)
         return rows
 
-    def installation(self, skill_id: str) -> dict[str, Any] | None:
+    def installation(
+        self, skill_id: str, owner: dict[str, str] | None = None
+    ) -> dict[str, Any] | None:
+        owner_json = _encode_owner(owner)
         with self.transaction() as db:
+            query = "SELECT * FROM managed_install WHERE skill_id=?"
+            params = (skill_id,)
+            if owner is not None:
+                query += " AND owner_json=?"
+                params = (skill_id, owner_json)
             row = db.execute(
-                "SELECT * FROM managed_install WHERE skill_id=?", (skill_id,)
+                query, params
             ).fetchone()
         if not row:
             return None
         value = dict(row)
-        value["baseline"] = json.loads(value.pop("baseline_json"))
+        _decode_install_row(value)
         return value
 
     def deactivate_install(self, skill_id: str) -> None:
