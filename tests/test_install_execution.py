@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_wisdom_plugin.errors import WisdomConflict
+from hermes_wisdom_plugin.errors import WisdomConflict, WisdomNotFound
 from hermes_wisdom_plugin.install_execution import InstallExecutor
 from hermes_wisdom_plugin.package import PackagePolicyError
 
@@ -110,7 +110,11 @@ class Store:
         return self.records.get(skill_id)
 
     def installations(self, owner=None):
-        return [value for value in self.records.values() if owner is None or value["owner"] == owner]
+        return [
+            value
+            for value in self.records.values()
+            if owner is None or value["owner"] == owner
+        ]
 
     def deactivate_install(self, skill_id):
         self.records[skill_id]["state"] = "inactive"
@@ -143,8 +147,10 @@ class Host:
     def validate_target(self, path):
         assert Path(path).is_relative_to(self.skills_root)
 
-    def scan(self, directory):
+    def scan(self, directory, *, source, force):
         assert ".hub/collective-wisdom" in Path(directory).as_posix()
+        assert source == "community"
+        assert force is False
         return {"allowed": True, "verdict": "allow", "summary": "clean", "findings": []}
 
 
@@ -159,7 +165,14 @@ def executor(tmp_path):
     client = Client()
     receipts = Receipts()
     current = {"value": dict(OWNER)}
-    value = InstallExecutor(client, store, receipts, Reviewer(), Host(tmp_path / "skills"), lambda: dict(current["value"]))
+    value = InstallExecutor(
+        client,
+        store,
+        receipts,
+        Reviewer(),
+        Host(tmp_path / "skills"),
+        lambda: dict(current["value"]),
+    )
     return value, store, client, receipts, current
 
 
@@ -168,7 +181,7 @@ def test_apply_commits_exact_tree_and_preserves_server_mode(executor):
     result = value.apply("receipt-1")
 
     target = Path(result["path"])
-    assert target.read_text if False else (target / "SKILL.md").read_bytes() == FILES[0][2]
+    assert (target / "SKILL.md").read_bytes() == FILES[0][2]
     assert result["effective_update_mode"] == "REQUIRED"
     assert result["setup_required"] is False
     assert store.records["skill-1"]["owner"] == OWNER
@@ -242,7 +255,11 @@ def test_owner_change_before_effect_rejects_without_installing(executor):
 
 def test_foreign_owner_primary_key_collision_is_never_adopted(executor):
     value, store, _client, _receipts, _current = executor
-    store.records["skill-1"] = {"skill_id": "skill-1", "state": "inactive", "owner": {**OWNER, "account_id": "other"}}
+    store.records["skill-1"] = {
+        "skill_id": "skill-1",
+        "state": "inactive",
+        "owner": {**OWNER, "account_id": "other"},
+    }
     with pytest.raises(PackagePolicyError, match="another installation owner"):
         value.apply("receipt-1")
 
@@ -255,7 +272,10 @@ def test_uninstall_preserves_modified_tree_and_retry_does_not_delete_recreated_t
     client.deactivate_error = RuntimeError("offline")
 
     pending = value.uninstall("skill-1")
-    trash = Path(next(item for item in store.operations.values() if item["kind"] == "uninstall")["payload"]["trash_path"])
+    operation = next(
+        item for item in store.operations.values() if item["kind"] == "uninstall"
+    )
+    trash = Path(operation["payload"]["trash_path"])
     assert pending["pending"] is True
     assert (trash / "SKILL.md").read_text() == "# locally edited\n"
     target.mkdir(parents=True)
@@ -264,6 +284,18 @@ def test_uninstall_preserves_modified_tree_and_retry_does_not_delete_recreated_t
 
     assert value.uninstall("skill-1")["uninstalled"] is True
     assert (target / "SKILL.md").read_text() == "# recreated\n"
+
+
+def test_uninstall_treats_server_not_found_as_already_inactive(executor):
+    value, store, client, _receipts, _current = executor
+    value.apply("receipt-1")
+    client.deactivate_error = WisdomNotFound("already absent", status=404)
+
+    result = value.uninstall("skill-1")
+
+    assert result["uninstalled"] is True
+    assert result["state"] == "inactive"
+    assert store.records["skill-1"]["state"] == "inactive"
 
 
 def test_partial_install_requires_explicit_acceptance_and_claims_no_readiness(executor):
@@ -278,3 +310,40 @@ def test_partial_install_requires_explicit_acceptance_and_claims_no_readiness(ex
         assert "ready" not in result
     finally:
         PLAN["compatibility"] = original
+
+
+def test_completed_receipt_replays_outcome_without_starting_again(executor):
+    value, store, client, receipts, _current = executor
+    first = value.apply("receipt-1")
+    started = dict(receipts.started)
+
+    assert value.apply("receipt-1") == first
+    assert receipts.started == started
+    assert len(client.record_calls) == 1
+    assert len(store.operations) == 1
+
+
+def test_unknown_scan_requires_acknowledgement_in_reviewed_plan(executor):
+    value, store, _client, _receipts, _current = executor
+    value.host.scan = lambda *_args, **_kwargs: {
+        "allowed": None, "verdict": "unknown", "summary": "scanner unavailable", "findings": []
+    }
+    with pytest.raises(PackagePolicyError, match="did not allow"):
+        value.apply("receipt-1")
+    assert store.records == {}
+
+
+def test_unknown_scan_with_review_ack_can_install(executor):
+    value, _store, _client, _receipts, _current = executor
+    value.host.scan = lambda *_args, **_kwargs: {
+        "allowed": None, "verdict": "unknown", "summary": "scanner unavailable", "findings": []
+    }
+
+    class AcknowledgedReviewer(Reviewer):
+        def verify(self, plan):
+            result = super().verify(plan)
+            result.plan["scan_review_acknowledged"] = True
+            return result
+
+    value.reviewer = AcknowledgedReviewer()
+    assert value.apply("receipt-1")["installed"] is True

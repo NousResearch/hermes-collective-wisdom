@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -35,6 +36,9 @@ class InstallExecutor:
         """Apply one exact reviewed receipt, or resume its unfinished operation."""
         owner = self._owner()
         plan = self.receipts.load(receipt, allow_started=True)
+        completed = self.receipts.outcome(receipt)
+        if completed is not None:
+            return completed
         skill_id = _required_text(plan, "skill_id")
         lock = self.store.acquire_operation_lock(skill_id)
         if not lock:
@@ -106,7 +110,11 @@ class InstallExecutor:
         if outcome in {"partial", "compatible_after_setup"} and not accept_partial:
             raise PackagePolicyError("explicit --accept-partial is required")
         verified = self.reviewer.verify(plan)
+        self._assert_owner(owner)
+        self.store.assert_operation_lock(_required_text(plan, "skill_id"), lock)
         skill_id = _required_text(verified.plan, "skill_id")
+        if skill_id != plan["skill_id"] or verified.plan.get("receipt") != receipt:
+            raise WisdomValidationError("verified install does not match its receipt")
         slug = _safe_segment(verified.plan.get("slug"), "skill slug")
         target = self._target(owner, slug)
         if target.exists() or target.is_symlink():
@@ -130,10 +138,17 @@ class InstallExecutor:
         self.receipts.start(receipt, operation_id)
         try:
             _write_staging(staging, verified.files)
-            scan = self.host.scan(staging)
-            if scan.get("allowed") is not True:
+            scan = self.host.scan(staging, source="community", force=False)
+            unknown_acknowledged = (
+                scan.get("allowed") is None
+                and verified.plan.get("scan_review_acknowledged") is True
+            )
+            if scan.get("allowed") is not True and not unknown_acknowledged:
+                shutil.rmtree(staging, ignore_errors=True)
+                self.store.advance(operation_id, "scan_rejected", done=True)
+                detail = scan.get("summary") or scan.get("verdict")
                 raise PackagePolicyError(
-                    f"host scan did not allow installation: {scan.get('summary') or scan.get('verdict')}"
+                    f"host scan did not allow installation: {detail}"
                 )
             payload["local_scan"] = scan
             self.store.replace_operation_payload(operation_id, payload)
@@ -189,9 +204,13 @@ class InstallExecutor:
                 )
             except Exception as exc:
                 if _permanent_gateway_error(exc):
+                    self._assert_owner(owner)
+                    self.store.assert_operation_lock(payload["skill_id"], lock)
                     self._quarantine_rejected(operation_id, payload, target, owner)
                     raise
                 return self._pending_result(payload, operation_id, exc)
+            self._assert_owner(owner)
+            self.store.assert_operation_lock(payload["skill_id"], lock)
             mode = _field(server, "effective_update_mode")
             self.store.record_install({
                 **self._install_record(payload, owner, "active"),
@@ -239,9 +258,14 @@ class InstallExecutor:
                     owner["installation_id"], payload["skill_id"]
                 )
             except Exception as exc:
-                if not _permanent_gateway_error(exc):
+                if getattr(exc, "status", None) == 404 or isinstance(exc, WisdomNotFound):
+                    server = {"state": "inactive"}
+                elif not _permanent_gateway_error(exc):
                     return self._pending_result(payload, operation_id, exc, uninstall=True)
-                raise
+                else:
+                    raise
+            self._assert_owner(owner)
+            self.store.assert_operation_lock(payload["skill_id"], lock)
             self.store.advance(operation_id, "gateway_recorded", done=True)
             return {
                 "uninstalled": True,
@@ -385,6 +409,11 @@ class InstallExecutor:
 
 def _operation_payload(operation: dict) -> dict:
     payload = operation.get("payload")
+    if payload is None and isinstance(operation.get("payload_json"), str):
+        try:
+            payload = json.loads(operation["payload_json"])
+        except json.JSONDecodeError as exc:
+            raise PackagePolicyError("operation recovery payload is invalid") from exc
     if not isinstance(payload, dict):
         raise PackagePolicyError("operation recovery payload is invalid")
     return dict(payload)
