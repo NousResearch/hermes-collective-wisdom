@@ -52,6 +52,7 @@ class InstallReceipts:
             root = os.open(self.store.root, flags)
             try:
                 os.mkdir("plans", mode=0o700, dir_fd=root)
+                os.fsync(root)
             except FileExistsError:
                 pass
             directory = os.open("plans", flags, dir_fd=root)
@@ -81,6 +82,7 @@ class InstallReceipts:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
+            os.fsync(directory)
         if self.owner() != owner:
             raise WisdomAuthError("Installation owner changed during review")
         self.store.set_metadata(self._key(receipt), {

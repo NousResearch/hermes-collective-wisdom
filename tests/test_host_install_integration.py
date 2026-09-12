@@ -280,7 +280,9 @@ def configure_package(native_root):
         {
             "version": 2,
             "state": "published",
+            "commit": "sha256:" + "a" * 64,
             "content_hash": CONTENT_HASH,
+            "package_manifest_hash": MANIFEST_HASH,
             "system_spec": system_spec,
             "published_at": "2026-09-12T00:00:00Z",
             "security_check": {"status": "pass"},

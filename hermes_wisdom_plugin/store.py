@@ -21,12 +21,8 @@ from .errors import WisdomConflict
 SCHEMA_FAMILY = "hermes_wisdom_plugin.profile_store"
 SCHEMA_VERSION = 2
 _OWNER_KEYS = (
-    "profile_name",
-    "profile_home",
-    "account_id",
-    "organization_id",
-    "base_url",
-    "installation_id",
+    "profile_name", "profile_home", "account_id",
+    "organization_id", "base_url", "installation_id",
 )
 
 

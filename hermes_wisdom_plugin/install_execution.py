@@ -697,7 +697,7 @@ def _tree_hashes(root: Path) -> dict[str, str] | None:
 
 def _is_junction(path: Path) -> bool:
     checker = getattr(os.path, "isjunction", None)
-    return bool(checker and checker(path))
+    return bool(callable(checker) and checker(path))
 
 
 def _require_scan(current: object, reviewed: object, accepted_partial: bool) -> None:
