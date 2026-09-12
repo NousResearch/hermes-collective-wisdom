@@ -27,20 +27,24 @@ socket.socket.connect = forbidden
 from hermes_cli import auth
 assert Path(auth.__file__).resolve().is_relative_to(Path(os.environ["WISDOM_AGENT_DIR"]))
 auth.resolve_nous_runtime_credentials = forbidden
+from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential, persist_pool_entries
 from hermes_wisdom_plugin.account import HermesAccountAdapter
 from hermes_wisdom_plugin.errors import WisdomAuthError
 
 home = Path(os.environ["HERMES_HOME"])
 assert home.is_relative_to(Path(os.environ["HOME"]))
 
-def persist(subject="member", org="team", scopes=None, ttl=600, marker="a"):
+def synthetic_token(subject="member", org="team", scopes=None, ttl=600, marker="a"):
     # Unsigned fixture tests local projection only, never server authorization.
     claims = {"sub": subject, "org_id": org, "exp": time.time() + ttl,
               "scope": "inference:invoke", "jti": marker,
               "wisdom_scopes": ["wisdom:read"] if scopes is None else scopes}
     encode = lambda value: base64.urlsafe_b64encode(
         json.dumps(value).encode()).decode().rstrip("=")
-    token = encode({"alg": "none"}) + "." + encode(claims) + ".fixture"
+    return encode({"alg": "none"}) + "." + encode(claims) + ".fixture"
+
+def persist(subject="member", org="team", scopes=None, ttl=600, marker="a"):
+    token = synthetic_token(subject, org, scopes, ttl, marker)
     auth._save_auth_store({"providers": {"nous": {
         "access_token": token, "user_id": subject, "org_id": org,
         "portal_base_url": "https://portal.example", "refresh_token": "never-use",
@@ -83,6 +87,37 @@ denied(adapter.credentials)
 persist()
 os.environ["HERMES_HOME"] = str(home.parent / "different-profile")
 denied(adapter.credentials)
+os.environ["HERMES_HOME"] = str(home)
+
+# Exercise the host's real persisted pool and refresh-free load_pool() selection.
+pool_token = synthetic_token(subject="pool-member", org="pool-team", marker="pool")
+pool_entry = PooledCredential(
+    provider="nous", id="pool-fixture", label="pool-fixture",
+    auth_type=AUTH_TYPE_OAUTH, priority=0, source="manual:device_code",
+    access_token=pool_token, refresh_token="never-use",
+    inference_base_url="https://inference-api.nousresearch.com/v1",
+    extra={"scope": "inference:invoke", "portal_base_url": "http://localhost:3000"},
+)
+persist_pool_entries("nous", [pool_entry.to_dict()])
+
+def replace_provider(state):
+    store = auth._load_auth_store()
+    store["providers"] = {} if state is None else {"nous": state}
+    auth._save_auth_store(store)
+
+replace_provider(None)
+pool_adapter = HermesAccountAdapter.current()
+assert pool_adapter.account_id == "pool-member"
+assert pool_adapter.organization_id == "pool-team"
+assert pool_adapter.credentials().access_token == pool_token
+
+replace_provider({"access_token": "malformed", "refresh_token": "never-use"})
+denied(pool_adapter.credentials)
+denied(HermesAccountAdapter.current)
+expired = synthetic_token(subject="pool-member", org="pool-team", ttl=-1, marker="expired")
+replace_provider({"access_token": expired, "refresh_token": "never-use"})
+denied(pool_adapter.credentials)
+denied(HermesAccountAdapter.current)
 assert "hermes_cli.plugin_invocation" not in sys.modules
 assert "hermes_wisdom" not in sys.modules
 print("unmodified-host account compatibility passed")
