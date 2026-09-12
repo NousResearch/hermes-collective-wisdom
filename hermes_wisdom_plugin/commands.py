@@ -370,6 +370,7 @@ def _render_show(detail: object) -> str:
     if portal_url:
         lines.append(f"View in Portal: {portal_url}")
     lines.append(f"Versions: {_slash_command('versions', slug)}")
+    lines.append(f"Back: {_slash_command_without_argument('browse')}")
     return "\n".join(lines)
 
 
@@ -411,11 +412,10 @@ def _render_versions(  # pylint: disable=too-many-locals
     if not selected:
         lines.extend(("", "No published versions."))
     has_next = start + PAGE_SIZE < len(versions)
+    lines.extend(("", f"Back: {_slash_command('show', slug)}"))
     if page > 1:
-        lines.extend(("", f"Back: {_paged_command('versions', slug, page - 1)}"))
+        lines.append(f"Previous: {_paged_command('versions', slug, page - 1)}")
     if has_next:
-        if page <= 1:
-            lines.append("")
         lines.append(f"Next: {_paged_command('versions', slug, page + 1)}")
     return "\n".join(lines)
 
@@ -438,9 +438,7 @@ def _requirements_summary(value: object) -> str:
             safe_values = [_text(item) for item in values if isinstance(item, str)]
             if safe_values:
                 parts.append(f"{label}: {', '.join(safe_values)}")
-    enabled_runtime = [
-        _text(name) for name, enabled in runtime.items() if enabled is True
-    ]
+    enabled_runtime = _enabled_runtime(runtime)
     if enabled_runtime:
         parts.append("runtime: " + ", ".join(enabled_runtime))
     tools = requirements.get("tools")
@@ -449,7 +447,68 @@ def _requirements_summary(value: object) -> str:
         parts.append(f"{len(tools)} tool requirement(s)")
     if isinstance(plugins, list) and plugins:
         parts.append(f"{len(plugins)} plugin requirement(s)")
+    model_summary = _model_requirement_summary(requirements.get("model"))
+    if model_summary:
+        parts.append(model_summary)
+    parts.extend(_opaque_requirement_summaries(requirements))
     return "; ".join(parts) or "No special requirements declared"
+
+
+def _enabled_runtime(runtime: dict[str, Any]) -> list[str]:
+    return [
+        name for name in ("shell", "browser", "code") if runtime.get(name) is True
+    ]
+
+
+def _model_requirement_summary(value: object) -> str | None:
+    model = value if isinstance(value, dict) else {}
+    capabilities = _safe_list_count(model.get("capabilities"))
+    context_declared = (
+        isinstance(model.get("minimum_context_window"), int)
+        and not isinstance(model.get("minimum_context_window"), bool)
+        and model["minimum_context_window"] > 0
+    )
+    if capabilities or context_declared:
+        qualifiers = []
+        if capabilities:
+            qualifiers.append(f"{capabilities} capability requirement(s)")
+        if context_declared:
+            qualifiers.append("context minimum declared")
+        return "model: " + ", ".join(qualifiers)
+    return None
+
+
+def _opaque_requirement_summaries(requirements: dict[str, Any]) -> list[str]:
+    """Count sensitive requirements without rendering their values."""
+
+    summaries: list[str] = []
+    for field, label in (
+        ("credentials", "credential"),
+        ("connections", "connection"),
+        ("hardware", "hardware"),
+    ):
+        count = _safe_list_count(requirements.get(field))
+        if count:
+            summaries.append(f"{count} {label} requirement(s)")
+    limitations = _safe_list_count(requirements.get("known_limitations"))
+    if limitations:
+        summaries.append(f"{limitations} known limitation(s)")
+    filesystem = requirements.get("filesystem")
+    filesystem = filesystem if isinstance(filesystem, dict) else {}
+    readable = _safe_list_count(filesystem.get("read"))
+    writable = _safe_list_count(filesystem.get("write"))
+    if readable or writable:
+        summaries.append(f"filesystem: {readable} read, {writable} write location(s)")
+    network = requirements.get("network")
+    network = network if isinstance(network, dict) else {}
+    destinations = _safe_list_count(network.get("destinations"))
+    if destinations:
+        summaries.append(f"{destinations} network destination requirement(s)")
+    return summaries
+
+
+def _safe_list_count(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
 
 
 def _review_states(value: object) -> str:
@@ -488,6 +547,10 @@ def _text(value: object, *, limit: int = 512) -> str:
 
 def _slash_command(command: str, argument: str) -> str:
     return "/wisdom " + shlex.join((command, argument))
+
+
+def _slash_command_without_argument(command: str) -> str:
+    return "/wisdom " + shlex.join((command,))
 
 
 def _paged_command(command: str, argument: str, page: int) -> str:

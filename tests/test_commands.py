@@ -118,6 +118,20 @@ class _Service:
                         "platforms": ["macOS"],
                         "runtime": {"shell": True},
                         "tools": [{"name": "browser"}],
+                        "plugins": [{"id": "safe-count-only"}],
+                        "model": {
+                            "capabilities": ["PRIVATE_MODEL_CAPABILITY"],
+                            "minimum_context_window": 8192,
+                        },
+                        "credentials": ["PRIVATE_CREDENTIAL"],
+                        "connections": ["PRIVATE_CONNECTION"],
+                        "filesystem": {
+                            "read": ["/Users/private/read"],
+                            "write": ["/Users/private/write"],
+                        },
+                        "network": {"destinations": ["private.internal"]},
+                        "hardware": ["PRIVATE_HARDWARE"],
+                        "known_limitations": ["PRIVATE_LIMITATION"],
                     },
                     "security_check": {
                         "status": "pass",
@@ -334,12 +348,52 @@ def test_slash_show_renders_published_metadata_requirements_states_and_portal():
 
     assert "Summarize an incident" in output
     assert "Latest: v7" in output
-    assert "Hermes 0.20.5+; OS: macOS; runtime: shell; 1 tool requirement(s)" in output
+    assert "Hermes 0.20.5+; OS: macOS; runtime: shell" in output
+    for summary in (
+        "1 tool requirement(s)",
+        "1 plugin requirement(s)",
+        "model: 1 capability requirement(s), context minimum declared",
+        "1 credential requirement(s)",
+        "1 connection requirement(s)",
+        "filesystem: 1 read, 1 write location(s)",
+        "1 network destination requirement(s)",
+        "1 hardware requirement(s)",
+        "1 known limitation(s)",
+    ):
+        assert summary in output
     assert "Security check: Pass" in output
     assert "Professionalism check: Advisory" in output
     assert "https://portal.example/wisdom/skills/skill-1?org_id=org-1" in output
-    for private in ("account-secret", "/Users/private", "PRIVATE_SUMMARY", "PRIVATE_FINDING"):
+    assert "Back: /wisdom browse" in output
+    for private in (
+        "account-secret",
+        "/Users/private",
+        "PRIVATE_SUMMARY",
+        "PRIVATE_FINDING",
+        "PRIVATE_MODEL_CAPABILITY",
+        "PRIVATE_CREDENTIAL",
+        "PRIVATE_CONNECTION",
+        "private.internal",
+        "PRIVATE_HARDWARE",
+        "PRIVATE_LIMITATION",
+    ):
         assert private not in output
+
+
+def test_slash_default_sandbox_flag_does_not_imply_a_special_requirement():
+    service = _Service()
+    detail = service.resolve_skill("skill-1")
+    detail["latest_version_detail"]["version"]["system_spec"] = {
+        "hermes": {"minimum_version": "0.20.5"},
+        "runtime": {"sandbox": True},
+    }
+    service.resolve_skill = lambda _reference: detail
+
+    output = run_slash("show skill-1", service)
+
+    assert "Requirements: Hermes 0.20.5+" in output
+    assert "runtime:" not in output
+    assert "No special requirements declared" not in output
 
 
 def test_slash_versions_filters_and_sorts_published_rows_with_links_and_back():
@@ -350,8 +404,56 @@ def test_slash_versions_filters_and_sorts_published_rows_with_links_and_back():
     assert "Version True" not in output
     assert "Requirements: Hermes 0.20.5+" in output
     assert "version=2" in output
-    assert "Back: /wisdom versions incident-handoff --page 1" in output
+    assert "Back: /wisdom show incident-handoff" in output
+    assert "Previous: /wisdom versions incident-handoff --page 1" in output
     assert "PRIVATE_SUMMARY" not in output
+
+
+def test_slash_versions_first_page_always_links_back_to_show():
+    output = run_slash("versions incident-handoff", _Service())
+
+    assert "Back: /wisdom show incident-handoff" in output
+    assert "Previous:" not in output
+
+
+def test_slash_navigation_preserves_browse_show_versions_parent_intent():
+    service = _Service()
+
+    browse = run_slash("browse incident", service)
+    show = run_slash("show incident-handoff", service)
+    versions = run_slash("versions incident-handoff", service)
+
+    assert "Show: /wisdom show incident-0" in browse
+    assert "Versions: /wisdom versions incident-handoff" in show
+    assert "Back: /wisdom browse" in show
+    assert "Back: /wisdom show incident-handoff" in versions
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        None,
+        [],
+        {"skill": [], "versions": "private-path", "portal_url": {"secret": True}},
+        {
+            "skill": {"slug": "safe-skill", "private": "/Users/private"},
+            "versions": [None, "bad", {"version": False}, {"version": -1}],
+            "latest_version_detail": {"version": []},
+            "raw_exception": "secret-token",
+        },
+    ],
+)
+def test_slash_renderers_fail_closed_on_malformed_detail(detail):
+    service = _Service()
+    service.resolve_skill = lambda _reference: detail
+
+    show = run_slash("show skill-1", service)
+    versions = run_slash("versions skill-1", service)
+
+    for output in (show, versions):
+        assert "secret-token" not in output
+        assert "/Users/private" not in output
+        assert "private-path" not in output
 
 
 def test_slash_drops_unsafe_portal_links():
