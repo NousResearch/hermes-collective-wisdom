@@ -28,6 +28,9 @@ class Discovery:
         portal_base_url: str,
         organization_id: str,
     ) -> None:
+        required_client_methods = ("list_skills", "skill", "version")
+        if any(not callable(getattr(client, name, None)) for name in required_client_methods):
+            raise TypeError("client must provide Wisdom discovery read methods")
         if not callable(check_owner):
             raise TypeError("check_owner must be callable")
         if not isinstance(portal_base_url, str) or not portal_base_url.strip():
@@ -49,7 +52,9 @@ class Discovery:
             self._check_owner()
 
     def list_skills(self) -> dict[str, Any]:
-        response = self._response(lambda: self.client.list_skills())
+        """Return the first authoritative discovery page."""
+
+        response = self._response(self.client.list_skills)
         return response.model_dump(mode="json")
 
     def search_skills(self, query: str | None = None) -> list[dict[str, Any]]:
@@ -101,15 +106,17 @@ class Discovery:
         raw = _reference(reference)
         try:
             return self.show(raw)
-        except WisdomNotFound:
+        except WisdomNotFound as exc:
             matches = [
                 item for item in self.search_skills(raw) if item.get("slug") == raw
             ]
             if len(matches) != 1:
-                raise WisdomNotFound("Wisdom skill not found")
+                raise WisdomNotFound("Wisdom skill not found") from exc
             return self.show(str(matches[0]["id"]))
 
     def show(self, skill_id: str) -> dict[str, Any]:
+        """Return public metadata plus the newest positive published version."""
+
         skill_id = _reference(skill_id)
         detail = self._response(lambda: self.client.skill(skill_id))
         result = detail.model_dump(mode="json")
@@ -127,6 +134,8 @@ class Discovery:
         return result
 
     def versions(self, skill_id: str) -> list[dict[str, Any]]:
+        """Return the authoritative published version index."""
+
         skill_id = _reference(skill_id)
         detail = self._response(lambda: self.client.skill(skill_id))
         return list(detail.versions)
@@ -149,4 +158,9 @@ def _is_published_positive_version(item: object) -> bool:
         return False
     version = item.get("version")
     state = item.get("state")
-    return type(version) is int and version > 0 and state in (None, "published")
+    return (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version > 0
+        and state in (None, "published")
+    )

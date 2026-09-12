@@ -43,6 +43,19 @@ _CHECK_STATES = {
     "running": "Pending",
     "unavailable": "Unavailable",
 }
+_PUBLIC_STATUS_STATES = {
+    "active": "ready",
+    "configured": "ready",
+    "ready": "ready",
+    "not_configured": "not configured",
+    "degraded": "attention required",
+    "unavailable": "unavailable",
+}
+_CLI_COMMANDS = ("setup", "status", "list", "browse", "show", "versions", "help")
+
+
+class _SlashUsageError(ValueError):
+    """A locally generated, safe-to-render slash usage error."""
 
 
 def build_parser(parser: argparse.ArgumentParser) -> None:
@@ -75,7 +88,9 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
     add("help", "Show Collective Wisdom command help")
 
 
-def run_cli(args: argparse.Namespace, service: object) -> int:
+def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements
+    args: argparse.Namespace, service: object
+) -> int:
     """Run one parsed terminal command against an injected service."""
 
     command = getattr(args, "wisdom_command", None)
@@ -89,14 +104,16 @@ def run_cli(args: argparse.Namespace, service: object) -> int:
                         "noninteractive setup requires --accept-disclosure"
                     )
                 # The onboarding slice owns the canonical disclosure text.
-                from .onboarding import WISDOM_DISCLOSURE
+                from .onboarding import (  # pylint: disable=import-error,import-outside-toplevel
+                    WISDOM_DISCLOSURE,
+                )
 
                 print(WISDOM_DISCLOSURE)
                 answer = input("Enable Collective Wisdom for this profile? [y/N] ")
                 if answer.strip().lower() not in {"y", "yes"}:
                     return 7
                 accepted = True
-            result = service.setup(disclosure_accepted=accepted)
+            result = service.setup(accept_disclosure=accepted)
         elif command == "status":
             result = service.status()
         elif command == "list":
@@ -112,10 +129,13 @@ def run_cli(args: argparse.Namespace, service: object) -> int:
             service.require_setup()
             result = {"versions": service.versions(args.skill_id)}
         elif command == "help":
-            args._wisdom_parser.print_help()
+            if as_json:
+                _emit({"commands": list(_CLI_COMMANDS)}, as_json=True)
+            else:
+                getattr(args, "_wisdom_parser").print_help()
             return 0
         else:
-            args._wisdom_parser.print_help()
+            getattr(args, "_wisdom_parser").print_help()
             return 2
         _emit(result, as_json=as_json)
         return 0
@@ -142,11 +162,16 @@ def run_cli(args: argparse.Namespace, service: object) -> int:
         return 8
 
 
-def run_slash(raw_args: str, service: object) -> str:
+def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
+    raw_args: str, service: object
+) -> str:
     """Synchronously render one mutation-free, shared-chat-safe slash view."""
 
     try:
         parts = shlex.split(raw_args or "")
+    except ValueError:
+        return "Could not parse /wisdom arguments."
+    try:
         command = parts[0].casefold() if parts else "help"
         args = parts[1:]
         if command not in _SLASH_COMMANDS:
@@ -155,7 +180,7 @@ def run_slash(raw_args: str, service: object) -> str:
             command = "browse"
         if command == "help":
             if args:
-                raise ValueError("Usage: /wisdom help")
+                raise _SlashUsageError("Usage: /wisdom help")
             return _slash_help()
         if command == "setup":
             return (
@@ -165,20 +190,25 @@ def run_slash(raw_args: str, service: object) -> str:
             )
         if command == "status":
             if args:
-                raise ValueError("Usage: /wisdom status")
+                raise _SlashUsageError("Usage: /wisdom status")
             return _render_status(service.status())
         if command == "browse":
-            query, page = _paged_arguments(args, "/wisdom browse [query] [--page N]")
+            query, page = _paged_arguments(
+                args, "Usage: /wisdom browse [query] [--page N]"
+            )
+            service.require_setup()
             return _render_browse(service.search_skills(query or None), query, page)
         if command == "show":
             if len(args) != 1:
-                raise ValueError("Usage: /wisdom show <skill>")
+                raise _SlashUsageError("Usage: /wisdom show <skill>")
+            service.require_setup()
             return _render_show(service.resolve_skill(args[0]))
         if command == "versions":
             reference, page = _version_arguments(args)
+            service.require_setup()
             return _render_versions(service.resolve_skill(reference), page)
-    except ValueError as exc:
-        return _safe_parser_error(exc)
+    except _SlashUsageError as exc:
+        return str(exc)
     except (WisdomNotFound, WisdomAuthError, WisdomConflict, WisdomValidationError) as exc:
         return _safe_service_error(exc)
     except Exception:  # pylint: disable=broad-exception-caught
@@ -224,22 +254,23 @@ def _paged_arguments(args: list[str], usage: str) -> tuple[str, int]:
         value = args[index]
         if value == "--page":
             if page is not None or index + 1 >= len(args):
-                raise ValueError(usage)
+                raise _SlashUsageError(usage)
             page = _page_number(args[index + 1], usage)
             index += 2
             continue
         if value.startswith("--"):
-            raise ValueError(usage)
+            raise _SlashUsageError(usage)
         values.append(value)
         index += 1
     return " ".join(values).strip(), page or 1
 
 
 def _version_arguments(args: list[str]) -> tuple[str, int]:
-    values, page = _paged_arguments(args, "/wisdom versions <skill> [--page N]")
+    usage = "Usage: /wisdom versions <skill> [--page N]"
+    values, page = _paged_arguments(args, usage)
     references = shlex.split(values)
     if len(references) != 1:
-        raise ValueError("Usage: /wisdom versions <skill> [--page N]")
+        raise _SlashUsageError(usage)
     return references[0], page
 
 
@@ -247,25 +278,24 @@ def _page_number(value: str, usage: str) -> int:
     try:
         page = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(usage) from exc
+        raise _SlashUsageError(usage) from exc
     if not 1 <= page <= _MAX_PAGE:
-        raise ValueError(usage)
+        raise _SlashUsageError(usage)
     return page
 
 
 def _render_status(value: object) -> str:
     data = value if isinstance(value, dict) else {}
-    available = bool(data.get("gateway_available"))
-    capable = bool(data.get("capability_advertised"))
-    entitled = bool(data.get("entitled"))
-    state = "healthy" if available and capable and entitled else "attention required"
+    configured = data.get("configured") is True
+    state = _PUBLIC_STATUS_STATES.get(
+        str(data.get("state") or "").casefold(),
+        "ready" if configured else "not configured",
+    )
     return "\n".join(
         (
             "Collective Wisdom status",
             "",
-            f"Setup: {'ready' if data.get('configured') else 'required'}",
-            f"Gateway: {'available' if available else 'unavailable'}",
-            f"Access: {'enabled' if capable and entitled else 'unavailable'}",
+            f"Setup: {'ready' if configured else 'required'}",
             f"State: {state}",
         )
     )
@@ -343,7 +373,9 @@ def _render_show(detail: object) -> str:
     return "\n".join(lines)
 
 
-def _render_versions(detail: object, page: int) -> str:
+def _render_versions(  # pylint: disable=too-many-locals
+    detail: object, page: int
+) -> str:
     data = detail if isinstance(detail, dict) else {}
     skill = data.get("skill") if isinstance(data.get("skill"), dict) else {}
     slug = _text(skill.get("slug") or skill.get("id") or "Shared skill")
@@ -371,6 +403,8 @@ def _render_versions(detail: object, page: int) -> str:
             or "Immutable published version"
         )
         lines.extend(("", f"Version {number}", published, _review_states(item)))
+        if isinstance(item.get("system_spec"), dict):
+            lines.append(f"Requirements: {_requirements_summary(item['system_spec'])}")
         version_url = _version_url(base_url, number)
         if version_url:
             lines.append(f"View in Portal: {version_url}")
@@ -429,13 +463,6 @@ def _review_states(value: object) -> str:
     return " - ".join(lines)
 
 
-def _safe_parser_error(exc: ValueError) -> str:
-    message = str(exc)
-    if message.startswith("Usage: /wisdom"):
-        return message
-    return "Could not parse /wisdom arguments."
-
-
 def _safe_service_error(exc: Exception) -> str:
     if isinstance(exc, WisdomNotFound):
         return "That Collective Wisdom item was not found."
@@ -447,7 +474,11 @@ def _safe_service_error(exc: Exception) -> str:
 
 
 def _positive_version(value: object) -> int | None:
-    return value if type(value) is int and value > 0 else None
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
 
 
 def _text(value: object, *, limit: int = 512) -> str:
