@@ -22,7 +22,8 @@ from .package import PackagePolicyError
 
 
 def _distribution_version(name: str) -> str | None:
-    for candidate in {name, name.replace("_", "-"), name.rsplit("/", 1)[-1]}:
+    candidates = (name, name.replace("_", "-"), name.rsplit("/", 1)[-1])
+    for candidate in dict.fromkeys(candidates):
         try:
             return importlib.metadata.version(candidate)
         except importlib.metadata.PackageNotFoundError:
@@ -54,10 +55,10 @@ def _is_admin() -> bool:
     if os.name != "nt":
         return hasattr(os, "geteuid") and os.geteuid() == 0
     try:  # pragma: no cover - exercised by the Windows CI lane
-        import ctypes
+        import ctypes  # pylint: disable=import-outside-toplevel
 
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:  # pragma: no cover - defensive Windows host boundary
+    except Exception:  # pylint: disable=broad-exception-caught  # pragma: no cover
         return False
 
 
@@ -94,7 +95,9 @@ class InstallationHost:
         if active_home != self.profile_home:
             raise PackagePolicyError("active Hermes profile changed during install review")
 
-    def capabilities(self, spec: SystemSpecification) -> LocalCapabilities:
+    def capabilities(  # pylint: disable=too-many-locals,too-many-branches
+        self, spec: SystemSpecification
+    ) -> LocalCapabilities:  # pylint: disable=too-many-statements,too-many-nested-blocks
         """Read only declared local facts; never execute commands or probe networks."""
 
         if not isinstance(spec, SystemSpecification):
@@ -301,23 +304,28 @@ class InstallationHost:
         return decision
 
     def validate_target(self, path: Path) -> None:
-        """Validate one direct-child skills target using host-owned guards."""
+        """Validate one contained skills target using host-owned redirect guards."""
 
         if not isinstance(path, Path):
             raise TypeError("path must be a Path")
         self._check_profile()
         root = self.skills_root.resolve()
         candidate = path.expanduser().resolve()
-        if candidate == root or candidate.parent != root:
-            raise PackagePolicyError("install target must be a direct child of skills")
+        if candidate == root or not candidate.is_relative_to(root):
+            raise PackagePolicyError("install target must be contained by skills")
         try:
             models = self._module("tools.skills_hub_models")
             installer = self._module("tools.skills_hub_install")
             validate_name = getattr(models, "_validate_skill_name")
+            resolve_target = getattr(installer, "_resolve_lock_install_path")
             check_target = getattr(installer, "_check_install_target")
             if validate_name(path.name) != path.name:
                 raise ValueError("host normalized the requested skill name")
-            check_target(path)
+            relative = path.relative_to(self.skills_root).as_posix()
+            guarded = resolve_target(relative, path.name)
+            if guarded.resolve() != candidate:
+                raise ValueError("host resolved a different install target")
+            check_target(guarded)
         except PackagePolicyError:
             raise
         except Exception as exc:  # pylint: disable=broad-exception-caught

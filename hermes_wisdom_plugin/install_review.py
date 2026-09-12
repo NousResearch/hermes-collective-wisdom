@@ -8,9 +8,8 @@ separate executor; this module only prepares an immutable owner-bound review.
 from __future__ import annotations
 
 import copy
-import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -18,7 +17,12 @@ from urllib.parse import parse_qs, urlparse
 from pydantic import ValidationError
 
 from .compatibility import evaluate
-from .contract import SystemSpecification, parse_manifest_bytes, sha256_address
+from .contract import (
+    SystemSpecification,
+    org_directory_name,
+    parse_manifest_bytes,
+    sha256_address,
+)
 from .errors import WisdomAuthError, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
 
@@ -155,23 +159,42 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             raise PackagePolicyError("invalid Wisdom update mode")
         return value if isinstance(value, str) else None
 
-    def _reject_existing(self, skill_id: str, slug: str | None = None) -> None:
+    def _reject_existing(
+        self,
+        skill_id: str,
+        owner: dict[str, Any],
+        slug: str | None = None,
+        *,
+        check_existing: bool = True,
+    ) -> None:
         try:
-            existing = self.store.installation(skill_id)
+            existing = self.store.installation(skill_id, owner)
+            any_owner = self.store.installation(skill_id)
             installations = self.store.installations()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             raise PackagePolicyError("managed install state is unavailable") from exc
         if existing is not None and not isinstance(existing, dict):
             raise PackagePolicyError("managed install state is invalid")
-        if existing and existing.get("state") == "active":
+        if existing and existing.get("state") == "active" and check_existing:
             raise PackagePolicyError(
                 "skill is already managed; use the update workflow"
             )
+        if any_owner is not None and not isinstance(any_owner, dict):
+            raise PackagePolicyError("managed install state is invalid")
+        if any_owner and any_owner.get("owner") != owner:
+            raise PackagePolicyError(
+                "skill is already managed by another installation owner"
+            )
         if not isinstance(installations, list):
             raise PackagePolicyError("managed install state is invalid")
-        if slug is None:
+        if slug is None or not check_existing:
             return
-        target = self.host.skills_root / slug
+        target = (
+            self.host.skills_root
+            / "_wisdom"
+            / org_directory_name(owner["organization_id"])
+            / slug
+        )
         self.host.validate_target(target)
         target_resolved = target.resolve()
         for item in installations:
@@ -206,19 +229,29 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             raise PackagePolicyError("Wisdom skill has no published versions")
         return versions
 
-    def _stage_and_scan(
+    def _stage_and_scan(  # pylint: disable=too-many-locals
         self, files: list[tuple[str, str, bytes]]
     ) -> dict[str, object]:
         skills_root = self.host.skills_root
         try:
+            profile_home = getattr(self.host, "profile_home", skills_root.parent)
+            if not isinstance(profile_home, Path):
+                raise PackagePolicyError("Wisdom review staging is unsafe")
+            for directory in (profile_home, skills_root):
+                if directory.is_symlink() or (
+                    hasattr(directory, "is_junction") and directory.is_junction()
+                ):
+                    raise PackagePolicyError("Wisdom review staging is unsafe")
             skills_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             hub = skills_root / ".hub"
             staging_root = hub / "collective-wisdom"
             for directory in (hub, staging_root):
-                if directory.is_symlink():
+                if directory.is_symlink() or (
+                    hasattr(directory, "is_junction") and directory.is_junction()
+                ):
                     raise PackagePolicyError("Wisdom review staging is unsafe")
                 directory.mkdir(exist_ok=True, mode=0o700)
-                directory.chmod(0o700)
+            staging_root.chmod(0o700)
             with tempfile.TemporaryDirectory(prefix="review-", dir=staging_root) as raw:
                 staging = Path(raw)
                 for relative, _mode, body in files:
@@ -227,8 +260,6 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
                     destination.write_bytes(body)
                     destination.chmod(0o600)
                 result = self.host.scan(staging)
-        except PackagePolicyError:
-            raise
         except OSError as exc:
             raise PackagePolicyError("Wisdom review staging is unavailable") from exc
         if not isinstance(result, dict) or set(result) != {
@@ -254,14 +285,16 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         except (UnicodeError, ValueError, ValidationError) as exc:
             raise WisdomValidationError("version package manifest is invalid") from exc
 
-    def _prepare(  # pylint: disable=too-many-locals
+    def _prepare(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         skill_id: str,
         selected_version: int | None,
         update_mode: str | None,
         owner: dict[str, Any],
+        *,
+        check_existing: bool,
     ) -> tuple[dict[str, Any], list[tuple[str, str, bytes]], dict[str, str]]:
-        self._reject_existing(skill_id)
+        self._reject_existing(skill_id, owner, check_existing=check_existing)
         detail = self._request(owner, lambda: self.client.skill(skill_id))
         skill = getattr(detail, "skill", None)
         versions = getattr(detail, "versions", None)
@@ -273,7 +306,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         slug = skill.get("slug") or skill_id
         if not isinstance(slug, str) or not slug:
             raise WisdomValidationError("Gateway returned an invalid skill slug")
-        self._reject_existing(skill_id, slug)
+        self._reject_existing(
+            skill_id, owner, slug, check_existing=check_existing
+        )
         published_versions = self._published_versions(versions)
         version_number = selected_version or max(published_versions)
         if version_number not in published_versions:
@@ -281,9 +316,16 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         version_detail = self._request(
             owner, lambda: self.client.version(skill_id, version_number)
         )
+        version_skill = getattr(version_detail, "skill", None)
         version_metadata = getattr(version_detail, "version", None)
-        if not isinstance(version_metadata, dict):
+        if not isinstance(version_skill, dict) or not isinstance(version_metadata, dict):
             raise WisdomValidationError("Gateway returned invalid version metadata")
+        if (
+            version_skill.get("id", skill_id) != skill_id
+            or version_skill.get("state") != "active"
+            or version_skill.get("takedown_generation") != skill.get("takedown_generation")
+        ):
+            raise WisdomValidationError("Gateway version skill metadata changed")
         metadata_version = version_metadata.get("version")
         if metadata_version is not None and metadata_version != version_number:
             raise WisdomValidationError("Gateway returned a different Wisdom version")
@@ -308,6 +350,20 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         if not isinstance(response_hash, str) or response_hash != content_hash:
             raise WisdomValidationError("Gateway package content hash does not match")
         manifest, manifest_body = self._manifest(files)
+        manifest_hash = sha256_address(manifest_body)
+        response_commit = getattr(content, "commit", None)
+        if (
+            version_metadata.get("content_hash") != content_hash
+            or not isinstance(response_commit, str)
+            or version_metadata.get("commit") != response_commit
+            or (
+                version_metadata.get("package_manifest_hash") is not None
+                and version_metadata.get("package_manifest_hash") != manifest_hash
+            )
+        ):
+            raise WisdomValidationError(
+                "version metadata does not match the exact package content"
+            )
         declared_specification = version_metadata.get("system_spec")
         try:
             declared = SystemSpecification.model_validate(declared_specification)
@@ -320,22 +376,29 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
                 "version metadata does not match the exact package manifest"
             )
         local = self.host.capabilities(manifest.requirements)
-        compatibility = asdict(evaluate(manifest.requirements, local))
+        evaluated = evaluate(manifest.requirements, local)
+        compatibility = {
+            "outcome": evaluated.outcome,
+            "satisfied": list(evaluated.satisfied),
+            "setup_actions": list(evaluated.setup_actions),
+            "limitations": list(evaluated.limitations),
+            "blocked": list(evaluated.blocked),
+        }
         local_scan = self._stage_and_scan(files)
         scan_allowed = local_scan["allowed"]
         allowed = (
             compatibility["outcome"] != "blocked_pending_action"
             and scan_allowed is not False
         )
-        manifest_hash = sha256_address(manifest_body)
+        sizes = {path: len(body) for path, _mode, body in files}
         inventory = [
             {
                 "path": record.path,
                 "mode": record.mode,
                 "hash": record.hash,
-                "size": len(body),
+                "size": sizes[record.path],
             }
-            for record, (_path, _mode, body) in zip(records, files)
+            for record in records
         ]
         server_checks = {
             key: copy.deepcopy(version_metadata.get(key))
@@ -383,7 +446,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         mode = self._update_mode(update_mode)
         skill_id, version = self._resolve_reference(reference)
         owner = self._owner_snapshot()
-        review, _files, _baseline = self._prepare(skill_id, version, mode, owner)
+        review, _files, _baseline = self._prepare(
+            skill_id, version, mode, owner, check_existing=True
+        )
         self._check_owner(owner)
         try:
             plan = self.receipts.create(review)
@@ -414,7 +479,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         version = self._positive_int(plan.get("version"), "version")
         self._generation(plan.get("takedown_generation"))
         mode = self._update_mode(plan.get("update_mode"))
-        current, files, baseline = self._prepare(skill_id, version, mode, owner)
+        current, files, baseline = self._prepare(
+            skill_id, version, mode, owner, check_existing=False
+        )
         reviewed = {field: plan.get(field) for field in _REVIEW_FIELDS}
         if reviewed != current:
             raise WisdomValidationError(
