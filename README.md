@@ -3,7 +3,7 @@
 Private development repository for extracting Collective Wisdom from Hermes
 Agent into an external, opt-in plugin.
 
-**Status: development slice, terminal setup and read-only discovery.** The native
+**Status: development slice, terminal setup, discovery and manual installation.** The native
 entrypoint registers `hermes wisdom` and `/wisdom`, including while signed out.
 Credentials are resolved on invocation. Loading starts no polling, model tools,
 qualification, or proactive delivery, and does not change installed skills.
@@ -16,14 +16,31 @@ hermes wisdom status --json
 hermes wisdom browse "incident"
 hermes wisdom show <skill-id> --json
 hermes wisdom versions <skill-id>
+hermes wisdom install <skill-id>@v1 --plan --json
+hermes wisdom install --apply-receipt <receipt> --json
+hermes wisdom installed --json
+hermes wisdom uninstall <skill-id> --yes --json
 ```
 
 Setup requires explicit disclosure acceptance and read/install scopes, but does
 not install a skill. Noninteractive setup requires `--accept-disclosure`.
 `/wisdom browse`, `/wisdom show`, and `/wisdom versions` provide read-only,
 shared-chat-safe text. `/wisdom setup` only points to the terminal; it cannot
-accept disclosure. Install/update controls and rich platform cards remain later
-slices, not supported commands in this development build.
+accept disclosure. Slash install/installed/uninstall only provide terminal
+instructions; they never inspect private installation state or mutate files.
+Terminal installation requires an exact, enrolment-bound review receipt, valid
+for 24 hours before starting. Interactive install also supports a plain terminal
+confirmation. Re-run `install --plan` to recheck an expired or changed review.
+Retry interrupted installation with the same `--apply-receipt`; status does not
+silently resume it. Uninstall moves files to recoverable, undiscoverable trash.
+
+Skill setup execution, updates, rich cards and proactive delivery remain later
+slices. `--accept-partial` acknowledges setup/compatibility limitations; it never
+authorizes setup commands. Installed files are not proof of verified readiness.
+The recorded update policy does not start an automatic update worker yet.
+This development slice verifies installation on Linux/macOS. Secure receipt
+operations fail closed on platforms without descriptor-relative, no-follow
+filesystem support; Windows installation is not yet supported.
 
 Work is on `codex/first-release-foundation`. See the
 [execution tasks](docs/FIRST-RELEASE.md) and
@@ -73,6 +90,8 @@ Without that optional checkout, pytest explicitly skips the source-artifact
 check. The runtime schema/vector digest checks still run. This is not the
 four-repository release smoke, which remains a separate V1 gate.
 
+The [manual installation evidence](docs/verification/manual-installation.md)
+records the slice's extraction, host dependencies, and verification boundaries.
 The [account compatibility probe](docs/verification/F1-account.md) additionally
 accepts `WISDOM_AGENT_DIR` pointing to an unmodified Agent checkout. It uses
 synthetic credentials in a temporary profile, never the current user's login.

@@ -98,8 +98,26 @@ The extracted plugin client uses explicit providers in tests. That does not
 complete workflow integration. The [account adapter](verification/F1-account.md)
 now passes denial/expiry/profile-switch checks against unmodified upstream.
 It uses `get_provider_auth_state` and the existing host decoder, not a new API.
-Registration remains inert pending controller, disclosure and operation wiring;
-the read-only slice does not waive those prerequisites from the old flow.
+CLI/slash registration now supports explicit terminal onboarding and safe
+discovery. Credentials are resolved per invocation; slash mutation requests
+are static terminal handoffs. Neither registration nor status starts recovery.
+
+### Manual Installation: Narrow Host Guard Adapter
+
+The terminal installation slice uses the pinned host's `scan_skill` and
+`should_allow_install(force=False)`, plus its existing target validators. These
+are tested internal imports, not a new public host API. Static capability reads
+do not execute commands, refresh credentials, load plugins, or probe networks.
+Unavailable guards fail closed. The destructive Hub replacement installer is
+not used.
+
+The plugin owns exact-content receipts, journals, atomic promotion and
+recoverable removal. Staging under `.hub/collective-wisdom` and trash under
+`.archive/collective-wisdom` use directories excluded by the actual host skill
+scanner; committed `_wisdom/<org>/<slug>` skills remain discoverable. Plain
+terminal confirmation does not use remembered tool approvals or private TUI
+modals. See [manual installation evidence](verification/manual-installation.md)
+for the tested boundaries and outstanding live acceptance.
 
 ### H3: Post-Delivery and Idle-Session Integration
 

@@ -28,12 +28,8 @@ from .package import PackagePolicyError, verify_content_files
 
 
 _OWNER_FIELDS = (
-    "profile_name",
-    "profile_home",
-    "account_id",
-    "organization_id",
-    "base_url",
-    "installation_id",
+    "profile_name", "profile_home", "account_id",
+    "organization_id", "base_url", "installation_id",
 )
 _UPDATE_MODES = frozenset({"MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"})
 _REVIEW_FIELDS = (

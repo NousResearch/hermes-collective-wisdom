@@ -94,6 +94,17 @@ depends on an unported workflow is deferred, not deleted for convenience.
 
 ## Import Boundary Decisions
 
+### Manual Installation Extraction
+
+The [manual installation record](verification/manual-installation.md) identifies
+the selected install/client/compatibility/uninstall units and their replacement
+boundary tests. Terminal review, receipts, recovery and removal are this slice's
+scope. Reference native-consent, setup execution, update-worker and callback
+tests remain deferred, not removed or counted as passing. The `installed` CLI
+parser is an intentional correction of the reference parser gap. Shared slash
+installation remains a terminal handoff, so native TUI mutation parity is not
+complete.
+
 - Pure contract validation, hashing and deterministic state rules stay in the
   plugin with upstream attribution and their original behavioral tests.
 - `hermes_constants.get_hermes_home` becomes an explicit profile data directory

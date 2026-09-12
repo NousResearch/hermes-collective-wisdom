@@ -95,6 +95,8 @@ class InstallationHost:
         if active_home != self.profile_home:
             raise PackagePolicyError("active Hermes profile changed during install review")
 
+    # Keep the extracted static detector together while adapting its host boundary.
+    # pylint: disable=too-many-statements,too-many-nested-blocks
     def capabilities(  # pylint: disable=too-many-locals,too-many-branches
         self, spec: SystemSpecification
     ) -> LocalCapabilities:  # pylint: disable=too-many-statements,too-many-nested-blocks

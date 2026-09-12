@@ -352,7 +352,7 @@ class InstallExecutor:
     def _bind_install_receipt(self, receipt: str, operation_id: str) -> None:
         metadata = self.store.get_metadata("install_receipt:" + receipt)
         if not isinstance(metadata, dict):
-            # Protocol fakes may delegate binding entirely to the receipt object.
+            # The receipt boundary rejects missing or invalid authority records.
             self.receipts.start(receipt, operation_id)
             return
         bound = metadata.get("operation_id")
@@ -720,8 +720,8 @@ def _tree_hashes(root: Path) -> dict[str, str] | None:
 
 
 def _is_junction(path: Path) -> bool:
-    checker = getattr(os.path, "isjunction", None)
-    return bool(callable(checker) and checker(path))
+    checker = getattr(os.path, "isjunction", lambda _path: False)
+    return bool(checker(path))
 
 
 def _require_scan(current: object, reviewed: object, accepted_partial: bool) -> None:

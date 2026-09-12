@@ -8,7 +8,26 @@ automated, and live status remain in [FEATURES.md](FEATURES.md).
 
 ## Simplification Requirement (2026-09-12)
 
-### Active Slice: Terminal Setup and Safe Discovery
+### Implemented Slice: Safe Manual Installation
+
+Continue PR #1 from plugin `cffef37`, reference `0924f7946b`, and unmodified
+Agent `bf51fee548`. Approximately six points are drawn from C1/C2 and the
+required P1/R2 primitives, not added to the baseline.
+
+- Extract exact package review, static capability detection and host scanning.
+- Bind terminal receipts to enrolment, hashes, policy and a 24-hour review.
+- Use journalled atomic installs, local-edit protection and recoverable removal.
+- Keep staging/trash under host-excluded `.hub`/`.archive` subtrees.
+- Reconcile only explicit retries; no polling, setup execution or update worker.
+- Keep every slash surface read-only with terminal handoffs. TUI mutation parity
+  and native callbacks remain incomplete, not waived.
+
+See [manual installation evidence](verification/manual-installation.md).
+The terminal slice is implemented and locally verified. Native mutation parity
+and real-account acceptance remain separate release work.
+The package uses existing scoped Gateway routes and requires no Agent PR.
+
+### Completed Slice: Terminal Setup and Safe Discovery
 
 Built from plugin `84d6fca`, behavioral reference `0924f7946b`, and tested against
 unmodified Agent `bf51fee548`. Continue plugin PR #1; no Agent dependency.
