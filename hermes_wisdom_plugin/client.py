@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 from collections.abc import Callable
@@ -12,7 +13,7 @@ from urllib.parse import quote, urlsplit
 import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .contract import SystemSpecification
+from .contract import SystemSpecification, parse_manifest_bytes
 from .errors import (
     WisdomAuthError,
     WisdomConflict,
@@ -20,6 +21,8 @@ from .errors import (
     WisdomNotFound,
     WisdomValidationError,
 )
+from .package import PackagePolicyError, verify_content_files
+from .wire import wire_address
 
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -91,6 +94,67 @@ class VersionDetail(WireModel):
 
     skill: dict[str, Any]
     version: dict[str, Any]
+
+
+class VersionContentFile(BaseModel):
+    """One exact blob in a published version response."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=1024)
+    mode: Literal["file", "exec"]
+    hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    content_base64: str = Field(min_length=1)
+
+
+class VersionContent(BaseModel):
+    """Bounded, exact published package returned by the Gateway."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    commit: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    content_hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    files: list[VersionContentFile] = Field(max_length=32)
+
+
+class InstallationRecord(BaseModel):
+    """Gateway acknowledgement for an installed version."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    installed_version: int = Field(gt=0)
+    effective_update_mode: Literal["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"]
+
+
+class InstallationItem(BaseModel):
+    """One installation visible to the current installation identity."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    skill_id: str = Field(min_length=1, max_length=512)
+    installed_version: int = Field(gt=0)
+    latest_version: int | None = Field(default=None, gt=0)
+    update_mode: Literal["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"]
+    skill_state: str = Field(min_length=1, max_length=64)
+    takedown_generation: int | None = Field(default=None, ge=0)
+
+
+class InstallationList(BaseModel):
+    """Bounded installation listing response."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    installations: list[InstallationItem] = Field(max_length=10_000)
+
+
+class InstallationDeactivation(BaseModel):
+    """Gateway acknowledgement for an installation deactivation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    skill_id: str = Field(min_length=1, max_length=512)
+    installation_id: str = Field(min_length=1, max_length=512)
+    state: Literal["inactive"]
 
 
 class Capability(WireModel):
@@ -227,7 +291,7 @@ class WisdomClient:
         model: type[BaseModel],
         params: dict[str, Any] | None = None,
         method: str = "GET",
-        json_body: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
         sync_root: bool = False,
         install: bool = False,
     ) -> Any:
@@ -351,6 +415,137 @@ class WisdomClient:
             model=VersionDetail,
         )
 
+    def content(
+        self,
+        skill_id: str,
+        version: int,
+        *,
+        installation_id: str,
+        takedown_generation: int,
+    ) -> tuple[VersionContent, list[tuple[str, str, bytes]]]:
+        """Download and verify an install-scoped immutable package."""
+
+        version = _version(version)
+        installation_id = _text(
+            installation_id, "installation_id", _MAX_IDENTIFIER_BYTES
+        )
+        takedown_generation = _generation(takedown_generation)
+        response = self._request(
+            f"skills/{_quoted_identifier(skill_id, 'skill_id')}/versions/{version}/content",
+            model=VersionContent,
+            params={
+                "installation_id": installation_id,
+                "takedown_generation": str(takedown_generation),
+            },
+            install=True,
+        )
+        return self._decode_version_content(response)
+
+    @staticmethod
+    def _decode_version_content(
+        response: VersionContent,
+    ) -> tuple[VersionContent, list[tuple[str, str, bytes]]]:
+        # Adapted from Hermes Agent hermes_wisdom/client.py at 0924f7946b.
+        decoded: list[tuple[str, str, bytes]] = []
+        for item in response.files:
+            try:
+                raw = base64.b64decode(item.content_base64, validate=True)
+            except (TypeError, ValueError) as exc:
+                raise WisdomValidationError(
+                    "version content contains malformed base64"
+                ) from exc
+            if wire_address(raw) != item.hash:
+                raise WisdomValidationError(
+                    f"version blob failed integrity validation: {item.path}"
+                )
+            decoded.append((item.path, item.mode, raw))
+        try:
+            _, derived = verify_content_files(decoded)
+        except PackagePolicyError as exc:
+            raise WisdomValidationError("version content failed package validation") from exc
+        if derived != response.content_hash:
+            raise WisdomValidationError(
+                "version content hash failed integrity validation"
+            )
+        manifest_body = next(
+            (body for path, _, body in decoded if path == "skill.manifest.json"), None
+        )
+        if manifest_body is None:
+            raise WisdomValidationError("version content has no package manifest")
+        try:
+            parse_manifest_bytes(manifest_body)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise WisdomValidationError("version package manifest is invalid") from exc
+        return response, decoded
+
+    def record_install(
+        self,
+        *,
+        skill_id: str,
+        installation_id: str,
+        version: int,
+        takedown_generation: int,
+        update_mode: str | None,
+    ) -> InstallationRecord:
+        """Record an install using a fresh install-scoped credential snapshot."""
+
+        skill_id = _text(skill_id, "skill_id", _MAX_IDENTIFIER_BYTES)
+        installation_id = _text(
+            installation_id, "installation_id", _MAX_IDENTIFIER_BYTES
+        )
+        version = _version(version)
+        takedown_generation = _generation(takedown_generation)
+        if update_mode not in {None, "MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"}:
+            raise WisdomValidationError("update_mode is invalid")
+        payload: dict[str, Any] = {
+            "skill_id": skill_id,
+            "installation_id": installation_id,
+            "version": version,
+            "takedown_generation": takedown_generation,
+        }
+        if update_mode is not None:
+            payload["update_mode"] = update_mode
+        result = self._request(
+            "installations",
+            model=InstallationRecord,
+            method="POST",
+            json_body=payload,
+            install=True,
+        )
+        if result.installed_version != version:
+            raise WisdomError("Gateway acknowledged a different installed version")
+        return result
+
+    def installations(self, installation_id: str) -> list[dict[str, Any]]:
+        """List installs using a fresh install-scoped credential snapshot."""
+
+        result = self._request(
+            f"installations/{_quoted_identifier(installation_id, 'installation_id')}",
+            model=InstallationList,
+            install=True,
+        )
+        return [item.model_dump(mode="json") for item in result.installations]
+
+    def deactivate_install(
+        self, installation_id: str, skill_id: str
+    ) -> InstallationDeactivation:
+        """Deactivate one install and validate the acknowledged identities."""
+
+        installation_id = _text(
+            installation_id, "installation_id", _MAX_IDENTIFIER_BYTES
+        )
+        skill_id = _text(skill_id, "skill_id", _MAX_IDENTIFIER_BYTES)
+        result = self._request(
+            f"installations/{quote(installation_id, safe='')}/skills/"
+            f"{quote(skill_id, safe='')}",
+            model=InstallationDeactivation,
+            method="DELETE",
+            install=True,
+        )
+        if result.installation_id != installation_id or result.skill_id != skill_id:
+            raise WisdomError("Gateway acknowledged a different installation")
+        return result
+
 
 def _text(value: object, name: str, max_bytes: int) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -371,6 +566,12 @@ def _quoted_identifier(value: object, name: str) -> str:
 def _version(value: object) -> int:
     if not _is_plain_int(value) or not 1 <= value < 2_147_483_647:
         raise WisdomValidationError("version must be a positive integer")
+    return value
+
+
+def _generation(value: object) -> int:
+    if not _is_plain_int(value) or not 0 <= value < 2_147_483_647:
+        raise WisdomValidationError("takedown_generation must be a non-negative integer")
     return value
 
 
