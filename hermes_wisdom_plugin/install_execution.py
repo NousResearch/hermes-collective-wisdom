@@ -153,6 +153,7 @@ class InstallExecutor:
                 "state": "pending",
                 "owner": owner,
             }, by_skill, operation))
+        self._assert_owner(owner)
         return result
 
     @staticmethod
@@ -327,6 +328,13 @@ class InstallExecutor:
                 self.receipts.complete(payload["receipt"], result)
                 self.store.advance(operation_id, "gateway_recorded", done=True)
                 return result
+        if phase == "gateway_rejected":
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise PackagePolicyError("rejected install recovery outcome is missing")
+            self.receipts.complete(payload["receipt"], result)
+            self.store.advance(operation_id, "gateway_rejected", done=True)
+            return result
         raise PackagePolicyError(f"unsupported install recovery phase: {phase}")
 
     def _resume_uninstall(self, operation_id: str, payload: dict, lock: str) -> dict:
@@ -394,19 +402,29 @@ class InstallExecutor:
     ) -> None:
         trash = self._trash_path(operation_id, payload["slug"])
         trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if (
-            target.exists()
-            and not trash.exists()
-            and _tree_hashes(target) == payload.get("baseline")
-        ):
+        if target.exists() and not trash.exists():
             _same_filesystem(target, trash.parent)
             self._assert_owner(owner)
             self.store.assert_operation_lock(payload["skill_id"], lock)
             _durable_replace(target, trash)
         self.store.deactivate_install(payload["skill_id"])
         payload["trash_path"] = str(trash)
+        result = {
+            "installed": False,
+            "rejected": True,
+            "skill_id": payload["skill_id"],
+            "version": int(payload["version"]),
+            "path": None,
+            "recoverable_path": str(trash),
+            "content_hash": payload["content_hash"],
+            "setup_execution_authorized": False,
+            "ready_to_use": None,
+        }
+        payload["result"] = result
         self.store.replace_operation_payload(operation_id, payload)
-        self.store.advance(operation_id, "gateway_recorded", done=True)
+        self.store.advance(operation_id, "gateway_rejected")
+        self.receipts.complete(payload["receipt"], result)
+        self.store.advance(operation_id, "gateway_rejected", done=True)
 
     def _install_record(self, payload: dict, owner: dict, state: str) -> dict:
         return {

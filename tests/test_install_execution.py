@@ -264,6 +264,53 @@ def test_permanent_gateway_rejection_quarantines_active_bytes(executor):
     assert not Path(record["target_path"]).exists()
     payload = next(iter(store.operations.values()))["payload"]
     assert (Path(payload["trash_path"]) / "SKILL.md").read_bytes() == FILES[0][2]
+    assert value.apply("receipt-1") == payload["result"]
+    assert len(client.record_calls) == 1
+
+
+def test_permanent_rejection_archives_locally_modified_tree(executor):
+    value, store, client, _receipts, _current = executor
+    client.record_error = RuntimeError("offline")
+    assert value.apply("receipt-1")["pending"] is True
+    target = Path(store.records["skill-1"]["target_path"])
+    (target / "SKILL.md").write_text("# locally modified\n", encoding="utf-8")
+    client.record_error = WisdomConflict("taken down", status=409)
+
+    with pytest.raises(WisdomConflict, match="taken down"):
+        value.apply("receipt-1")
+
+    payload = next(iter(store.operations.values()))["payload"]
+    trash = Path(payload["trash_path"])
+    assert not target.exists()
+    assert (trash / "SKILL.md").read_text() == "# locally modified\n"
+
+
+def test_rejected_receipt_completion_crash_recovers_without_reinstall(executor, monkeypatch):
+    value, store, client, receipts, _current = executor
+    client.record_error = WisdomConflict("taken down", status=409)
+    real_complete = receipts.complete
+    failed = False
+
+    def fail_once(receipt, result):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("receipt completion interrupted")
+        real_complete(receipt, result)
+
+    monkeypatch.setattr(receipts, "complete", fail_once)
+    with pytest.raises(OSError, match="receipt completion"):
+        value.apply("receipt-1")
+    operation = store.pending_operations()[0]
+    assert operation["phase"] == "gateway_rejected"
+    trash = Path(operation["payload"]["trash_path"])
+
+    result = value.apply("receipt-1")
+
+    assert result["rejected"] is True
+    assert trash.is_dir()
+    assert not Path(store.records["skill-1"]["target_path"]).exists()
+    assert len(client.record_calls) == 1
 
 
 def test_owner_change_before_effect_rejects_without_installing(executor):
