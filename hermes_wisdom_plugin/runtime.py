@@ -103,14 +103,59 @@ class InvocationService:
         self.check_owner()
         return result
 
-    def status(self):
+    def status(self, *, include_operations=False):
         """Inspect local setup without enrolling or contacting the Gateway."""
         self.check_owner()
         if not (self.root / "wisdom.db").is_file():
             return {"configured": False, "state": "not_configured", "reason": "not_configured"}
         result = self._open().status()
+        if include_operations and result.get("configured"):
+            owner = {**self.binding(), "installation_id": result.get("installation_id")}
+            result["pending_operations"] = [
+                {"operation_id": operation["id"], "kind": operation["kind"],
+                 "phase": operation["phase"], "skill_id": operation["entity_id"]}
+                for operation in self._onboarding.store.pending_operations()
+                if json.loads(operation["payload_json"]).get("owner") == owner
+            ]
         self.check_owner()
         return result
+
+    def _installation_owner(self):
+        self.require_setup()
+        self._install_credentials()
+        return {**self.binding(), "installation_id":
+                self._onboarding.store.existing_installation_identity()}
+
+    def _installation_services(self):
+        from .install_execution import InstallExecutor  # pylint: disable=import-outside-toplevel
+        from .install_host import InstallationHost  # pylint: disable=import-outside-toplevel
+        from .install_receipts import InstallReceipts  # pylint: disable=import-outside-toplevel
+        from .install_review import InstallReviewer  # pylint: disable=import-outside-toplevel
+
+        self._installation_owner()
+        store = self._onboarding.store
+        host = InstallationHost(self.profile[1])
+        receipts = InstallReceipts(store, self._installation_owner)
+        reviewer = InstallReviewer(self.client, store, receipts, host, self._installation_owner)
+        executor = InstallExecutor(self.client, store, receipts, reviewer,
+                                   host, self._installation_owner)
+        return reviewer, executor
+
+    def install_plan(self, reference, *, update_mode=None):
+        """Prepare an owner-bound terminal review without installing any files."""
+        return self._installation_services()[0].plan(reference, update_mode=update_mode)
+
+    def install_apply(self, receipt, *, accept_partial=False):
+        """Apply or retry only the explicitly selected terminal receipt."""
+        return self._installation_services()[1].apply(receipt, accept_partial=accept_partial)
+
+    def list_installations(self):
+        """Inspect private installation state only through the terminal entry."""
+        return self._installation_services()[1].installed()
+
+    def uninstall(self, skill_id):
+        """Perform the removal already confirmed by the terminal controller."""
+        return self._installation_services()[1].uninstall(skill_id)
 
     def require_setup(self):
         """Deny discovery before creating state or issuing a request."""
@@ -211,7 +256,7 @@ class CommandRuntime:
             except ValueError:
                 return "Invalid Wisdom command. Use /wisdom help."
             command = words[0].casefold() if words else "help"
-            if command in {"help", "--help", "-h", "setup"}:
+            if command in {"help", "--help", "-h", "setup", "install", "installed", "uninstall"}:
                 return run_slash("help" if command in {"--help", "-h"} else raw_args, service)
             binding = service.binding()
             task = asyncio.create_task(asyncio.to_thread(

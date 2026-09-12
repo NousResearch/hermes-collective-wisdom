@@ -28,7 +28,8 @@ from .package import PackagePolicyError
 PAGE_SIZE = 5
 _MAX_PAGE = 10_000
 _SLASH_COMMANDS = frozenset(
-    {"setup", "status", "list", "browse", "show", "versions", "help"}
+    {"setup", "status", "list", "browse", "show", "versions", "help",
+     "install", "installed", "uninstall"}
 )
 _CHECK_LABELS = (
     ("security_check", "Security check"),
@@ -51,7 +52,8 @@ _PUBLIC_STATUS_STATES = {
     "degraded": "attention required",
     "unavailable": "unavailable",
 }
-_CLI_COMMANDS = ("setup", "status", "list", "browse", "show", "versions", "help")
+_CLI_COMMANDS = ("setup", "status", "list", "browse", "show", "versions",
+                 "install", "installed", "uninstall", "help")
 
 
 class _SlashUsageError(ValueError):
@@ -85,10 +87,21 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
     show.add_argument("skill_id")
     versions = add("versions", "List published versions")
     versions.add_argument("skill_id")
+    install = add("install", "Review or apply an exact managed skill installation")
+    install.add_argument("reference", nargs="?", default="")
+    install.add_argument("--plan", action="store_true", help="Create a review without installing")
+    install.add_argument("--apply-receipt", help="Apply an explicitly reviewed install receipt")
+    install.add_argument("--accept-partial", action="store_true",
+                         help="Acknowledge partial or setup-required compatibility")
+    install.add_argument("--update-mode", choices=["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"])
+    add("installed", "Inspect this enrolment's managed installations")
+    uninstall = add("uninstall", "Move a managed skill to recoverable trash")
+    uninstall.add_argument("skill_id")
+    uninstall.add_argument("--yes", action="store_true", help="Confirm recoverable removal")
     add("help", "Show Collective Wisdom command help")
 
 
-def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements
+def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too-many-statements
     args: argparse.Namespace, service: object
 ) -> int:
     """Run one parsed terminal command against an injected service."""
@@ -115,7 +128,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements
                 accepted = True
             result = service.setup(accept_disclosure=accepted)
         elif command == "status":
-            result = service.status()
+            result = service.status(include_operations=True)
         elif command == "list":
             service.require_setup()
             result = service.list_skills()
@@ -128,6 +141,16 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements
         elif command == "versions":
             service.require_setup()
             result = {"versions": service.versions(args.skill_id)}
+        elif command == "install":
+            result = _install_cli(args, service)
+            if result is None:
+                return 7
+        elif command == "installed":
+            result = {"installations": service.list_installations()}
+        elif command == "uninstall":
+            result = _uninstall_cli(args, service)
+            if result is None:
+                return 7
         elif command == "help":
             if as_json:
                 _emit({"commands": list(_CLI_COMMANDS)}, as_json=True)
@@ -148,7 +171,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements
     except PackagePolicyError as exc:
         _emit({"ok": False, "error": str(exc), "category": 6}, as_json=as_json)
         return 6
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         return 7
     except Exception:  # pylint: disable=broad-exception-caught
         _emit(
@@ -188,6 +211,8 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
                 "Run `hermes wisdom setup` in your terminal to review the disclosure "
                 "and configure this profile."
             )
+        if command in {"install", "installed", "uninstall"}:
+            return _terminal_handoff(command)
         if command == "status":
             if args:
                 raise _SlashUsageError("Usage: /wisdom status")
@@ -216,6 +241,49 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
     return _unsupported_command()
 
 
+def _uninstall_cli(args, service):
+    """Preserve the reference terminal-only recoverable removal confirmation."""
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise PackagePolicyError("noninteractive uninstall requires --yes")
+        answer = input("Move this managed skill to recoverable Wisdom trash? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            return None
+    return service.uninstall(args.skill_id)
+
+
+def _install_cli(args, service):
+    """Reference CLI plan/apply contract; a JSON review never implies approval."""
+    if args.apply_receipt:
+        if args.reference or args.plan or args.update_mode is not None:
+            raise PackagePolicyError(
+                "--apply-receipt cannot change the reviewed reference or policy"
+            )
+        return service.install_apply(args.apply_receipt, accept_partial=args.accept_partial)
+    if not args.reference:
+        raise PackagePolicyError("install requires a reference or --apply-receipt")
+    plan = service.install_plan(args.reference, update_mode=args.update_mode)
+    if args.plan or args.json:
+        return plan
+    _emit(plan, as_json=False)
+    if not sys.stdin.isatty():
+        raise PackagePolicyError("noninteractive install requires --plan then --apply-receipt")
+    answer = input("Apply this exact reviewed install plan? [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        return None
+    return service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
+
+
+def _terminal_handoff(command):
+    instructions = {
+        "install": "hermes wisdom install <skill-id> --plan",
+        "installed": "hermes wisdom installed",
+        "uninstall": "hermes wisdom uninstall <skill-id>",
+    }
+    return ("Use the terminal for private installation review and confirmation.\n\n"
+            f"Run `{instructions[command]}`. Nothing has been changed.")
+
+
 def _emit(value: Any, *, as_json: bool) -> None:
     if as_json:
         print(
@@ -237,6 +305,9 @@ def _slash_help() -> str:
             "/wisdom versions <skill>",
             "/wisdom status",
             "/wisdom setup",
+            "/wisdom install (terminal instructions)",
+            "/wisdom installed (terminal instructions)",
+            "/wisdom uninstall (terminal instructions)",
             "/wisdom help",
         )
     )

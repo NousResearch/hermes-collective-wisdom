@@ -51,7 +51,7 @@ class _Service:
         self.calls.append(("setup", accept_disclosure))
         return {"configured": True}
 
-    def status(self):
+    def status(self, *, include_operations=False):  # pylint: disable=unused-argument
         self.calls.append(("status",))
         return {
             "configured": True,
@@ -164,7 +164,8 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
         args = parser.parse_args([command, *trailing])
         assert args.wisdom_command == command
         assert args.json is True
-    assert "install" not in parser.format_help()
+    assert "install" in parser.format_help()
+    assert "update" not in parser.format_help()
 
 
 @pytest.mark.parametrize(
@@ -190,7 +191,7 @@ def test_cli_dispatch_shapes_and_exit_parity(argv, expected_call, expected_key, 
 
 def test_cli_json_is_sorted_and_help_has_machine_shape(capsys):
     service = _Service()
-    service.status = lambda: {"z": 1, "a": 2}
+    service.status = lambda **_kwargs: {"z": 1, "a": 2}
 
     assert run_cli(_parser().parse_args(["status", "--json"]), service) == 0
     output = capsys.readouterr().out
@@ -240,7 +241,7 @@ def test_cli_declined_disclosure_returns_cancel_code(monkeypatch):
 @pytest.mark.parametrize("error", [WisdomNotFound("missing"), WisdomAuthError("login")])
 def test_cli_preserves_typed_error_exit_codes(error, capsys):
     service = _Service()
-    service.status = lambda: (_ for _ in ()).throw(error)
+    service.status = lambda **_kwargs: (_ for _ in ()).throw(error)
 
     assert run_cli(_parser().parse_args(["status", "--json"]), service) == error.exit_code
     assert json.loads(capsys.readouterr().out)["category"] == error.exit_code
@@ -313,8 +314,10 @@ def test_slash_help_advertises_only_read_commands_and_terminal_setup():
 
     for command in ("browse", "show", "versions", "status", "setup", "help"):
         assert f"/wisdom {command}" in output
-    for command in ("install", "update", "uninstall", "share", "review", "publish"):
+    for command in ("update", "share", "review", "publish"):
         assert f"/wisdom {command}" not in output
+    for command in ("install", "installed", "uninstall"):
+        assert f"/wisdom {command} (terminal instructions)" in output
 
 
 def test_slash_status_uses_an_explicit_shared_chat_whitelist():
@@ -477,7 +480,7 @@ def test_slash_drops_unsafe_portal_links():
     assert "user:secret" not in output
 
 
-@pytest.mark.parametrize("command", ["install x", "update --all", "share local"])
+@pytest.mark.parametrize("command", ["update --all", "share local"])
 def test_slash_rejects_mutation_commands_without_service_calls(command):
     service = _Service()
 
@@ -485,7 +488,7 @@ def test_slash_rejects_mutation_commands_without_service_calls(command):
 
     assert output.startswith("Unsupported")
     assert not service.calls
-    assert "/wisdom install" not in output
+    assert "/wisdom install (terminal instructions)" in output
 
 
 @pytest.mark.parametrize(
