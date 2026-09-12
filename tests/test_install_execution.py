@@ -10,7 +10,9 @@ import pytest
 
 from hermes_wisdom_plugin.errors import WisdomConflict, WisdomNotFound
 from hermes_wisdom_plugin.install_execution import InstallExecutor
+from hermes_wisdom_plugin.install_receipts import InstallReceipts
 from hermes_wisdom_plugin.package import PackagePolicyError
+from hermes_wisdom_plugin.store import WisdomStore
 
 
 OWNER = {
@@ -347,3 +349,28 @@ def test_unknown_scan_with_review_ack_can_install(executor):
 
     value.reviewer = AcknowledgedReviewer()
     assert value.apply("receipt-1")["installed"] is True
+
+
+def test_real_store_and_receipt_complete_one_owner_bound_install(tmp_path):
+    owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
+    store = WisdomStore(tmp_path / "state")
+    receipts = InstallReceipts(store, lambda: dict(owner))
+    plan = receipts.create({key: value for key, value in PLAN.items() if key != "receipt"})
+    client = Client()
+    value = InstallExecutor(
+        client,
+        store,
+        receipts,
+        Reviewer(),
+        Host(tmp_path / "skills"),
+        lambda: dict(owner),
+    )
+
+    result = value.apply(plan["receipt"])
+
+    assert receipts.outcome(plan["receipt"]) == result
+    assert value.installed() == [store.installation("skill-1", owner=owner)]
+    assert store.pending_operations() == []
+    assert store.operation(receipts.store.get_metadata(
+        "install_receipt:" + plan["receipt"]
+    )["operation_id"])["phase"] == "gateway_recorded"
