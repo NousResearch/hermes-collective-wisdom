@@ -8,13 +8,44 @@ automated, and live status remain in [FEATURES.md](FEATURES.md).
 
 ## Simplification Requirement (2026-09-12)
 
+### Active Slice: Terminal Setup and Safe Discovery
+
+Built from plugin `84d6fca`, behavioral reference `0924f7946b`, and tested against
+unmodified Agent `bf51fee548`. Continue plugin PR #1; no Agent dependency.
+Approximately six points are drawn from H1/F1/F2/F3/C1, not added to the budget.
+
+1. Account/client/store: refresh-free provider/pool credentials, scope-aware
+   enrolment, durable reserved installation identity and account-bound setup.
+2. Read controller: setup/status/list/browse/show/versions, CLI JSON/error parity,
+   bounded search, published metadata, shared-safe slash text and navigation.
+3. Native integration: existing CLI/slash registrations, captured profile root,
+   disposable host loading/dispatch, cancellation, packaging and CI evidence.
+
+Registration is unconditional while the plugin is enabled. It performs no auth
+read or background work. Each protected invocation reads current credentials;
+terminal setup explicitly accepts disclosure. Slash setup only gives terminal
+instructions, because the shared host callback supplies no caller metadata.
+
+All slash output uses the shared-chat whitelist, even in TUI. Device assessment,
+installation controls, publication, scanning, recovery/feed processing, tools,
+native buttons and proactive delivery remain later slices. Network-backed slash
+commands run in a short-lived read-only worker with a 25-second total budget;
+timeout, cancellation and unload terminate/reap it rather than leaving an HTTP
+thread running. This is command isolation, not a background task or scheduler.
+
+See [slice evidence](verification/terminal-discovery.md) for current verification
+and explicit reference-test deferrals. Real-account acceptance is not part of
+this slice. Do not reset or modify the existing demo.
+
+### Continuing First-Release Requirements
+
 Implement entitlement inside the installed/enabled plugin; do not modify core
 command dispatch, help, completion, or menus solely for Wisdom availability.
 Agent PR #108645 was rejected and is not a dependency of this release.
 Automatic hiding of installed but unavailable first-release commands is no
 longer required: a concise denied/unavailable response is acceptable.
 
-Read current host credentials at initialization and recheck profile, account,
+Read current host credentials at workflow initialization and recheck profile, account,
 organization, scopes, and expiry before protected operations. Initialization
 alone is not authorization. Background processing uses a lightweight local
 recheck; it must not refresh credentials for availability. Invalidate cached

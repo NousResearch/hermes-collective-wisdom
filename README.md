@@ -3,10 +3,27 @@
 Private development repository for extracting Collective Wisdom from Hermes
 Agent into an external, opt-in plugin.
 
-**Status: first-release extraction in progress; not ready for use.** The native
-entrypoint remains intentionally inert until plugin-side authorization and
-workflow wiring are integrated using existing host APIs. It registers no commands, tools, hooks, background
-tasks, or UI and does not read credentials, contact services, or change skills.
+**Status: development slice, terminal setup and read-only discovery.** The native
+entrypoint registers `hermes wisdom` and `/wisdom`, including while signed out.
+Credentials are resolved on invocation. Loading starts no polling, model tools,
+qualification, or proactive delivery, and does not change installed skills.
+
+After enabling the plugin and logging in with Wisdom access, run:
+
+```bash
+hermes wisdom setup
+hermes wisdom status --json
+hermes wisdom browse "incident"
+hermes wisdom show <skill-id> --json
+hermes wisdom versions <skill-id>
+```
+
+Setup requires explicit disclosure acceptance and read/install scopes, but does
+not install a skill. Noninteractive setup requires `--accept-disclosure`.
+`/wisdom browse`, `/wisdom show`, and `/wisdom versions` provide read-only,
+shared-chat-safe text. `/wisdom setup` only points to the terminal; it cannot
+accept disclosure. Install/update controls and rich platform cards remain later
+slices, not supported commands in this development build.
 
 Work is on `codex/first-release-foundation`. See the
 [execution tasks](docs/FIRST-RELEASE.md) and
@@ -74,9 +91,9 @@ hermes plugins install NousResearch/hermes-collective-wisdom --ref <full-40-char
 Private repository access must already be configured for the installer. Do not
 put a GitHub token in the plugin config or clone URL. Installation, plugin
 enablement, Wisdom entitlement, and disclosure/feature opt-in are distinct
-checks. Enabling this scaffold intentionally exposes no Wisdom functionality.
+checks. Account or organization changes require explicit terminal setup again.
 
-No plugin has been installed into the local demo as part of milestone 0.
+No plugin has been installed into a live profile as part of this slice.
 
 ## Documents
 

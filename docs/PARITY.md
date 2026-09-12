@@ -43,8 +43,9 @@ The first command extraction must preserve these distinctions from
 
 Slash `list` aliases `browse`; its human-readable result uses five-item pages.
 Search traverses at most 100 pages, detects repeated cursors, and case-folds
-slug/author fields. Slug resolution requires exactly one match. Preserve private
-installation/compatibility details only on private surfaces: group discovery
+slug/author fields. Slug resolution requires exactly one match. This development
+slice uses shared-chat-safe output for every slash invocation, including TUI:
+private installation/compatibility annotations are deferred. Group discovery
 must not read device state. Back navigation must survive browse/show/versions.
 
 CLI JSON is indented by two spaces, key-sorted, Unicode-preserving, and uses

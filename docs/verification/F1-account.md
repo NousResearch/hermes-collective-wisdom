@@ -77,6 +77,10 @@ explicitly skips. Normal plugin CI does not install Agent; its result must not
 be described as passing real-host integration. Without the Gateway checkout,
 the separate development artifact check also skips.
 
-Native registration remains inert. Commands, callbacks, approval invalidation,
-proactive session selection and all four-surface live acceptance remain pending.
+This is the foundation's historical result. The subsequent
+[terminal-discovery slice](terminal-discovery.md) adds native command wiring,
+scope-aware setup, and refresh-free host credential-pool fallback. It also uses
+the existing host `_nous_portal_base_url` resolver for Portal navigation; that
+narrow private API coupling is covered by real-host tests. Native callbacks,
+approval invalidation, proactive selection and four-surface live acceptance remain pending.
 No user profile was reset, logged in/out, installed into, or otherwise changed.
