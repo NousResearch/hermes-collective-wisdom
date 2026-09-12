@@ -28,6 +28,7 @@ class _HostAccountSnapshot:  # pylint: disable=too-many-instance-attributes
     expires_at: float
     not_before: float
     base_url: str
+    portal_base_url: str
     access_token: str = field(repr=False)
 
 
@@ -40,6 +41,7 @@ class _AccountBinding:
     account_id: str
     organization_id: str
     base_url: str
+    portal_base_url: str
 
 
 SnapshotReader = Callable[[], _HostAccountSnapshot]
@@ -67,6 +69,7 @@ class HermesAccountAdapter:
             account_id=snapshot.account_id,
             organization_id=snapshot.organization_id,
             base_url=snapshot.base_url,
+            portal_base_url=snapshot.portal_base_url,
         )
         self._read_snapshot = read_snapshot
         self._clock = clock
@@ -112,17 +115,40 @@ class HermesAccountAdapter:
 
         return self._binding.organization_id
 
+    @property
+    def base_url(self) -> str:
+        """Return the bound Wisdom Gateway base URL."""
+
+        return self._binding.base_url
+
+    @property
+    def portal_base_url(self) -> str:
+        """Return the current Portal URL after rechecking the bound account."""
+
+        try:
+            return self._current_bound_snapshot().portal_base_url
+        except Exception:  # pylint: disable=broad-exception-caught
+            raise WisdomAuthError(_UNAVAILABLE) from None
+
     def _current_bound_snapshot(self) -> _HostAccountSnapshot:
         snapshot = self._read_snapshot()
         _require_current_snapshot(snapshot, self._clock())
         expected = self._binding
-        if (
-            snapshot.profile_name != expected.profile_name
-            or snapshot.profile_home != expected.profile_home
-            or snapshot.account_id != expected.account_id
-            or snapshot.organization_id != expected.organization_id
-            or snapshot.base_url != expected.base_url
-        ):
+        ownership = (
+            snapshot.profile_name,
+            snapshot.profile_home,
+            snapshot.account_id,
+            snapshot.organization_id,
+        )
+        expected_ownership = (
+            expected.profile_name,
+            expected.profile_home,
+            expected.account_id,
+            expected.organization_id,
+        )
+        destinations = (snapshot.base_url, snapshot.portal_base_url)
+        expected_destinations = (expected.base_url, expected.portal_base_url)
+        if ownership != expected_ownership or destinations != expected_destinations:
             raise WisdomAuthError(_UNAVAILABLE)
         return snapshot
 
@@ -140,12 +166,12 @@ class HermesAccountAdapter:
             not_before=snapshot.not_before,
         )
 
-    def credentials(self) -> WisdomGatewayCredentials:
-        """Return one current bearer snapshot for a Gateway request."""
+    def credentials(self, *, scope: str = DEFAULT_SCOPE) -> WisdomGatewayCredentials:
+        """Return current request credentials when read and requested scopes remain granted."""
 
         try:
             snapshot = self._current_bound_snapshot()
-            if DEFAULT_SCOPE not in snapshot.scopes:
+            if not _nonblank(scope) or not {DEFAULT_SCOPE, scope}.issubset(snapshot.scopes):
                 raise WisdomAuthError(_UNAVAILABLE)
             return WisdomGatewayCredentials(
                 base_url=snapshot.base_url,
@@ -156,16 +182,22 @@ class HermesAccountAdapter:
             raise WisdomAuthError(_UNAVAILABLE) from None
 
 
-def _read_current_host_account() -> _HostAccountSnapshot:
+def _read_current_host_account() -> _HostAccountSnapshot:  # pylint: disable=too-many-locals
     """Read current Hermes state through the pinned, refresh-free host APIs."""
 
     get_provider_auth_state = import_module("hermes_cli.auth").get_provider_auth_state
+    resolve_portal_base_url = getattr(
+        import_module("hermes_cli.auth"), "_nous_portal_base_url"
+    )
     decode_jwt_claims = getattr(
         import_module("hermes_cli.auth_constants"), "_decode_jwt_claims"
     )
     get_active_profile_name = import_module("hermes_cli.profiles").get_active_profile_name
     get_hermes_home = import_module("hermes_constants").get_hermes_home
     is_guest_state = import_module("hermes_cli.anon_auth").is_guest_state
+    get_nous_auth_status_local = import_module(
+        "hermes_cli.auth_nous"
+    ).get_nous_auth_status_local
     resolve_sync_base_url = import_module(
         "tools.skills_sync_client"
     ).resolve_sync_base_url
@@ -173,11 +205,17 @@ def _read_current_host_account() -> _HostAccountSnapshot:
     profile_name = get_active_profile_name()
     profile_home = _resolved_home(get_hermes_home())
     state = get_provider_auth_state("nous")
+    if state is None:
+        state = get_nous_auth_status_local()
+        source = state.get("source") if isinstance(state, Mapping) else None
+        if not isinstance(source, str) or not source.startswith("pool:"):
+            raise RuntimeError("Nous credential pool is unavailable")
     if not isinstance(state, Mapping):
         raise RuntimeError("Nous credentials are missing")
     token = state.get("access_token")
     claims = decode_jwt_claims(token)
     base_url = resolve_sync_base_url()
+    portal_base_url = resolve_portal_base_url(dict(state))
 
     if profile_name != get_active_profile_name() or profile_home != _resolved_home(
         get_hermes_home()
@@ -190,6 +228,7 @@ def _read_current_host_account() -> _HostAccountSnapshot:
         token,
         claims,
         base_url,
+        portal_base_url,
         is_guest=is_guest_state(state),
     )
 
@@ -207,6 +246,7 @@ def _validated_snapshot(  # pylint: disable=too-many-arguments,too-many-locals,t
     token: object,
     claims: object,
     base_url: object,
+    portal_base_url: object,
     *,
     is_guest: bool = False,
     now: float | None = None,
@@ -244,6 +284,8 @@ def _validated_snapshot(  # pylint: disable=too-many-arguments,too-many-locals,t
         raise RuntimeError("Nous account binding is inconsistent")
     if not _nonblank(base_url):
         raise RuntimeError("Nous Gateway route is unavailable")
+    if not _nonblank(portal_base_url):
+        raise RuntimeError("Nous Portal route is unavailable")
 
     return _HostAccountSnapshot(
         profile_name=profile_name,
@@ -254,6 +296,7 @@ def _validated_snapshot(  # pylint: disable=too-many-arguments,too-many-locals,t
         expires_at=expires_at,
         not_before=not_before,
         base_url=base_url,
+        portal_base_url=portal_base_url,
         access_token=token,
     )
 

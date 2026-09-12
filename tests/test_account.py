@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_wisdom_plugin.account import (
     HermesAccountAdapter,
     _HostAccountSnapshot,
+    _read_current_host_account,
     _validated_snapshot,
 )
 from hermes_wisdom_plugin.client import WisdomClient
@@ -30,6 +32,7 @@ def snapshot(**overrides: object) -> _HostAccountSnapshot:
         "expires_at": NOW + 600,
         "not_before": 0.0,
         "base_url": "https://gateway.example",
+        "portal_base_url": "https://portal.example",
         "access_token": "secret-token",
     }
     values.update(overrides)
@@ -58,6 +61,8 @@ def test_current_binds_profile_account_and_supplies_client_contract() -> None:
     assert adapter.profile_home == "/profiles/work"
     assert adapter.account_id == "user-1"
     assert adapter.organization_id == "org-1"
+    assert adapter.base_url == "https://gateway.example"
+    assert adapter.portal_base_url == "https://portal.example"
     assert "secret-token" not in repr(adapter.__dict__["_binding"])
     assert not hasattr(adapter.__dict__["_binding"], "access_token")
     assert adapter.entitlement_claims().scopes == ["wisdom:read", "wisdom:publish"]
@@ -65,7 +70,7 @@ def test_current_binds_profile_account_and_supplies_client_contract() -> None:
     assert credentials.base_url == "https://gateway.example"
     assert credentials.organization_id == "org-1"
     assert credentials.access_token == "secret-token"
-    assert reader.calls == 3
+    assert reader.calls == 4
 
 
 @pytest.mark.parametrize(
@@ -76,6 +81,7 @@ def test_current_binds_profile_account_and_supplies_client_contract() -> None:
         ("account_id", "user-2"),
         ("organization_id", "org-2"),
         ("base_url", "https://other-gateway.example"),
+        ("portal_base_url", "https://other-portal.example"),
     ],
 )
 def test_profile_org_and_account_switches_fail_closed(field: str, value: str) -> None:
@@ -134,6 +140,23 @@ def test_current_scope_removal_is_projected_for_entitlement_denial() -> None:
     assert claims.scopes == []
     with pytest.raises(WisdomAuthError):
         adapter.credentials()
+
+
+def test_credentials_require_read_and_requested_scope() -> None:
+    """Every credential request requires both baseline read and its requested capability."""
+
+    reader = Reader(snapshot())
+    adapter = HermesAccountAdapter.current(_read_snapshot=reader, _clock=lambda: NOW)
+
+    assert adapter.credentials(scope="wisdom:publish").access_token == "secret-token"
+    reader.value = replace(reader.value, scopes=("wisdom:read",))
+    with pytest.raises(WisdomAuthError):
+        adapter.credentials(scope="wisdom:publish")
+    reader.value = replace(reader.value, scopes=("wisdom:publish",))
+    with pytest.raises(WisdomAuthError):
+        adapter.credentials(scope="wisdom:publish")
+    with pytest.raises(WisdomAuthError):
+        adapter.credentials(scope="")
 
 
 def test_scope_removal_blocks_client_before_network_io() -> None:
@@ -207,6 +230,139 @@ def test_current_rejects_missing_host_api_shape(monkeypatch) -> None:
         HermesAccountAdapter.current()
 
 
+def _host_modules(provider_state, pool_status, calls):
+    """Build the reviewed host API shape with deterministic local snapshots."""
+
+    claims = {
+        "provider-token": {
+            "sub": "provider-user",
+            "org_id": "provider-org",
+            "exp": NOW + 600,
+            "nbf": 0,
+            "wisdom_scopes": ["wisdom:read"],
+        },
+        "pool-token": {
+            "sub": "pool-user",
+            "org_id": "pool-org",
+            "exp": NOW + 600,
+            "nbf": 0,
+            "wisdom_scopes": ["wisdom:read"],
+        },
+    }
+
+    def read_provider(_provider):
+        calls.append("provider")
+        return provider_state
+
+    def read_pool_status():
+        calls.append("pool")
+        return pool_status
+
+    return {
+        "hermes_cli.auth": SimpleNamespace(
+            get_provider_auth_state=read_provider,
+            _nous_portal_base_url=lambda state: state.get("portal_base_url"),
+        ),
+        "hermes_cli.auth_constants": SimpleNamespace(
+            _decode_jwt_claims=lambda token: claims.get(token, {})
+        ),
+        "hermes_cli.profiles": SimpleNamespace(get_active_profile_name=lambda: "work"),
+        "hermes_constants": SimpleNamespace(get_hermes_home=lambda: "/profiles/work"),
+        "hermes_cli.anon_auth": SimpleNamespace(is_guest_state=lambda _state: False),
+        "hermes_cli.auth_nous": SimpleNamespace(
+            get_nous_auth_status_local=read_pool_status
+        ),
+        "tools.skills_sync_client": SimpleNamespace(
+            resolve_sync_base_url=lambda: "https://gateway.example"
+        ),
+    }
+
+
+def _provider_state(token: str = "provider-token") -> dict[str, str]:
+    """Return one valid persisted provider state."""
+
+    return {
+        "access_token": token,
+        "user_id": "provider-user",
+        "org_id": "provider-org",
+        "portal_base_url": "https://provider-portal.example",
+    }
+
+
+def _pool_status(*, source: str = "pool:primary") -> dict[str, object]:
+    """Return one valid refresh-free credential-pool projection."""
+
+    return {
+        "source": source,
+        "access_token": "pool-token",
+        "portal_base_url": "https://pool-portal.example",
+    }
+
+
+def test_present_provider_state_takes_precedence_over_pool(monkeypatch) -> None:
+    """A present provider record is authoritative and avoids pool status reads."""
+
+    calls = []
+    modules = _host_modules(_provider_state(), _pool_status(), calls)
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.account.import_module", lambda name: modules[name]
+    )
+    monkeypatch.setattr("hermes_wisdom_plugin.account.time.time", lambda: NOW)
+
+    result = _read_current_host_account()
+
+    assert calls == ["provider"]
+    assert result.account_id == "provider-user"
+    assert result.portal_base_url == "https://provider-portal.example"
+
+
+def test_invalid_present_provider_state_never_falls_back_to_pool(monkeypatch) -> None:
+    """An invalid present record denies instead of selecting another account."""
+
+    calls = []
+    modules = _host_modules({}, _pool_status(), calls)
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.account.import_module", lambda name: modules[name]
+    )
+    monkeypatch.setattr("hermes_wisdom_plugin.account.time.time", lambda: NOW)
+
+    with pytest.raises(RuntimeError):
+        _read_current_host_account()
+    assert calls == ["provider"]
+
+
+def test_absent_provider_state_uses_refresh_free_pool_snapshot(monkeypatch) -> None:
+    """Only an absent provider record permits the host's local pool fallback."""
+
+    calls = []
+    modules = _host_modules(None, _pool_status(), calls)
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.account.import_module", lambda name: modules[name]
+    )
+    monkeypatch.setattr("hermes_wisdom_plugin.account.time.time", lambda: NOW)
+
+    result = _read_current_host_account()
+
+    assert calls == ["provider", "pool"]
+    assert result.account_id == "pool-user"
+    assert result.organization_id == "pool-org"
+    assert result.portal_base_url == "https://pool-portal.example"
+
+
+def test_pool_fallback_rejects_non_pool_provenance(monkeypatch) -> None:
+    """A concurrent provider appearance cannot pass through the fallback path."""
+
+    calls = []
+    modules = _host_modules(None, _pool_status(source="auth_store_local"), calls)
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.account.import_module", lambda name: modules[name]
+    )
+
+    with pytest.raises(RuntimeError, match="pool is unavailable"):
+        _read_current_host_account()
+    assert calls == ["provider", "pool"]
+
+
 def test_core_validation_rejects_guest_missing_and_malformed_state() -> None:
     """Guest markers and malformed identity fields fail before projection."""
 
@@ -230,6 +386,7 @@ def test_core_validation_rejects_guest_missing_and_malformed_state() -> None:
         "secret-token",
         claims,
         "https://gateway.example",
+        "https://portal.example",
         now=NOW,
     )
     assert valid.account_id == "user-1"
@@ -255,6 +412,7 @@ def test_core_validation_rejects_guest_missing_and_malformed_state() -> None:
                 bad_state.get("access_token"),
                 bad_claims,
                 "https://gateway.example",
+                "https://portal.example",
                 now=NOW,
             )
 
@@ -266,6 +424,7 @@ def test_core_validation_rejects_guest_missing_and_malformed_state() -> None:
             "secret-token",
             claims,
             "https://gateway.example",
+            "https://portal.example",
             is_guest=True,
             now=NOW,
         )
