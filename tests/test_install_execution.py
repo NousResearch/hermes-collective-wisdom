@@ -1,5 +1,9 @@
 """Focused execution and crash-recovery tests for manual installation."""
 
+# Test doubles intentionally expose the executor's protocol-shaped methods.
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=redefined-outer-name,too-few-public-methods,protected-access
+
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_wisdom_plugin.errors import WisdomConflict, WisdomNotFound
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomNotFound
+from hermes_wisdom_plugin import install_execution
 from hermes_wisdom_plugin.install_execution import InstallExecutor
 from hermes_wisdom_plugin.install_receipts import InstallReceipts
 from hermes_wisdom_plugin.package import PackagePolicyError
@@ -40,6 +45,12 @@ PLAN = {
     "takedown_generation": 3,
     "update_mode": "AUTO_WITH_NOTICE",
     "compatibility": {"outcome": "compatible"},
+    "local_scan": {
+        "allowed": True,
+        "verdict": "allow",
+        "summary": "clean",
+        "findings": [],
+    },
 }
 
 
@@ -69,6 +80,7 @@ class Store:
         self.records = {}
         self.counter = 0
         self.lock = None
+        self.metadata = {}
 
     def acquire_operation_lock(self, entity_id):
         if self.lock:
@@ -121,6 +133,12 @@ class Store:
     def deactivate_install(self, skill_id):
         self.records[skill_id]["state"] = "inactive"
 
+    def get_metadata(self, key):
+        return self.metadata.get(key)
+
+    def set_metadata(self, key, value):
+        self.metadata[key] = dict(value)
+
 
 class Client:
     def __init__(self):
@@ -128,6 +146,16 @@ class Client:
         self.deactivate_error = None
         self.record_calls = []
         self.deactivate_calls = []
+
+    def installations(self, _installation_id):
+        return [{
+            "skill_id": "skill-1",
+            "installed_version": 2,
+            "latest_version": 3,
+            "update_mode": "REQUIRED",
+            "skill_state": "active",
+            "takedown_generation": 3,
+        }]
 
     def record_install(self, **values):
         self.record_calls.append(values)
@@ -149,10 +177,8 @@ class Host:
     def validate_target(self, path):
         assert Path(path).is_relative_to(self.skills_root)
 
-    def scan(self, directory, *, source, force):
-        assert ".hub/collective-wisdom" in Path(directory).as_posix()
-        assert source == "community"
-        assert force is False
+    def scan(self, directory):
+        assert Path(directory).is_relative_to(self.skills_root)
         return {"allowed": True, "verdict": "allow", "summary": "clean", "findings": []}
 
 
@@ -300,6 +326,36 @@ def test_uninstall_treats_server_not_found_as_already_inactive(executor):
     assert store.records["skill-1"]["state"] == "inactive"
 
 
+def test_duplicate_completed_uninstall_replays_recorded_outcome(executor):
+    value, store, client, _receipts, _current = executor
+    value.apply("receipt-1")
+
+    first = value.uninstall("skill-1")
+    second = value.uninstall("skill-1")
+
+    assert second == first
+    assert len(client.deactivate_calls) == 1
+    assert len([item for item in store.operations.values() if item["kind"] == "uninstall"]) == 1
+    assert value.installed() == []
+
+
+def test_installed_includes_owner_pending_before_local_ledger(executor, monkeypatch):
+    value, _store, _client, _receipts, _current = executor
+    monkeypatch.setattr(
+        install_execution.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("promotion interrupted")),
+    )
+    with pytest.raises(OSError, match="promotion"):
+        value.apply("receipt-1")
+
+    installed = value.installed()
+
+    assert len(installed) == 1
+    assert installed[0]["state"] == "pending"
+    assert installed[0]["pending_operation"] == {"kind": "install", "phase": "staged"}
+
+
 def test_partial_install_requires_explicit_acceptance_and_claims_no_readiness(executor):
     value, _store, _client, _receipts, _current = executor
     original = dict(PLAN["compatibility"])
@@ -330,8 +386,8 @@ def test_unknown_scan_requires_acknowledgement_in_reviewed_plan(executor):
     value.host.scan = lambda *_args, **_kwargs: {
         "allowed": None, "verdict": "unknown", "summary": "scanner unavailable", "findings": []
     }
-    with pytest.raises(PackagePolicyError, match="did not allow"):
-        value.apply("receipt-1")
+    with pytest.raises(PackagePolicyError, match="changed after review"):
+        value.apply("receipt-1", accept_partial=True)
     assert store.records == {}
 
 
@@ -341,14 +397,17 @@ def test_unknown_scan_with_review_ack_can_install(executor):
         "allowed": None, "verdict": "unknown", "summary": "scanner unavailable", "findings": []
     }
 
-    class AcknowledgedReviewer(Reviewer):
-        def verify(self, plan):
-            result = super().verify(plan)
-            result.plan["scan_review_acknowledged"] = True
-            return result
-
-    value.reviewer = AcknowledgedReviewer()
-    assert value.apply("receipt-1")["installed"] is True
+    original = PLAN["local_scan"]
+    PLAN["local_scan"] = {
+        "allowed": None,
+        "verdict": "unknown",
+        "summary": "scanner unavailable",
+        "findings": [],
+    }
+    try:
+        assert value.apply("receipt-1", accept_partial=True)["installed"] is True
+    finally:
+        PLAN["local_scan"] = original
 
 
 def test_real_store_and_receipt_complete_one_owner_bound_install(tmp_path):
@@ -369,8 +428,163 @@ def test_real_store_and_receipt_complete_one_owner_bound_install(tmp_path):
     result = value.apply(plan["receipt"])
 
     assert receipts.outcome(plan["receipt"]) == result
-    assert value.installed() == [store.installation("skill-1", owner=owner)]
+    installed = value.installed()
+    assert len(installed) == 1
+    assert installed[0]["skill_id"] == "skill-1"
+    assert installed[0]["latest_version"] == 3
+    assert installed[0]["skill_state"] == "active"
+    assert installed[0]["effective_update_mode"] == "REQUIRED"
+    assert installed[0]["modified"] is False
+    assert installed[0]["pending_operation"] is None
+    assert installed[0]["setup_execution_authorized"] is False
+    assert installed[0]["ready_to_use"] is None
     assert store.pending_operations() == []
     assert store.operation(receipts.store.get_metadata(
         "install_receipt:" + plan["receipt"]
     )["operation_id"])["phase"] == "gateway_recorded"
+
+
+def test_pending_install_must_match_exact_receipt(executor):
+    value, _store, client, receipts, _current = executor
+    client.record_error = RuntimeError("offline")
+    assert value.apply("receipt-1")["pending"] is True
+    second = {**PLAN, "receipt": "receipt-2"}
+    receipts.load = lambda receipt, allow_started=False: dict(
+        second if receipt == "receipt-2" else PLAN
+    )
+
+    with pytest.raises(PackagePolicyError, match="another install receipt"):
+        value.apply("receipt-2")
+
+
+def test_pending_install_blocks_uninstall_for_same_skill(executor):
+    value, _store, client, _receipts, _current = executor
+    client.record_error = RuntimeError("offline")
+    assert value.apply("receipt-1")["pending"] is True
+
+    with pytest.raises(PackagePolicyError, match="another managed operation"):
+        value.uninstall("skill-1")
+
+
+def test_exact_staging_path_is_bound_to_operation_id(executor):
+    value, store, client, _receipts, _current = executor
+    client.record_error = RuntimeError("offline")
+    assert value.apply("receipt-1")["pending"] is True
+    operation = store.pending_operations()[0]
+    operation["phase"] = "staged"
+    operation["payload"]["staging_path"] = str(
+        Path(value.host.skills_root) / ".hub" / "collective-wisdom" / "other-operation"
+    )
+
+    with pytest.raises(PackagePolicyError, match="staging path"):
+        value.apply("receipt-1")
+
+
+def test_staged_retry_rechecks_new_partial_compatibility(executor, monkeypatch):
+    value, _store, _client, _receipts, _current = executor
+    real_replace = install_execution.os.replace
+    monkeypatch.setattr(
+        install_execution.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("promotion interrupted")),
+    )
+    with pytest.raises(OSError, match="promotion"):
+        value.apply("receipt-1")
+    monkeypatch.setattr(install_execution.os, "replace", real_replace)
+
+    class NewlyPartial(Reviewer):
+        def verify(self, plan):
+            result = super().verify(plan)
+            result.plan["compatibility"] = {"outcome": "partial"}
+            return result
+
+    value.reviewer = NewlyPartial()
+    with pytest.raises(PackagePolicyError, match="accept-partial"):
+        value.apply("receipt-1")
+
+
+def test_staging_write_interruption_is_reconstructed_on_retry(executor, monkeypatch):
+    value, _store, _client, _receipts, _current = executor
+    real_write = install_execution._write_staging
+    failed = False
+
+    def fail_once(staging, files):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("write interrupted")
+        real_write(staging, files)
+
+    monkeypatch.setattr(install_execution, "_write_staging", fail_once)
+    with pytest.raises(OSError, match="write interrupted"):
+        value.apply("receipt-1")
+
+    assert value.apply("receipt-1")["installed"] is True
+
+
+def test_gateway_recorded_crash_replays_payload_without_second_post(executor, monkeypatch):
+    value, store, client, receipts, _current = executor
+    real_complete = receipts.complete
+    failed = False
+
+    def fail_once(receipt, result):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("receipt commit interrupted")
+        real_complete(receipt, result)
+
+    monkeypatch.setattr(receipts, "complete", fail_once)
+    with pytest.raises(OSError, match="receipt commit"):
+        value.apply("receipt-1")
+    assert store.pending_operations()[0]["phase"] == "gateway_recorded"
+
+    assert value.apply("receipt-1")["installed"] is True
+    assert len(client.record_calls) == 1
+
+
+def test_auth_failure_is_never_returned_as_pending(executor):
+    value, _store, client, _receipts, _current = executor
+    client.record_error = WisdomAuthError("reauthentication required")
+
+    with pytest.raises(WisdomAuthError, match="reauthentication"):
+        value.apply("receipt-1")
+
+
+def test_pending_error_redacts_unexpected_exception(executor):
+    value, _store, client, _receipts, _current = executor
+    client.record_error = RuntimeError("secret transport detail")
+
+    result = value.apply("receipt-1")
+
+    assert result["pending"] is True
+    assert "secret" not in result["error"]
+    assert result["files_installed"] is True
+    assert result["local_state"] == "active"
+
+
+def test_staging_parent_symlink_is_rejected(executor, tmp_path):
+    value, _store, _client, _receipts, _current = executor
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    hub = Path(value.host.skills_root) / ".hub"
+    hub.parent.mkdir(parents=True)
+    hub.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PackagePolicyError, match="symlink"):
+        value.apply("receipt-1")
+
+
+def test_installed_rechecks_owner_after_gateway_read(executor):
+    value, _store, client, _receipts, current = executor
+    value.apply("receipt-1")
+    real_installations = client.installations
+
+    def switch_owner(installation_id):
+        result = real_installations(installation_id)
+        current["value"] = {**OWNER, "account_id": "account-2"}
+        return result
+
+    client.installations = switch_owner
+    with pytest.raises(PackagePolicyError, match="owner changed"):
+        value.installed()
