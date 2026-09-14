@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
-import shutil
 import stat
 import unicodedata
 from dataclasses import dataclass
@@ -406,7 +406,7 @@ def _safe_relative(path: Path, root: Path) -> str:
     return rel
 
 
-def _validate_tree(  # pylint: disable=too-many-branches
+def _validate_tree(  # pylint: disable=too-many-branches,too-many-statements,too-many-locals
     root: Path, *, require_manifest: bool = True
 ) -> list[Path]:
     if not root.is_dir() or root.is_symlink():
@@ -415,6 +415,7 @@ def _validate_tree(  # pylint: disable=too-many-branches
     collision_keys: set[str] = set()
     total = 0
     file_count = 0
+    skill_body: bytes | None = None
     for path in sorted(root.rglob("*")):
         rel = _safe_relative(path, root)
         if path.is_symlink():
@@ -447,10 +448,13 @@ def _validate_tree(  # pylint: disable=too-many-branches
                 raise PackagePolicyError(
                     f"package-manager manifest is not allowed: {rel}"
                 )
+            body = _read_regular_file(
+                path, display_path=rel, max_bytes=MAX_FILE_BYTES
+            )
             file_count += 1
             if file_count > MAX_FILES:
                 raise PackagePolicyError(f"package exceeds {MAX_FILES} files")
-            size = path.stat().st_size
+            size = len(body)
             if size > MAX_FILE_BYTES:
                 raise PackagePolicyError(f"file exceeds {MAX_FILE_BYTES} bytes: {rel}")
             total += size
@@ -458,9 +462,12 @@ def _validate_tree(  # pylint: disable=too-many-branches
                 raise PackagePolicyError(
                     f"package exceeds {MAX_TREE_BYTES} total bytes"
                 )
-            if path.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+            mode = path.lstat().st_mode
+            if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
                 raise PackagePolicyError(f"executable content is not allowed: {rel}")
-            _validate_text_bytes(path.read_bytes(), path=rel)
+            _validate_text_bytes(body, path=rel)
+            if rel == "SKILL.md":
+                skill_body = body
             entries.append(path)
     if not (root / "SKILL.md").is_file():
         raise PackagePolicyError("package requires exactly one root SKILL.md")
@@ -468,7 +475,9 @@ def _validate_tree(  # pylint: disable=too-many-branches
         raise PackagePolicyError(
             "package requires exactly one root skill.manifest.json"
         )
-    skill_text = (root / "SKILL.md").read_text(encoding="utf-8")
+    if skill_body is None:
+        raise PackagePolicyError("package requires exactly one root SKILL.md")
+    skill_text = skill_body.decode("utf-8")
     if FORBIDDEN_REFERENCE_RE.search(skill_text):
         raise PackagePolicyError(
             "SKILL.md references active scripts/templates; create an explicit instruction-only fork"
@@ -476,14 +485,93 @@ def _validate_tree(  # pylint: disable=too-many-branches
     return entries
 
 
-def _source_fingerprint(source: Path) -> str:
+def _read_regular_file(
+    path: Path, *, display_path: str, max_bytes: int | None = None
+) -> bytes:
+    """Read one unchanged regular file without following a final symlink."""
+
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise PackagePolicyError(f"special filesystem content is not supported: {display_path}")
+    if before.st_nlink != 1:
+        raise PackagePolicyError(f"hard-linked content is not supported: {display_path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PackagePolicyError(f"source changed while reading: {display_path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        def identity(value):
+            """Return the stable stat fields required for this open/read check."""
+
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_size,
+                value.st_mtime_ns,
+            )
+        if identity(opened) != identity(before):
+            raise PackagePolicyError(f"source changed while reading: {display_path}")
+        if max_bytes is not None and opened.st_size > max_bytes:
+            raise PackagePolicyError(f"file exceeds {max_bytes} bytes: {display_path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            body = stream.read(max_bytes + 1 if max_bytes is not None else -1)
+        if max_bytes is not None and len(body) > max_bytes:
+            raise PackagePolicyError(f"file exceeds {max_bytes} bytes: {display_path}")
+        after = path.lstat()
+        if identity(after) != identity(opened):
+            raise PackagePolicyError(f"source changed while reading: {display_path}")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def source_fingerprint(source: Path) -> str:
+    """Hash the exact regular source files while rejecting unsafe entries."""
+
+    if source.is_symlink() or not source.is_dir():
+        raise PackagePolicyError("skill root must be a regular directory")
     records: list[str] = []
     for path in sorted(source.rglob("*")):
-        if path.is_file() and not path.is_symlink():
+        if path.is_symlink():
+            raise PackagePolicyError(
+                f"symlinks are not supported: {path.relative_to(source).as_posix()}"
+            )
+        if path.is_file():
+            relative = path.relative_to(source).as_posix()
             records.append(
-                f"{path.relative_to(source).as_posix()} {sha256_address(path.read_bytes())}\n"
+                f"{relative} {sha256_address(_read_regular_file(path, display_path=relative))}\n"
+            )
+        elif not path.is_dir():
+            raise PackagePolicyError(
+                "special filesystem content is not supported: "
+                f"{path.relative_to(source).as_posix()}"
             )
     return sha256_address("".join(records).encode("utf-8"))
+
+
+def read_validated_package_files(root: Path) -> list[tuple[str, str, bytes]]:
+    """Read one complete safe package without hiding unsafe overlay entries."""
+
+    paths = _validate_tree(root)
+    files = [
+        (
+            _safe_relative(path, root),
+            "file",
+            _read_regular_file(
+                path,
+                display_path=_safe_relative(path, root),
+                max_bytes=MAX_FILE_BYTES,
+            ),
+        )
+        for path in paths
+    ]
+    after = [_safe_relative(path, root) for path in _validate_tree(root)]
+    if after != [path for path, _mode, _body in files]:
+        raise PackagePolicyError("prepared package changed while reading")
+    return files
 
 
 def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
@@ -500,11 +588,13 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
 ) -> PreparedPackage:
     """Create a guarded private overlay and its canonical wire objects."""
 
+    if source.is_symlink():
+        raise PackagePolicyError("skill root must be a regular directory")
     source = source.resolve()
-    source_hash = _source_fingerprint(source)
+    source_hash = source_fingerprint(source)
     target = overlay_root / source_hash.removeprefix("sha256:")
     if target.exists():
-        shutil.rmtree(target)
+        raise PackagePolicyError("prepared overlay already exists; review the existing draft")
     target.mkdir(parents=True, mode=0o700)
     # Copy only validated allowlisted bytes. Validation happens first so an
     # unsupported referenced file never disappears silently from the package.
@@ -516,8 +606,11 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
             dest.mkdir(parents=True, exist_ok=True)
         elif path.is_file():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(path.read_bytes())
+            relative = path.relative_to(source).as_posix()
+            dest.write_bytes(_read_regular_file(path, display_path=relative))
             dest.chmod(0o600)
+    if source_fingerprint(source) != source_hash:
+        raise PackagePolicyError("source changed while the review overlay was being prepared")
     if editorial_name is not None or editorial_description is not None:
         if editorial_applier is None:
             raise PackagePolicyError("plugin editorial metadata applier is required")

@@ -60,9 +60,9 @@ Source view types and text rendering are in `gateway/wisdom_command.py`:
 commands and Portal URLs in text fallback; never print opaque callback payloads.
 
 Install/update controls are deferred from an initial read-only development
-slice, **not excluded from release one**. Their source tests remain pending and
+slice, **not excluded from release**. Their source tests remain pending and
 must pass again when consumption is integrated. Do not claim browse parity or
-ship a release-one browse card without the planned install/review controls.
+ship a release browse card without the planned install/review controls.
 
 ## Extraction Units and Reference Tests
 
@@ -99,11 +99,183 @@ depends on an unported workflow is deferred, not deleted for convenience.
 The [manual installation record](verification/manual-installation.md) identifies
 the selected install/client/compatibility/uninstall units and their replacement
 boundary tests. Terminal review, receipts, recovery and removal are this slice's
-scope. Reference native-consent, setup execution, update-worker and callback
+scope. Reference native-consent, update-worker and callback
 tests remain deferred, not removed or counted as passing. The `installed` CLI
 parser is an intentional correction of the reference parser gap. Shared slash
 installation remains a terminal handoff, so native TUI mutation parity is not
 complete.
+
+### Terminal Installed Setup (C3)
+
+`setup_document.py` selectively adapts the reference
+`hermes_wisdom/agent_led/setup_document.py` format and setup schema; inspection,
+prerequisite/readiness distinctions and explicit uncertain recovery draw from
+`installed_setup.py`, `setup_handoff.py`, and `setup_execution.py`. The plugin
+uses its own existing hardened receipt store rather than copying the reference
+mediation/queue system. No reference test family is counted wholesale as passed.
+
+Replacement coverage lives in `test_setup_document.py`, `test_installed_setup.py`,
+`test_setup_execution.py` and `test_host_setup_integration.py`, with CLI/runtime
+and install-exclusion cases in their existing suites. The real-host probe checks
+approval refusal, single launch, acknowledgement loss, fresh-process status and
+an installed-package setup/verification journey with durable reopened state.
+It uses synthetic ownership and temporary markers, not Gateway/live login.
+
+The pinned host's foreground runner retries after execution exceptions, so setup
+instead uses its guarded background spawn once and waits for a validated result.
+Missing or host-redacted process identity/content remains unknown, never a reason
+to weaken binding or replay. Source native setup consent, model-authored proposals,
+mediation queue/cards, callbacks and TUI/Telegram/Slack/Desktop/Dashboard journeys
+remain deferred. Terminal receipt coverage does not close those parity gates.
+
+### Terminal Local Contribution Preparation
+
+`contribution_review.py` selectively adapts the reference local-preparation
+boundary from `hermes_wisdom/service.py`, with the package/security kernel,
+editorial metadata handling and fixed professionalism schema in this plugin.
+`suggest` resolves one explicitly named local skill, creates an owner-private
+overlay, records complete hash-bound preparation output, and never submits it.
+Prepared draft reopening is bound to the complete enrollment owner. Unsafe or
+changed source/overlay bytes fail closed; model-authored copy and assessment do
+not certify technical quality, security, or publication eligibility.
+
+The bounded plugin-only continuation adapts reference
+`WisdomService.save_prepared` and its `test_service.py` save journey. The new
+terminal `prepared inspect` command exports one complete save-ready JSON object;
+`prepared save` retains the reference complete-existing-file-set restriction;
+and `prepared review` re-runs exact checks. Plugin boundary adaptations add full
+owner checking before byte/model disclosure, bounded no-follow input reads, a
+fresh UUID overlay, and one durable hash/state/owner compare-and-swap. This is a
+new terminal adapter over reference service behavior: no old terminal command
+parity is claimed, because the reference save entry was a web route.
+
+Replacement coverage lives in `test_contribution_review.py`, `test_package.py`,
+`test_store.py`, `test_commands.py`, `test_runtime.py`, and
+`test_host_commands_integration.py`. The pinned-host test preserves the actual
+synchronous default `PluginLlm`/auxiliary caller and configured provider/model,
+replacing only the OpenAI HTTP transport. It verifies that no request occurs
+without explicit `--allow-model-review`; with authorization, the configured
+route receives the exact prepared package and owner description with no tools,
+and real returned route provenance is retained. The same pinned-host recording
+exercises inspect -> edit -> save -> local recheck -> authorized model re-review
+without replacing `_sync_caller`. It separately verifies zero Wisdom Gateway
+submission and unchanged source bytes.
+
+This closes only local preparation plus bounded complete-existing-file-set
+terminal editing evidence. It does not implement or
+accept the reference submit/approve/decline flow, private server draft, direct or
+moderated publication policy, publication status cards, recovery/outboxes,
+publisher ledger, qualification, file add/remove/rename or visibility UI, native
+presentation, or live/deployed paths.
+No whole M5 feature or reference test family is claimed complete.
+
+### Terminal Policy-Routed Publication
+
+`publication.py` is a bounded adaptation of publication review, owner approval,
+policy routing, and recovery behavior from Agent
+`0924f7946b937c2ed02d083fc26752d577c54b3b`:
+`hermes_wisdom/share_queue.py`, `hermes_wisdom/agent_led/share_flow.py`, and
+`hermes_wisdom/publication_cards.py`. Reference navigation and assertions came
+from `tests/wisdom/test_share_queue.py`, `test_share_staging.py`, and
+`test_publication_recovery.py`; only terminal-relevant cases were adapted.
+
+The plugin-specific boundary persists an immutable reviewed byte closure,
+owner/policy-bound receipt, remote draft identity, ambiguous-effect phases,
+decline intent, and terminal projections in its existing store. Gateway contract
+types and paths are pinned separately; the local client does not select a
+publication mode. Replacement evidence is in `test_publication.py`,
+`test_client_publication.py`, and the registered-host publication journey in
+`test_host_commands_integration.py`. These tests do not claim wholesale passage
+of any reference family or publication-card renderer coverage.
+
+### Terminal Named-Skill Manual Update (U1)
+
+`update_review.py` and `update_execution.py` selectively adapt the reference
+named-skill check/update behavior while retaining this plugin's owner-bound
+receipts, descriptor-held operation locks, host guards and durable journal.
+`check` is read-only and distinguishes absent authority from malformed or
+otherwise unverifiable Gateway rows. `update --plan` binds the prior managed
+record, actual local snapshot, exact incoming package, authority/policy and any
+explicit edited-copy destination; apply-time flags cannot widen that receipt.
+
+Directory promotion uses atomic rename; the journal recovers the gap between
+moving the old tree and promoting the new one. This is not a cross-system
+transaction. The exact prior tree is retained for recovery. Modified
+bytes block by default and, only after explicit review, are durably copied via
+host-excluded `.hub` staging before promotion to the reviewed unmanaged path.
+Recovery validates the ledger and target bytes permitted at each journal phase,
+rechecks owner/lease/authority before effects, accepts a server-clamped policy
+only after evidence of a committed target version, and quarantines target bytes
+after terminal authority rejection. Concurrent/unknown errors remain pending.
+Final acknowledgement retry cannot repeat the Gateway commit or file mutation.
+Review and recovery require the canonical owner/organization/slug managed path;
+redirected staging/archive ancestors are rejected before filesystem mutation.
+
+Replacement coverage lives in `test_update_review.py`,
+`test_update_execution.py`, `test_host_update_integration.py`, and the existing
+command/runtime/setup suites. The pinned-host CLI journey installs and verifies
+v1, edits it, interrupts preservation and target promotion, retries the same
+receipt, proves exact-copy preservation and hidden partial staging, rejects an
+old v1 setup receipt, separately verifies v2, and reopens v2 ready in a fresh
+process. That U1 evidence does not itself prove automatic updates, Not Now, native rich
+controls, feed/delivery orchestration, qualification, or live-surface parity; those are
+tracked and evidenced by their own gates.
+
+### Explicit Automatic Update and Mediation Maintenance
+
+`automatic_updates.py` selectively adapts pinned legacy
+`hermes_wisdom/consumption.py` policy admission and bounded managed-install iteration,
+while all file effects remain in this plugin's hardened `UpdateReviewer` and
+`UpdateExecutor`. The only modes are `MANUAL`, `AUTO_WITH_NOTICE`, and `REQUIRED`.
+Policy authorization is recorded separately from human confirmation; authority, package,
+hash, compatibility, local scan, owner, and path facts are revalidated before mutation.
+The approved legacy REQUIRED fork-and-converge rule is preserved through the executor's
+exact recovery-tree copy before incoming promotion. A rotating owner-bound cursor prevents
+later installations from starving across bounded passes.
+
+Completed automatic operations create an idempotent local `installation_updated` feed
+projection. The operation journal is the repair authority after a notice-write crash, so
+repair cannot repeat file or Gateway effects. `mediation_producer.py` adapts the reference
+feed/weekly candidate selection into owner-bound queue references only after fresh policy,
+mute, suppression, and quota gates. Existing owner-scoped queue rows are removed before the
+eight-item feed bound, so retries reach later feed and weekly work while preserving weekly
+quota/cooldown eligibility. Counts come from atomic inserts and native seen/delivery state is
+unchanged. It deliberately stops before assessment or delivery.
+Coverage lives in `test_automatic_maintenance.py`, `test_mediation_producer.py`, and the
+real registered command/HTTP journey in `test_host_commands_integration.py`; no legacy
+filesystem executor, fabricated session, model consent, scheduler, or live send is copied.
+
+### Native Slack/Telegram Browse, Install, Update, Setup, Publication, and Tools
+
+The plugin projects native browse/detail/version cards, exact-version install,
+named-skill manual update, separately approved setup/verification, and publication
+review/status controls through native Slack and Telegram. Publication outcomes and
+trusted Portal links update the original card. Exact paged package/file inspection,
+receipt acknowledgements, `Not Now`, explicit reopen, renderer-loss fallback, and
+callback route/card ownership remain shared controller behavior. Active-runtime
+serialization is keyed by physical route/message; delivery CAS records the network
+outcome but does not claim distributed ordering across processes.
+
+Pinned-host tests use real plugin discovery, gateway command admission, ordinary
+human lifecycle hooks, scoped model routing, Slack Bolt/PTB callback dispatch, the
+shared controller/store/filesystem, and recording transports. Registered
+`wisdom_inspect` and `present_wisdom_consent` retain read/queue-only boundaries and
+revalidate the live admitted private human route. Candidate inspection requires the
+exact qualification owner marker and a current non-tombstoned source; same-org
+reenrollment cannot disclose the prior member's local candidate.
+
+`wisdom_inbox` now projects owner-bound assessments, unresolved native reviews,
+and installed setup inspection references. The admitted model route fences native
+reviews to its session/actor/platform/address; terminal inspection may see the
+exact enrolled owner's reviews across private routes. Fixed mode retains explicit
+work while hiding proactive assessments. Native reviews use the actual
+`wisdom_consent` authority rather than a second consent table; manually created
+reviews have no assessment ID and none is fabricated. Plans, receipts, commands,
+and callback authority are excluded. This is read-only projection parity, not
+assessment generation or proactive delivery. See the
+[private inbox gate](TESTING.md#private-inbox-integration--2026-09-14). Native TUI, proactive
+mediation presentation, Desktop, Dashboard, and all live gates remain open. Explicit
+bounded automatic maintenance is covered separately; no background scheduler is claimed.
 
 - Pure contract validation, hashing and deterministic state rules stay in the
   plugin with upstream attribution and their original behavioral tests.
@@ -126,7 +298,7 @@ complete.
 | Reference material | Reason | Required replacement evidence |
 | --- | --- | --- |
 | Legacy SQLite migrations/backfills and old callback token acceptance | Fresh start was explicitly approved | Fresh-schema/reopen/version rejection tests; restart and recovery still required |
-| Desktop/Dashboard implementation and their surface tests | M9-M12 follow-up, not first release | Retain all existing feature records and estimates |
+| Desktop/Dashboard implementation and their surface tests | Sequenced after M0-M8 core work; required for release | Retain all existing feature records, historical estimates, and deployed acceptance |
 | Full OpenAPI snapshot | Large development artifact, not required runtime source | Immutable revision plus SHA verification; package runtime schemas/vectors |
 | Core Wisdom registration and platform replacement glue | External plugin architecture | Real supported plugin dispatch, lifecycle, native callback, unload and denial tests |
 | Duplicated fixture setup | Consolidation only where behavior is equivalent | Original assertions retained; distinct security failures remain separate cases |
@@ -144,3 +316,6 @@ revisions; preserve existing canonical Unicode/stored-address/recovery checks.
 The read token needs access to both private Portal and plugin repositories.
 Gateway workflow availability on its default branch and repository-secret
 configuration are administrative dependencies, not completed application tests.
+Gateway PR 255 and Portal PR 1022 are verified merged, but merge evidence is not
+release acceptance. Final proof must exercise the deployed endpoints with
+Shannon's Nous Portal login; mocks and local scripts remain supporting evidence.

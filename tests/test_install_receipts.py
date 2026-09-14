@@ -4,6 +4,8 @@
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -83,6 +85,43 @@ def test_redirected_storage_denied(receipt_state, tmp_path, redirect):
         os.link(path, tmp_path / "duplicate")
     with pytest.raises(WisdomValidationError):
         receipts.load(plan["receipt"])
+
+
+def test_fifo_receipt_is_rejected_without_blocking(receipt_state):
+    store, owner, _, receipts = receipt_state
+    plan = _plan(receipts)
+    path = store.root / "plans" / (plan["receipt"] + ".json")
+    path.unlink()
+    os.mkfifo(path)
+    script = """
+import json
+import sys
+
+from hermes_wisdom_plugin.errors import WisdomValidationError
+from hermes_wisdom_plugin.install_receipts import InstallReceipts
+from hermes_wisdom_plugin.store import WisdomStore
+
+store = WisdomStore(sys.argv[1])
+owner = json.loads(sys.argv[2])
+try:
+    InstallReceipts(store, lambda: owner).load(sys.argv[3])
+except WisdomValidationError:
+    print("rejected")
+else:
+    raise SystemExit("FIFO receipt was accepted")
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(store.root), json.dumps(owner), plan["receipt"]],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    finally:
+        path.unlink(missing_ok=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "rejected\n"
 
 
 def test_accepted_operation_can_recover_after_expiry_and_replay_result(receipt_state):

@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,7 +59,7 @@ def test_register_is_lazy_and_owns_both_command_handles(tmp_path, monkeypatch) -
             runtime_module.HermesAccountAdapter, "current",
             lambda: (_ for _ in ()).throw(AssertionError("registration read credentials")),
         )
-        entries = {}
+        entries: dict[str, Any] = {"hooks": [], "tools": {}, "config": {}}
         disposed = []
 
         def register_cli(name, _help, setup, handler):
@@ -69,16 +70,72 @@ def test_register_is_lazy_and_owns_both_command_handles(tmp_path, monkeypatch) -
             entries["slash"] = (name, handler)
             return SimpleNamespace(dispose=lambda: disposed.append("slash"))
 
+        def register_tool(**definition):
+            entries["tools"][definition["name"]] = definition
+            return SimpleNamespace(dispose=lambda: disposed.append(definition["name"]))
+
+        def set_config(key, value):
+            entries["config"][key] = value
+
         context = SimpleNamespace(
             state=SimpleNamespace(data_dir=tmp_path / "plugin-data" / "wisdom"),
-            register_cli_command=register_cli, register_command=register_slash,
+            register_cli_command=register_cli,
+            register_command=register_slash,
+            register_tool=register_tool,
+            register_hook=lambda name, callback: (
+                entries["hooks"].append((name, callback))
+                or SimpleNamespace(dispose=lambda: disposed.append(name))
+            ),
+            register_auxiliary_task=lambda key, **details: (
+                entries.update(auxiliary=(key, details))
+                or SimpleNamespace(dispose=lambda: disposed.append(key))
+            ),
+            register_platform_handler=lambda name, callback: entries.update(
+                slack=(name, callback)
+            ),
+            register_telegram_handler=lambda callback: entries.update(telegram=callback),
+            get_config=lambda key, default=None: (
+                True if key == "qualification.allow_model_review"
+                else entries["config"].get(key, default)
+            ),
+            set_config=set_config,
+            llm=object(),
+            spawn_task=lambda *_args, **_kwargs: None,
             on_unload=lambda callback: entries.update(unload=callback),
         )
         assert plugin.register(context) is None
+        assert entries["auxiliary"][0] == "hermes_collective_wisdom_refinement"
         assert entries["cli"][0] == entries["slash"][0] == "wisdom"
+        assert [name for name, _callback in entries["hooks"]] == [
+            "pre_gateway_dispatch", "pre_llm_call", "on_skill_lifecycle", "on_session_end"
+        ]
+        assert entries["slack"][0] == "slack"
+        assert callable(entries["telegram"])
+        assert set(entries["tools"]) == {
+            "wisdom_inbox", "wisdom_inspect", "present_wisdom_consent",
+        }
+        assert all(
+            definition["toolset"] == "skills"
+            and callable(definition["handler"])
+            and callable(definition["check_fn"])
+            for definition in entries["tools"].values()
+        )
+        owner = entries["slash"][1].__self__
+        service = owner._service()  # pylint: disable=protected-access
+        monkeypatch.setattr(service, "native_owner", lambda: {"organization_id": "org"})
+        assert service.notification_mode() == "agent"
+        service.set_notification_mode("fixed")
+        assert entries["config"] == {"notifications.delivery_mode": "fixed"}
+        assert service.notification_mode() == "fixed"
+        service.close()
         assert not list(tmp_path.iterdir())
         entries["unload"]()
         entries["unload"]()
-        assert disposed == ["slash", "cli"]
+        assert disposed == [
+            "slash", "cli", "present_wisdom_consent", "wisdom_inspect", "wisdom_inbox",
+            "on_session_end", "on_skill_lifecycle",
+            "pre_llm_call", "pre_gateway_dispatch",
+            "hermes_collective_wisdom_refinement",
+        ]
     finally:
         unload_native_plugin(module_name)

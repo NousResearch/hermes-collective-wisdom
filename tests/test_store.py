@@ -137,8 +137,94 @@ def test_profile_store_reopens_full_current_plugin_schema(tmp_path: Path):
         marker = db.execute(
             "SELECT family,version,typeof(version) FROM plugin_schema_identity"
         ).fetchone()
-    assert tuple(marker) == (SCHEMA_FAMILY, 2, "integer")
-    assert SCHEMA_VERSION == 2
+    assert tuple(marker) == (SCHEMA_FAMILY, SCHEMA_VERSION, "integer")
+    with reopened.transaction() as db:
+        native_tables = {row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wisdom_%'"
+        )}
+    assert {"wisdom_agent_session", "wisdom_consent", "wisdom_setup_handoff"} <= native_tables
+
+
+def test_profile_store_migrates_v2_to_current_without_changing_c3_or_u1_records(
+    tmp_path: Path,
+):
+    root = tmp_path / "profile-data"
+    old = WisdomStore(root)
+    owner = {
+        "profile_name": "default", "profile_home": "/tmp/profile",
+        "account_id": "member", "organization_id": "org",
+        "base_url": "https://gateway.invalid", "installation_id": "install",
+    }
+    old.record_install({
+        "skill_id": "skill-1", "org_id": "org", "slug": "managed", "version": 2,
+        "content_hash": "b" * 64, "baseline": {"SKILL.md": "b" * 64},
+        "target_path": "/tmp/profile/skills/managed", "update_mode": "MANUAL",
+        "state": "active", "owner": owner,
+    })
+    setup_payload = {
+        "owner": owner, "receipt": "wsp_setup", "version": 2,
+        "content_hash": "b" * 64, "target_path": "/tmp/profile/skills/managed",
+        "setup_key": "setup-key",
+        "step": {"phase": "setup", "index": 0, "command": "printf configured"},
+        "task_id": "wisdom-setup:wsp_setup", "handle": None,
+    }
+    operation_id = old.journal("wisdom_setup", "skill-1", "unknown", setup_payload)
+    old.set_metadata("setup_receipt:wsp_setup", {
+        "receipt": "wsp_setup", "operation_id": operation_id,
+        "plan": {"skill_id": "skill-1", "owner": owner},
+    })
+    before_install = old.installation("skill-1")
+    before_operation = old.operation(operation_id)
+    before_receipt = old.get_metadata("setup_receipt:wsp_setup")
+
+    # Recreate the exact v2 boundary: v2 had all C3/U1 tables and records but
+    # none of the native tables introduced by schema v3.
+    with old.transaction() as db:
+        db.execute("DROP TABLE wisdom_setup_handoff")
+        db.execute("DROP TABLE wisdom_consent")
+        db.execute("DROP TABLE wisdom_agent_session")
+        db.execute("ALTER TABLE feed_state DROP COLUMN owner_user_id")
+        db.execute("ALTER TABLE feed_state DROP COLUMN base_url")
+        db.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
+        db.execute("UPDATE plugin_schema_identity SET version=2 WHERE singleton=1")
+
+    migrated = WisdomStore(root)
+
+    assert migrated.installation("skill-1") == before_install
+    assert migrated.operation(operation_id) == before_operation
+    assert migrated.get_metadata("setup_receipt:wsp_setup") == before_receipt
+    with migrated.transaction() as db:
+        assert tuple(db.execute(
+            "SELECT family,version FROM plugin_schema_identity"
+        ).fetchone()) == (SCHEMA_FAMILY, SCHEMA_VERSION)
+        assert db.execute("SELECT COUNT(*) FROM wisdom_consent").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM wisdom_assessment").fetchone()[0] == 0
+
+
+def test_profile_store_migrates_direct_v3_to_current_without_changing_native_records(tmp_path):
+    root = tmp_path / "profile-data"
+    old = WisdomStore(root)
+    with old.transaction() as db:
+        db.execute(
+            "INSERT INTO wisdom_agent_session VALUES(?,?,?,?,?,?,?)",
+            ("org", "session", "actor", "slack", "default", "{}", 1.0),
+        )
+        db.execute("DROP TABLE wisdom_candidate_defer")
+        db.execute("DROP TABLE wisdom_assessment")
+        db.execute("ALTER TABLE feed_state DROP COLUMN owner_user_id")
+        db.execute("ALTER TABLE feed_state DROP COLUMN base_url")
+        db.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
+        db.execute("UPDATE plugin_schema_identity SET version=3 WHERE singleton=1")
+
+    migrated = WisdomStore(root)
+    with migrated.transaction() as db:
+        assert tuple(db.execute(
+            "SELECT family,version FROM plugin_schema_identity"
+        ).fetchone()) == (SCHEMA_FAMILY, SCHEMA_VERSION)
+        assert tuple(db.execute(
+            "SELECT organization_id,session_key,actor_id FROM wisdom_agent_session"
+        ).fetchone()) == ("org", "session", "actor")
+        assert db.execute("SELECT COUNT(*) FROM wisdom_assessment").fetchone()[0] == 0
 
 
 def test_feed_generation_conflict_keeps_public_error_contract(tmp_path: Path):

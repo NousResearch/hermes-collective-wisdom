@@ -63,22 +63,11 @@ The real loopback HTTP test additionally checks request path/header/schema
 behavior and rejects an organization switch before a second request. It does
 not contact Gateway, Portal, or a live account.
 
-## Not Completed
+## Evidence Boundary
 
-The host experiment described below is historical. PR #108645 was rejected;
-current integration uses existing upstream APIs and a plugin-side account
-adapter. Its test counts do not establish plugin compatibility or a dependency.
-
-These kernels do not complete F1/F2/P1 or any user-facing workflow. Native
-registration remains inert. Host credential projection, settings/account wiring,
-complete authenticated client and preparation integration, consent,
-installation/setup/update/publication,
-qualification, mediation, native delivery/recovery, and H2 remain unfinished.
-The separate Agent H1 branch is a partial command-context implementation, not
-the complete trusted tool/lifecycle interface. Its reviewed head is
-`c4032ae225adc1bfa042c5a458ba38891baeddf9`; the integrator reran 102 focused
-command/context tests. See H1-commands.md for full-CI history and limits.
-
-No plugin was enabled in a user profile, no gateway was restarted, and no live
-skill was installed, submitted or published. Live CLI/TUI/Telegram/Slack checks,
-four-repository smoke, and complete first-release acceptance are **not run**.
+This is a historical kernel/extraction result, not current workflow status.
+[Terminal discovery](terminal-discovery.md) and
+[manual installation](manual-installation.md) record the subsequent integrated
+slices; [FEATURES.md](../FEATURES.md) owns remaining scope and acceptance.
+The rejected [host-context experiment](H1-commands.md) is not a dependency.
+No live profile, gateway, or team skill was changed during these checks.

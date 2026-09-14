@@ -58,6 +58,44 @@ Keep states for not-sent, confirmed-sent, and uncertain-send distinct. Persist
 platform message references only with appropriate acknowledgement. Repeated
 callbacks and worker recovery must converge on one recorded operation outcome.
 
+The shared consumption slice binds its feed checkpoint to the exact account,
+organization, installation, Gateway base route, and monotonic generation. Every
+page is transactionally persisted before projection; replayed event IDs are
+idempotent. Explicit maintenance clears a stale projection before its next request
+and caches at most eight exact skill/version/publisher metadata records per pass.
+Passive inbox and notification reads verify the stored owner and generation before
+reading rows; they never rebind, poll, fetch metadata, run a model, deliver, or
+mutate installations.
+
+Explicit maintenance also owns two bounded producers. Mediation production persists at
+most eight exact owner-bound feed/weekly references after current policy, mute, and
+suppression checks. Owner-scoped queue membership is applied before the feed projection
+bound, so retries reach later feed rows and qualified weekly evidence while preserving the
+weekly policy cap and cooldown. Counts reflect atomic inserts; queueing does not alter native
+seen/delivery state. It neither assesses nor delivers them. Automatic update production
+uses a durable owner-bound rotating cursor, so installations beyond the first eight are
+eventually considered. It admits only fresh `AUTO_WITH_NOTICE`/`REQUIRED` authority and
+reuses the hardened update journal and replacement executor. Completed operations project
+idempotent `installation_updated` events into the same local feed; restart repairs a
+missing projection from the completed journal without replaying filesystem or Gateway
+effects. `MANUAL`, ambiguous, incompatible, unsafe, and unauthorized work remains review.
+
+Mediation, mute/suppression preferences, delivery reservations, and operation
+outcomes use additive SQLite tables. A delivery request ID is saved before the
+Gateway claim. Claim and settlement responses must match the exact organization,
+recipient, request, reference, and event. A lost or remotely uncertain send settles
+as `uncertain` and is not reclaimed; a remote deferral is not immediately replayed.
+Setup is never reported as an install/update outcome, and verified completion
+follows the ordered `files_installed` report.
+
+### Publication transaction boundary
+
+A publication receipt authorizes one exact owner, local draft, immutable file-byte snapshot, content/description/manifest hashes, and observed Gateway policy. CAS blobs, trees, and the commit are serialized from that snapshot; publication must not walk the mutable overlay again after review. Immediately before first upload the controller revalidates current owner, canonical source fingerprint, exact reviewed hashes, and the current local security guard.
+
+The SQLite operation journal records each external-effect intent before sending it. Draft submission, approval, publication, and decline have explicit unknown-outcome phases. Recovery first reads or lists the authoritative owner-private remote draft and verifies its exact slug, commit, content, description, and manifest identity. It retries only after that state proves the effect is still safe; an ambiguous exception is never treated as non-delivery. A policy change blocks only uncommitted work and requires a new receipt bound to the same operation; it cannot hide a remote terminal outcome or create a second draft.
+
+Publication leases fence durable phase changes and external-effect completion by lock key, holder, and unexpired lease. Decline intent is persisted before the request, so reopen cannot accidentally resume approval/publication while cancellation is uncertain. Completing an operation updates its journal payload, local draft state, and remote-draft projection in one SQLite transaction; repeated terminal recovery repairs missing projections idempotently.
+
 ## Commands, Tools, and Presentation
 
 Entitlement belongs in the plugin, with a narrow version-tested adapter to

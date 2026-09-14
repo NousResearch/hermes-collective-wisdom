@@ -56,8 +56,9 @@ deletions. Its planning classification was:
 The full OpenAPI snapshot alone was 13,295 lines. Desktop production/test
 additions were approximately 10,236; Dashboard production/test additions were
 approximately 7,817. These UI totals overlap the classification above and must
-not be added to it. Deferral removes them from first-release scope, not from the
-overall plan. Do not equate file/line reduction with preserved functionality.
+not be added to it. Desktop and Dashboard follow core-surface implementation,
+but remain required for release. Do not equate file/line reduction with preserved
+functionality.
 
 ## Supporting References
 

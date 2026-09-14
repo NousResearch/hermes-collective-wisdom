@@ -3,6 +3,7 @@
 # Test doubles intentionally expose the executor's protocol-shaped methods.
 # pylint: disable=missing-class-docstring,missing-function-docstring
 # pylint: disable=redefined-outer-name,too-few-public-methods,protected-access
+# pylint: disable=import-outside-toplevel
 
 from __future__ import annotations
 
@@ -75,7 +76,8 @@ class Receipts:
 
 
 class Store:
-    def __init__(self):
+    def __init__(self, root):
+        self.root = root
         self.operations = {}
         self.records = {}
         self.counter = 0
@@ -140,6 +142,14 @@ class Store:
         self.metadata[key] = dict(value)
 
 
+def test_apply_rejects_pending_setup_even_if_database_lease_is_free(executor):
+    value, store, _client, _receipts, _current = executor
+    store.journal("wisdom_setup", "skill-1", "running", {"owner": OWNER})
+
+    with pytest.raises(PackagePolicyError, match="setup operation"):
+        value.apply("receipt-1")
+
+
 class Client:
     def __init__(self):
         self.record_error = None
@@ -189,7 +199,7 @@ class Reviewer:
 
 @pytest.fixture
 def executor(tmp_path):
-    store = Store()
+    store = Store(tmp_path / "state")
     client = Client()
     receipts = Receipts()
     current = {"value": dict(OWNER)}
@@ -215,6 +225,15 @@ def test_apply_commits_exact_tree_and_preserves_server_mode(executor):
     assert store.records["skill-1"]["owner"] == OWNER
     assert receipts.completed["receipt-1"] == result
     assert client.record_calls[0]["installation_id"] == "install-1"
+
+
+def test_install_respects_nonexpiring_setup_starter_lock(executor):
+    from hermes_wisdom_plugin.setup_lock import managed_operation_guard
+
+    value, store, _client, _receipts, _current = executor
+    with managed_operation_guard(Path(store.root), "skill-1"):
+        with pytest.raises(PackagePolicyError, match="starting or running"):
+            value.apply("receipt-1")
 
 
 def test_retry_after_rename_wins_verifies_target_and_finishes(executor, monkeypatch):

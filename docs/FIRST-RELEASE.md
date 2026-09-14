@@ -1,12 +1,75 @@
-# First Release: Extract, Adapt, and Verify
+# Release Implementation Sequence: Extract, Adapt, and Verify
 
-Approved execution plan. CLI, TUI, Telegram, and Slack are release one;
-Desktop and Dashboard remain the 31-point follow-up. M0 is complete. M1-M8
-retain their 63-point baseline; investigation and verification are included.
+CLI, TUI, Telegram, and Slack are implemented and accepted first; Desktop and
+Dashboard then complete the same release. M0 is complete. The original planning
+baseline assigned 63 points to M1-M8 and 31 points to M9-M12; investigation and
+verification were included. Those are historical estimates, not remaining-work
+or delivery promises.
 This document defines tasks, not a second completion tracker: implementation,
 automated, and live status remain in [FEATURES.md](FEATURES.md).
 
 ## Simplification Requirement (2026-09-12)
+
+### Current Restart: Recommendations Without New Infrastructure
+
+The explicit native browse/install/update/setup/publication block is locally
+verified; see [the bounded gate](TESTING.md#final-bounded-native-publicationtool-cleanup--2026-09-14).
+The current work is to connect existing state and workflow services, not extract
+another broad framework. The following requirement references are relative to
+`gateway-gateway/docs/design/collective-wisdom/`:
+
+| Required behavior | Source | Existing implementation / narrow remaining connection |
+| --- | --- | --- |
+| Detect meaningful refinement, not formatting churn | `REVIEW_RESOLUTIONS.md` R7 and `IMPLEMENTATION_PLAN.md` Stage A | Local structural/stability kernels and explicit opt-in deferred auxiliary tiebreak are [locally verified](TESTING.md#authorized-ambiguous-refinement-classifier--2026-09-14). Local classification is not server publication authority. |
+| Explain a suggestion using an authorized model route | `IMPLEMENTATION_PLAN.md` Stage B; trust boundary amended by `REVIEW_RESOLUTIONS.md` R1 | Reuse the existing host model boundary and durable assessments; no main-prompt mutation or new model client. |
+| Show feed/recommendations and respect notification settings | `IMPLEMENTATION_PLAN.md` Stage E; `UAT.md` UAT-014 | Feed, queues, preferences and outboxes exist. The private inbox reads real assessments/pending reviews; queued assessment generation is locally verified. Private Slack/Telegram delivery is now [locally verified](TESTING.md#native-ready-advice-delivery-gate--2026-09-14); CLI/TUI proactive presentation remains blocked on the documented host API gap, and live acceptance remains open. |
+| Preserve exact user approval and private ownership | `AGENT_REQUIREMENTS.md` consent and Telegram rows | Reuse existing receipt-bound reviewers/executors and native controls; no parallel consent engine. |
+
+The phrase “human-owned mediation” names reference implementation machinery,
+not a new product requirement. No general scheduler, universal actor framework,
+second execution engine, or speculative schema is authorized by this restart.
+Each addition needs an exercised user-visible path and meaningful denial/recovery
+coverage. Keep source/tests coherent; do not remove safety coverage for a smaller
+line count. TUI, full file editing, Desktop/Dashboard and live acceptance remain
+release scope, not prerequisites for rewriting completed terminal/native work.
+
+### Implemented Slice: Explicit Automatic Maintenance and Mediation Production
+
+`maintenance --apply-automatic` now performs a bounded, owner-rotating pass over
+managed installations. Fresh Gateway `AUTO_WITH_NOTICE` and `REQUIRED` authority can
+enter the existing hardened update reviewer/executor; `MANUAL`, policy drift, unsafe or
+incompatible content, and ambiguous state remain review. REQUIRED preserves exact edited
+bytes before convergence. Completed results create durable local feed notices, repaired
+from the operation journal after a projection failure without replaying the update.
+The same explicit maintenance invocation queues bounded owner-bound feed/weekly mediation
+references after policy, quota, mute, and suppression gates. Queue-aware selection occurs
+before the shared eight-item bound, so retries reach later feed rows and weekly evidence;
+only actual inserts are counted, without marking native rows seen or delivered. It performs
+no assessment or delivery. See the
+[automatic/producer gate](TESTING.md#explicit-automatic-update-and-mediation-producer-gate).
+
+### Implemented Slice: Named-Skill Terminal Manual Updates (U1)
+
+`check` and `update` now provide exact review, explicit modified-copy preservation,
+phase-aware replacement/recovery and fresh post-update setup consent. The
+[U1 gate](TESTING.md#u1-named-skill-manual-update-gate) records local and pinned-host
+evidence. This closes only the named-skill terminal slice; its later explicit automatic
+maintenance coverage does not imply a scheduler, native proactive delivery, or UI/live
+acceptance.
+
+### Previous Slice: Separately Approved Terminal Skill Setup (C3)
+
+`installed-setup` now supplies installed-content inspection, prerequisite
+acknowledgements, exact-command receipts, guarded single-launch execution,
+verification and explicit uncertain recovery. Enrollment `setup` is unchanged.
+The existing operation journal/receipt store is reused, with a shared descriptor
+lock across install/uninstall/setup. No new host API or schema migration is needed.
+
+The foreground terminal runner retries execution exceptions; this slice instead
+uses the host's single background spawn and synchronous result wait. Missing or
+unverifiable results stay unknown. The [C3 test gate](TESTING.md#c3-local-setup-gate)
+and [parity ledger](PARITY.md#terminal-installed-setup-c3) record the actual
+boundary. Terminal implementation does not close native mutation/live acceptance.
 
 ### Implemented Slice: Safe Manual Installation
 
@@ -18,9 +81,11 @@ required P1/R2 primitives, not added to the baseline.
 - Bind terminal receipts to enrolment, hashes, policy and a 24-hour review.
 - Use journalled atomic installs, local-edit protection and recoverable removal.
 - Keep staging/trash under host-excluded `.hub`/`.archive` subtrees.
-- Reconcile only explicit retries; no polling, setup execution or update worker.
-- Keep every slash surface read-only with terminal handoffs. TUI mutation parity
-  and native callbacks remain incomplete, not waived.
+- Reconcile only explicit retries; that installation slice added no setup execution
+  or update worker. Separately approved setup is now the C3 workflow above.
+- At this historical installation checkpoint, slash surfaces were read-only with
+  terminal handoffs. Later explicit Slack/Telegram controls are locally verified;
+  TUI mutation parity and full/live acceptance remain incomplete, not waived.
 
 See [manual installation evidence](verification/manual-installation.md).
 The terminal slice is implemented and locally verified. Native mutation parity
@@ -45,10 +110,10 @@ read or background work. Each protected invocation reads current credentials;
 terminal setup explicitly accepts disclosure. Slash setup only gives terminal
 instructions, because the shared host callback supplies no caller metadata.
 
-All slash output uses the shared-chat whitelist, even in TUI. Device assessment,
-installation controls, publication, scanning, recovery/feed processing, tools,
-native buttons and proactive delivery remain later slices. Network-backed slash
-commands run in a short-lived read-only worker with a 25-second total budget;
+At this discovery-only checkpoint, slash output used the shared-chat whitelist,
+even in TUI. Subsequent terminal/native slices added installation, publication,
+scanning, recovery/feed state and tools; proactive delivery remains unfinished.
+Network-backed read-only slash commands run in a short-lived worker with a 25-second total budget;
 timeout, cancellation and unload terminate/reap it rather than leaving an HTTP
 thread running. This is command isolation, not a background task or scheduler.
 
@@ -56,12 +121,12 @@ See [slice evidence](verification/terminal-discovery.md) for current verificatio
 and explicit reference-test deferrals. Real-account acceptance is not part of
 this slice. Do not reset or modify the existing demo.
 
-### Continuing First-Release Requirements
+### Continuing Core-Sequence Requirements
 
 Implement entitlement inside the installed/enabled plugin; do not modify core
 command dispatch, help, completion, or menus solely for Wisdom availability.
 Agent PR #108645 was rejected and is not a dependency of this release.
-Automatic hiding of installed but unavailable first-release commands is no
+Automatic hiding of installed but unavailable commands is no
 longer required: a concise denied/unavailable response is acceptable.
 
 Read current host credentials at workflow initialization and recheck profile, account,
@@ -146,8 +211,8 @@ Dependencies are implementation readiness, not reasons to defer source reading.
 | R2 | M7-004 | 2 | Durable operation/delivery primitives from F1; integrate recovery with each producer and S1/S2 before acceptance |
 | S1 | M7-003 | 1 | Telegram native bridge; start with F3/C2 views, finish against P2/R1/R2 |
 | S2 | M7-005 | 1 | Slack native bridge; start with F3/C2 views, finish against P2/R1/R2 |
-| V1 | M8-001, M8-002, M8-003 | 5 | Four-repo smoke, artifact installation, diagnostics and live acceptance of all preceding tasks |
-| Total | M1-M8 | 63 | Re-estimate after extraction audit and first working vertical slice |
+| V1 | M8-001, M8-002, M8-003 | 5 | Four-repo smoke, artifact installation, diagnostics and core-surface live acceptance of all preceding tasks; not final release acceptance |
+| Total | M1-M8 | 63 | Historical core-sequence baseline; re-estimate from current evidence |
 
 ## Worktrees and Delivery
 
@@ -157,7 +222,7 @@ Dependencies are implementation readiness, not reasons to defer source reading.
 4. Wave 4: R1 and complete S1/S2; then V1 using actual installed plugin artifacts.
 
 Use Sol for implementation and Luna for bounded investigations. Each concurrent
-worker has a separate `codex/<task>` branch/worktree and explicit file ownership.
+worker has a separate `shannonsands/<feature>` branch/worktree and explicit file ownership.
 One integrator owns shared types, central schema changes, registration, dependency
 manifests, and tracker integration. A worker requests shared changes instead of
 editing another worker's files. Schema extraction itself may be delegated to
@@ -190,3 +255,7 @@ a runtime contract pin just because a repository's main moved.
 - Live acceptance uses real commands, lifecycle facts and callbacks on all four
   surfaces. Reset/restart/publish actions require specific authorization; no
   incidental demo or production changes are part of source extraction.
+- Release additionally requires packaged Desktop and Dashboard workflows against
+  deployed endpoints using Shannon's Nous Portal login. Local scripts, mocks,
+  stories, and M8 acceptance alone are insufficient. Gateway PR 255 and Portal
+  PR 1022 are verified merged; record their immutable revisions for the run.

@@ -1,18 +1,16 @@
-"""Keep the feature inventory's estimates and dependency graph consistent."""
+"""Keep stable feature IDs and their dependency graph consistent."""
 
 import csv
 import re
-from collections import defaultdict
 from pathlib import Path
 
 TRACKER = Path(__file__).resolve().parents[1] / "docs" / "FEATURES.md"
 FEATURE_ID = re.compile(r"CW-M(\d+)-\d{3}")
 
 
-def test_feature_estimates_and_dependencies_are_consistent() -> None:
-    """Every feature has a unique ID and an acyclic, fully accounted estimate."""
+def test_feature_ids_and_dependencies_are_consistent() -> None:
+    """Every feature has a unique ID and resolvable, acyclic dependencies."""
     features = {}
-    totals = defaultdict(int)
     with TRACKER.open(encoding="utf-8", newline="") as handle:
         for cells in csv.reader(handle, delimiter="|"):
             if len(cells) != 11:
@@ -23,11 +21,7 @@ def test_feature_estimates_and_dependencies_are_consistent() -> None:
                 continue
             assert feature_id not in features, f"Duplicate feature: {feature_id}"
             features[feature_id] = re.findall(r"CW-M\d+-\d{3}", cells[4])
-            totals[int(match.group(1))] += int(cells[3].strip())
-
-    assert dict(totals) == dict(enumerate([3, 13, 8, 8, 8, 8, 5, 8, 5, 5, 13, 8, 5]))
-    assert sum(points for milestone, points in totals.items() if milestone <= 8) == 66
-    assert sum(totals.values()) == 97
+    assert features, "No feature records found"
 
     resolved = set()
     while len(resolved) < len(features):

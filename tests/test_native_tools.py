@@ -1,0 +1,96 @@
+"""Model-facing Wisdom tools retain exact private/read-only boundaries."""
+
+import json
+
+from types import SimpleNamespace
+
+from hermes_wisdom_plugin.native_tools import NativeModelTools
+
+
+class Service:
+    """Record calls made by model-tool handlers."""
+
+    def __init__(self):
+        """Start with an empty call ledger."""
+        self.calls = []
+
+    def close(self):
+        """Record service lifetime cleanup."""
+        self.calls.append(("close",))
+
+    def inbox(self, *, invocation):
+        """Return one owner-private candidate reference."""
+        self.calls.append(("inbox", invocation))
+        return {"activity": [{"reference": {"kind": "candidate", "event_id": "event-1"}}]}
+
+    def native_candidate_inspect(self, identity):
+        """Return a local-only candidate projection."""
+        self.calls.append(("candidate", identity))
+        return {"kind": "candidate", "event_id": identity, "networked": False}
+
+    def native_skill_inspect(self, identity, *, version):
+        """Return an exact shared version projection."""
+        self.calls.append(("skill", identity, version))
+        return {"kind": "skill", "skill_id": identity, "version": version}
+
+    def list_installations(self):
+        """Return the installed-skill fixture."""
+        self.calls.append(("installed",))
+        return [{"skill_id": "skill-1", "version": 2}]
+
+    def installed_setup_inspect(self, identity, *, version):
+        """Return setup status for the exact installed version."""
+        self.calls.append(("setup", identity, version))
+        return {"skill_id": identity, "version": version, "ready_to_use": False}
+
+
+def tools():
+    """Build model tools around a recording service."""
+    service = Service()
+    native = SimpleNamespace(
+        tool_invocation=lambda **_kwargs: "invocation",
+        queue_model_consent=lambda *_args, **_kwargs: {"state": "queued"},
+    )
+    runtime = SimpleNamespace(native=native, _closed=False, _service=lambda: service)
+    return NativeModelTools(runtime), service
+
+
+def test_inbox_returns_exact_activity_instead_of_status_summary():
+    """Inbox retains activity references rather than substituting status."""
+    model_tools, service = tools()
+    result = json.loads(model_tools.inbox({}, task_id="task", session_id="session"))
+    assert result == {
+        "activity": [{"reference": {"kind": "candidate", "event_id": "event-1"}}]
+    }
+    assert service.calls == [("inbox", "invocation"), ("close",)]
+
+
+def test_candidate_is_private_and_skill_version_is_exact():
+    """Inspection keeps candidate and immutable shared identities distinct."""
+    model_tools, service = tools()
+    candidate = json.loads(model_tools.inspect(
+        {"kind": "candidate", "identity": "event-1", "version": None},
+        task_id="task", session_id="session",
+    ))
+    assert candidate["networked"] is False
+    assert json.loads(model_tools.inspect(
+        {"kind": "skill", "identity": "skill-1", "version": 7},
+        task_id="task", session_id="session",
+    )) == {"kind": "skill", "skill_id": "skill-1", "version": 7}
+    assert ("candidate", "event-1") in service.calls
+    assert ("skill", "skill-1", 7) in service.calls
+
+
+def test_present_reports_queued_not_presented():
+    """Presentation truthfully reports an asynchronous queued state."""
+    model_tools, _service = tools()
+    result = json.loads(model_tools.present(
+        {
+            "kind": "skill", "identity": "skill-1", "version": 2,
+            "step": None, "title": "Review", "explanation": "Exact package review",
+        },
+        task_id="task", session_id="session",
+    ))
+    assert result["delivery"] == {"state": "queued"}
+    assert result["executed"] is False
+    assert "presented" not in result

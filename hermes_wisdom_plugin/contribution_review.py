@@ -1,0 +1,576 @@
+"""Thin owner-private coordinator for manually selected local contributions."""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+from pathlib import PurePosixPath
+from typing import Any, Callable
+
+from .contract import author_description_hash, sha256_address
+from .editorial import (
+    apply_editorial_metadata_to_overlay,
+    explicit_editorial_values,
+    load_skill_editorial_metadata,
+    resolve_editorial_metadata,
+)
+from .errors import (
+    WisdomAuthError,
+    WisdomConflict,
+    WisdomError,
+    WisdomNotFound,
+    WisdomValidationError,
+)
+from .local_security import prepared_security_check
+from .package import (
+    MAX_FILES,
+    PackagePolicyError,
+    PreparedPackage,
+    load_manifest,
+    prepare_package,
+    read_validated_package_files,
+    source_fingerprint,
+    verify_content_files,
+)
+from .professionalism import review_package
+from .publisher_evidence import evidence_block, publication_description
+
+
+OwnerProvider = Callable[[], dict[str, str]]
+
+
+def _remove_unreferenced_edit(
+    store: Any, draft_id: str, edit_root: Path
+) -> None:
+    """Remove a failed stage only when durable state proves it is unreferenced."""
+
+    try:
+        current = store.draft(draft_id)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return
+    if current is not None:
+        overlay_value = current.get("overlay_path")
+        if not isinstance(overlay_value, str) or not overlay_value:
+            return
+        try:
+            referenced = Path(overlay_value).resolve()
+            candidate_root = edit_root.resolve()
+        except (OSError, RuntimeError):
+            return
+        if referenced == candidate_root or referenced.is_relative_to(candidate_root):
+            return
+    shutil.rmtree(edit_root, ignore_errors=True)
+
+
+def _existing_author_description(frontmatter: dict[str, Any]) -> str | None:
+    """Prefer owner-facing editorial copy, then the canonical description."""
+
+    _name, editorial_description = explicit_editorial_values(frontmatter)
+    if editorial_description:
+        return editorial_description
+    description = frontmatter.get("description")
+    value = description.strip() if isinstance(description, str) else ""
+    return value or None
+
+
+def _draft_author_description(skill_markdown: str, llm: Any) -> str:
+    """Draft constrained author copy through the explicitly authorized host route."""
+
+    try:
+        result = llm.complete(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Write one concise, outcome-oriented plain-text description of this "
+                        "Hermes skill. Do not claim quality, safety, usage, popularity, or "
+                        "platform verification. Return only the description, at most 600 "
+                        "characters."
+                    ),
+                },
+                {"role": "user", "content": skill_markdown[:24_000]},
+            ],
+            temperature=0.2,
+            max_tokens=220,
+            timeout=60,
+            purpose="Draft Collective Wisdom author description",
+        )
+        text = str(getattr(result, "text", "") or "").strip()
+    except Exception as exc:
+        raise WisdomError(
+            "Hermes could not draft a description with the configured model. "
+            "Check the model setup and try again."
+        ) from exc
+    if not text:
+        raise PackagePolicyError(
+            "the configured model did not return an author description"
+        )
+    return text
+
+
+class ContributionReviewer:  # pylint: disable=too-few-public-methods
+    """Prepare one exact local skill without upload or publication authority."""
+
+    def __init__(
+        self,
+        store: Any,
+        host: Any,
+        owner_provider: OwnerProvider,
+        *,
+        llm: Any | None = None,
+    ) -> None:
+        self.store = store
+        self.host = host
+        self.owner_provider = owner_provider
+        self.llm = llm
+
+    def _owner(self) -> dict[str, str]:
+        owner = self.owner_provider()
+        required = {
+            "profile_name", "profile_home", "account_id", "organization_id",
+            "base_url", "installation_id",
+        }
+        if not isinstance(owner, dict) or set(owner) != required:
+            raise WisdomAuthError("Collective Wisdom contribution owner is unavailable")
+        if any(
+            not isinstance(owner.get(key), str) or not owner[key].strip()
+            for key in required
+        ):
+            raise WisdomAuthError("Collective Wisdom contribution owner is unavailable")
+        return dict(owner)
+
+    def _assert_owner(self, expected: dict[str, str]) -> None:
+        if self._owner() != expected:
+            raise WisdomAuthError("Collective Wisdom contribution owner changed")
+
+    @staticmethod
+    def _assert_draft_owner(
+        draft: dict[str, Any], expected: dict[str, str]
+    ) -> None:
+        if draft.get("owner") != expected:
+            raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
+
+    def _source(self, skill_name: str) -> Path:
+        if not isinstance(skill_name, str) or not skill_name.strip():
+            raise WisdomNotFound("local skill not found")
+        if skill_name != skill_name.strip() or "/" in skill_name or "\\" in skill_name:
+            raise WisdomNotFound("local skill not found")
+        if skill_name in {".", ".."}:
+            raise WisdomNotFound("local skill not found")
+        root = Path(getattr(self.host, "skills_root", ""))
+        if not root.is_dir() or root.is_symlink():
+            raise WisdomNotFound("local skill not found")
+        candidates: list[Path] = []
+        for skill_md in root.glob("*/SKILL.md"):
+            if skill_md.parent.name == skill_name:
+                candidates.append(skill_md.parent)
+        for skill_md in root.glob("*/*/SKILL.md"):
+            if skill_md.parent.name == skill_name:
+                candidates.append(skill_md.parent)
+        safe: list[Path] = []
+        root_resolved = root.resolve()
+        for candidate in candidates:
+            if candidate.is_symlink() or (candidate / "SKILL.md").is_symlink():
+                continue
+            resolved = candidate.resolve()
+            if resolved != root_resolved and resolved.is_relative_to(root_resolved):
+                safe.append(resolved)
+        if len(safe) != 1:
+            raise WisdomNotFound("local skill not found")
+        return safe[0]
+
+    @staticmethod
+    def _files(overlay: Path) -> tuple[list[dict[str, str]], str]:
+        raw = read_validated_package_files(overlay)
+        entries = [
+            {
+                "path": relative,
+                "mode": "file",
+                "content_utf8": body.decode("utf-8"),
+            }
+            for relative, _mode, body in raw
+        ]
+        records, content_hash = verify_content_files(raw)
+        hashes = {record.path: record.hash for record in records}
+        return [{**entry, "hash": hashes[entry["path"]]} for entry in entries], content_hash
+
+    def _result(
+        self,
+        draft: dict[str, Any],
+        *,
+        allow_model_review: bool,
+        expected_owner: dict[str, str],
+    ) -> dict[str, Any]:
+        overlay = Path(str(draft["overlay_path"]))
+        files, content_hash = self._files(overlay)
+        if content_hash != draft["content_hash"]:
+            raise WisdomConflict(
+                "this source already has an edited draft; review that draft instead"
+            )
+        scan = self.host.scan(overlay)
+        guard = scan.get("guard") if isinstance(scan.get("guard"), dict) else scan
+        security = prepared_security_check(
+            files, str(draft["description"]), {"guard": guard}
+        )
+        security["content_hash"] = content_hash
+        security["author_description_hash"] = str(draft["description_hash"])
+        manifest, _manifest_bytes = load_manifest(overlay / "skill.manifest.json")
+        professionalism = self._professionalism(
+            draft,
+            files=files,
+            allow_model_review=allow_model_review,
+            expected_owner=expected_owner,
+        )
+        self._assert_owner(expected_owner)
+        # A model response is only an assessment. Re-read exact bytes before returning it.
+        _files_after, hash_after = self._files(overlay)
+        if hash_after != draft["content_hash"]:
+            raise WisdomConflict("prepared package changed during review")
+        return {
+            "state": "prepared",
+            "draft_id": str(draft["id"]),
+            "local_draft_id": str(draft["id"]),
+            "skill_id": str(draft["skill_id"]),
+            "source_hash": str(draft["source_hash"]),
+            "overlay_path": str(overlay),
+            "description": str(draft["description"]),
+            "drafted_description": str(draft["description"]),
+            "system_specification": manifest.requirements.model_dump(mode="json"),
+            **load_skill_editorial_metadata(overlay),
+            "files": files,
+            "hashes": {
+                "content": str(draft["content_hash"]),
+                "author_description": str(draft["description_hash"]),
+                "package_manifest": str(draft["manifest_hash"]),
+            },
+            "local_scan": scan,
+            "security_check": security,
+            "professionalism_check": professionalism,
+            "publisher_evidence": evidence_block(str(draft["description"])),
+            "network_submission": False,
+            "notice": (
+                "Owner-private local preparation only. "
+                "Nothing has been uploaded or published."
+            ),
+            "next_step": (
+                "Review and save the complete local package, then send its exact bytes "
+                "for owner-only server review."
+            ),
+        }
+
+    @staticmethod
+    def _expected_hashes(value: object) -> dict[str, str]:
+        if not isinstance(value, dict) or set(value) != {
+            "content", "author_description", "package_manifest"
+        }:
+            raise PackagePolicyError("expected prior draft hashes are required")
+        if any(not isinstance(item, str) or not item for item in value.values()):
+            raise PackagePolicyError("expected prior draft hashes are required")
+        return dict(value)
+
+    def reopen(
+        self, draft_id: str, *, allow_model_review: bool = False
+    ) -> dict[str, Any]:
+        """Reopen one owner-bound local prepared draft without submission authority."""
+
+        expected_owner = self._owner()
+        draft = self.store.draft(draft_id)
+        if draft is None or not draft_id.startswith("local:"):
+            raise WisdomNotFound("prepared draft not found")
+        self._assert_draft_owner(draft, expected_owner)
+        if str(draft["state"]) != "prepared":
+            raise WisdomConflict(
+                "this local draft cannot be edited while it is "
+                + str(draft["state"]).replace("_", " ")
+            )
+        return self._result(
+            draft,
+            allow_model_review=allow_model_review,
+            expected_owner=expected_owner,
+        )
+
+    def inspect_prepared(self, draft_id: str) -> dict[str, Any]:
+        """Export one complete exact payload that can be edited and saved directly."""
+
+        result = self.reopen(draft_id)
+        return {
+            "draft_id": result["draft_id"],
+            "author_description": result["drafted_description"],
+            "files": [
+                {"path": item["path"], "content_utf8": item["content_utf8"]}
+                for item in result["files"]
+            ],
+            "expected_hashes": result["hashes"],
+        }
+
+    def save_prepared(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self,
+        draft_id: str,
+        *,
+        author_description: str,
+        files: list[dict[str, str]],
+        expected_hashes: dict[str, str],
+    ) -> dict[str, Any]:
+        """Save owner edits locally using an owner- and hash-bound pointer CAS."""
+
+        expected_owner = self._owner()
+        hashes = self._expected_hashes(expected_hashes)
+        local = self.store.draft(draft_id)
+        if local is None or not draft_id.startswith("local:"):
+            raise WisdomNotFound("prepared draft not found")
+        self._assert_draft_owner(local, expected_owner)
+        if str(local["state"]) != "prepared":
+            raise WisdomConflict(
+                "this local draft cannot be edited while it is "
+                + str(local["state"]).replace("_", " ")
+            )
+        if hashes != {
+            "content": str(local["content_hash"]),
+            "author_description": str(local["description_hash"]),
+            "package_manifest": str(local["manifest_hash"]),
+        }:
+            raise WisdomConflict("prepared draft changed; inspect it again before saving")
+
+        overlay = Path(str(local["overlay_path"]))
+        _, actual_content_hash = self._files(overlay)
+        _manifest, manifest_bytes = load_manifest(overlay / "skill.manifest.json")
+        if (
+            actual_content_hash != hashes["content"]
+            or author_description_hash(str(local["description"]))
+            != hashes["author_description"]
+            or sha256_address(manifest_bytes) != hashes["package_manifest"]
+        ):
+            raise WisdomConflict("prepared draft changed; inspect it again before saving")
+        if not isinstance(files, list) or len(files) > MAX_FILES:
+            raise PackagePolicyError(f"package exceeds {MAX_FILES} files")
+        requested: dict[str, bytes] = {}
+        for item in files:
+            if not isinstance(item, dict):
+                raise PackagePolicyError(
+                    "every edited file requires a path and UTF-8 content"
+                )
+            path = item.get("path")
+            content = item.get("content_utf8")
+            if not isinstance(path, str) or not isinstance(content, str):
+                raise PackagePolicyError(
+                    "every edited file requires a path and UTF-8 content"
+                )
+            if path in requested:
+                raise PackagePolicyError(f"duplicate edited file: {path}")
+            requested[path] = content.encode("utf-8")
+        verify_content_files([(path, "file", body) for path, body in requested.items()])
+
+        edit_root = self.store.root / "contribution-edits" / uuid.uuid4().hex
+        retained = False
+        try:
+            inputs = self.store.root / "local-edit-inputs"
+            inputs.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with tempfile.TemporaryDirectory(prefix="edit-", dir=inputs) as raw_stage:
+                stage = Path(raw_stage)
+                for path, body in requested.items():
+                    destination = stage.joinpath(*PurePosixPath(path).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    destination.write_bytes(body)
+                    destination.chmod(0o600)
+                package = prepare_package(
+                    stage,
+                    host=self.host,
+                    overlay_root=edit_root,
+                    author_description=author_description,
+                    owner=expected_owner["account_id"],
+                    installation_id=expected_owner["installation_id"],
+                )
+            candidate = {
+                **local,
+                "overlay_path": str(package.overlay),
+                "draft_commit": package.commit,
+                "description": package.description,
+                "content_hash": package.content_hash,
+                "description_hash": package.description_hash,
+                "manifest_hash": package.manifest_hash,
+            }
+            result = self._result(
+                candidate, allow_model_review=False, expected_owner=expected_owner
+            )
+            self._assert_owner(expected_owner)
+            if not self.store.replace_prepared_draft(
+                draft_id,
+                expected_owner=expected_owner,
+                expected_hashes=hashes,
+                values=candidate,
+            ):
+                raise WisdomConflict("prepared draft changed; inspect it again before saving")
+            retained = True
+            return result
+        finally:
+            if not retained:
+                _remove_unreferenced_edit(self.store, draft_id, edit_root)
+
+    def _professionalism(
+        self,
+        draft: dict[str, Any],
+        *,
+        files: list[dict[str, str]],
+        allow_model_review: bool,
+        expected_owner: dict[str, str],
+    ) -> dict[str, Any]:
+        """Reuse or explicitly run one durable exact-hash review record."""
+
+        values = {
+            "skill_id": str(draft["skill_id"]),
+            "content_hash": str(draft["content_hash"]),
+            "author_description_hash": str(draft["description_hash"]),
+        }
+        existing = self.store.professionalism_review(**values)
+        if existing is not None and existing["state"] == "complete":
+            result = existing.get("result")
+            if isinstance(result, dict):
+                return result
+        package = [
+            {"path": item["path"], "content_utf8": item["content_utf8"]}
+            for item in files
+        ]
+        if not allow_model_review:
+            return review_package(
+                package=package,
+                author_description=str(draft["description"]),
+                content_hash=values["content_hash"],
+                description_hash=values["author_description_hash"],
+                llm=None,
+            )
+        queued = self.store.enqueue_professionalism_review(
+            **values,
+            package=package,
+            author_description=str(draft["description"]),
+        )
+        worker_id = f"contribution:{uuid.uuid4().hex}"
+        claimed = self.store.claim_professionalism_review(
+            worker_id=worker_id, review_id=str(queued["id"])
+        )
+        if claimed is None:
+            return review_package(
+                package=package,
+                author_description=str(draft["description"]),
+                content_hash=values["content_hash"],
+                description_hash=values["author_description_hash"],
+                llm=None,
+            )
+        result = review_package(
+            package=package,
+            author_description=str(draft["description"]),
+            content_hash=values["content_hash"],
+            description_hash=values["author_description_hash"],
+            llm=self.llm,
+        )
+        self._assert_owner(expected_owner)
+        if not self.store.complete_professionalism_review(
+            str(claimed["id"]), worker_id=worker_id, result=result
+        ):
+            raise WisdomConflict("professionalism review ownership changed")
+        return result
+
+    def prepare(  # pylint: disable=too-many-locals
+        self, skill_name: str, *, allow_model_review: bool = False
+    ) -> dict[str, Any]:
+        """Prepare one manually selected skill; model disclosure requires an explicit flag."""
+
+        expected_owner = self._owner()
+        source = self._source(skill_name)
+        source_hash = source_fingerprint(source)
+        self._assert_owner(expected_owner)
+        skill_id = self.store.register_skill(
+            source,
+            content_hash=source_hash,
+            source_kind="local",
+            snapshot_text=(source / "SKILL.md").read_text(encoding="utf-8"),
+        )
+        existing = self.store.prepared_draft(skill_id, source_hash)
+        if existing is not None:
+            self._assert_draft_owner(existing, expected_owner)
+            return self._result(
+                existing,
+                allow_model_review=allow_model_review,
+                expected_owner=expected_owner,
+            )
+
+        frontmatter = self.host.parse_skill_frontmatter(source)
+        if not isinstance(frontmatter, dict):
+            raise WisdomValidationError("local skill frontmatter is unavailable")
+        skill_markdown = (source / "SKILL.md").read_text(encoding="utf-8")
+        description = _existing_author_description(frontmatter)
+        if description is None:
+            if not allow_model_review:
+                raise PackagePolicyError(
+                    "local skill requires author copy or explicit model review authorization"
+                )
+            description = _draft_author_description(skill_markdown, self.llm)
+        description = publication_description(self.store, skill_id, description)
+        editorial = resolve_editorial_metadata(
+            frontmatter=frontmatter,
+            skill_markdown=skill_markdown,
+            llm=self.llm if allow_model_review else None,
+        )
+        self._assert_owner(expected_owner)
+        namespace = self.store.root / "contribution-prepared" / uuid.uuid4().hex
+        retained = False
+
+        def apply_editorial(
+            overlay: Path,
+            *,
+            editorial_name: str | None,
+            editorial_description: str | None,
+        ) -> None:
+            apply_editorial_metadata_to_overlay(
+                overlay,
+                editorial_name=editorial_name,
+                editorial_description=editorial_description,
+                frontmatter=frontmatter,
+            )
+
+        try:
+            package: PreparedPackage = prepare_package(
+                source,
+                host=self.host,
+                overlay_root=namespace,
+                author_description=description,
+                owner=expected_owner["account_id"],
+                installation_id=expected_owner["installation_id"],
+                editorial_name=editorial["editorial_name"],
+                editorial_description=editorial["editorial_description"],
+                editorial_applier=apply_editorial,
+            )
+            if source_fingerprint(source) != source_hash:
+                raise WisdomConflict("source changed during preparation")
+            self._assert_owner(expected_owner)
+            draft = {
+                "id": f"local:{skill_id}:{uuid.uuid4().hex}",
+                "skill_id": skill_id,
+                "source_hash": source_hash,
+                "overlay_path": str(package.overlay),
+                "draft_commit": package.commit,
+                "state": "prepared",
+                "description": package.description,
+                "content_hash": package.content_hash,
+                "description_hash": package.description_hash,
+                "manifest_hash": package.manifest_hash,
+            }
+            with self.store.transaction() as db:
+                self.store.record_draft(draft, _db=db)
+                self.store.bind_draft_owner(
+                    str(draft["id"]), expected_owner, _db=db
+                )
+            retained = True
+            saved = self.store.draft(str(draft["id"]))
+            if saved is None:
+                raise WisdomValidationError("prepared local draft was not persisted")
+            self._assert_draft_owner(saved, expected_owner)
+            return self._result(
+                saved,
+                allow_model_review=allow_model_review,
+                expected_owner=expected_owner,
+            )
+        finally:
+            if not retained:
+                shutil.rmtree(namespace, ignore_errors=True)

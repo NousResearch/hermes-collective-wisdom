@@ -137,6 +137,41 @@ input, and its queued return does not prove delivery. Core adapter
 post-delivery/idle internals are investigation evidence, not permission to patch
 core routing or call private adapter internals by default.
 
+### Verified Local Presentation Gap — 2026-09-14
+
+The delivery audit against the pinned `bf51fee548ceaa28d2c299a41c0f65066c04c061`
+host found no public CLI/TUI notification-and-acknowledgement callback.
+`pre_llm_call` observes a turn (or injects context); `inject_message` creates
+conversation input. Neither acknowledges human-facing notification delivery.
+`PluginContext.emit` publishes namespaced subscriber events, not a local renderer
+receipt. Direct printing would bypass TUI rendering and cannot justify a
+`transport_accepted` receipt.
+
+Slack/Telegram already expose connected native SDK factories and real send
+acknowledgements. Their plugin delivery connection is locally verified; CLI/TUI
+proactive presentation remains blocked, with manual inbox intact.
+No fake continuation, fabricated receipt, core patch, or new host API is added.
+A generic local notification interface requires a separate scope/design decision.
+
+The continuation audit also checked `agent/turn_finalizer.py:627-643` at the same
+pin: `on_session_end` fires before the conversation result returns to its caller.
+It is a completion observation, not proof that the caller delivered the reply or
+that its UI is idle. The public hook summary in the current official plugin docs
+likewise supplies no idle/presentation acknowledgement. Therefore connecting the
+weekly producer to that hook must not be described as post-delivery cadence.
+
+The minimal proposed host scope is two related capabilities, not a new workflow
+engine: (1) a host-owned eligible human-surface opportunity after actual reply
+rendering or an idle transition, fenced to the current profile/session/turn;
+(2) bounded plain notification rendering with a renderer acknowledgement and
+known-not-rendered versus uncertain outcomes. The plugin retains durable queue,
+quota/cooldown, content checks, and dedupe ownership. No notification is a user
+message, model continuation, or approval. The host must invalidate opportunities
+on session replacement, new work, unload, or lost admission. A neutral host test
+must prove those transitions and CLI/TUI rendering before plugin delivery can
+claim a receipt. Exact public signatures and upstream implementation remain
+unapproved; no speculative host API calls have been added here.
+
 ### UI Follow-Up
 
 Desktop has dynamic contribution visibility and disposal. Dashboard's registry

@@ -12,7 +12,7 @@ import logging
 import stat as _stat
 from contextlib import suppress
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -110,6 +110,45 @@ def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> 
                 )
             )
     return _add_tree(entries, objects)
+
+
+def build_tree_from_snapshot(
+    files: List[Tuple[str, str, bytes]], objects: ObjectSet, *, max_object_bytes: int
+) -> str:
+    """Build the wire tree from one already-validated immutable byte snapshot."""
+
+    root: Dict[str, Any] = {}
+    for relative, mode, body in files:
+        parts = PurePosixPath(relative).parts
+        if not parts or relative.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError(f"invalid snapshot path: {relative}")
+        if mode not in {MODE_FILE, MODE_EXEC}:
+            raise ValueError(f"invalid snapshot mode: {mode}")
+        if len(body) > max_object_bytes:
+            raise ValueError(
+                f"file {relative} is {len(body)} bytes > max_object_bytes {max_object_bytes}"
+            )
+        node = root
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            if not isinstance(child, dict):
+                raise ValueError(f"snapshot path conflicts with file: {relative}")
+            node = child
+        if parts[-1] in node:
+            raise ValueError(f"duplicate snapshot path: {relative}")
+        node[parts[-1]] = (mode, body)
+
+    def add_directory(node: Dict[str, Any]) -> str:
+        entries: List[Dict[str, str]] = []
+        for name, value in node.items():
+            if isinstance(value, dict):
+                entries.append(_entry(name, KIND_TREE, add_directory(value), MODE_DIR))
+            else:
+                mode, body = value
+                entries.append(_entry(name, KIND_BLOB, objects.add(KIND_BLOB, body), mode))
+        return _add_tree(entries, objects)
+
+    return add_directory(root)
 
 
 def build_commit(  # pylint: disable=too-many-arguments

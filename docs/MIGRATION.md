@@ -2,19 +2,18 @@
 
 ## Agreed Boundaries
 
-The first implementation increment is **milestone 0 only**: an inert native
-plugin scaffold, quality checks, and this document set, committed and pushed to
-the private repository. No demo reset, host patch, or Wisdom workflow is part of
-that increment.
-
-First release covers CLI, TUI, Telegram, and Slack. Desktop and Dashboard are
-fully scoped follow-ups, not exclusions. All use one workflow implementation.
+Implementation sequencing proves CLI, TUI, Telegram, and Slack first, followed
+by the shared UI backend, Desktop, and Dashboard. Release requires all six
+surfaces; M0-M8 is not a standalone release boundary. All use one workflow
+implementation.
 No legacy profiles need migration; only the developers used the reverted core
 feature. A fresh demo reset is a separately authorized operational step.
 
-Gateway and Portal are already merged. Their moderation, authorization, flag
-targeting, and manager-email logic stays server-side. Changes to their release
-harness or runtime contract pins are separate from moving Agent functionality.
+Gateway PR [255](https://github.com/NousResearch/gateway-gateway/pull/255)
+and Portal PR [1022](https://github.com/NousResearch/hermes-portal/pull/1022)
+are verified merged. Their moderation, authorization, flag targeting, and
+manager-email logic stays server-side. Changes to their release harness or
+runtime contract pins are separate from moving Agent functionality.
 
 ## Milestones
 
@@ -31,19 +30,20 @@ Milestone totals below are the approved budget, not additional work points.
 | M5 | Sharing and publication | M2, consent from M3 | 8 | Exact reviewed draft follows policy; status reconciles |
 | M6 | Qualification | M5 | 5 | Real usage and refinement events qualify correctly |
 | M7 | Recommendations and native delivery | M3-M6 | 8 | Telegram/Slack adapters cover all flows and recovery |
-| M8 | First-release acceptance | M1-M7 | 5 | Four-repo smoke and live representative flows pass |
+| M8 | Core-surface acceptance | M1-M7 | 5 | Four-repo smoke and live CLI/TUI/Telegram/Slack flows pass; release remains blocked on M9-M12 |
 | M9 | Shared UI backend and contracts | M3-M5, M7 | 5 | Scoped REST/state/event contract passes denial tests |
 | M10 | Desktop parity | M9 | 13 | External Desktop contribution covers the feature set |
 | M11 | Dashboard parity | M9 | 8 | External Dashboard contribution covers the feature set |
-| M12 | UI packaging and acceptance | M10, M11 | 5 | Both installed bundles pass integration and live checks |
+| M12 | UI packaging and release acceptance | M10, M11 | 5 | Both installed bundles pass integration and live checks against deployed endpoints using Shannon's Nous Portal login |
 | | **Total** | | **97** | |
 
-M0-M8 total **66 points**. Full scope is **97 points**, or approximately
-**120-125 with contingency**. Provisionally allow **6-9 engineering weeks** for
-full scope, excluding upstream reviews and deployment waits. This is not a
-velocity-calibrated promise. Re-estimate after M1 and again after the first
-working vertical slice. Track upstream wait time separately from engineering
-effort. M9 can start after its dependencies; M10/M11 can proceed independently.
+The original planning baseline assigned **66 points** to M0-M8 and **31 points**
+to M9-M12: **97 points** total, or approximately **120-125 with contingency**.
+It provisionally allowed **6-9 engineering weeks** for full scope, excluding
+upstream reviews and deployment waits. These are historical baseline estimates,
+not remaining-work calculations or delivery promises. Re-estimate from current
+evidence rather than carrying them forward as velocity. M9 can start after its
+dependencies; M10/M11 can proceed independently.
 
 ## Delivery Order and PR Shape
 
@@ -53,14 +53,30 @@ effort. M9 can start after its dependencies; M10/M11 can proceed independently.
    a generic host extension only for a demonstrated callback/lifecycle gap.
 3. Build the manual CLI/TUI browse-inspect-confirm-install path using the shared
    service. Keep package checks and exact-version consent intact from the start.
-4. Add update, preference, and publishing workflows as separate slices. Preserve
-   operation receipts and statuses even before all rich adapters are complete.
+4. Add update, preference, and publishing workflows as separate slices. The
+   bounded terminal prepared-draft editor and policy-routed publication operation
+   are implemented: one exact-content receipt drives owner-private upload,
+   authoritative recovery, decline, and durable terminal status. This remains
+   locally verified, including explicit Slack/Telegram original-card controls;
+   do not represent it as complete file-manifest UI, proactive delivery, or live
+   publication parity. Preserve operation receipts and statuses while remaining
+   adapters are added.
+   The shared consumption state block is now extracted: feed checkpoints/events,
+   mediation leases, mute/suppression preferences, delivery reservations,
+   operation outcomes, and explicit terminal recovery are present. Explicit maintenance
+   now produces bounded owner-scoped mediation references and can apply freshly authorized
+   automatic updates behind `--apply-automatic`; no scheduler is started. Model assessment and private native advisory delivery now have separate local
+   verification gates. CLI/TUI proactive presentation, live acceptance, and operation
+   reporting without a legitimate Gateway delivery/event receipt remain open.
 5. Add lifecycle-based qualification and contextual recommendations. Then finish
    Telegram/Slack presentation and run their full workflows end to end.
-6. Complete first-release acceptance before declaring the plugin usable for
-   dogfooding. Registration, a green unit test, and a sent card are different gates.
+6. Complete core-surface acceptance before broad dogfooding. Registration, a
+   green unit test, and a sent card are different gates.
 7. Add the shared UI API, then Desktop and Dashboard independently. Use the
    same operation service, not parallel frontend-controlled implementations.
+8. Before release, verify both installed UI bundles and the complete workflow
+   against deployed endpoints using Shannon's Nous Portal login. Mocks, stories,
+   and local scripting support this gate but cannot replace it.
 
 The approved execution breakdown is [FIRST-RELEASE.md](FIRST-RELEASE.md).
 Selectively copy working code and its tests before adapting plugin boundaries.
@@ -70,7 +86,7 @@ release-smoke PR; any Agent API PR is conditional, not mandatory. Parallel task 
 exclusive write scopes and one integration owner. Preserve feature IDs and
 points rather than double-counting extraction as new work.
 
-## Desktop Follow-Up
+## Desktop Release Phase
 
 Use an external unified package at `desktop/plugin.js`, importing only the
 supported Desktop SDK/React surface. Author maintainable source and build the
@@ -91,7 +107,7 @@ cached data and invalidate pending controls when that ownership changes.
 Account for local and remote backends, expiry, disable/reload, reconnects, and
 the SDK's OAuth-remote socket no-op: authenticated polling must work alone.
 
-## Dashboard Follow-Up
+## Dashboard Release Phase
 
 Ship a separate `dashboard/manifest.json` and reviewed JS bundle using the
 Dashboard SDK's supplied React, authentication helpers, and tab/slot registry.
@@ -118,9 +134,9 @@ Dashboard-only product features; its expected deprecation affects priority only.
 - Consolidate fixtures and parameterize truly equivalent cases. Retain separate
   tests for different authorization and failure paths.
 - Omit legacy migration code and unrelated frontend locale bundles from the
-  first release. Later UI localization belongs in the plugin's own artifacts.
-- Desktop/Dashboard deferral avoids about 18k legacy UI/test lines initially,
-  not permanently. Track runtime, tests, generated data, docs, and host changes
+  core-surface sequence. UI localization belongs in the plugin's own artifacts.
+- Sequencing Desktop/Dashboard after core surfaces avoided about 18k legacy
+  UI/test lines initially, not permanently. Track runtime, tests, generated data, docs, and host changes
   separately so the new footprint remains explainable.
 
 ## Reset and Rollout
@@ -128,7 +144,7 @@ Dashboard-only product features; its expected deprecation affects priority only.
 When explicitly authorized, inventory the exact local demo profiles/processes,
 back up developer fixtures, and reset only their Wisdom test state. Never
 delete all Hermes configuration, credentials, installed user skills, or unrelated
-processes. No reset or data migration is required to validate milestone 0.
+processes. No reset or data migration is required for ordinary isolated checks.
 
 Install immutable plugin builds into disposable profiles first. Then test with
 an entitled member, an entitled organization admin, and an unrelated account.

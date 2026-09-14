@@ -53,6 +53,10 @@ def test_current_v1_schema_upgrades_only_after_full_shape_validation(tmp_path: P
         "  updated_at TEXT NOT NULL,\n  owner_json TEXT\n",
         "  updated_at TEXT NOT NULL\n",
         1,
+    ).replace(
+        "  owner_user_id TEXT,\n  base_url TEXT,\n",
+        "",
+        1,
     )
     with sqlite3.connect(root / "wisdom.db") as db:
         db.executescript(v1_sql)
@@ -64,6 +68,9 @@ def test_current_v1_schema_upgrades_only_after_full_shape_validation(tmp_path: P
     store = WisdomStore(root)
     with store.transaction() as db:
         columns = [row[1] for row in db.execute("PRAGMA table_info(managed_install)")]
+        consent_columns = [
+            row[1] for row in db.execute("PRAGMA table_info(wisdom_consent)")
+        ]
         marker = db.execute(
             "SELECT version FROM plugin_schema_identity WHERE singleton=1"
         ).fetchone()[0]
@@ -71,7 +78,8 @@ def test_current_v1_schema_upgrades_only_after_full_shape_validation(tmp_path: P
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0]
     assert columns[-1] == "owner_json"
-    assert marker == SCHEMA_VERSION == 2
+    assert "state_revision" in consent_columns
+    assert marker == SCHEMA_VERSION
     assert metadata == str(SCHEMA_VERSION)
     WisdomStore(root)
 
@@ -82,6 +90,10 @@ def test_malformed_v1_schema_is_refused_without_metadata_upgrade(tmp_path: Path)
     v1_sql = CURRENT_SCHEMA_SQL.replace(
         "  updated_at TEXT NOT NULL,\n  owner_json TEXT\n",
         "  updated_at TEXT NOT NULL\n",
+        1,
+    ).replace(
+        "  owner_user_id TEXT,\n  base_url TEXT,\n",
+        "",
         1,
     )
     with sqlite3.connect(root / "wisdom.db") as db:

@@ -22,6 +22,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .package import PackagePolicyError
+from .setup_lock import managed_operation_guard
 
 
 class InstallExecutor:
@@ -29,11 +30,11 @@ class InstallExecutor:
 
     def __init__(
         self,
-        client: object,
-        store: object,
-        receipts: object,
-        reviewer: object,
-        host: object,
+        client: Any,
+        store: Any,
+        receipts: Any,
+        reviewer: Any,
+        host: Any,
         owner: Callable[[], dict],
     ) -> None:
         self.client = client
@@ -44,6 +45,13 @@ class InstallExecutor:
         self.owner = owner
 
     def apply(self, receipt: str, accept_partial: bool = False) -> dict:
+        """Exclude setup starters while applying one reviewed installation."""
+        plan = self.receipts.load(receipt, allow_started=True)
+        skill_id = _required_text(plan, "skill_id")
+        with managed_operation_guard(Path(self.store.root), skill_id):
+            return self._apply(receipt, accept_partial=accept_partial)
+
+    def _apply(self, receipt: str, accept_partial: bool = False) -> dict:
         """Apply one exact reviewed receipt, or resume its unfinished operation."""
         owner = self._owner()
         plan = self.receipts.load(receipt, allow_started=True)
@@ -57,8 +65,10 @@ class InstallExecutor:
         try:
             self._assert_owner(owner)
             conflicting = self._pending("uninstall", skill_id)
-            if conflicting:
+            if conflicting or self._pending("update", skill_id):
                 raise PackagePolicyError("another managed operation is pending for this skill")
+            if self._pending("wisdom_setup", skill_id):
+                raise PackagePolicyError("a setup operation is pending for this skill")
             pending = self._pending("install", skill_id)
             if pending:
                 payload = _operation_payload(pending)
@@ -75,6 +85,11 @@ class InstallExecutor:
             self.store.release_operation_lock(skill_id, lock)
 
     def uninstall(self, skill_id: str) -> dict:
+        """Exclude setup starters while beginning recoverable removal."""
+        with managed_operation_guard(Path(self.store.root), skill_id):
+            return self._uninstall(skill_id)
+
+    def _uninstall(self, skill_id: str) -> dict:
         """Remove one owner-managed skill into recoverable hidden storage."""
         owner = self._owner()
         lock = self.store.acquire_operation_lock(skill_id)
@@ -83,8 +98,10 @@ class InstallExecutor:
         try:
             self._assert_owner(owner)
             conflicting = self._pending("install", skill_id)
-            if conflicting:
+            if conflicting or self._pending("update", skill_id):
                 raise PackagePolicyError("another managed operation is pending for this skill")
+            if self._pending("wisdom_setup", skill_id):
+                raise PackagePolicyError("a setup operation is pending for this skill")
             pending = self._pending("uninstall", skill_id)
             if pending:
                 payload = _operation_payload(pending)
