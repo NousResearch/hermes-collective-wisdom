@@ -13,6 +13,7 @@ import subprocess
 import pytest
 from pydantic import ValidationError
 
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.setup_receipts import SetupReceipts
 from test_installed_setup import OWNER, installed  # pylint: disable=unused-import,wrong-import-order
@@ -170,6 +171,154 @@ def test_unknown_launch_is_never_replayed_and_requires_explicit_recovery(control
     assert value.apply(plan["receipt"])["state"] == "abandoned"
 
 
+@pytest.mark.parametrize(
+    "observable_host_result",
+    [
+        {"state": "running"},
+        {"state": "passed", "exit_code": 0, "output": "finished"},
+    ],
+)
+def test_recovery_status_returns_durable_running_snapshot_without_poll_or_write(
+    controller, observable_host_result,
+):
+    """Passive review reports the journal even if polling would now be terminal."""
+
+    value, store, _inspection_host, execution_host, target = controller
+    execution_host.next_result = {"state": "running"}
+    execution_host.status_result = observable_host_result
+    plan = value.plan(
+        "skill-1", version=1, phase="setup", index=0, command="printf maybe"
+    )
+    started = value.apply(plan["receipt"])
+    before = store.operation(started["operation_id"])
+
+    status = value.recovery_status("skill-1", started["operation_id"])
+
+    assert status == {
+        "kind": "wisdom_setup",
+        "skill_id": "skill-1",
+        "operation_id": started["operation_id"],
+        "receipt": plan["receipt"],
+        "journal_phase": "running",
+        "journal_state": "pending",
+        "version": 1,
+        "content_hash": plan["content_hash"],
+        "target_path": str(target),
+        "setup_key": plan["setup_key"],
+        "step": plan["step"],
+        "task_id": "wisdom-setup:" + plan["receipt"],
+        "handle": before["payload"]["handle"],
+        "result": None,
+        "can_recover": True,
+    }
+    assert execution_host.status_calls == []
+    assert store.operation(started["operation_id"]) == before
+
+
+def test_recovery_status_returns_durable_terminal_snapshot_without_poll_or_write(controller):
+    value, store, _inspection_host, execution_host, target = controller
+    plan = value.plan(
+        "skill-1", version=1, phase="setup", index=0, command="printf complete"
+    )
+    result = value.apply(plan["receipt"])
+    operation_id = store.get_metadata("setup_receipt:" + plan["receipt"])["operation_id"]
+    before = store.operation(operation_id)
+
+    status = value.recovery_status("skill-1", operation_id)
+
+    assert status == {
+        "kind": "wisdom_setup",
+        "skill_id": "skill-1",
+        "operation_id": operation_id,
+        "receipt": plan["receipt"],
+        "journal_phase": "passed",
+        "journal_state": "done",
+        "version": 1,
+        "content_hash": plan["content_hash"],
+        "target_path": str(target),
+        "setup_key": plan["setup_key"],
+        "step": plan["step"],
+        "task_id": "wisdom-setup:" + plan["receipt"],
+        "handle": before["payload"]["handle"],
+        "result": result,
+        "can_recover": False,
+    }
+    assert execution_host.status_calls == []
+    assert store.operation(operation_id) == before
+
+
+def test_reviewed_setup_recovery_revalidates_command_before_poll_or_abandon(controller):
+    value, store, _inspection_host, execution_host, _target = controller
+    execution_host.next_result = {"state": "running"}
+    plan = value.plan(
+        "skill-1", version=1, phase="setup", index=0, command="printf reviewed"
+    )
+    started = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", started["operation_id"])
+    row = store.operation(started["operation_id"])
+    payload = dict(row["payload"])
+    payload["step"] = {**payload["step"], "command": "printf different"}
+    store.replace_operation_payload(started["operation_id"], payload)
+
+    with pytest.raises(WisdomConflict, match="reviewed|receipt|content"):
+        value.recover(
+            "skill-1",
+            started["operation_id"],
+            acknowledged_effects_checked_and_stopped=True,
+            expected_recovery=reviewed,
+            may_apply=lambda: True,
+        )
+
+    assert execution_host.status_calls == []
+    assert store.operation(started["operation_id"])["state"] == "pending"
+
+
+def test_reviewed_setup_recovery_never_abandons_a_still_running_process(controller):
+    value, store, _inspection_host, execution_host, _target = controller
+    execution_host.next_result = {"state": "running"}
+    execution_host.status_result = {"state": "running"}
+    plan = value.plan(
+        "skill-1", version=1, phase="setup", index=0, command="printf running"
+    )
+    started = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", started["operation_id"])
+
+    result = value.recover(
+        "skill-1",
+        started["operation_id"],
+        acknowledged_effects_checked_and_stopped=True,
+        expected_recovery=reviewed,
+        may_apply=lambda: True,
+    )
+
+    assert result["state"] == "running"
+    assert len(execution_host.status_calls) == 1
+    assert store.operation(started["operation_id"])["state"] == "pending"
+
+
+def test_revoked_review_has_no_setup_recovery_poll_or_write(controller):
+    value, store, _inspection_host, execution_host, _target = controller
+    execution_host.next_result = {"state": "running"}
+    plan = value.plan(
+        "skill-1", version=1, phase="setup", index=0, command="printf revoked"
+    )
+    started = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", started["operation_id"])
+    before = store.operation(started["operation_id"])
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.recover(
+            "skill-1",
+            started["operation_id"],
+            acknowledged_effects_checked_and_stopped=True,
+            expected_recovery=reviewed,
+            may_apply=lambda: False,
+        )
+
+    assert execution_host.status_calls == []
+    assert store.operation(started["operation_id"]) == before
+
+
 # pylint: disable-next=too-many-locals
 def test_native_unknown_recovery_clear_uses_c3_journal_and_preserves_filesystem_effect(
     installed,
@@ -224,7 +373,8 @@ def test_native_unknown_recovery_clear_uses_c3_journal_and_preserves_filesystem_
                 "policy": {}, "owner": dict(OWNER),
             }
 
-        def update_apply(self, _receipt):
+        def update_apply(self, _receipt, *, may_apply):
+            assert may_apply() is True
             return {"updated": True, "version": 1}
 
         def installed_setup_inspect(self, skill_id, *, version=None):
@@ -233,13 +383,20 @@ def test_native_unknown_recovery_clear_uses_c3_journal_and_preserves_filesystem_
         def installed_setup_plan(self, skill_id, **values):
             return c3.plan(skill_id, **values)
 
-        def installed_setup_apply(self, receipt):
-            return c3.apply(receipt)
+        def installed_setup_apply(self, receipt, *, may_apply):
+            return c3.apply(receipt, may_apply=may_apply)
 
-        def installed_setup_recover(self, skill_id, operation_id, *, acknowledged=False):
+        def installed_setup_recovery_inspect(self, skill_id, operation_id):
+            return c3.recovery_status(skill_id, operation_id)
+
+        def installed_setup_recover(
+            self, skill_id, operation_id, *, acknowledged=False,
+            expected_recovery=None, may_apply=None,
+        ):
             return c3.recover(
                 skill_id, operation_id,
                 acknowledged_effects_checked_and_stopped=acknowledged,
+                expected_recovery=expected_recovery, may_apply=may_apply,
             )
 
     service = Service()

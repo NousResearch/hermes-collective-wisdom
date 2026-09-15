@@ -1,8 +1,60 @@
 # Host API Map
 
 Audited against Agent `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
-See [SOURCES.md](SOURCES.md) for immutable source notation. Proposed interfaces
-below are **not present or implemented** by this repository today.
+See [SOURCES.md](SOURCES.md) for immutable source notation. The historical API
+inventory below describes those pinned hosts, not unpublished host development.
+
+## Local development checkpoint — 2026-09-15
+
+A separately authorized, generic CLI/TUI presentation implementation now exists on
+Agent branch `shannonsands/plugin-local-presentation`, based on
+`1ad89ac018f26a4f21817ebf37bb09f508656d63`. It provides
+`ctx.register_presentation_handler()` and correlated `rendered`, `not_rendered`,
+and `uncertain` receipts. It is not committed, published, or part of the pinned
+host used by the accepted plugin artifact tests.
+
+The Wisdom plugin now optionally registers an interactive cadence consumer. It reuses
+owner-scoped assessment leases, policy checks and the Gateway reservation/outcome
+protocol, then requests literal local output. Registration is inert and older
+hosts retain manual inbox access. An uncertain result stops the batch without
+resending; untouched ready leases are released. Under the approved simplification,
+the consumer may now perform bounded production and assessment before delivery.
+It consumes a single-use owner-bound capture of the real pre-LLM Python context;
+it does not invent model routing, inject messages, or grant approval. Local
+pre-LLM alone no longer assesses or claims work. See the
+[current gate](TESTING.md#simple-interactive-cadence--2026-09-15).
+
+Local CLI/TUI read-tool handoffs now also use the existing pre-LLM hook: an
+expiring, bounded grant binds the exact task/session and active model route to the
+profile/account/installation owner. `wisdom_inspect` and `wisdom_inbox` validate
+that binding against the service instance used for the read. Replacement turns,
+route loss, unload and changed ownership reject old grants. This does not enable
+native consent cards on local surfaces or authorize install/setup/publication.
+
+Assessment cancellation releases the presentation callback without waiting for a
+synchronous provider to stop. The worker owns its own service lifetime and loses
+admission on cancellation; its already-started call may finish, but its result may
+not trigger stale delivery. The underlying provider thread is not forcibly killed.
+
+[Local turn journeys](TESTING.md#local-turn-journeys--2026-09-15) now cover the
+real host pre-LLM hook and classic CLI PTY offer/render, plus TUI `prompt.submit`
+through RPC/Ink and new-input cancellation. Both renderer journeys follow the
+inspection handoff through the scoped tool registry. Gateway/model results are
+recording fixtures; full live CLI/TUI and mutation UX acceptance remain open.
+Do not infer a released minimum host version or deployed acceptance. The historical
+gap below still applies to old pinned hosts, not this development capability.
+
+
+The same isolated host now also provides an optional generic TUI review bridge
+through `ctx.request_review()`, `ctx.can_request_review()` before protected
+preparation, and `ctx.is_review_current()` after selection and final owner reads.
+The latter does not renew the one-shot request or grant consent. It binds an explicit
+slash invocation to the exact plugin registration, session, transport and input
+generation. A literal, scrollable body and allowlisted named actions cross actual
+RPC/Ink; initial Enter cancels, and display acknowledgement is never selection.
+The host owns no Wisdom receipt or execution policy. Wisdom's `tui_actions.py`
+uses the existing install/update/setup kernels; unsupported hosts fail safely to
+the terminal handoff. See [the development TUI commands](../README.md#development-tui-review-and-actions).
 
 A partial command-only experiment exists on the rejected Agent PR #108645:
 [historical H1 evidence](verification/H1-commands.md). It is not a dependency.
@@ -179,6 +231,19 @@ and manifest have different lifecycle semantics. In M9, ensure both can hide
 unavailable contributions on expiry/profile change. If a lifecycle/visibility
 hook is missing, add a small generic extension with a neutral example; do not
 patch a Wisdom condition into host navigation or core routes.
+
+### Selected Desktop handoff boundary — Option 1
+
+The native-context dashboard backend has been withdrawn from this package.
+`api_context: "native"` and `hermes_cli.plugin_api_context` are unpublished host
+changes, not stock SDK contracts. The external Desktop page uses the public
+Desktop SDK for navigation, components and clipboard only. It performs no private
+HTTP reads, receipt application or background activity. All protected workflows
+remain explicit native commands on the intended host/profile.
+
+Dashboard SDK work is deferred. Do not restart a host bridge, add a daemon, guess
+state/config paths or treat renderer identity as authorization. Earlier proposed
+host additions in this document are historical, not current implementation tasks.
 
 ## Deliberately Not Building
 

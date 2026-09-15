@@ -108,8 +108,9 @@ class Service:
             "owner": self.native_owner(),
         }
 
-    def update_apply(self, receipt):
+    def update_apply(self, receipt, *, may_apply):
         assert receipt == "receipt"
+        assert may_apply() is True
         Service.applies += 1
         return {"updated": True, "version": 2}
 

@@ -2,12 +2,14 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-many-locals
 # pylint: disable=protected-access,too-few-public-methods,too-many-arguments
 # pylint: disable=use-implicit-booleaness-not-comparison,import-outside-toplevel
-# pylint: disable=unused-variable,unused-argument
+# pylint: disable=unused-variable,unused-argument,invalid-name
 
 from __future__ import annotations
 
 import json
 import sys
+import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -16,6 +18,7 @@ import pytest
 
 from native_sdk_fixtures import agent_policy as _policy
 from hermes_wisdom_plugin.client import WisdomMuteResponse
+from hermes_wisdom_plugin.client_delivery import ClientDeliveryResponse
 from hermes_wisdom_plugin.mediation import (
     Advice,
     AssessmentBridge,
@@ -23,6 +26,8 @@ from hermes_wisdom_plugin.mediation import (
     conversation_context,
 )
 from hermes_wisdom_plugin.mediation_store import MediationStore
+from hermes_wisdom_plugin.native_context import NativeInvocation
+from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 from hermes_wisdom_plugin.qualification import snapshot_tree
 from hermes_wisdom_plugin.store import WisdomStore
 
@@ -603,3 +608,210 @@ def test_bridge_schedules_native_drain_even_when_generation_is_unavailable(tmp_p
     assert call.args[:2] == (invocation, owner)
     assert call.kwargs["get_delivery_mode"]() == "agent"
     assert call.kwargs["admission_current"]() is True
+
+
+def test_native_human_turn_produces_assesses_and_delivers_due_feed_once(
+    tmp_path, monkeypatch
+):
+    service, owner = _service(tmp_path)
+    service.profile = ("default", tmp_path / "profile")
+    service.notification_config = Mock(return_value={
+        "notifications": {"delivery_mode": "agent"}
+    })
+    service.client.recommendation_suppressions.return_value = []
+
+    class DueConsumption:
+        def __init__(self):
+            self.ready = False
+            self.polls = 0
+
+        def poll_feed(self):
+            self.polls += 1
+            return {"inserted": 1, "pages": 1, "cursor": "cursor-1"}
+
+        def refresh_metadata(self):
+            self.ready = True
+            return {"enriched": 1, "remaining": 0}
+
+        def notifications(self, **_kwargs):
+            assert self.ready
+            return {"events": [{
+                "event_id": "feed-1", "category": "new_skill", "kind": "new",
+                "skill_id": "skill-1", "skill_name": "Shared workflow", "version": 1,
+                "occurred_at": "2026-09-15T00:00:00Z",
+            }], "more": False}
+
+    consumption = DueConsumption()
+    service._consumption = Mock(return_value=consumption)
+
+    def delivery_response(request_id, reference, *, state="claimed"):
+        return ClientDeliveryResponse(
+            org_id="org-1", recipient_user_id="account-1", event_id="feed-1",
+            request_id=request_id, reference=reference, state=state, reason=None,
+            lease_until=(datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() + 120, timezone.utc
+            ).isoformat().replace("+00:00", "Z")) if state == "claimed" else None,
+        )
+
+    service.client.claim_notification_delivery.side_effect = delivery_response
+    service.client.settle_notification_delivery.side_effect = (
+        lambda event_id, request_id, reference, *, outcome, receipt: delivery_response(
+            request_id, reference, state=outcome
+        )
+    )
+    llm = RecordingLlm()
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", SimpleNamespace(
+        _RUNTIME_MAIN_CONTEXT=SimpleNamespace(get=lambda: {
+            "session_id": "session-1", "provider": "active-provider",
+            "model": "active-model",
+        })
+    ))
+
+    class SlackClient:
+        def __init__(self):
+            self.posts = []
+
+        async def chat_postMessage(self, **payload):
+            self.posts.append(payload)
+            return {"ok": True, "channel": payload["channel"], "ts": "advice-1"}
+
+    class SlackApp:
+        def __init__(self):
+            self.client = SlackClient()
+
+        def action(self, _pattern):
+            return lambda callback: callback
+
+    class SlackAdapter:
+        _owner_profile = "default"
+
+    async def scenario():
+        tasks = []
+        runtime = NativeSurfaceRuntime(
+            tmp_path / "state", "default", lambda: service, llm,
+            lambda coro, **_kwargs: tasks.append(asyncio.create_task(coro)),
+        )
+        app = SlackApp()
+        adapter = SlackAdapter()
+        runtime.wire_slack(app, adapter)
+        invocation = NativeInvocation(
+            platform="slack", profile="default", chat_type="dm", chat_id="D1",
+            actor_id="account-1", actor_name="Shannon", thread_id="", scope_id="W1",
+            message_id="request-1", session_key="slack:W1:D1:account-1",
+            adapter=adapter, host_session_id="session-1", task_id="task-1",
+            turn_id="turn-1",
+        )
+        runtime.tool_invocation = lambda **_kwargs: invocation
+        bridge = AssessmentBridge(
+            lambda: service, llm, get_delivery_mode=lambda: "agent",
+            profile_name="default",
+        )
+
+        bridge.run(
+            native_runtime=runtime, platform="slack", parent_session_id="",
+            session_id="session-1", task_id="task-1", turn_id="turn-1",
+            sender_id="account-1", model="active-model", conversation_history=[],
+        )
+        await asyncio.sleep(0)
+        await asyncio.gather(*tasks)
+        restarted = AssessmentBridge(
+            lambda: service, llm, get_delivery_mode=lambda: "agent",
+            profile_name="default",
+        )
+        restarted.run(
+            native_runtime=runtime, platform="slack", parent_session_id="",
+            session_id="session-1", task_id="task-2", turn_id="turn-2",
+            sender_id="account-1", model="active-model", conversation_history=[],
+        )
+        await asyncio.sleep(0)
+        await asyncio.gather(*tasks)
+        return app
+
+    app = asyncio.run(scenario())
+
+    rows = MediationStore(service.store, owner=owner).assessments("org-1")
+    assert consumption.polls == 1
+    assert len(llm.calls) == 1
+    assert len(rows) == 1 and rows[0]["state"] == "delivered", (
+        rows, app.client.posts, service.client.method_calls
+    )
+    assert len(app.client.posts) == 1
+
+
+def test_local_pre_llm_facts_do_not_produce_without_human_origin_proof(tmp_path):
+    service, _owner_value = _service(tmp_path)
+    service._consumption = Mock(
+        side_effect=AssertionError("unproven local origin started cadence")
+    )
+    bridge = AssessmentBridge(
+        lambda: service, RecordingLlm(), get_delivery_mode=lambda: "agent",
+        profile_name="default",
+    )
+
+    bridge.run(
+        platform="cli", parent_session_id="", session_id="session-1",
+        task_id="task-1", turn_id="turn-1", model="active-model",
+        conversation_history=[],
+    )
+
+    service._consumption.assert_not_called()
+    service.client.agent_led_policy.assert_not_called()
+
+
+@pytest.mark.parametrize("boundary", ["consumption", "owner_read"])
+def test_native_cadence_unload_during_last_read_denies_network(tmp_path, boundary):
+    service, owner = _service(tmp_path)
+    bridge = AssessmentBridge(
+        lambda: service, RecordingLlm(), get_delivery_mode=lambda: "agent",
+        profile_name="default",
+    )
+    consumption = Mock()
+    if boundary == "consumption":
+        def consumption_reader():
+            bridge.close()
+            return consumption
+        service._consumption = consumption_reader
+    else:
+        def owner_reader():
+            bridge.close()
+            return owner
+        service._installation_owner = owner_reader
+        service._consumption = Mock(return_value=consumption)
+    queue = MediationStore(service.store, owner=owner)
+    bridge._produce_due(
+        service, owner, queue, lambda: True, native_admitted=True,
+    )
+    consumption.poll_feed.assert_not_called()
+    if boundary == "owner_read":
+        service.client.agent_led_policy.assert_not_called()
+
+
+def test_failed_native_refresh_uses_durable_cooldown_across_bridge_restart(tmp_path):
+    service, _owner_value = _service(tmp_path)
+    service.profile = ("default", tmp_path / "profile")
+    service.notification_config = Mock(return_value={
+        "notifications": {"delivery_mode": "agent"}
+    })
+    consumption = Mock()
+    consumption.poll_feed.side_effect = ConnectionError("fixture gateway unavailable")
+    service._consumption = Mock(return_value=consumption)
+    invocation = SimpleNamespace(
+        profile="default", session_key="slack:W1:D1:account-1",
+        actor_id="account-1", platform="slack", chat_id="D1",
+        thread_id="", scope_id="W1",
+    )
+    native = Mock()
+    native.tool_invocation.return_value = invocation
+
+    for task_id in ("task-1", "task-2"):
+        AssessmentBridge(
+            lambda: service, RecordingLlm(), get_delivery_mode=lambda: "agent",
+            profile_name="default",
+        ).run(
+            native_runtime=native, platform="slack", parent_session_id="",
+            session_id="session-1", task_id=task_id, turn_id=task_id,
+            sender_id="account-1", model="active-model", conversation_history=[],
+        )
+
+    assert consumption.poll_feed.call_count == 1
+    assert service.client.agent_led_policy.call_count == 1

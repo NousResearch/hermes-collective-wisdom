@@ -257,6 +257,45 @@ def test_sync_status_is_redacted_and_read_only(tmp_path):
     after = service.store.path.read_bytes()
 
     assert result["can_retry"] is False
-    assert set(result) == {"delivery", "operation", "can_retry"}
+    assert set(result) == {"preference", "mute", "delivery", "operation", "can_retry"}
     assert json.dumps(result).find("account-1") == -1
     assert before == after
+
+
+def test_sync_retry_does_not_resurrect_conflicted_or_expired_preferences(tmp_path):
+    from hermes_wisdom_plugin.sync_recovery import WisdomSyncRecovery
+
+    service = _service(tmp_path)
+    MediationStore(service.store)
+    preferences = WisdomPreferences(service, clock=lambda: 1000.0)
+    with service.store.transaction() as db:
+        preferences.stage_suppression(
+            db,
+            org="org-1",
+            user="account-1",
+            reference={"kind": "skill", "skill_id": "skill-1", "version": 2},
+        )
+    preferences.stage_mute("org-1", "1_day", expected_revision=0)
+    with service.store.transaction() as db:
+        db.execute(
+            "UPDATE wisdom_preference_outbox SET state='conflict',attempts=3"
+        )
+        db.execute(
+            "UPDATE wisdom_mute_outbox SET state='expired',attempts=3,expires_at=999"
+        )
+    service.client.reset_mock()
+
+    result = WisdomSyncRecovery(service, clock=lambda: 1000.0).retry(
+        may_apply=lambda: True
+    )
+
+    assert service.client.method_calls == []
+    assert result["preference"]["conflict"] == 1
+    assert result["mute"]["expired"] == 1
+    with service.store.transaction() as db:
+        preference = db.execute(
+            "SELECT state,attempts FROM wisdom_preference_outbox"
+        ).fetchone()
+        mute = db.execute("SELECT state,attempts FROM wisdom_mute_outbox").fetchone()
+    assert tuple(preference) == ("conflict", 3)
+    assert tuple(mute) == ("expired", 3)

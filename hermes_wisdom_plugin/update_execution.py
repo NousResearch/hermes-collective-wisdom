@@ -61,7 +61,60 @@ class UpdateExecutor:
         self.host = host
         self.owner = owner
 
-    def apply(self, receipt: str) -> dict[str, Any]:
+    @staticmethod
+    def _require_current(may_apply: Callable[[], bool] | None) -> None:
+        if may_apply is not None and may_apply() is not True:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+
+    @staticmethod
+    def _assert_payload_matches_plan(payload: dict, plan: dict) -> None:
+        if any(payload.get(key) != value for key, value in plan.items()):
+            raise WisdomConflict("update recovery no longer matches its reviewed receipt")
+
+    def recovery_status(self, skill_id: str, operation_id: str) -> dict[str, Any]:
+        """Inspect one exact update journal without verification, retry, or mutation."""
+
+        row = self.store.operation(operation_id)
+        if row is None or row.get("kind") != "update" or row.get("entity_id") != skill_id:
+            raise PackagePolicyError("update recovery operation was not found")
+        payload = _operation_payload(row)
+        if payload.get("owner") != self._owner():
+            raise WisdomAuthError("update recovery belongs to another enrolment")
+        receipt = payload.get("receipt")
+        version = payload.get("version")
+        from_version = payload.get("from_version")
+        content_hash = payload.get("content_hash")
+        # Keep the complete fail-closed journal identity check visible together.
+        if (
+            # pylint: disable-next=too-many-boolean-expressions
+            payload.get("skill_id") != skill_id
+            or not isinstance(receipt, str)
+            or not receipt
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or not isinstance(from_version, int)
+            or isinstance(from_version, bool)
+            or not isinstance(content_hash, str)
+            or not content_hash
+        ):
+            raise PackagePolicyError("update recovery identity is invalid")
+        plan = self.receipts.load(receipt, allow_started=True)
+        self._assert_payload_matches_plan(payload, plan)
+        return {
+            "kind": "update", "skill_id": skill_id,
+            "operation_id": operation_id, "receipt": receipt,
+            "phase": str(row["phase"]), "state": str(row["state"]),
+            "from_version": from_version, "version": version,
+            "content_hash": content_hash, "can_resume": row["state"] != "done",
+        }
+
+    def apply(
+        self,
+        receipt: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+        expected_recovery: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Apply or explicitly retry one receipt; status never enters this path."""
 
         plan = self.receipts.load(receipt, allow_started=True)
@@ -71,7 +124,14 @@ class UpdateExecutor:
             )
         skill_id = _required_text(plan, "skill_id")
         with managed_operation_guard(Path(self.store.root), skill_id):
-            return self._apply(receipt, plan)
+            if expected_recovery is not None:
+                operation_id = expected_recovery.get("operation_id")
+                if not isinstance(operation_id, str) or not operation_id:
+                    raise WisdomConflict("reviewed update recovery identity is invalid")
+                current = self.recovery_status(skill_id, operation_id)
+                if current != expected_recovery:
+                    raise WisdomConflict("update recovery changed after it was reviewed")
+            return self._apply(receipt, plan, may_apply=may_apply)
 
     def apply_automatic(self, receipt: str) -> dict[str, Any]:
         """Apply or resume only a fresh policy-authorized automatic operation."""
@@ -84,9 +144,11 @@ class UpdateExecutor:
             raise PackagePolicyError("automatic execution requires automatic policy authority")
         skill_id = _required_text(plan, "skill_id")
         with managed_operation_guard(Path(self.store.root), skill_id):
-            return self._apply(receipt, plan)
+            return self._apply(receipt, plan, may_apply=None)
 
-    def _apply(self, receipt: str, plan: dict[str, Any]) -> dict[str, Any]:
+    def _apply(
+        self, receipt: str, plan: dict[str, Any], *, may_apply: Callable[[], bool] | None
+    ) -> dict[str, Any]:
         completed = self.receipts.outcome(receipt)
         owner = self._owner()
         if plan.get("owner") != owner:
@@ -110,28 +172,41 @@ class UpdateExecutor:
                 payload = _operation_payload(row)
                 if payload.get("receipt") != receipt or payload.get("owner") != owner:
                     raise PackagePolicyError("another update receipt is pending for this skill")
+                validate_update_target(self.host, payload, owner)
+                self._assert_payload_matches_plan(payload, plan)
+                self._require_current(may_apply)
                 self._repair_start(row, payload)
                 phase = str(row["phase"])
                 if phase in {"gateway_recorded", "gateway_rejected"}:
+                    self._require_current(may_apply)
                     self.store.assert_operation_lock(skill_id, lease)
-                    return self._resume(str(row["id"]), payload, lease)
+                    return self._resume(
+                        str(row["id"]), payload, lease, may_apply=may_apply
+                    )
                 try:
                     verified = self.reviewer.verify(plan, recovery_phase=phase)
                 except UpdateAuthorityRejected:
+                    self._require_current(may_apply)
                     return self._reject_recovery(str(row["id"]), payload, owner, lease)
+                self._require_current(may_apply)
                 self.store.assert_operation_lock(skill_id, lease)
-                return self._resume(str(row["id"]), payload, lease, verified=verified)
+                return self._resume(
+                    str(row["id"]), payload, lease,
+                    verified=verified, may_apply=may_apply,
+                )
             if completed is not None:
                 return completed
             verified = self.reviewer.verify(plan)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(skill_id, lease)
-            return self._start(verified, receipt, owner, lease)
+            return self._start(verified, receipt, owner, lease, may_apply=may_apply)
         finally:
             self.store.release_operation_lock(skill_id, lease)
 
     def _start(
-        self, verified: Any, receipt: str, owner: dict, lease: str
+        self, verified: Any, receipt: str, owner: dict, lease: str,
+        *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         plan = verified.plan
         if not plan.get("allowed"):
@@ -149,6 +224,7 @@ class UpdateExecutor:
             "recovery_path": None,
             "quarantine_path": None,
         }
+        self._require_current(may_apply)
         operation_id = self.store.journal(
             "update", _required_text(plan, "skill_id"), "reviewed", payload
         )
@@ -156,20 +232,26 @@ class UpdateExecutor:
         self.store.replace_operation_payload(operation_id, payload)
         self._bind_receipt(receipt, operation_id)
         staging = Path(payload["staging_path"])
+        self._require_current(may_apply)
         _write_staging(staging, verified.files)
         _require_tree(staging, verified.baseline)
         self._assert_owner(owner)
         self.store.assert_operation_lock(payload["skill_id"], lease)
         self.store.advance(operation_id, "staged")
         # Failures retain the deterministic journal/staging path for explicit retry.
-        return self._resume(operation_id, payload, lease, verified=verified)
+        return self._resume(
+            operation_id, payload, lease, verified=verified, may_apply=may_apply
+        )
 
     def _resume(
-        self, operation_id: str, payload: dict, lease: str, *, verified: Any | None = None
+        self, operation_id: str, payload: dict, lease: str, *,
+        verified: Any | None = None,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         operation = self.store.operation(operation_id)
         if operation is None:
             raise PackagePolicyError("update recovery journal is missing")
+        self._require_current(may_apply)
         owner = self._owner()
         if payload.get("owner") != owner:
             raise WisdomAuthError("update recovery belongs to another enrolment")
@@ -188,12 +270,15 @@ class UpdateExecutor:
                 if verified is None:
                     raise PackagePolicyError("reviewed update staging bytes are unavailable")
                 if staging.exists() or staging.is_symlink():
+                    self._require_current(may_apply)
                     shutil.rmtree(staging, ignore_errors=True)
+                self._require_current(may_apply)
                 _write_staging(staging, verified.files)
             _require_tree(staging, payload["baseline"])
             self.store.advance(operation_id, "staged")
             phase = "staged"
         if phase == "staged":
+            self._require_current(may_apply)
             recovery.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if target.exists() and not recovery.exists():
                 _require_tree(target, payload["local_snapshot"])
@@ -207,6 +292,7 @@ class UpdateExecutor:
             self.store.advance(operation_id, "old_preserved")
             phase = "old_preserved"
         if phase == "old_preserved":
+            self._require_current(may_apply)
             self._preserve_copy(payload, recovery, operation_id, owner, lease)
             self.store.advance(operation_id, "edits_preserved")
             phase = "edits_preserved"
@@ -216,6 +302,7 @@ class UpdateExecutor:
                 _require_tree(staging, payload["baseline"])
                 _same_filesystem(staging, target.parent)
                 self._assert_owner(owner)
+                self._require_current(may_apply)
                 self.store.assert_operation_lock(skill_id, lease)
                 _durable_replace(staging, target)
             elif not already_promoted:
@@ -228,16 +315,21 @@ class UpdateExecutor:
             _require_tree(target, payload["baseline"])
             _require_tree(recovery, payload["local_snapshot"])
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(skill_id, lease)
             self.store.record_install(self._install_record(payload, owner, "active"))
             self.store.advance(operation_id, "local_ledger_committed")
             phase = "local_ledger_committed"
         if phase == "local_ledger_committed":
-            return self._record_gateway(operation_id, payload, owner, lease, target, recovery)
+            return self._record_gateway(
+                operation_id, payload, owner, lease, target, recovery,
+                may_apply=may_apply,
+            )
         if phase == "gateway_recorded":
             result = payload.get("result") or self.receipts.outcome(payload["receipt"])
             if not isinstance(result, dict):
                 raise PackagePolicyError("completed update outcome is missing")
+            self._require_current(may_apply)
             self.receipts.complete(payload["receipt"], result)
             self.store.advance(operation_id, "gateway_recorded", done=True)
             return result
@@ -245,6 +337,7 @@ class UpdateExecutor:
             result = payload.get("result")
             if not isinstance(result, dict):
                 raise PackagePolicyError("rejected update outcome is missing")
+            self._require_current(may_apply)
             self.receipts.complete(payload["receipt"], result)
             self.store.advance(operation_id, "gateway_rejected", done=True)
             return result
@@ -258,6 +351,8 @@ class UpdateExecutor:
         lease: str,
         target: Path,
         recovery: Path,
+        *,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         remote = self._remote(payload["skill_id"], owner)
         remote_version = remote.get("installed_version") if remote else None
@@ -267,6 +362,7 @@ class UpdateExecutor:
                 return self._pending_result(payload, operation_id, "Gateway result is unverifiable")
         elif remote_version == payload["from_version"]:
             try:
+                self._require_current(may_apply)
                 server = self.client.record_install(
                     skill_id=payload["skill_id"],
                     installation_id=owner["installation_id"],
@@ -292,6 +388,7 @@ class UpdateExecutor:
                 payload, operation_id, "Gateway installation state changed; inspect before retrying"
             )
         self._assert_owner(owner)
+        self._require_current(may_apply)
         self.store.assert_operation_lock(payload["skill_id"], lease)
         self.store.record_install(self._install_record(payload, owner, "active", mode=mode))
         result = {

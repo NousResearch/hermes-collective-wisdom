@@ -48,7 +48,7 @@ def tools():
     """Build model tools around a recording service."""
     service = Service()
     native = SimpleNamespace(
-        tool_invocation=lambda **_kwargs: "invocation",
+        tool_invocation=lambda **_kwargs: SimpleNamespace(platform="telegram"),
         queue_model_consent=lambda *_args, **_kwargs: {"state": "queued"},
     )
     runtime = SimpleNamespace(native=native, _closed=False, _service=lambda: service)
@@ -62,7 +62,7 @@ def test_inbox_returns_exact_activity_instead_of_status_summary():
     assert result == {
         "activity": [{"reference": {"kind": "candidate", "event_id": "event-1"}}]
     }
-    assert service.calls == [("inbox", "invocation"), ("close",)]
+    assert service.calls == [("inbox", SimpleNamespace(platform="telegram")), ("close",)]
 
 
 def test_candidate_is_private_and_skill_version_is_exact():

@@ -1,5 +1,5 @@
 """Local send reservations and receipt recovery; never sends a message itself."""
-# pylint: disable=line-too-long,missing-function-docstring,missing-class-docstring,too-many-arguments,too-many-positional-arguments,protected-access,broad-exception-caught,too-many-branches,cyclic-import
+# pylint: disable=line-too-long,missing-function-docstring,missing-class-docstring,too-many-arguments,too-many-positional-arguments,protected-access,broad-exception-caught,too-many-branches,too-many-statements,cyclic-import
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from datetime import datetime
 from .client import WisdomError
 from .client_delivery import ClientDeliveryResponse
 from .delivery import DeliveryReceipt
+from .errors import WisdomAuthError
 from .mediation_store import MediationStore
 from .preferences import WisdomPreferences, suppression_key
 
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 SEND_MARGIN = 10
 SYNC_LEASE = 90
 MAX_SYNC_ATTEMPTS = 5
+
+
+def _require_current(may_apply):
+    if may_apply is not None and may_apply() is not True:
+        raise WisdomAuthError("Collective Wisdom review is no longer current")
 
 
 def create_schema(db):
@@ -100,7 +106,16 @@ class DeliveryOutbox:
         try:
             owner_reader = getattr(self.service, "_installation_owner", None)
             service_current = not callable(owner_reader) or owner_reader() == self.owner
-            return service_current and self.store.get_metadata("qualification_owner") == self.owner
+            installation_current = (
+                self.store.existing_installation_identity()
+                == self.owner.get("installation_id")
+                and self.store.active_org_id() == self.owner.get("organization_id")
+            )
+            return bool(
+                service_current
+                and installation_current
+                and self.store.get_metadata("qualification_owner") == self.owner
+            )
         except Exception:
             return False
 
@@ -125,6 +140,8 @@ class DeliveryOutbox:
             raise ValueError("Wisdom delivery owner is no longer active")
 
     def identity(self, org):
+        if not self._owner_current():
+            raise ValueError("Wisdom delivery owner is no longer active")
         return WisdomPreferences(self.service, clock=self.clock).identity(org)
 
     @staticmethod
@@ -278,14 +295,17 @@ class DeliveryOutbox:
             (org, job["id"], job["lease_token"]),
         )
 
-    def flush(self, org):  # pylint: disable=too-many-locals
+    def flush(self, org, *, may_apply=None):  # pylint: disable=too-many-locals
         """At most eight settlements per poll. Network retries never execute sends."""
-        if not self._owner_current():
+        owner_current = self._owner_current()
+        _require_current(may_apply)
+        if not owner_current:
             return
         owner = self.owner
         assert owner is not None
         owner_key = MediationStore._owner_key(owner)
         user = self.identity(org)
+        _require_current(may_apply)
         now = self.clock()
         for _ in range(8):
             with self.store.transaction() as db:
@@ -317,12 +337,18 @@ class DeliveryOutbox:
                 )
             result = None
             failure = None
+            authority_error = None
             settled_outcome = row["outcome"]
             try:
-                if self.identity(org) != user or not self._owner_current():
+                identity_current = self.identity(org)
+                _require_current(may_apply)
+                owner_current = self._owner_current()
+                _require_current(may_apply)
+                if identity_current != user or not owner_current:
                     return
                 reference = json.loads(row["reference_json"])
                 if row["event_id"] is None:
+                    _require_current(may_apply)
                     claimed = self.service.client.claim_notification_delivery(
                         row["request_id"], reference
                     )
@@ -338,13 +364,18 @@ class DeliveryOutbox:
                             else "not_sent"
                         )
                 if result is None:
-                    if self.identity(org) != user or not self._owner_current():
+                    identity_current = self.identity(org)
+                    _require_current(may_apply)
+                    owner_current = self._owner_current()
+                    _require_current(may_apply)
+                    if identity_current != user or not owner_current:
                         return
                     receipt = (
                         DeliveryReceipt.model_validate_json(row["receipt_json"])
                         if row["receipt_json"]
                         else None
                     )
+                    _require_current(may_apply)
                     result = self.service.client.settle_notification_delivery(
                         row["event_id"],
                         row["request_id"],
@@ -360,6 +391,10 @@ class DeliveryOutbox:
                     raise WisdomError("Invalid notification settlement response")
                 if result.state != "deferred":
                     settled_outcome = result.state
+            except WisdomAuthError as exc:
+                authority_error = exc
+                failure = "settlement_unavailable"
+                logger.warning("Wisdom receipt sync deferred (%s)", failure)
             except Exception as exc:
                 # A definite local non-send can be retired even when another client
                 # owns the remote event. A new attempt must still obtain a new claim.
@@ -398,6 +433,8 @@ class DeliveryOutbox:
                     and row["receipt_json"]
                 ):
                     self._recover_receipt(db, org, row, now)
+            if authority_error is not None:
+                raise authority_error
 
     @staticmethod
     def _recover_receipt(db, org, row, now):

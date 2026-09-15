@@ -1,5 +1,75 @@
 # Verification Plan
 
+## Current release gate: stock Agent and Desktop SDK handoffs
+
+The current release is the external plugin on unmodified Hermes Agent, plus the
+Desktop SDK command-copy guide. Dashboard and full embedded action parity are
+deferred. Historical modified-host and earlier test-count checkpoints below do
+not establish stock-host, installed-app, service-backed, or release acceptance.
+
+### Repeatable local checks
+
+```sh
+python -m pytest -q -rs --tb=short
+python -m pylint hermes_wisdom_plugin tests scripts/test_wisdom_offline_acceptance.py
+node --experimental-vm-modules --test tests/desktop/plugin.test.mjs
+python -m build
+```
+
+Use the project virtualenv. Configure `WISDOM_AGENT_DIR`, `WISDOM_HOST_PYTHON`,
+and `WISDOM_GATEWAY_DIR` for actual stock-host and cross-repository probes.
+Seven optional modified-host presentation/journey tests are intentionally
+excluded when their separate environment variables are unset. Test fixtures use
+disposable state; this does not authorize running arbitrary live-platform probes.
+
+### Required behavioral evidence
+
+- Recommendation delivery: reject background invocations before assessment,
+  claim or delivery; preserve durable claim/deduplication and offline suppression.
+  The persisted 60-second throttle is pacing, not the deduplication mechanism.
+- Native effects: preserve exact review and deliberate consent, carry invocation
+  authority through service wrappers into the executors, and recheck durable
+  consent and admission after owner rereads. Rendering, inspection and copying
+  commands never authorize an effect; install approval never authorizes setup.
+- Recovery: preserve successful apply results when subsequent inspection fails;
+  resume only the named journal/receipt, without blind replay or duplicate writes.
+  Setup abandonment uses the exact reviewed recovery snapshot and does not undo
+  filesystem effects. Retain the real-executor restart/unknown-outcome tests.
+- Packaging: verify source/sdist/wheel Python-byte parity, Desktop assets,
+  registered native plugin/CLI discovery on the stock host, and run the suite from
+  the extracted archive. A rebuilt archive needs its own evidence.
+- Driver contracts: retain `test_publication_driver_calls_existing_client_methods`
+  and Gateway's adjacent publication-driver helper tests. Import-only bootstraps
+  do not prove service-path API compatibility. Synthetic fixture authentication
+  is not Portal-account login or proof of a human consent interaction.
+
+### Real Desktop evidence and limitations
+
+The isolated built Desktop/Electron/backend pass on 2026-09-15 exercised plugin
+discovery and enablement, sidebar rendering, exact clipboard text, palette
+navigation, disable cleanup, persisted opt-in and re-enable without duplicates.
+It used the supported `HERMES_DESKTOP_PYTHON` override, not Agent source edits.
+The clipboard was restored and the disposable application was closed.
+
+Navigation used normal keyboard focus/activation after pointer automation was
+intercepted by the host. Mouse activation is **not** accepted by that pass, nor
+is packaged `/Applications/Hermes.app` release acceptance implied. No normal
+profile installation or effectful copied command was part of this test.
+
+### Service and release boundary
+
+Use Gateway's `scripts/test-wisdom-cross-repo.sh` with its immutable-source guard
+intact, pinned stock Agent/Portal dependencies, Node >=24 and disposable
+Postgres/MinIO services. The real-account smoke matrix in `FIRST-RELEASE.md`
+remains distinct from synthetic service-fixture acceptance. Portal login is not
+needed for local checks or those fixtures; agree actual targets/actions before
+any real-account effects. A green local artifact is not a deployment verdict.
+
+Development-only running checkpoints were consolidated outside the release
+package; current evidence and unresolved gates are tracked in the shared
+Collective Wisdom project note. The historical checkpoints below retain the
+pre-existing feature evidence, not a claim that all current gates are closed.
+
 ## Native Candidate Not Now Gate — 2026-09-15
 
 Candidate advisory deferral is integrated into the existing shared assessment

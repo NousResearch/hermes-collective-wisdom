@@ -25,6 +25,39 @@ from hermes_wisdom_plugin.commands import (
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound
 
 
+@pytest.mark.parametrize("choice", ["status", "agent", "fixed"])
+def test_cli_notification_settings_are_explicit_and_status_does_not_write(choice, capsys):
+    service = SimpleNamespace(mode="agent", calls=[])
+    service.require_setup = lambda: service.calls.append(("require_setup",))
+
+    def set_mode(mode):
+        service.calls.append(("set_notification_mode", mode))
+        service.mode = mode
+
+    service.notification_mode = lambda: service.mode
+    service.notification_mode_writable = lambda: True
+    service.set_notification_mode = set_mode
+    args = _parser().parse_args(["settings", choice, "--json"])
+    assert run_cli(args, service) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "delivery_mode": "agent" if choice == "status" else choice,
+        "writable": True,
+    }
+    assert service.calls == (
+        [("require_setup",)] if choice == "status"
+        else [("require_setup",), ("set_notification_mode", choice)]
+    )
+
+
+@pytest.mark.parametrize("command", ["settings fixed", "mute forever", "sync retry"])
+def test_shared_slash_controls_only_offer_terminal_handoff(command):
+    service = _Service()
+    output = run_slash(command, service)
+    assert f"hermes wisdom {command.split()[0]} status" in output
+    assert f"/wisdom {command.split()[0]}" in run_slash("help", service)
+    assert not service.calls
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog="hermes wisdom")
     build_parser(parser)
@@ -623,15 +656,19 @@ def test_slash_setup_with_any_arguments_is_instruction_only():
     assert not service.calls
 
 
-def test_slash_help_advertises_only_read_commands_and_terminal_setup():
-    output = run_slash("help", _Service())
+def test_slash_help_distinguishes_reads_private_reviews_and_terminal_instructions():
+    service = _Service()
+    output = run_slash("help", service)
 
     for command in ("browse", "show", "versions", "status", "setup", "help"):
         assert f"/wisdom {command}" in output
-    for command in ("share", "review", "publish"):
+    for command in ("share", "review"):
         assert f"/wisdom {command}" not in output
+    for command in ("candidate", "suggest", "prepared", "publish", "publication"):
+        assert f"/wisdom {command} " in output
     for command in ("install", "installed", "check", "update", "uninstall"):
         assert f"/wisdom {command} (terminal instructions)" in output
+    assert not service.calls
 
 
 @pytest.mark.parametrize("command", ["check skill-1", "update skill-1 --plan"])

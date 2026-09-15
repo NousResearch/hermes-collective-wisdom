@@ -12,14 +12,16 @@ this plugin's current public APIs rather than the removed coordinator.
 
 from __future__ import annotations
 
-import json
+import contextvars
 import importlib
+import json
+import threading
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .mediation_store import BATCH_SIZE, MediationStore
+from .mediation_store import BATCH_SIZE, MediationStore, delivery_context_allowed
 from .preferences import WisdomPreferences, suppression_key
 from .qualification import UnsafeSnapshotError, snapshot_tree
 
@@ -560,7 +562,7 @@ class QueuedAssessment:
 
 
 class AssessmentBridge:
-    """Map the registered pre-LLM lifecycle fact to one bounded assessment pass."""
+    """Capture local routes and run bounded work only at eligible surface boundaries."""
 
     def __init__(
         self,
@@ -575,11 +577,191 @@ class AssessmentBridge:
         self.get_delivery_mode = get_delivery_mode
         self.profile_name = profile_name
         self._closed = False
+        self._local_lock = threading.Lock()
+        self._local_turns: dict[str, tuple[contextvars.Context, dict[str, Any]]] = {}
 
     def close(self) -> None:
         """Revoke this registration's pending admission checks."""
 
         self._closed = True
+        with self._local_lock:
+            self._local_turns.clear()
+
+    def _capture_local(self, facts: dict[str, Any]) -> None:
+        """Remember real turn routing without opening the queue or doing model work."""
+
+        session_id = str(facts.get("session_id") or "")
+        with self._local_lock:
+            self._local_turns.pop(session_id, None)
+        model = str(facts.get("model") or "").strip()
+        route = _active_main_runtime()
+        if (
+            self._closed
+            or self.get_delivery_mode() != "agent"
+            or not delivery_context_allowed()
+            or not session_id
+            or not model
+            or not isinstance(route, dict)
+            or route.get("session_id") != session_id
+            or route.get("model") != model
+            or not route.get("provider")
+        ):
+            return
+        service = self.service_factory()
+        try:
+            owner = dict(service._installation_owner())
+        except Exception:
+            return
+        finally:
+            service.close()
+        captured = {
+            "session_id": session_id,
+            "model": model,
+            "history": conversation_context(list(facts.get("conversation_history") or [])),
+            "route": route,
+            "owner": owner,
+        }
+        with self._local_lock:
+            if self._closed:
+                return
+            self._local_turns[session_id] = (contextvars.copy_context(), captured)
+            while len(self._local_turns) > 32:
+                self._local_turns.pop(next(iter(self._local_turns)))
+
+    def _admit_local_tool(self, native_runtime: Any, facts: dict[str, Any]) -> None:
+        """Expose read-only handoff tools only inside this validated local model turn."""
+
+        session_id = str(facts.get("session_id") or "")
+        task_id = str(facts.get("task_id") or "")
+        native_runtime.revoke_local_tool(session_id=session_id)
+        model = str(facts.get("model") or "").strip()
+        route = _active_main_runtime()
+        if (
+            self._closed or facts.get("parent_session_id")
+            or not delivery_context_allowed() or not session_id or not task_id or not model
+            or not isinstance(route, dict) or route.get("session_id") != session_id
+            or route.get("model") != model or not route.get("provider")
+        ):
+            return
+        service = self.service_factory()
+        try:
+            owner = dict(service._installation_owner())
+        except Exception:
+            return
+        finally:
+            service.close()
+        try:
+            native_runtime.admit_local_tool(
+                owner=owner, surface=str(facts.get("platform") or "").casefold(),
+                session_id=session_id, task_id=task_id,
+                turn_id=str(facts.get("turn_id") or ""), route=route,
+            )
+        except (PermissionError, RuntimeError, ValueError):
+            return
+
+    def run_local(
+        self, service: Any, owner: dict[str, str], queue: Any, opportunity: Any,
+        *, admission_current: Callable[[], bool],
+    ) -> dict[str, Any] | None:
+        """Consume one captured active-model route only after host local eligibility."""
+
+        with self._local_lock:
+            turn = self._local_turns.pop(str(opportunity.session_id), None)
+        if turn is None or self._closed or not admission_current():
+            return None
+        context, captured = turn
+        if captured["owner"] != owner:
+            return None
+
+        def process() -> dict[str, Any] | None:
+            if (
+                self._closed
+                or not admission_current()
+                or _active_main_runtime() != captured["route"]
+            ):
+                return None
+            self._produce_due(
+                service, owner, queue, admission_current, native_admitted=True,
+            )
+            if self._closed or not admission_current():
+                return None
+            return QueuedAssessment(
+                service, owner, self.llm, get_delivery_mode=self.get_delivery_mode,
+                clock=queue.clock, admission_current=admission_current,
+            ).run(
+                session_key=f"local:{opportunity.session_id}",
+                session_id=opportunity.session_id,
+                platform="local",
+                actor_id=owner["account_id"],
+                model=captured["model"],
+                history=captured["history"],
+                address={"chat_id": opportunity.surface_id},
+            )
+
+        return context.run(process)
+
+    def _produce_due(
+        self, service: Any, owner: dict[str, str], queue: Any,
+        admission_current: Callable[[], bool], *, native_admitted: bool,
+    ) -> None:
+        """Refresh one throttled producer pass only from proven native human admission."""
+
+        try:
+            if (
+                not native_admitted
+                or self.get_delivery_mode() != "agent"
+                or not queue.claim_refresh(owner["organization_id"])
+            ):
+                return
+        except Exception:
+            return
+
+        def authorized() -> bool:
+            if (
+                self._closed
+                or self.get_delivery_mode() != "agent"
+                or not admission_current()
+            ):
+                return False
+            try:
+                service.check_owner()
+                owner_current = service._installation_owner() == owner
+                return bool(
+                    owner_current
+                    and self.get_delivery_mode() == "agent"
+                    and admission_current()
+                    and not self._closed
+                )
+            except Exception:
+                return False
+
+        try:
+            if not authorized():
+                return
+            policy = service.client.agent_led_policy()
+            if not authorized():
+                return
+            consumption = service._consumption()
+            if not authorized():
+                return
+            consumption.poll_feed()
+            if not authorized():
+                return
+            consumption.refresh_metadata()
+            if not authorized():
+                return
+            from .mediation_producer import (  # pylint: disable=import-outside-toplevel
+                MaintenanceMediationProducer,
+            )
+            MaintenanceMediationProducer(
+                service, consumption, owner,
+                skills_root=service.profile[1] / "skills",
+                config=service.notification_config(),
+                authorized=authorized,
+            ).produce(policy)
+        except Exception:
+            # claim_refresh was persisted before I/O, so failures back off safely.
+            return
 
     def run(self, *, native_runtime: Any | None = None, **facts: Any) -> None:
         """Act only in a real main-agent local or admitted private native turn."""
@@ -594,6 +776,11 @@ class AssessmentBridge:
         if not all((session_id, task_id, turn_id)) or platform not in {
             "cli", "tui", "slack", "telegram"
         }:
+            return None
+        if platform in {"cli", "tui"}:
+            if native_runtime is not None:
+                self._admit_local_tool(native_runtime, facts)
+            self._capture_local(facts)
             return None
         invocation = None
         if platform in {"slack", "telegram"}:
@@ -638,6 +825,12 @@ class AssessmentBridge:
                 except (PermissionError, RuntimeError, ValueError):
                     return False
                 return current == invocation
+
+            queue = MediationStore(service.store, owner=owner)
+            self._produce_due(
+                service, owner, queue, admission_current,
+                native_admitted=invocation is not None,
+            )
 
             QueuedAssessment(
                 service, owner, self.llm, get_delivery_mode=self.get_delivery_mode,

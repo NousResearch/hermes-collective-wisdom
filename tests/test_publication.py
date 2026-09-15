@@ -230,6 +230,68 @@ def test_submit_rechecks_source_and_current_upload_guard(tmp_path: Path):
     assert client.state.calls["upload"] == 0
 
 
+def test_revocation_during_real_owner_validation_prevents_publication_intent_and_transport(
+    tmp_path: Path,
+):
+    controller, prepared, client, _binding = publication(tmp_path)
+    review = controller.review(prepared["draft_id"])
+    admitted = [True]
+    original_scan = controller.reviewer.host.scan
+
+    def revoke_during_scan(overlay):
+        result = original_scan(overlay)
+        admitted[0] = False
+        return result
+
+    controller.reviewer.host.scan = revoke_during_scan
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.submit(review["receipt"], may_apply=lambda: admitted[0])
+
+    assert client.state.calls == Counter()
+    assert controller.store.operation(prepared["draft_id"]) is None
+
+
+def test_revocation_after_object_upload_stops_before_remote_draft_submission(tmp_path: Path):
+    controller, prepared, client, _binding = publication(tmp_path)
+    review = controller.review(prepared["draft_id"])
+    admitted = [True]
+    original_upload = client.upload_private_objects
+
+    def upload_then_revoke(objects):
+        result = original_upload(objects)
+        admitted[0] = False
+        return result
+
+    client.upload_private_objects = upload_then_revoke
+    result = controller.submit(review["receipt"], may_apply=lambda: admitted[0])
+
+    assert result["state"] == "pending"
+    assert result["phase"] == "objects_uploaded"
+    assert "invocation ended" in result["detail"].lower()
+    assert client.state.calls == Counter(upload=1)
+
+
+def test_revocation_after_decline_status_read_stops_before_remote_mutation(tmp_path: Path):
+    controller, prepared, client, _binding = publication(tmp_path, mode="moderated")
+    published = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    admitted = [True]
+    original_draft = client.draft
+
+    def read_then_revoke(draft_id):
+        result = original_draft(draft_id)
+        admitted[0] = False
+        return result
+
+    client.draft = read_then_revoke
+    result = controller.decline(
+        published["operation_id"], may_apply=lambda: admitted[0]
+    )
+
+    assert result["state"] == "pending"
+    assert result["phase"] == "pending_moderation"
+    assert client.state.drafts["draft-1"].state == "pending_moderation"
+
+
 def test_cas_uses_same_validated_snapshot_when_overlay_changes_before_tree_build(
     tmp_path: Path, monkeypatch
 ):

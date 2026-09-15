@@ -99,7 +99,7 @@ class NativeModelTools:
     def inbox(self, _args: dict[str, Any], **kwargs: Any) -> str:
         """Read pending private work for the admitted route."""
         invocation = self._invocation(kwargs)
-        service = self.runtime._service()  # pylint: disable=protected-access
+        service = self._service(invocation)
         try:
             return json.dumps(service.inbox(invocation=invocation), sort_keys=True)
         finally:
@@ -107,10 +107,10 @@ class NativeModelTools:
 
     def inspect(self, args: dict[str, Any], **kwargs: Any) -> str:
         """Read one exact private object without changing it."""
-        self._invocation(kwargs)
+        invocation = self._invocation(kwargs)
         kind = str(args.get("kind") or "")
         identity = str(args.get("identity") or "")
-        service = self.runtime._service()  # pylint: disable=protected-access
+        service = self._service(invocation)
         try:
             if kind == "candidate":
                 result = service.native_candidate_inspect(identity)
@@ -135,6 +135,16 @@ class NativeModelTools:
             return json.dumps(result, sort_keys=True)
         finally:
             service.close()
+
+    def _service(self, invocation: Any):
+        service = self.runtime._service()  # pylint: disable=protected-access
+        try:
+            if invocation.platform in {"cli", "tui"}:
+                self.runtime.native.validate_local_tool_owner(invocation, service)
+            return service
+        except Exception:
+            service.close()
+            raise
 
     def present(self, args: dict[str, Any], **kwargs: Any) -> str:
         """Queue a native exact review without approving its action."""

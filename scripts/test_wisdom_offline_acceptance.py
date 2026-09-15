@@ -102,22 +102,36 @@ def verify_checkout(
     expected_revision: str,
     *,
     require_clean: bool,
+    require_exact_head: bool = True,
 ) -> dict[str, Any]:
-    """Verify a local Git source without fetching, switching, or mutating it."""
+    """Inspect a local Git source without conflating a pin with worktree bytes."""
     if not repo.is_dir():
         raise AcceptanceError(f"checkout is missing: {repo}")
     head = _git(repo, "rev-parse", "HEAD")
     object_type = _git(repo, "cat-file", "-t", expected_revision)
     if object_type != "commit":
         raise AcceptanceError(f"pinned object is not a commit in {repo}: {expected_revision}")
-    if head != expected_revision:
+    if require_exact_head and head != expected_revision:
         raise AcceptanceError(
             f"HEAD drift in {repo}: expected {expected_revision}, got {head}"
         )
     status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
     if require_clean and status:
         raise AcceptanceError(f"checkout has uncommitted content: {repo}")
+    working_tree = {
+        "path": str(repo),
+        "head": head,
+        "head_exact": head == expected_revision,
+        "dirty": bool(status),
+        "clean": not bool(status),
+    }
     return {
+        "immutable_revision": {
+            "commit": expected_revision,
+            "available": True,
+        },
+        "working_tree": working_tree,
+        # Flat aliases retain compatibility with earlier evidence readers.
         "path": str(repo),
         "head": head,
         "required_revision": expected_revision,
@@ -125,6 +139,38 @@ def verify_checkout(
         "head_exact": head == expected_revision,
         "clean": not bool(status),
     }
+
+
+def _git_blob(repo: Path, revision: str, relative: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{revision}:{relative}"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise AcceptanceError(
+            f"required immutable Git file is unavailable: {revision}:{relative} "
+            f"in {repo}: {os.fsdecode(completed.stderr).strip()}"
+        )
+    return completed.stdout
+
+
+def verify_clean_paths(repo: Path, paths: tuple[str, ...]) -> list[str]:
+    """Require selected contract/runtime paths to match the checked-out commit."""
+    status = _git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        *paths,
+    )
+    if status:
+        raise AcceptanceError(
+            f"pinned contract paths have uncommitted content in {repo}: {status}"
+        )
+    return list(paths)
 
 
 def validated_revision(value: str, *, label: str) -> str:
@@ -393,12 +439,14 @@ def _verify_contract_bytes(plugin_dir: Path, expected: dict[str, str]) -> dict[s
     return actual
 
 
-def _verify_portal_pin(portal_dir: Path, expected: dict[str, str]) -> dict[str, str]:
-    pin_path = (
-        portal_dir
-        / "apps/nous-account-service/src/server/sync/generated/wisdom-plane-contract-pin.json"
+def _verify_portal_pin(
+    portal_dir: Path, portal_revision: str, expected: dict[str, str]
+) -> dict[str, str]:
+    relative = (
+        "apps/nous-account-service/src/server/sync/generated/"
+        "wisdom-plane-contract-pin.json"
     )
-    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin = json.loads(_git_blob(portal_dir, portal_revision, relative))
     comparisons = {
         "gatewayCommit": expected["gateway_contract"],
         "openapiSha256": expected["openapi_sha256"],
@@ -410,7 +458,11 @@ def _verify_portal_pin(portal_dir: Path, expected: dict[str, str]) -> dict[str, 
             raise AcceptanceError(
                 f"Portal contract pin drift for {key}: expected {value}, got {pin.get(key)}"
             )
-    return {key: str(pin[key]) for key in comparisons}
+    return {
+        "source_revision": portal_revision,
+        "source_path": relative,
+        **{key: str(pin[key]) for key in comparisons},
+    }
 
 
 def build_command(plugin_python: Path, artifacts_dir: Path) -> list[str]:
@@ -418,29 +470,109 @@ def build_command(plugin_python: Path, artifacts_dir: Path) -> list[str]:
     return [str(plugin_python), "-m", "build", "--outdir", str(artifacts_dir)]
 
 
-def _native_load_command(agent_python: Path, extracted_root: Path) -> list[str]:
+def gateway_driver_bootstrap_commands(
+    agent_python: Path,
+    agent_dir: Path,
+    gateway_dir: Path,
+    artifact_root: Path,
+) -> tuple[list[list[str]], dict[str, str]]:
+    """Return isolated offline driver probes pinned to one extracted artifact."""
+
+    driver_root = gateway_dir / "test" / "e2e"
+    commands = [
+        [str(agent_python), "-I", "-B", str(driver_root / name), "--offline-bootstrap"]
+        for name in (
+            "wisdom_delivery_driver.py",
+            "wisdom_outbox_driver.py",
+            "wisdom_publication_driver.py",
+        )
+    ]
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "HERMES_AGENT_DIR": str(agent_dir.resolve()),
+            "HERMES_WISDOM_ARTIFACT_ROOT": str(artifact_root.resolve()),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    return commands, environment
+
+
+def verify_native_artifact_layout(extracted_root: Path) -> dict[str, str]:
+    """Require the native directory-loader files from the extracted sdist."""
+    required = {
+        "native_loader": extracted_root / "__init__.py",
+        "manifest": extracted_root / "plugin.yaml",
+        "package": extracted_root / "hermes_wisdom_plugin",
+        "desktop": extracted_root / "desktop" / "plugin.js",
+    }
+    for label, path in required.items():
+        if label == "package":
+            valid = path.is_dir() and (path / "__init__.py").is_file()
+        else:
+            valid = path.is_file()
+        if not valid:
+            raise AcceptanceError(
+                f"extracted native artifact is missing {path.relative_to(extracted_root)} ({label})"
+            )
+    return {
+        "native_loader": "__init__.py",
+        "manifest": "plugin.yaml",
+        "package": "hermes_wisdom_plugin",
+        "desktop": "desktop/plugin.js",
+    }
+
+
+def _host_artifact_discovery_command(
+    agent_python: Path, agent_dir: Path, extracted_root: Path
+) -> list[str]:
+    """Load the extracted external artifact through the real host plugin manager."""
     code = """
-import importlib.util
 import json
+import os
 import pathlib
+import shutil
 import sys
-root = pathlib.Path(sys.argv[1]).resolve()
+import tempfile
 assert sys.flags.isolated == 1
-name = '_wisdom_offline_artifact.hermes_collective_wisdom'
-spec = importlib.util.spec_from_file_location(name, root / '__init__.py', submodule_search_locations=[str(root)])
-assert spec is not None and spec.loader is not None
-module = importlib.util.module_from_spec(spec)
-sys.modules[name] = module
-before = set(sys.modules)
-spec.loader.exec_module(module)
-assert callable(module.register)
-assert module.register.__module__ == name + '.hermes_wisdom_plugin'
-assert not (set(sys.modules) - before).intersection({'agent', 'hermes_cli', 'tools'})
-module_file = pathlib.Path(sys.modules[module.register.__module__].__file__).resolve()
-assert module_file.is_relative_to(root.resolve())
-print(json.dumps({'artifact_import': 'passed', 'module_file': str(module_file)}))
+agent = pathlib.Path(sys.argv[1]).resolve()
+artifact = pathlib.Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(agent))
+with tempfile.TemporaryDirectory(prefix='wisdom-host-discovery-') as temporary:
+    home = pathlib.Path(temporary)
+    installed = home / 'plugins' / 'hermes-collective-wisdom'
+    shutil.copytree(artifact, installed, symlinks=True)
+    (home / 'config.yaml').write_text(
+        'plugins:\\n  enabled:\\n    - hermes-collective-wisdom\\n', encoding='utf-8')
+    os.environ['HERMES_HOME'] = str(home)
+    from hermes_cli.plugins import PluginContext, PluginManager
+    manager = PluginManager(scope_key=str(home))
+    try:
+        manager.discover_and_load()
+        matches = [row for row in manager.list_plugins()
+                   if row['name'] == 'hermes-collective-wisdom']
+        assert len(matches) == 1, matches
+        row = matches[0]
+        assert row['enabled'] is True and row['error'] is None, row
+        loaded = next(item for item in manager._plugins.values()
+                      if item.manifest.name == 'hermes-collective-wisdom')
+        module_file = pathlib.Path(loaded.module.__file__).resolve()
+        assert module_file.is_relative_to(installed.resolve())
+        assert 'hermes_wisdom' not in sys.modules
+        print(json.dumps({
+            'artifact_import': 'passed',
+            'host_discovery': 'passed',
+            'module_file': str(module_file),
+            'plugin': row,
+            'host_presentation_api': hasattr(PluginContext, 'register_presentation_handler'),
+        }))
+    finally:
+        manager.unload()
 """.strip()
-    return [str(agent_python), "-I", "-c", code, str(extracted_root)]
+    return [
+        str(agent_python), "-I", "-B", "-c", code,
+        str(agent_dir), str(extracted_root),
+    ]
 
 
 def verify_artifact_package_parity(  # pylint: disable=too-many-locals
@@ -495,13 +627,14 @@ def verify_artifact_package_parity(  # pylint: disable=too-many-locals
     }
 
 
-def _build_and_load(  # pylint: disable=too-many-locals
+def _build_and_load(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
     source_snapshot: Path,
     plugin_python: Path,
     agent_python: Path,
+    agent_dir: Path,
     gateway_dir: Path,
     output_dir: Path,
-) -> tuple[list[dict[str, str]], list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], dict[str, Any], dict[str, str]]:
     artifacts_dir = output_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     commands: list[dict[str, Any]] = []
@@ -543,7 +676,25 @@ def _build_and_load(  # pylint: disable=too-many-locals
         roots = [path for path in extract_dir.iterdir() if path.is_dir()]
         if len(roots) != 1:
             raise AcceptanceError("sdist extraction did not produce exactly one root")
-        commands.append(run_command(_native_load_command(agent_python, roots[0]), cwd=extract_dir))
+        native_layout = verify_native_artifact_layout(roots[0])
+        commands.append(
+            run_command(
+                _host_artifact_discovery_command(agent_python, agent_dir, roots[0]),
+                cwd=extract_dir,
+            )
+        )
+        driver_commands, driver_environment = gateway_driver_bootstrap_commands(
+            agent_python, agent_dir, gateway_dir, roots[0]
+        )
+        for command in driver_commands:
+            commands.append(
+                run_command(
+                    command,
+                    cwd=gateway_dir,
+                    timeout=120,
+                    env=driver_environment,
+                )
+            )
     artifacts = [
         {
             "path": str(path),
@@ -553,7 +704,7 @@ def _build_and_load(  # pylint: disable=too-many-locals
         for path in sorted(artifacts_dir.iterdir())
         if path.is_file()
     ]
-    return artifacts, commands, package_parity
+    return artifacts, commands, package_parity, native_layout
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -614,24 +765,57 @@ def _run_checks(  # pylint: disable=too-many-locals
                 "Plugin source is uncommitted; the snapshot hash identifies tested bytes, "
                 "not an immutable release commit."
             )
+        portal_identity = verify_checkout(
+            portal_dir,
+            portal_revision,
+            require_clean=False,
+            require_exact_head=False,
+        )
+        gateway_identity = verify_checkout(
+            gateway_dir, expected["gateway_contract"], require_clean=False
+        )
+        gateway_identity["verified_clean_paths"] = verify_clean_paths(
+            gateway_dir,
+            ("src", "prisma", "openapi.json", "package-lock.json", "tsconfig.json"),
+        )
+        if not gateway_identity["clean"]:
+            report["remaining_blockers"].append(
+                "Gateway has uncommitted content outside its pinned runtime-contract paths; "
+                "the worktree is recorded separately from the immutable contract commit."
+            )
         report["sources"] = {
-            "gateway": verify_checkout(
-                gateway_dir, expected["gateway_contract"], require_clean=True
-            ),
+            "gateway": gateway_identity,
             "agent": verify_checkout(agent_dir, expected["agent"], require_clean=True),
-            "portal": verify_checkout(portal_dir, portal_revision, require_clean=True),
+            "portal": portal_identity,
         }
         report["runtime_contracts"] = _verify_contract_bytes(source_snapshot, expected)
-        report["portal_contract_pin"] = _verify_portal_pin(portal_dir, expected)
+        report["portal_contract_pin"] = _verify_portal_pin(
+            portal_dir, portal_revision, expected
+        )
 
-        portal_argv, portal_cwd = portal_contract_command(portal_dir, pnpm)
-        report["checks"].append(run_command(portal_argv, cwd=portal_cwd, timeout=180))
-        artifacts, build_checks, package_parity = _build_and_load(
-            source_snapshot, plugin_python, agent_python, gateway_dir, output_dir
+        if portal_identity["head_exact"] and portal_identity["clean"]:
+            portal_argv, portal_cwd = portal_contract_command(portal_dir, pnpm)
+            report["checks"].append(run_command(portal_argv, cwd=portal_cwd, timeout=180))
+        else:
+            report["checks"].append({
+                "name": "portal_contract_check",
+                "status": "blocked",
+                "reason": (
+                    "the located Portal worktree is not a clean checkout of the immutable "
+                    f"release pin {portal_revision}"
+                ),
+            })
+            report["remaining_blockers"].append(
+                "Portal's generated TypeScript contract check requires a clean checkout at "
+                f"{portal_revision}; immutable pin bytes were verified directly from Git."
+            )
+        artifacts, build_checks, package_parity, native_layout = _build_and_load(
+            source_snapshot, plugin_python, agent_python, agent_dir, gateway_dir, output_dir
         )
         report["checks"].extend(build_checks)
         report["artifacts"] = artifacts
         report["artifact_package_parity"] = package_parity
+        report["native_artifact_layout"] = native_layout
         report["status"] = "passed"
 
 

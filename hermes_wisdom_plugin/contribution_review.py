@@ -141,8 +141,28 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomAuthError("Collective Wisdom contribution owner is unavailable")
         return dict(owner)
 
-    def _assert_owner(self, expected: dict[str, str]) -> None:
-        if self._owner() != expected:
+    # Deliberately local: contribution and publication own distinct failure messages.
+    # pylint: disable=duplicate-code
+    @staticmethod
+    def _require_current(may_apply: Callable[[], bool] | None) -> None:
+        if may_apply is None:
+            return
+        try:
+            current = may_apply() is True
+        except Exception as exc:  # authority callbacks fail closed
+            raise WisdomAuthError(
+                "Collective Wisdom review is no longer current"
+            ) from exc
+        if not current:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+
+    # pylint: enable=duplicate-code
+    def _assert_owner(
+        self, expected: dict[str, str], may_apply: Callable[[], bool] | None = None,
+    ) -> None:
+        current = self._owner()
+        self._require_current(may_apply)
+        if current != expected:
             raise WisdomAuthError("Collective Wisdom contribution owner changed")
 
     @staticmethod
@@ -196,20 +216,36 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         hashes = {record.path: record.hash for record in records}
         return [{**entry, "hash": hashes[entry["path"]]} for entry in entries], content_hash
 
-    def _result(
+    def _result(  # pylint: disable=too-many-locals
         self,
         draft: dict[str, Any],
         *,
         allow_model_review: bool,
         expected_owner: dict[str, str],
+        reviewed_hashes: dict[str, str] | None = None,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        self._require_current(may_apply)
         overlay = Path(str(draft["overlay_path"]))
         files, content_hash = self._files(overlay)
         if content_hash != draft["content_hash"]:
             raise WisdomConflict(
                 "this source already has an edited draft; review that draft instead"
             )
+        current_hashes = {
+            "content": str(draft["content_hash"]),
+            "author_description": str(draft["description_hash"]),
+            "package_manifest": str(draft["manifest_hash"]),
+        }
+        if (
+            reviewed_hashes is not None
+            and self._expected_hashes(reviewed_hashes) != current_hashes
+        ):
+            raise WisdomConflict(
+                "Collective Wisdom prepared draft changed after the displayed disclosure"
+            )
         scan = self.host.scan(overlay)
+        self._require_current(may_apply)
         guard = scan.get("guard") if isinstance(scan.get("guard"), dict) else scan
         security = prepared_security_check(
             files, str(draft["description"]), {"guard": guard}
@@ -222,8 +258,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             files=files,
             allow_model_review=allow_model_review,
             expected_owner=expected_owner,
+            may_apply=may_apply,
         )
-        self._assert_owner(expected_owner)
+        self._assert_owner(expected_owner, may_apply)
         # A model response is only an assessment. Re-read exact bytes before returning it.
         _files_after, hash_after = self._files(overlay)
         if hash_after != draft["content_hash"]:
@@ -271,11 +308,15 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         return dict(value)
 
     def reopen(
-        self, draft_id: str, *, allow_model_review: bool = False
+        self, draft_id: str, *, allow_model_review: bool = False,
+        reviewed_hashes: dict[str, str] | None = None,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Reopen one owner-bound local prepared draft without submission authority."""
 
+        self._require_current(may_apply)
         expected_owner = self._owner()
+        self._require_current(may_apply)
         draft = self.store.draft(draft_id)
         if draft is None or not draft_id.startswith("local:"):
             raise WisdomNotFound("prepared draft not found")
@@ -289,12 +330,16 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             draft,
             allow_model_review=allow_model_review,
             expected_owner=expected_owner,
+            reviewed_hashes=reviewed_hashes,
+            may_apply=may_apply,
         )
 
-    def inspect_prepared(self, draft_id: str) -> dict[str, Any]:
+    def inspect_prepared(
+        self, draft_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Export one complete exact payload that can be edited and saved directly."""
 
-        result = self.reopen(draft_id)
+        result = self.reopen(draft_id, may_apply=may_apply)
         return {
             "draft_id": result["draft_id"],
             "author_description": result["drafted_description"],
@@ -312,10 +357,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         author_description: str,
         files: list[dict[str, str]],
         expected_hashes: dict[str, str],
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Save owner edits locally using an owner- and hash-bound pointer CAS."""
 
+        self._require_current(may_apply)
         expected_owner = self._owner()
+        self._require_current(may_apply)
         hashes = self._expected_hashes(expected_hashes)
         local = self.store.draft(draft_id)
         if local is None or not draft_id.startswith("local:"):
@@ -392,9 +440,11 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "manifest_hash": package.manifest_hash,
             }
             result = self._result(
-                candidate, allow_model_review=False, expected_owner=expected_owner
+                candidate, allow_model_review=False, expected_owner=expected_owner,
+                may_apply=may_apply,
             )
-            self._assert_owner(expected_owner)
+            self._assert_owner(expected_owner, may_apply)
+            self._require_current(may_apply)
             if not self.store.replace_prepared_draft(
                 draft_id,
                 expected_owner=expected_owner,
@@ -415,6 +465,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         files: list[dict[str, str]],
         allow_model_review: bool,
         expected_owner: dict[str, str],
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Reuse or explicitly run one durable exact-hash review record."""
 
@@ -449,6 +500,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         claimed = self.store.claim_professionalism_review(
             worker_id=worker_id, review_id=str(queued["id"])
         )
+        self._require_current(may_apply)
         if claimed is None:
             return review_package(
                 package=package,
@@ -464,7 +516,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             description_hash=values["author_description_hash"],
             llm=self.llm,
         )
-        self._assert_owner(expected_owner)
+        self._assert_owner(expected_owner, may_apply)
         if not self.store.complete_professionalism_review(
             str(claimed["id"]), worker_id=worker_id, result=result
         ):
@@ -472,14 +524,18 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         return result
 
     def prepare(  # pylint: disable=too-many-locals
-        self, skill_name: str, *, allow_model_review: bool = False
+        self, skill_name: str, *, allow_model_review: bool = False,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Prepare one manually selected skill; model disclosure requires an explicit flag."""
 
+        self._require_current(may_apply)
         expected_owner = self._owner()
+        self._require_current(may_apply)
         source = self._source(skill_name)
         source_hash = source_fingerprint(source)
-        self._assert_owner(expected_owner)
+        self._assert_owner(expected_owner, may_apply)
+        self._require_current(may_apply)
         skill_id = self.store.register_skill(
             source,
             content_hash=source_hash,
@@ -493,6 +549,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 existing,
                 allow_model_review=allow_model_review,
                 expected_owner=expected_owner,
+                may_apply=may_apply,
             )
 
         frontmatter = self.host.parse_skill_frontmatter(source)
@@ -505,14 +562,17 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 raise PackagePolicyError(
                     "local skill requires author copy or explicit model review authorization"
                 )
+            self._require_current(may_apply)
             description = _draft_author_description(skill_markdown, self.llm)
+            self._require_current(may_apply)
         description = publication_description(self.store, skill_id, description)
+        self._require_current(may_apply)
         editorial = resolve_editorial_metadata(
             frontmatter=frontmatter,
             skill_markdown=skill_markdown,
             llm=self.llm if allow_model_review else None,
         )
-        self._assert_owner(expected_owner)
+        self._assert_owner(expected_owner, may_apply)
         namespace = self.store.root / "contribution-prepared" / uuid.uuid4().hex
         retained = False
 
@@ -543,7 +603,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             )
             if source_fingerprint(source) != source_hash:
                 raise WisdomConflict("source changed during preparation")
-            self._assert_owner(expected_owner)
+            self._assert_owner(expected_owner, may_apply)
             draft = {
                 "id": f"local:{skill_id}:{uuid.uuid4().hex}",
                 "skill_id": skill_id,
@@ -557,6 +617,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "manifest_hash": package.manifest_hash,
             }
             with self.store.transaction() as db:
+                self._require_current(may_apply)
                 self.store.record_draft(draft, _db=db)
                 self.store.bind_draft_owner(
                     str(draft["id"]), expected_owner, _db=db
@@ -570,6 +631,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 saved,
                 allow_model_review=allow_model_review,
                 expected_owner=expected_owner,
+                may_apply=may_apply,
             )
         finally:
             if not retained:

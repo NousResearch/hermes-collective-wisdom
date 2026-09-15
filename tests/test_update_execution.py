@@ -15,10 +15,10 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_wisdom_plugin.contract import org_directory_name
-from hermes_wisdom_plugin.errors import WisdomConflict
 from hermes_wisdom_plugin.install_execution import InstallExecutor
 from hermes_wisdom_plugin.native_context import NativeInvocation
 from hermes_wisdom_plugin.native_review import NativeReviewController
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.store import WisdomStore
 from hermes_wisdom_plugin.update_execution import UpdateExecutor
@@ -265,6 +265,86 @@ def test_transient_gateway_error_is_pending_and_retry_converges(executor):
     client.error = None
     assert value.apply(plan["receipt"])["updated"] is True
     assert len(client.record_calls) == 2
+
+
+def test_reviewed_update_recovery_rejects_phase_drift_before_resume(executor):
+    value, store, client, _receipts, plan, target, _owner = executor
+    client.error = RuntimeError("offline")
+    pending = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", pending["operation_id"])
+    calls_before = list(client.record_calls)
+    store.advance(pending["operation_id"], "gateway_recorded")
+    client.error = None
+
+    with pytest.raises(WisdomConflict, match="recovery.*changed|changed.*recovery"):
+        value.apply(
+            plan["receipt"], expected_recovery=reviewed, may_apply=lambda: True
+        )
+
+    assert client.record_calls == calls_before
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+    assert store.operation(pending["operation_id"])["phase"] == "gateway_recorded"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [("version", 3), ("content_hash", "sha256:changed")],
+)
+def test_update_recovery_rejects_journal_identity_drift_from_immutable_receipt(
+    executor, field, replacement,
+):
+    value, store, client, _receipts, plan, target, _owner = executor
+    client.error = RuntimeError("offline")
+    pending = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", pending["operation_id"])
+    row = store.operation(pending["operation_id"])
+    payload = dict(row["payload"])
+    payload[field] = replacement
+    store.replace_operation_payload(pending["operation_id"], payload)
+    calls_before = list(client.record_calls)
+    client.error = None
+
+    with pytest.raises(WisdomConflict, match="reviewed|receipt|content"):
+        value.apply(
+            plan["receipt"], expected_recovery=reviewed, may_apply=lambda: True
+        )
+
+    assert client.record_calls == calls_before
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+
+
+def test_exact_reviewed_update_recovery_resumes_normally(executor):
+    value, _store, client, _receipts, plan, target, _owner = executor
+    client.error = RuntimeError("offline")
+    pending = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", pending["operation_id"])
+    client.error = None
+
+    result = value.apply(
+        plan["receipt"], expected_recovery=reviewed, may_apply=lambda: True
+    )
+
+    assert result["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+
+
+def test_revoked_review_has_no_update_recovery_effect(executor):
+    value, store, client, _receipts, plan, target, _owner = executor
+    client.error = RuntimeError("offline")
+    pending = value.apply(plan["receipt"])
+    reviewed = value.recovery_status("skill-1", pending["operation_id"])
+    calls_before = list(client.record_calls)
+    before = store.operation(pending["operation_id"])
+    client.error = None
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.apply(
+            plan["receipt"], expected_recovery=reviewed, may_apply=lambda: False
+        )
+
+    assert client.record_calls == calls_before
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+    assert store.operation(pending["operation_id"]) == before
 
 
 def test_lost_success_response_reconciles_remote_target_without_second_post(executor):
@@ -534,8 +614,8 @@ def test_native_recovery_reconciles_real_executor_after_post_apply_inspection_lo
         def update_plan(self, skill_id, **choices):
             return value.reviewer.plan(skill_id, **choices)
 
-        def update_apply(self, receipt):
-            return value.apply(receipt)
+        def update_apply(self, receipt, *, may_apply):
+            return value.apply(receipt, may_apply=may_apply)
 
         def installed_setup_inspect(self, skill_id, *, version=None):
             assert skill_id == "skill-1" and version == 2
@@ -588,8 +668,17 @@ def test_native_pending_gateway_reconciliation_survives_restart_without_replacin
         def update_plan(self, skill_id, **choices):
             return self.executor.reviewer.plan(skill_id, **choices)
 
-        def update_apply(self, receipt):
-            return self.executor.apply(receipt)
+        def update_apply(self, receipt, *, may_apply):
+            return self.executor.apply(receipt, may_apply=may_apply)
+
+        def update_recovery_inspect(self, skill_id, operation_id):
+            return self.executor.recovery_status(skill_id, operation_id)
+
+        def update_recovery_resume(self, skill_id, operation_id, receipt, *, may_apply):
+            status = self.executor.recovery_status(skill_id, operation_id)
+            return self.executor.apply(
+                receipt, may_apply=may_apply, expected_recovery=status,
+            )
 
         def installed_setup_inspect(self, *_args, **_kwargs):
             self.inspections += 1

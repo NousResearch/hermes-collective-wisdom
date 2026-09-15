@@ -11,11 +11,89 @@ from unittest.mock import Mock
 import pytest
 
 from hermes_wisdom_plugin.client_delivery import ClientDeliveryResponse
+from hermes_wisdom_plugin.client_outcome import ClientOperationResponse
 from hermes_wisdom_plugin.delivery import DeliveryReceipt
-from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox
+from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox, MAX_SYNC_ATTEMPTS
+from hermes_wisdom_plugin.errors import WisdomAuthError
 from hermes_wisdom_plugin.mediation_store import LEASE_SECONDS, MediationStore
-from hermes_wisdom_plugin.operation_outbox import stage
+from hermes_wisdom_plugin.operation_outbox import MAX_ATTEMPTS, stage
 from hermes_wisdom_plugin.store import WisdomStore
+from hermes_wisdom_plugin.sync_recovery import WisdomSyncRecovery
+
+
+class RecordingOutboxClient:
+    """Gateway-shaped transport that can revoke an invocation during owner reads."""
+
+    expected_organization_id = "org"
+    display_org_id = "org"
+    identity = {"owner": "user"}
+    base_url = "https://gateway.example"
+
+    def __init__(self, store, current, clock):
+        self.store, self.current, self.clock = store, current, clock
+        self.calls = []
+        self.revoke_after_claim = False
+        self.revoke_after_report = False
+        self.revoke_on_operation_lease = False
+
+    @property
+    def owner_user_id(self):
+        if self.revoke_on_operation_lease:
+            with self.store.transaction() as db:
+                leased = db.execute(
+                    "SELECT 1 FROM wisdom_operation_outbox WHERE sync_token IS NOT NULL"
+                ).fetchone()
+            if leased:
+                self.current[0] = False
+        return "user"
+
+    def claim_notification_delivery(self, request_id, reference):
+        self.calls.append(("claim", request_id))
+        if self.revoke_after_claim:
+            self.current[0] = False
+        return ClientDeliveryResponse(
+            org_id="org",
+            recipient_user_id="user",
+            event_id=f"event-{request_id}",
+            request_id=request_id,
+            reference=reference,
+            state="claimed",
+            reason=None,
+            lease_until=(
+                datetime.fromtimestamp(self.clock() + 120, timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+        )
+
+    def settle_notification_delivery(
+        self, event_id, request_id, reference, *, outcome, receipt
+    ):
+        del receipt
+        self.calls.append(("settle", event_id, request_id, outcome))
+        return ClientDeliveryResponse(
+            org_id="org",
+            recipient_user_id="user",
+            event_id=event_id,
+            request_id=request_id,
+            reference=reference,
+            state=outcome,
+            reason=None,
+            lease_until=None,
+        )
+
+    def report_operation_outcome(self, event_id, outcome):
+        self.calls.append(("report", event_id, outcome["operation_key"]))
+        if self.revoke_after_report:
+            self.current[0] = False
+        return ClientOperationResponse(
+            org_id="org",
+            recipient_user_id="user",
+            event_id=event_id,
+            outcome=outcome,
+            attestation="client_reported",
+            duplicate=False,
+        )
 
 
 def _state(tmp_path):
@@ -64,6 +142,105 @@ def _state(tmp_path):
         owner=owner,
         outbox=DeliveryOutbox(service, clock=lambda: now[0], owner=owner), response=response,
     )
+
+
+def _recording_state(tmp_path):
+    state = _state(tmp_path)
+    current = [True]
+    client = RecordingOutboxClient(state.store, current, lambda: state.now[0])
+    revoke_on_delivery_lease = [False]
+
+    def installation_owner():
+        if revoke_on_delivery_lease[0]:
+            with state.store.transaction() as db:
+                leased = db.execute(
+                    "SELECT 1 FROM wisdom_remote_delivery WHERE sync_token IS NOT NULL"
+                ).fetchone()
+            if leased:
+                current[0] = False
+        return dict(state.owner)
+
+    service = SimpleNamespace(
+        store=state.store,
+        client=client,
+        _installation_owner=installation_owner,
+    )
+    state.client = client
+    state.service = service
+    state.current = current
+    state.revoke_on_delivery_lease = revoke_on_delivery_lease
+    state.outbox = DeliveryOutbox(
+        service, clock=lambda: state.now[0], owner=state.owner
+    )
+    return state
+
+
+def _stage_retryable_delivery(state):
+    request_id = state.outbox.reserve("org", state.job)
+    assert request_id
+    state.queue.cancel_reservation("org", state.job, state.now[0])
+    with state.store.transaction() as db:
+        db.execute(
+            """UPDATE wisdom_remote_delivery SET attempts=?,last_error=?
+            WHERE request_id=?""",
+            (MAX_SYNC_ATTEMPTS, "settlement_unavailable", request_id),
+        )
+    state.client.calls.clear()
+    return request_id
+
+
+def _stage_retryable_operation(state):
+    request_id = state.outbox.reserve("org", state.job)
+    assert request_id
+    assert state.queue.begin_delivery(
+        "org", state.job["id"], state.job["lease_token"], request_id=request_id
+    )
+    receipt = DeliveryReceipt(
+        platform="local",
+        destination="terminal",
+        message_id="1",
+        acknowledgement="transport_accepted",
+    )
+    assert state.queue.complete_delivery(
+        "org", state.job["id"], state.job["lease_token"], receipt=receipt
+    )
+    state.outbox.flush("org")
+    value = {
+        "id": "interaction",
+        "organization_id": "org",
+        "assessment_id": state.job["id"],
+        "owner_session": "session",
+        "operation": "install",
+        "plan": {"skill_id": "skill", "version": 1},
+    }
+    with state.store.transaction() as db:
+        db.execute(
+            """INSERT INTO wisdom_shared_consent
+            (id,organization_id,assessment_id,owner_session,actor_id,platform,operation,
+             plan_json,state,expires_at,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "interaction",
+                "org",
+                state.job["id"],
+                "session",
+                "actor",
+                "local",
+                "install",
+                json.dumps(value["plan"]),
+                "completed",
+                2000,
+                1000,
+                1000,
+            ),
+        )
+        assert stage(db, value, "completed", {}, state.now[0])
+        db.execute(
+            """UPDATE wisdom_operation_outbox SET state='failed',attempts=?,last_error=?
+            WHERE interaction_id=? AND report_state=?""",
+            (MAX_ATTEMPTS, "outcome_unavailable", "interaction", "files_installed"),
+        )
+    state.client.calls.clear()
 
 
 def _row(state):
@@ -146,6 +323,167 @@ def test_owner_changed_during_identity_read_cannot_settle(tmp_path, identity_rea
     state.outbox.identity = identity_then_revoke
     state.outbox.flush("org")
     assert state.client.settle_notification_delivery.call_count == 0
+
+
+@pytest.mark.parametrize("event_known", [False, True], ids=["claim-and-settle", "settle"])
+def test_selected_sync_retry_settles_delivery_with_current_invocation(
+    tmp_path, event_known
+):
+    state = _recording_state(tmp_path)
+    request_id = _stage_retryable_delivery(state)
+    if not event_known:
+        with state.store.transaction() as db:
+            db.execute(
+                "UPDATE wisdom_remote_delivery SET event_id=NULL WHERE request_id=?",
+                (request_id,),
+            )
+
+    result = WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+        may_apply=lambda: state.current[0]
+    )
+
+    expected: list[tuple] = [] if event_known else [("claim", request_id)]
+    expected.append(
+        ("settle", f"event-{request_id}", request_id, "not_sent")
+    )
+    assert state.client.calls == expected
+    assert _row(state)["state"] == "settled"
+    assert result["delivery"]["retryable"] == 0
+
+
+@pytest.mark.parametrize("event_known", [False, True], ids=["claim", "settle"])
+def test_selected_sync_retry_revoked_during_late_owner_read_has_no_remote_effect(
+    tmp_path, event_known
+):
+    state = _recording_state(tmp_path)
+    request_id = _stage_retryable_delivery(state)
+    if not event_known:
+        with state.store.transaction() as db:
+            db.execute(
+                "UPDATE wisdom_remote_delivery SET event_id=NULL WHERE request_id=?",
+                (request_id,),
+            )
+    state.revoke_on_delivery_lease[0] = True
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+            may_apply=lambda: state.current[0]
+        )
+
+    assert state.client.calls == []
+    assert _row(state)["state"] == "outcome"
+
+
+def test_delivery_flush_revoked_after_claim_preserves_pending_event(tmp_path):
+    state = _recording_state(tmp_path)
+    request_id = _stage_retryable_delivery(state)
+    with state.store.transaction() as db:
+        db.execute(
+            """UPDATE wisdom_remote_delivery SET event_id=NULL,attempts=0,last_error=NULL
+            WHERE request_id=?""",
+            (request_id,),
+        )
+    state.client.revoke_after_claim = True
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        state.outbox.flush("org", may_apply=lambda: state.current[0])
+
+    assert state.client.calls == [("claim", request_id)]
+    row = _row(state)
+    assert row["state"] == "outcome"
+    assert row["event_id"] == f"event-{request_id}"
+    assert row["last_error"] == "settlement_unavailable"
+
+
+def test_selected_sync_retry_reports_operation_with_current_invocation(tmp_path):
+    state = _recording_state(tmp_path)
+    _stage_retryable_operation(state)
+
+    result = WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+        may_apply=lambda: state.current[0]
+    )
+
+    assert [call[0] for call in state.client.calls] == ["report"]
+    with state.store.transaction() as db:
+        row = db.execute(
+            "SELECT state FROM wisdom_operation_outbox WHERE interaction_id='interaction'"
+        ).fetchone()
+    assert row["state"] == "settled"
+    assert result["operation"]["retryable"] == 0
+
+
+def test_selected_sync_retry_revoked_during_late_identity_read_does_not_report(tmp_path):
+    state = _recording_state(tmp_path)
+    _stage_retryable_operation(state)
+    state.client.revoke_on_operation_lease = True
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+            may_apply=lambda: state.current[0]
+        )
+
+    assert state.client.calls == []
+    with state.store.transaction() as db:
+        row = db.execute(
+            "SELECT state FROM wisdom_operation_outbox WHERE interaction_id='interaction'"
+        ).fetchone()
+    assert row["state"] == "pending"
+
+
+def test_selected_sync_retry_revoked_after_report_preserves_settled_outcome(tmp_path):
+    state = _recording_state(tmp_path)
+    _stage_retryable_operation(state)
+    state.client.revoke_after_report = True
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+            may_apply=lambda: state.current[0]
+        )
+
+    assert [call[0] for call in state.client.calls] == ["report"]
+    with state.store.transaction() as db:
+        row = db.execute(
+            "SELECT state FROM wisdom_operation_outbox WHERE interaction_id='interaction'"
+        ).fetchone()
+    assert row["state"] == "settled"
+
+    state.current[0] = True
+    state.client.revoke_after_report = False
+    WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+        may_apply=lambda: state.current[0]
+    )
+    assert [call[0] for call in state.client.calls] == ["report"]
+
+
+def test_sync_retry_does_not_resurrect_conflicted_delivery_or_operation(tmp_path):
+    state = _recording_state(tmp_path)
+    _stage_retryable_operation(state)
+    with state.store.transaction() as db:
+        db.execute(
+            """UPDATE wisdom_remote_delivery SET state='outcome',attempts=?,last_error=?""",
+            (MAX_SYNC_ATTEMPTS, "settlement_conflict"),
+        )
+        db.execute(
+            """UPDATE wisdom_operation_outbox SET state='failed',attempts=?,last_error=?""",
+            (MAX_ATTEMPTS, "outcome_conflict"),
+        )
+
+    result = WisdomSyncRecovery(state.service, clock=lambda: state.now[0]).retry(
+        may_apply=lambda: True
+    )
+
+    assert state.client.calls == []
+    assert result["delivery"]["conflict"] == 1
+    assert result["operation"]["conflict"] == 1
+    with state.store.transaction() as db:
+        delivery = db.execute(
+            "SELECT state,attempts,last_error FROM wisdom_remote_delivery"
+        ).fetchone()
+        operation = db.execute(
+            "SELECT state,attempts,last_error FROM wisdom_operation_outbox"
+        ).fetchone()
+    assert tuple(delivery) == ("outcome", MAX_SYNC_ATTEMPTS, "settlement_conflict")
+    assert tuple(operation) == ("failed", MAX_ATTEMPTS, "outcome_conflict")
 
 
 def test_unknown_send_is_settled_uncertain_and_never_reclaimed(tmp_path):

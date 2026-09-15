@@ -1,5 +1,6 @@
 """Owner-private contribution preparation and review tests."""
-# pylint: disable=missing-function-docstring,too-few-public-methods
+# Keep the private-draft authority matrix and its shared security fixtures together.
+# pylint: disable=missing-function-docstring,too-few-public-methods,too-many-lines
 
 from __future__ import annotations
 
@@ -242,6 +243,73 @@ def test_inspect_exports_a_complete_save_ready_exact_payload(tmp_path: Path):
         {"path": item["path"], "content_utf8": item["content_utf8"]}
         for item in prepared["files"]
     ]
+
+
+def test_disclosed_hashes_reject_concurrent_draft_before_model_call(tmp_path: Path):
+    llm = RecordingLlm()
+    value, _source, _binding = reviewer(tmp_path, llm=llm)
+    prepared = value.prepare("reviewed-skill")
+    disclosed = value.inspect_prepared(prepared["draft_id"])
+    value.save_prepared(
+        prepared["draft_id"], author_description="Concurrent private edit.",
+        files=disclosed["files"], expected_hashes=disclosed["expected_hashes"],
+    )
+
+    with pytest.raises(WisdomConflict, match="changed.*displayed|displayed.*changed"):
+        value.reopen(
+            prepared["draft_id"], allow_model_review=True,
+            reviewed_hashes=disclosed["expected_hashes"], may_apply=lambda: True,
+        )
+
+    assert not llm.calls
+
+
+def test_revocation_during_real_save_validation_prevents_durable_replacement(tmp_path: Path):
+    value, _source, _binding = reviewer(tmp_path)
+    prepared = value.prepare("reviewed-skill")
+    admitted = [True]
+    original_scan = value.host.scan
+
+    def revoke_during_scan(overlay):
+        result = original_scan(overlay)
+        admitted[0] = False
+        return result
+
+    value.host.scan = revoke_during_scan
+    before = value.store.draft(prepared["draft_id"])
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.save_prepared(
+            prepared["draft_id"], author_description="Revoked edit.",
+            files=[
+                {"path": item["path"], "content_utf8": item["content_utf8"]}
+                for item in prepared["files"]
+            ], expected_hashes=prepared["hashes"], may_apply=lambda: admitted[0],
+        )
+
+    assert value.store.draft(prepared["draft_id"]) == before
+
+
+def test_revocation_after_model_queue_claim_prevents_provider_send(tmp_path: Path):
+    llm = RecordingLlm()
+    value, _source, _binding = reviewer(tmp_path, llm=llm)
+    prepared = value.prepare("reviewed-skill")
+    disclosed = value.inspect_prepared(prepared["draft_id"])
+    admitted = [True]
+    original_claim = value.store.claim_professionalism_review
+
+    def revoke_after_claim(*args, **kwargs):
+        result = original_claim(*args, **kwargs)
+        admitted[0] = False
+        return result
+
+    value.store.claim_professionalism_review = revoke_after_claim
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.reopen(
+            prepared["draft_id"], allow_model_review=True,
+            reviewed_hashes=disclosed["expected_hashes"], may_apply=lambda: admitted[0],
+        )
+
+    assert not llm.calls
 
 
 def test_stale_sequential_save_cannot_replace_new_file_set(tmp_path: Path):

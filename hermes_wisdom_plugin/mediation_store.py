@@ -926,12 +926,17 @@ class MediationStore:
                     )
             return changed
 
-    def uncertain_delivery(self, org: str, assessment_id: str, token: str) -> bool:
+    def uncertain_delivery(
+        self, org: str, assessment_id: str, token: str,
+        *, receipt: DeliveryReceipt | None = None,
+    ) -> bool:
         with self.store.transaction() as db:
             self._check_org(db, org)
             from .delivery_outbox import stage_outcome
 
-            stage_outcome(db, org, assessment_id, token, self.clock())
+            stage_outcome(
+                db, org, assessment_id, token, self.clock(), receipt=receipt
+            )
             return bool(
                 db.execute(
                     """UPDATE wisdom_shared_assessment SET state='delivery_uncertain',

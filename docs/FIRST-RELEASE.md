@@ -1,7 +1,9 @@
 # Release Implementation Sequence: Extract, Adapt, and Verify
 
-CLI, TUI, Telegram, and Slack are implemented and accepted first; Desktop and
-Dashboard then complete the same release. M0 is complete. The original planning
+The approved initial scope is native workflows on unmodified Agent plus an
+external Desktop SDK handoff page. Dashboard and full embedded parity are deferred.
+No Agent changes or replacement backend are allowed. The historical full-parity
+sequence below is reference, not the current release gate. M0 is complete. The original planning
 baseline assigned 63 points to M1-M8 and 31 points to M9-M12; investigation and
 verification were included. Those are historical estimates, not remaining-work
 or delivery promises.
@@ -22,7 +24,7 @@ another broad framework. The following requirement references are relative to
 | --- | --- | --- |
 | Detect meaningful refinement, not formatting churn | `REVIEW_RESOLUTIONS.md` R7 and `IMPLEMENTATION_PLAN.md` Stage A | Local structural/stability kernels and explicit opt-in deferred auxiliary tiebreak are [locally verified](TESTING.md#authorized-ambiguous-refinement-classifier--2026-09-14). Local classification is not server publication authority. |
 | Explain a suggestion using an authorized model route | `IMPLEMENTATION_PLAN.md` Stage B; trust boundary amended by `REVIEW_RESOLUTIONS.md` R1 | Reuse the existing host model boundary and durable assessments; no main-prompt mutation or new model client. |
-| Show feed/recommendations and respect notification settings | `IMPLEMENTATION_PLAN.md` Stage E; `UAT.md` UAT-014 | Feed, queues, preferences and outboxes exist. The private inbox reads real assessments/pending reviews; queued assessment generation is locally verified. Private Slack/Telegram delivery is now [locally verified](TESTING.md#native-ready-advice-delivery-gate--2026-09-14); CLI/TUI proactive presentation remains blocked on the documented host API gap, and live acceptance remains open. |
+| Show feed/recommendations and respect notification settings | `IMPLEMENTATION_PLAN.md` Stage E; `UAT.md` UAT-014 | Feed, queues, preferences and outboxes exist. The private inbox reads real assessments/pending reviews; queued assessment generation is locally verified. Private Slack/Telegram delivery is now [locally verified](TESTING.md#native-ready-advice-delivery-gate--2026-09-14); a generic host implementation now exists in an unpublished development worktree; [interactive Wisdom cadence](TESTING.md#simple-interactive-cadence--2026-09-15) is locally verified; [bounded TUI install/update/setup actions](TESTING.md#tui-review-and-actions--2026-09-15) now pass locally; full recovery/settings/publication parity and live acceptance remain open. |
 | Preserve exact user approval and private ownership | `AGENT_REQUIREMENTS.md` consent and Telegram rows | Reuse existing receipt-bound reviewers/executors and native controls; no parallel consent engine. |
 
 The phrase “human-owned mediation” names reference implementation machinery,
@@ -255,7 +257,9 @@ a runtime contract pin just because a repository's main moved.
 - Live acceptance uses real commands, lifecycle facts and callbacks on all four
   surfaces. Reset/restart/publish actions require specific authorization; no
   incidental demo or production changes are part of source extraction.
-- Release additionally requires packaged Desktop and Dashboard workflows against
-  deployed endpoints using Shannon's Nous Portal login. Local scripts, mocks,
-  stories, and M8 acceptance alone are insufficient. Gateway PR 255 and Portal
-  PR 1022 are verified merged; record their immutable revisions for the run.
+- Option 1 requires installed Desktop SDK handoff acceptance and service-backed
+  native workflow evidence on explicitly agreed targets. Dashboard and rich
+  embedded parity are deferred; no host source changes are authorized. Local
+  scripts/mocks do not establish live acceptance. Record immutable revisions and
+  the artifact hash for each run. Historical Gateway/Portal merge evidence is
+  recorded in SOURCES.md; do not infer current deployed versions from it.

@@ -127,6 +127,86 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             raise WisdomAuthError("setup owner is unavailable")
         return value
 
+    @staticmethod
+    def _require_current(may_apply: Callable[[], bool] | None) -> None:
+        if may_apply is not None and may_apply() is not True:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+
+    def _recovery_snapshot(self, skill_id: str, row: dict) -> dict:
+        """Validate and project one journal row without polling or mutation."""
+
+        if row.get("kind") != KIND or row.get("entity_id") != skill_id:
+            raise PackagePolicyError("setup recovery operation was not found")
+        payload = _operation_payload(row)
+        if payload.get("owner") != self._owner():
+            raise WisdomAuthError("setup recovery belongs to another enrolment")
+        receipt = payload.get("receipt")
+        if not isinstance(receipt, str) or not receipt:
+            raise WisdomConflict("setup recovery receipt is invalid")
+        plan = self.receipts.load(receipt, allow_started=True)
+        identity_fields = (
+            "owner", "version", "content_hash", "target_path", "setup_key", "step"
+        )
+        if plan.get("skill_id") != skill_id or any(
+            plan.get(field) != payload.get(field) for field in identity_fields
+        ):
+            raise WisdomConflict("setup recovery no longer matches its reviewed content")
+        try:
+            step = SetupStep.model_validate(payload.get("step"), strict=True).model_dump()
+        except (TypeError, ValueError) as exc:
+            raise WisdomConflict("setup recovery step is invalid") from exc
+        task_id = payload.get("task_id")
+        if task_id != "wisdom-setup:" + receipt:
+            raise WisdomConflict("setup recovery task identity is invalid")
+        handle = payload.get("handle")
+        if handle is not None and not isinstance(handle, dict):
+            raise WisdomConflict("setup recovery process handle is invalid")
+        result = payload.get("result")
+        if result is not None and not isinstance(result, dict):
+            raise WisdomConflict("setup recovery result is invalid")
+        journal_state = str(row.get("state"))
+        if journal_state not in {"pending", "done"}:
+            raise WisdomConflict("setup recovery journal state is invalid")
+        return {
+            "kind": KIND,
+            "skill_id": skill_id,
+            "operation_id": str(row["id"]),
+            "receipt": receipt,
+            "journal_phase": str(row["phase"]),
+            "journal_state": journal_state,
+            "version": payload.get("version"),
+            "content_hash": payload.get("content_hash"),
+            "target_path": payload.get("target_path"),
+            "setup_key": payload.get("setup_key"),
+            "step": step,
+            "task_id": task_id,
+            "handle": dict(handle) if isinstance(handle, dict) else None,
+            "result": dict(result) if isinstance(result, dict) else None,
+            "can_recover": journal_state != "done",
+        }
+
+    def recovery_status(self, skill_id: str, operation_id: str) -> dict:
+        """Inspect one exact setup journal without polling or changing it."""
+
+        row = self.store.operation(operation_id)
+        if row is None:
+            raise PackagePolicyError("setup recovery operation was not found")
+        return self._recovery_snapshot(skill_id, row)
+
+    @staticmethod
+    def _assert_expected_recovery(expected: dict, current: dict) -> None:
+        if not isinstance(expected, dict) or expected != current:
+            raise WisdomConflict("setup recovery changed after it was reviewed")
+
+    @staticmethod
+    def _assert_recovery_identity(expected: dict, current: dict) -> None:
+        identity_fields = (
+            "kind", "skill_id", "operation_id", "receipt", "version",
+            "content_hash", "target_path", "setup_key", "step", "task_id", "handle",
+        )
+        if any(expected.get(field) != current.get(field) for field in identity_fields):
+            raise WisdomConflict("setup recovery changed after it was reviewed")
+
     def inspect(self, skill_id: str, *, version: int | None = None) -> dict:
         """Return owner-bound installed setup state without execution."""
 
@@ -243,7 +323,9 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             result["setup_requirement"] = requirement
         return result
 
-    def apply(self, receipt: str) -> dict:
+    def apply(
+        self, receipt: str, *, may_apply: Callable[[], bool] | None = None
+    ) -> dict:
         """Apply one setup receipt using at most one host background spawn."""
 
         plan = self.receipts.load(receipt, allow_started=True)
@@ -260,8 +342,9 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
                     raise PackagePolicyError(
                         "another setup operation is unfinished for this skill"
                     )
+                self._require_current(may_apply)
                 self._bind_receipt(receipt, row["id"])
-                return self._resume(row, payload)
+                return self._resume(row, payload, may_apply=may_apply)
             if any(
                 row["entity_id"] == skill_id
                 and row["kind"] in {"install", "uninstall", "update"}
@@ -276,15 +359,18 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
                 raise PackagePolicyError(
                     "installed package, prerequisites, or reviewed setup step changed"
                 )
+            self._require_current(may_apply)
             lease = self.store.acquire_operation_lock(skill_id)
             if not lease:
                 raise PackagePolicyError("another managed operation owns this skill")
             try:
-                return self._start(plan, receipt)
+                return self._start(plan, receipt, may_apply=may_apply)
             finally:
                 self.store.release_operation_lock(skill_id, lease)
 
-    def _start(self, plan: dict, receipt: str) -> dict:
+    def _start(
+        self, plan: dict, receipt: str, *, may_apply: Callable[[], bool] | None = None
+    ) -> dict:
         payload = {
             "owner": self._owner(),
             "receipt": receipt,
@@ -296,6 +382,7 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             "task_id": "wisdom-setup:" + receipt,
             "handle": None,
         }
+        self._require_current(may_apply)
         operation_id = self.store.journal(KIND, plan["skill_id"], "starting", payload)
         self._bind_receipt(receipt, operation_id)
         row = self.store.operation(operation_id)
@@ -310,6 +397,7 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             ):
                 raise WisdomConflict("setup journal changed while recording its process")
 
+        self._require_current(may_apply)
         result = self.execution_host.execute(
             plan["step"]["command"],
             workdir=Path(plan["target_path"]),
@@ -351,12 +439,15 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             stored["output_truncated"] = bool(result.get("output_truncated"))
         return self.receipts.finalize(payload["receipt"], row, payload, stored, state)
 
-    def _resume(self, row: dict, payload: dict) -> dict:
+    def _resume(
+        self, row: dict, payload: dict, *, may_apply: Callable[[], bool] | None = None
+    ) -> dict:
         if row["state"] == "done":
             result = payload.get("result")
             return result if isinstance(result, dict) else {"state": row["phase"]}
         if row["phase"] == "starting" or not isinstance(payload.get("handle"), dict):
             if row["phase"] != "unknown":
+                self._require_current(may_apply)
                 _transition(self.store, row, "unknown", payload)
             return {
                 "state": "unknown", "operation_id": row["id"],
@@ -370,8 +461,10 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             current = self.store.operation(row["id"])
             if current is None:
                 raise WisdomConflict("setup operation journal disappeared")
+            self._require_current(may_apply)
             return self._finish(current, _operation_payload(current), result)
         if result.get("state") != "running" and row["phase"] != "unknown":
+            self._require_current(may_apply)
             _transition(self.store, row, "unknown", payload)
         return {
             "state": "running" if result.get("state") == "running" else "unknown",
@@ -384,6 +477,8 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
         operation_id: str,
         *,
         acknowledged_effects_checked_and_stopped: bool = False,
+        expected_recovery: dict | None = None,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict:
         """Abandon UNKNOWN only after an explicit effects/stopped acknowledgement."""
 
@@ -394,16 +489,47 @@ class SetupController:  # pylint: disable=too-many-instance-attributes
             payload = _operation_payload(row)
             if payload.get("owner") != self._owner():
                 raise WisdomAuthError("setup recovery belongs to another enrolment")
+            if expected_recovery is not None:
+                self._require_current(may_apply)
+                self._assert_expected_recovery(
+                    expected_recovery, self._recovery_snapshot(skill_id, row)
+                )
             if row["state"] == "done":
                 return payload.get("result") or {"state": row["phase"]}
-            current = self._resume(row, payload)
+            self._require_current(may_apply)
+            current = self._resume(row, payload, may_apply=may_apply)
+            raw_step = payload.get("step")
+            step = raw_step if isinstance(raw_step, dict) else {}
+            current = {
+                **current,
+                "kind": KIND,
+                "skill_id": skill_id,
+                "version": payload.get("version"),
+                "content_hash": payload.get("content_hash"),
+                "phase": step.get("phase"),
+                "index": step.get("index"),
+                "command": step.get("command"),
+            }
             if current["state"] == "running":
                 return current
             if current["state"] != "unknown":
                 return current
             if not acknowledged_effects_checked_and_stopped:
-                return {**current, "recovery_review": True}
+                return {
+                    **current,
+                    "recovery_review": True,
+                    "recovery_consequence": (
+                        "Abandoning records the outcome as abandoned only after effects "
+                        "were checked and the recorded process was stopped; it never reruns."
+                    ),
+                }
+            self._require_current(may_apply)
             latest = self.store.operation(operation_id)
+            if latest is None:
+                raise WisdomConflict("setup operation journal disappeared")
+            latest_status = self._recovery_snapshot(skill_id, latest)
+            if expected_recovery is not None:
+                self._assert_recovery_identity(expected_recovery, latest_status)
             latest_payload = _operation_payload(latest)
             latest_payload["recovery"] = {
                 "effects_checked_and_stopped": True,

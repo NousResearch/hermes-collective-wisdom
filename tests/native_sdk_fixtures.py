@@ -198,7 +198,8 @@ class Service(InvocationService):
     def versions(self, skill_id):
         return self.show(skill_id)["versions"]
 
-    def publication_review(self, draft_id):
+    def publication_review(self, draft_id, *, may_apply=None):
+        del may_apply
         assert draft_id == "local-draft"
         return {
             "draft_id": draft_id, "editorial_name": "SDK publication",
@@ -217,7 +218,8 @@ class Service(InvocationService):
             "notice": "Nothing has been uploaded.",
         }
 
-    def publication_submit(self, receipt):
+    def publication_submit(self, receipt, *, may_apply=None):
+        assert may_apply is not None and may_apply() is True
         assert receipt == "publication-receipt"
         return {
             "operation_id": "publication-operation", "state": "done",
@@ -225,7 +227,8 @@ class Service(InvocationService):
             "portal_url": "https://portal.nousresearch.com/wisdom/review/remote-draft?org_id=org-1",
         }
 
-    def publication_reopen(self, operation_id):
+    def publication_reopen(self, operation_id, *, may_apply=None):
+        assert may_apply is not None and may_apply() is True
         assert operation_id == "publication-operation"
         return {
             "operation_id": operation_id, "state": "done", "publication_state": "published",

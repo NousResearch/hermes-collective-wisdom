@@ -9,6 +9,7 @@ import json
 import secrets
 import shlex
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -21,6 +22,9 @@ CONSENT_SECONDS = 24 * 60 * 60
 SLACK_SECTION_LIMIT = 2900
 TELEGRAM_TEXT_LIMIT = 3500
 TERMINAL = {"completed", "failed", "stale", "expired", "needs_review", "superseded"}
+_PUBLICATION_TERMINAL = {
+    "published", "rejected", "changes_requested", "declined", "invalidated",
+}
 _CONSENT_INSERT = (
     "INSERT INTO wisdom_consent("
     "id,organization_id,owner_session,actor_id,platform,profile,operation,state,"
@@ -93,6 +97,26 @@ def parse_callback(value: str) -> tuple[str, str]:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, allow_nan=False, ensure_ascii=True)
+
+
+def _safe_handoff_identifier(
+    value: object, placeholder: str = "<draft-id>",
+) -> str:
+    text = str(value or "")
+    if not text or any(
+        unicodedata.category(character).startswith("C") for character in text
+    ):
+        return placeholder
+    return shlex.quote(text)
+
+
+def _safe_display_identifier(value: object, placeholder: str = "Draft") -> str:
+    text = str(value or "")
+    if not text or any(
+        unicodedata.category(character).startswith("C") for character in text
+    ):
+        return placeholder
+    return text
 
 
 def slack_section_text(value: object) -> str:
@@ -325,6 +349,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PackagePolicyError("native update review is invalid")
         if plan.get("owner") != owner:
             raise PermissionError("Collective Wisdom review belongs to another enrolment.")
+        plan = self._prepare_review_deferral(service, plan)
         now = self.clock()
         identity = secrets.token_urlsafe(12)
         with self.store.transaction() as db:
@@ -354,7 +379,30 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         plan = service.install_plan(reference, update_mode=update_mode)
         if plan.get("operation") != "install" or plan.get("owner") != owner:
             raise PackagePolicyError("native install review is invalid")
+        plan = self._prepare_review_deferral(service, plan)
         return self._insert_review(service, invocation, "install", plan)
+
+    @staticmethod
+    def _prepare_review_deferral(  # pylint: disable=broad-exception-caught
+        service: Any, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Attach a verified cooldown snapshot, or explicitly omit Not Now.
+
+        Hosts without the complete shared service seam cannot verify policy and
+        therefore cannot offer a misleading local-only Not Now action.
+        """
+
+        prepare = getattr(service, "prepare_review_deferral", None)
+        defer = getattr(service, "defer_review", None)
+        if not callable(prepare) or not callable(defer):
+            return {**plan, "review_deferral_unavailable": True}
+        try:
+            deferral = prepare(plan)
+        except Exception:  # policy/owner authority unavailable: omit the action
+            return {**plan, "review_deferral_unavailable": True}
+        if not isinstance(deferral, dict):
+            return {**plan, "review_deferral_unavailable": True}
+        return {**plan, "review_deferral": deferral}
 
     def request_install_modes(
         self, service: Any, invocation: NativeInvocation, reference: str,
@@ -402,9 +450,10 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         plan = service.publication_review(draft_id)
         if plan.get("draft_id") != draft_id or not plan.get("receipt"):
             raise PackagePolicyError("native publication review is invalid")
-        return self._insert_review(
-            service, invocation, "publish", {**plan, "owner": owner, "allowed": True}
+        plan = self._prepare_review_deferral(
+            service, {**plan, "owner": owner, "allowed": True}
         )
+        return self._insert_review(service, invocation, "publish", plan)
 
     def request_setup(
         self, service: Any, invocation: NativeInvocation,
@@ -659,10 +708,11 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             return latest
         raise PermissionError("Collective Wisdom delivery state changed.")
 
-    def act(  # pylint: disable=too-many-return-statements,too-many-branches
+    def act(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
         self, service: Any, record_id: str, invocation: NativeInvocation,
-        action: str,
+        action: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        effect_current = may_apply or (lambda: True)
         record = self.load(record_id)
         self._validate(
             record, service, invocation,
@@ -672,8 +722,16 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             ),
         )
         if action == "inspect" and record["operation"] == "setup":
-            return self._setup_progress(service, record)
+            return self._setup_progress(
+                service, record, effect_current=effect_current
+            )
         if action == "defer":
+            if record["plan"].get("review_deferral_unavailable") is True:
+                raise PermissionError("Collective Wisdom deferral is unavailable.")
+            if isinstance(record["plan"].get("review_deferral"), dict):
+                return self._defer_review(
+                    service, record, invocation, effect_current=effect_current
+                )
             if record["state"] == "pending":
                 with self.store.transaction() as db:
                     db.execute(
@@ -728,26 +786,77 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         if action == "recheck" and record["operation"] == "setup":
             return self._recheck_setup(service, record)
         if action == "confirm":
-            return self._confirm(service, record)
+            return self._confirm(service, record, effect_current=effect_current)
         if action.startswith("install.mode."):
             return self._select_install_mode(service, record, action)
         if action.startswith("catalog."):
             return self._catalog_action(service, record, action)
         if action == "publication.status":
-            return self._publication_action(service, record, "reopen")
+            return self._publication_action(
+                service, record, "reopen", effect_current=effect_current
+            )
         if action == "publication.decline":
-            return self._publication_action(service, record, "decline")
+            return self._publication_action(
+                service, record, "decline", effect_current=effect_current
+            )
         if action == "recover":
-            return self._recover(service, record)
+            return self._recover(
+                service, record, effect_current=effect_current
+            )
         if action in {"setup.recover", "setup.clear"}:
             return self._setup_recovery(
-                service, record, clear=action == "setup.clear"
+                service, record, clear=action == "setup.clear",
+                effect_current=effect_current,
             )
         if action == "setup.status":
             return self._setup_status(service, record)
         if action.startswith("settings."):
             return self._settings_action(service, record, invocation, action)
         raise ValueError("Collective Wisdom control was not recognized.")
+
+    def _defer_review(
+        self, service: Any, record: dict[str, Any], invocation: NativeInvocation, *,
+        effect_current: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Persist the shared policy cooldown before retiring the native card."""
+
+        if record["state"] != "pending":
+            raise PermissionError("Collective Wisdom review is no longer pending.")
+        deferral = record["plan"]["review_deferral"]
+
+        def current() -> bool:
+            if effect_current() is not True:
+                return False
+            latest = self.load(record["id"])
+            try:
+                self._validate_route(latest, invocation)
+            except PermissionError:
+                return False
+            return bool(
+                latest["state"] == "pending"
+                and latest["state_revision"] == record["state_revision"]
+                and latest["delivery_state"] in {"confirmed", "edit_failed"}
+                and latest.get("message_id") == invocation.message_id
+                and self.clock() <= latest["expires_at"]
+                and service.native_owner() == latest["plan"].get("owner")
+            )
+
+        result = service.defer_review(deferral, may_apply=current)
+        if not isinstance(result, dict) or result.get("deferred") is not True:
+            raise PermissionError("Collective Wisdom deferral was not confirmed.")
+        with self.store.transaction() as db:
+            changed = db.execute(
+                "UPDATE wisdom_consent SET state='deferred',result_json=?,"
+                "state_revision=state_revision+1,updated_at=? "
+                "WHERE id=? AND state='pending' AND state_revision=?",
+                (_json(result), self.clock(), record["id"], record["state_revision"]),
+            )
+        if changed.rowcount != 1:
+            latest = self.load(record["id"])
+            if latest["state"] == "deferred" and latest.get("result") == result:
+                return latest
+            raise PermissionError("Collective Wisdom review state changed after deferral.")
+        return self.load(record["id"])
 
     def _settings_action(  # pylint: disable=too-many-locals,too-many-branches
         self, service: Any, record: dict[str, Any], invocation: NativeInvocation,
@@ -880,6 +989,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         )
         if plan.get("operation") != "install" or plan.get("owner") != service.native_owner():
             raise PackagePolicyError("native install review is invalid")
+        plan = self._prepare_review_deferral(service, plan)
         with self.store.transaction() as db:
             changed = db.execute(
                 "UPDATE wisdom_consent SET operation='install',plan_json=?,"
@@ -1026,6 +1136,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             or plan.get("owner") != record["plan"].get("owner")
         ):
             raise PermissionError("Collective Wisdom review belongs to another enrolment.")
+        plan = self._prepare_review_deferral(service, plan)
         now = self.clock()
         identity = secrets.token_urlsafe(12)
         with self.store.transaction() as db:
@@ -1082,8 +1193,36 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             )
         return self.load(identity)
 
+    def _authority_current(
+        self, service: Any, record: dict[str, Any],
+        effect_current: Callable[[], bool],
+    ) -> bool:
+        """Recheck the durable review and invocation around owner rereads."""
+
+        if effect_current() is not True:
+            return False
+        latest = self.load(record["id"])
+        if effect_current() is not True:
+            return False
+        if (
+            latest["state"] != record["state"]
+            or latest["state_revision"] != record["state_revision"]
+        ):
+            return False
+        owner_current = service.native_owner() == latest["plan"].get("owner")
+        if effect_current() is not True or not owner_current:
+            return False
+        # Owner resolution can re-enter the host; fence durable consent after it too.
+        latest = self.load(record["id"])
+        return (
+            effect_current() is True
+            and latest["state"] == record["state"]
+            and latest["state_revision"] == record["state_revision"]
+        )
+
     def _confirm(  # pylint: disable=too-many-return-statements,too-many-branches
-        self, service: Any, record: dict[str, Any]
+        self, service: Any, record: dict[str, Any], *,
+        effect_current: Callable[[], bool],
     ) -> dict[str, Any]:
         if record["state"] == "completed":
             return record
@@ -1124,24 +1263,47 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             **record, "state": "applying",
             "state_revision": int(record["state_revision"]) + 1,
         }
+
+        def applying_current() -> bool:
+            return self._authority_current(service, applying, effect_current)
+
+        active = applying
         try:
+            if effect_current() is not True:
+                raise PermissionError(
+                    "Collective Wisdom native review is no longer current."
+                )
             if record["operation"] == "publish":
-                result = service.publication_submit(record["plan"]["receipt"])
+                result = service.publication_submit(
+                    record["plan"]["receipt"], may_apply=applying_current
+                )
                 state = "completed" if result.get("state") == "done" else "needs_review"
                 return self._store_result(applying, result, state=state)
             if record["operation"] in {"install", "update"}:
                 result = (
-                    service.install_apply(record["plan"]["receipt"])
+                    service.install_apply(
+                        record["plan"]["receipt"], may_apply=applying_current
+                    )
                     if record["operation"] == "install"
-                    else service.update_apply(record["plan"]["receipt"])
+                    else service.update_apply(
+                        record["plan"]["receipt"], may_apply=applying_current
+                    )
                 )
                 if isinstance(result, dict) and result.get("pending") is True:
                     return self._store_result(applying, result, state="needs_review")
+                if record["operation"] == "update":
+                    active = self._store_result(applying, result, state="applying")
                 info = service.installed_setup_inspect(
                     record["plan"]["skill_id"], version=record["plan"]["version"]
                 )
+                if not self._authority_current(service, active, effect_current):
+                    raise PermissionError(
+                        "Collective Wisdom native review is no longer current."
+                    )
             else:
-                result = service.installed_setup_apply(record["plan"]["receipt"])
+                result = service.installed_setup_apply(
+                    record["plan"]["receipt"], may_apply=applying_current
+                )
                 if isinstance(result, dict) and result.get("state") in {"running", "unknown"}:
                     return self._store_setup_result(applying, result, state="applying")
                 if isinstance(result, dict) and result.get("state") in {"failed", "blocked"}:
@@ -1152,26 +1314,44 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                     record["plan"]["skill_id"], version=record["plan"]["version"]
                 )
         except Exception:
-            self._set_state(applying, "needs_review")
+            self._set_state(active, "needs_review")
             raise
-        return self._complete(applying, result, info)
+        return self._complete(active, result, info)
 
     def _publication_action(
-        self, service: Any, record: dict[str, Any], action: str,
+        self, service: Any, record: dict[str, Any], action: str, *,
+        effect_current: Callable[[], bool],
     ) -> dict[str, Any]:
         if record["operation"] != "publish" or not isinstance(record.get("result"), dict):
             raise PermissionError("Publication operation is unavailable.")
+        publication_state = str(record["result"].get("publication_state") or "")
+        # Terminal moderation outcomes are monotonic. A delayed duplicate click on
+        # the old card must not poll again and overwrite a newer final projection.
+        if publication_state in _PUBLICATION_TERMINAL:
+            return record
+        if action == "decline" and publication_state != "pending_moderation":
+            raise PermissionError("Publication can no longer be declined from this review.")
         operation_id = str(record["result"].get("operation_id") or "")
         if not operation_id:
             raise PermissionError("Publication operation is unavailable.")
+        if effect_current() is not True:
+            raise PermissionError("Collective Wisdom native review is no longer current.")
+
+        def current() -> bool:
+            return self._authority_current(service, record, effect_current)
+
         result = (
-            service.publication_reopen(operation_id)
-            if action == "reopen" else service.publication_decline(operation_id)
+            service.publication_reopen(operation_id, may_apply=current)
+            if action == "reopen"
+            else service.publication_decline(operation_id, may_apply=current)
         )
         state = "completed" if result.get("state") == "done" else "needs_review"
         return self._store_result(record, result, state=state)
 
-    def _recover(self, service: Any, record: dict[str, Any]) -> dict[str, Any]:
+    def _recover(
+        self, service: Any, record: dict[str, Any], *,
+        effect_current: Callable[[], bool],
+    ) -> dict[str, Any]:
         if record["operation"] != "update":
             raise PermissionError("Generic operation recovery is only available for updates.")
         if record["state"] == "completed":
@@ -1194,23 +1374,50 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             **record, "state": "applying",
             "state_revision": int(record["state_revision"]) + 1,
         }
+
+        def current() -> bool:
+            return self._authority_current(service, applying, effect_current)
+
         try:
-            if record["operation"] == "update":
-                result = service.update_apply(record["plan"]["receipt"])
+            result = record.get("result")
+            if not isinstance(result, dict):
+                raise PermissionError(
+                    "Exact update recovery is unavailable; inspect it in the terminal."
+                )
+            if result.get("pending") is True:
+                operation_id = result.get("operation_id")
+                if not isinstance(operation_id, str) or not operation_id:
+                    raise PermissionError(
+                        "Exact update recovery is unavailable; inspect it in the terminal."
+                    )
+                recovery = service.update_recovery_inspect(
+                    record["plan"]["skill_id"], operation_id
+                )
+                if not isinstance(recovery, dict) or current() is not True:
+                    raise PermissionError(
+                        "Collective Wisdom update recovery is no longer current."
+                    )
+                result = service.update_recovery_resume(
+                    record["plan"]["skill_id"], operation_id,
+                    record["plan"]["receipt"], may_apply=current,
+                )
                 if isinstance(result, dict) and result.get("pending") is True:
                     return self._store_result(applying, result, state="needs_review")
-            else:
-                result = service.installed_setup_apply(record["plan"]["receipt"])
             info = service.installed_setup_inspect(
                 record["plan"]["skill_id"], version=record["plan"]["version"]
             )
+            if current() is not True:
+                raise PermissionError(
+                    "Collective Wisdom native review is no longer current."
+                )
         except Exception:
             self._set_state(applying, "needs_review")
             raise
         return self._complete(applying, result, info)
 
     def _setup_progress(
-        self, service: Any, record: dict[str, Any]
+        self, service: Any, record: dict[str, Any], *,
+        effect_current: Callable[[], bool],
     ) -> dict[str, Any]:
         if record["state"] != "applying":
             return record
@@ -1220,14 +1427,34 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         operation_id = setup.get("operation_id")
         if not operation_id:
             raise PermissionError("Setup recovery operation is unavailable.")
-        current = service.installed_setup_recover(
-            record["plan"]["skill_id"], operation_id, acknowledged=False
+
+        def current_authority() -> bool:
+            return self._authority_current(service, record, effect_current)
+
+        recovery = service.installed_setup_recovery_inspect(
+            record["plan"]["skill_id"], operation_id
         )
+        if current_authority() is not True:
+            raise PermissionError("Collective Wisdom native review is no longer current.")
+        current = service.installed_setup_recover(
+            record["plan"]["skill_id"], operation_id, acknowledged=False,
+            expected_recovery=recovery, may_apply=current_authority,
+        )
+        if current.get("recovery_review") is True:
+            reviewed = service.installed_setup_recovery_inspect(
+                record["plan"]["skill_id"], operation_id
+            )
+            if current_authority() is not True:
+                raise PermissionError(
+                    "Collective Wisdom native review is no longer current."
+                )
+            current = {**current, "recovery_snapshot": reviewed}
         state = self._setup_record_state(current)
         return self._store_setup_result(record, current, state=state)
 
     def _setup_recovery(
-        self, service: Any, record: dict[str, Any], *, clear: bool
+        self, service: Any, record: dict[str, Any], *, clear: bool,
+        effect_current: Callable[[], bool],
     ) -> dict[str, Any]:
         if record["operation"] != "setup" or record["state"] != "applying":
             raise PermissionError("Setup operation does not need recovery.")
@@ -1239,9 +1466,33 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         operation_id = setup.get("operation_id")
         if not operation_id:
             raise PermissionError("Setup recovery operation is unavailable.")
+
+        def current_authority() -> bool:
+            return self._authority_current(service, record, effect_current)
+
+        if clear:
+            recovery = setup.get("recovery_snapshot")
+            if not isinstance(recovery, dict):
+                raise PermissionError("Review the interrupted setup effects again.")
+        else:
+            recovery = service.installed_setup_recovery_inspect(
+                record["plan"]["skill_id"], operation_id
+            )
+        if current_authority() is not True:
+            raise PermissionError("Collective Wisdom native review is no longer current.")
         current = service.installed_setup_recover(
-            record["plan"]["skill_id"], operation_id, acknowledged=clear
+            record["plan"]["skill_id"], operation_id, acknowledged=clear,
+            expected_recovery=recovery, may_apply=current_authority,
         )
+        if current.get("recovery_review") is True:
+            reviewed = service.installed_setup_recovery_inspect(
+                record["plan"]["skill_id"], operation_id
+            )
+            if current_authority() is not True:
+                raise PermissionError(
+                    "Collective Wisdom native review is no longer current."
+                )
+            current = {**current, "recovery_snapshot": reviewed}
         state = self._setup_record_state(current)
         return self._store_setup_result(record, current, state=state)
 
@@ -1669,8 +1920,11 @@ def _record_actions(record: dict[str, Any]) -> list[str]:
             not in {"pass", "advisory"}
         )
     )
+    deferral_actions = (
+        [] if plan.get("review_deferral_unavailable") is True else ["defer"]
+    )
     if not blocked:
-        return ["defer", "inspect", "confirm"]
+        return [*deferral_actions, "inspect", "confirm"]
     actions = []
     policy = plan.get("policy") or {}
     if plan.get("modified") and not (
@@ -1685,7 +1939,7 @@ def _record_actions(record: dict[str, Any]) -> list[str]:
         "partial", "compatible_after_setup"
     } and not (policy.get("accepted_partial") or policy.get("accept_partial")):
         actions.append("ack.partial")
-    return [*actions, "defer", "inspect"]
+    return [*actions, *deferral_actions, "inspect"]
 
 
 def project_view(  # pylint: disable=too-many-return-statements
@@ -1978,6 +2232,9 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
 def _publication_view(record: dict[str, Any]) -> NativeView:
     """Project one exact historical publication review on the owning card."""
     plan = record["plan"]
+    display_name = str(
+        plan.get("editorial_name") or _safe_display_identifier(plan.get("draft_id"))
+    )
     result = record.get("result") or {}
     publication_state = str(result.get("publication_state") or "")
     if record["state"] in {"completed", "needs_review"} and result:
@@ -1990,6 +2247,10 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
             "changes_requested": (
                 "Changes requested",
                 "Your organization requested changes. Open the skill review for details.",
+            ),
+            "rejected": (
+                "Rejected",
+                "Your organization rejected this contribution. Open the skill review for details.",
             ),
             "declined": (
                 "Not published",
@@ -2004,8 +2265,11 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
             ("Publication needs review", str(result.get("detail") or
              "Open the skill review to check its current publication status.")),
         )
+        server_detail = str(result.get("detail") or "").strip()
+        if server_detail and server_detail not in detail:
+            detail += "\n\nModeration detail: " + server_detail
         actions = []
-        if publication_state not in {"published", "declined", "invalidated"}:
+        if publication_state not in _PUBLICATION_TERMINAL:
             actions.append(NativeAction("Check status", "publication.status"))
         if publication_state == "pending_moderation":
             actions.append(NativeAction("Decline", "publication.decline"))
@@ -2014,9 +2278,7 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
             actions.append(NativeAction("View in Portal", url=portal_url))
         return NativeView(
             "Hermes Collective Wisdom", summary,
-            [NativeItem(
-                str(plan.get("editorial_name") or plan.get("draft_id") or "Skill"), detail
-            )],
+            [NativeItem(display_name, detail)],
             actions,
         )
     hashes = plan.get("hashes") or {}
@@ -2031,6 +2293,15 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
             f"- {item.get('path')} · {item.get('hash')}"
             for item in files if isinstance(item, dict)
         )
+    draft_id = _safe_handoff_identifier(plan.get("draft_id"))
+    detail += (
+        "\n\nThis native card cannot safely edit arbitrary package files. To change files or "
+        "the manifest before sharing, leave this card without confirming and use the "
+        "complete private JSON workflow in a terminal:\n"
+        f"hermes wisdom prepared inspect {draft_id} --json\n"
+        "hermes wisdom prepared save <payload.json> --json\n"
+        f"Then reopen /wisdom publish {draft_id}."
+    )
     detail += "\n\nNothing changes until you use the confirmation control."
     if _has_checks(plan):
         detail += "\n\n" + _review_text(plan, bool(record.get("checks_expanded")))
@@ -2038,14 +2309,13 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
     if _has_checks(plan):
         actions.append(_checks_action(bool(record.get("checks_expanded"))))
     if record["state"] == "pending":
-        actions.extend((
-            NativeAction("Not Now", "defer"),
-            NativeAction("Yes, share", "confirm", True),
-        ))
+        if isinstance(plan.get("review_deferral"), dict):
+            actions.append(NativeAction("Not Now", "defer"))
+        actions.append(NativeAction("Yes, share", "confirm", True))
     view = NativeView(
         "Hermes Collective Wisdom",
         "Deferred on this surface" if record["state"] == "deferred" else "Pending",
-        [NativeItem(str(plan.get("editorial_name") or plan.get("draft_id") or "Skill"), detail)],
+        [NativeItem(display_name, detail)],
         actions,
         notice=str(plan.get("notice") or ""),
     )
@@ -2054,11 +2324,11 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
         and str(record.get("platform") or "") in {"slack", "telegram"}
         and not _approval_is_lossless(record, view)
     ):
-        draft_id = shlex.quote(str(plan.get("draft_id") or ""))
+        draft_id = _safe_handoff_identifier(plan.get("draft_id"))
         return NativeView(
             "Hermes Collective Wisdom", "Complete review required in terminal",
             [NativeItem(
-                str(plan.get("editorial_name") or plan.get("draft_id") or "Skill"),
+                display_name,
                 "Native approval is disabled because this surface cannot render every reviewed "
                 "publication fact without truncation. Nothing was uploaded or published.\n\n"
                 "Review the complete immutable publication snapshot in a terminal:\n"
@@ -2066,7 +2336,10 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
                 "Submit only the fresh receipt returned by that review:\n"
                 "hermes wisdom publication submit <publication-receipt> --json",
             )],
-            [NativeAction("Not Now", "defer")],
+            (
+                [NativeAction("Not Now", "defer")]
+                if isinstance(plan.get("review_deferral"), dict) else []
+            ),
         )
     return view
 

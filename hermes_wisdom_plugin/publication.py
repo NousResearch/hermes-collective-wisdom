@@ -66,6 +66,26 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         return dict(owner)
 
     @staticmethod
+    def _require_current(may_apply: Callable[[], bool] | None) -> None:
+        if may_apply is None:
+            return
+        try:
+            current = may_apply() is True
+        except Exception as exc:  # authority callbacks fail closed
+            raise WisdomAuthError(
+                "Collective Wisdom publication is no longer current"
+            ) from exc
+        if not current:
+            raise WisdomAuthError("Collective Wisdom publication is no longer current")
+
+    @staticmethod
+    def _is_current(may_apply: Callable[[], bool] | None) -> bool:
+        try:
+            return may_apply is None or may_apply() is True
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+
+    @staticmethod
     def _receipt_revision(draft: dict[str, Any], policy: Any) -> str:
         return json.dumps(
             {
@@ -77,20 +97,30 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             separators=(",", ":"),
         )
 
-    def _policy(self, owner: dict[str, str]) -> Any:
+    def _policy(
+        self, owner: dict[str, str], may_apply: Callable[[], bool] | None = None,
+    ) -> Any:
+        self._require_current(may_apply)
         policy = self.client.agent_led_policy()
+        self._require_current(may_apply)
         if _value(policy, "org_id") != owner["organization_id"]:
             raise WisdomAuthError("Collective Wisdom publication policy owner changed")
         return policy
 
-    def review(self, draft_id: str) -> dict[str, Any]:
+    def review(
+        self, draft_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Show all exact local facts and create no publication side effect."""
 
+        self._require_current(may_apply)
         owner = self._owner()
+        self._require_current(may_apply)
         operation = self.store.operation(draft_id)
         if operation is not None:
-            return self._review_stalled_operation(operation, owner)
-        prepared = self.reviewer.reopen(draft_id)
+            return self._review_stalled_operation(
+                operation, owner, may_apply=may_apply
+            )
+        prepared = self.reviewer.reopen(draft_id, may_apply=may_apply)
         draft = self.store.draft(draft_id)
         if draft is None or draft.get("owner") != owner or draft.get("state") != "prepared":
             raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
@@ -99,7 +129,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             raise WisdomConflict(
                 str(security.get("summary") or "Local security checks must complete before sharing")
             )
-        policy = self._policy(owner)
+        policy = self._policy(owner, may_apply)
+        self._require_current(may_apply)
         receipt = self.store.save_receipt(
             draft_id=draft_id,
             server_revision=self._receipt_revision(draft, policy),
@@ -122,7 +153,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         }
 
     def _review_stalled_operation(
-        self, operation: dict[str, Any], owner: dict[str, str]
+        self, operation: dict[str, Any], owner: dict[str, str], *,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Create a fresh confirmation for a policy-stalled exact operation."""
 
@@ -136,16 +168,19 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         remote_id = payload.get("remote_draft_id")
         if not remote_id:
             raise WisdomConflict("Publication draft identity is unavailable")
+        self._require_current(may_apply)
         remote = self.client.draft(remote_id).draft
+        self._require_current(may_apply)
         if not self._draft_matches(remote, payload):
             raise WisdomValidationError(
                 "Authoritative publication draft no longer matches intent"
             )
         if str(_value(remote, "state")) not in _PUBLISHABLE:
             raise WisdomConflict("Authoritative publication state must be reconciled first")
-        policy = self._policy(owner)
+        policy = self._policy(owner, may_apply)
         if self.store.draft(payload["local_draft_id"]) is None:
             raise WisdomNotFound("Prepared publication draft not found")
+        self._require_current(may_apply)
         receipt = self.store.save_receipt(
             draft_id=payload["local_draft_id"],
             server_revision=self._operation_receipt_revision(operation, policy, remote),
@@ -184,9 +219,11 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         )
 
     def _verified_receipt(
-        self, receipt_id: str
+        self, receipt_id: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str], Any, dict[str, Any] | None]:
+        self._require_current(may_apply)
         owner = self._owner()
+        self._require_current(may_apply)
         receipt = self.store.publication_receipt(receipt_id)
         if receipt is None:
             raise WisdomConflict("Publication review receipt is missing or already used")
@@ -204,14 +241,16 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             "author_description": receipt["description_hash"],
             "package_manifest": receipt["manifest_hash"],
         }
-        policy = self._policy(owner)
+        policy = self._policy(owner, may_apply)
         if draft.get("state") != "prepared":
             operation = self._verified_existing_operation(
-                receipt, draft, expected, policy
+                receipt, draft, expected, policy, may_apply=may_apply
             )
             return draft, operation["payload"].get("review") or {}, owner, policy, operation
 
-        prepared = self.reviewer.reopen(str(draft["id"]))
+        prepared = self.reviewer.reopen(
+            str(draft["id"]), may_apply=may_apply
+        )
         security = prepared.get("security_check") or {}
         if security.get("upload_allowed") is not True:
             raise WisdomConflict(
@@ -238,6 +277,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         draft: dict[str, Any],
         expected: dict[str, Any],
         policy: Any,
+        *,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Validate fresh consent for an existing exact remote draft."""
 
@@ -249,7 +290,9 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         remote_id = operation["payload"].get("remote_draft_id")
         if not remote_id:
             raise WisdomConflict("Publication draft identity is unavailable")
+        self._require_current(may_apply)
         remote = self.client.draft(remote_id).draft
+        self._require_current(may_apply)
         if not self._draft_matches(remote, operation["payload"]):
             raise WisdomValidationError(
                 "Authoritative publication draft no longer matches intent"
@@ -356,19 +399,25 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             raise WisdomValidationError("Persisted publication intent has no objects")
         return result
 
-    def submit(self, receipt_id: str) -> dict[str, Any]:
+    def submit(  # pylint: disable=too-many-locals
+        self, receipt_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Consume one final hash-bound authorization and drive its durable operation."""
 
-        draft, prepared, owner, policy, existing = self._verified_receipt(receipt_id)
+        draft, prepared, owner, policy, existing = self._verified_receipt(
+            receipt_id, may_apply=may_apply
+        )
         reviewed_hashes = dict(prepared.get("hashes") or {})
         entity_id = str(draft["skill_id"])
         lock_key = "publication:" + entity_id
+        self._require_current(may_apply)
         lock = self.store.acquire_operation_lock(lock_key)
         if lock is None:
             raise WisdomConflict("This package is already being submitted. Reload its status")
         try:
             if existing is not None:
                 operation_id = str(existing["id"])
+                self._require_current(may_apply)
                 self.store.reauthorize_publication(
                     receipt_id=receipt_id,
                     operation_id=operation_id,
@@ -381,8 +430,12 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 )
             else:
                 # Close the review-to-effect window under the durable operation lock.
-                prepared = self.reviewer.reopen(str(draft["id"]))
-                if self._owner() != owner:
+                prepared = self.reviewer.reopen(
+                    str(draft["id"]), may_apply=may_apply
+                )
+                current_owner = self._owner()
+                self._require_current(may_apply)
+                if current_owner != owner:
                     raise WisdomAuthError("Collective Wisdom publication owner changed")
                 security = prepared.get("security_check") or {}
                 if security.get("upload_allowed") is not True:
@@ -402,13 +455,17 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 if prepared["hashes"] != reviewed_hashes:
                     raise WisdomConflict("The package changed; review it again before submitting")
                 intent = self._intent(draft, prepared, owner, policy)
+                self._require_current(may_apply)
                 operation_id = self.store.begin_publication(
                     receipt_id=receipt_id,
                     draft_id=str(draft["id"]),
                     entity_id=entity_id,
                     payload=intent,
                 )
-            return self._drive(operation_id, lock_key=lock_key, lock_owner=lock)
+            return self._drive(
+                operation_id, lock_key=lock_key, lock_owner=lock,
+                may_apply=may_apply,
+            )
         finally:
             self.store.release_operation_lock(lock_key, lock)
 
@@ -467,6 +524,19 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         return payload
 
     @staticmethod
+    def _stopped_result(operation_id: str, phase: str) -> dict[str, Any]:
+        return {
+            "operation_id": operation_id,
+            "state": "pending",
+            "phase": phase,
+            "detail": (
+                "The authorizing invocation ended after the durable operation entered "
+                "this phase. Inspect status before explicitly reopening it."
+            ),
+            "retry_safe": phase in {"intent", "objects_uploaded"},
+        }
+
+    @staticmethod
     def _uncertain_result(operation_id: str, phase: str, detail: str) -> dict[str, Any]:
         return {
             "operation_id": operation_id,
@@ -517,11 +587,16 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         *,
         lock_key: str,
         lock_owner: str,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        if not self._is_current(may_apply):
+            return self._stopped_result(operation_id, "draft_submission_unknown")
         matches = [
             draft for draft in self.client.list_drafts()
             if self._draft_matches(draft, operation["payload"])
         ]
+        if not self._is_current(may_apply):
+            return self._stopped_result(operation_id, "draft_submission_unknown")
         if len(matches) != 1:
             detail = (
                 "No unique exact owner draft is visible. Do not resubmit; check Gateway status "
@@ -543,6 +618,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             payload_override=payload,
             lock_key=lock_key,
             lock_owner=lock_owner,
+            may_apply=may_apply,
         )
 
     # Keeping durable phases in one dispatcher makes each remote effect's prior
@@ -554,20 +630,26 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         lock_key: str,
         lock_owner: str,
         payload_override: dict[str, Any] | None = None,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         operation = self._operation(operation_id)
         payload = payload_override or operation["payload"]
         phase = operation["phase"]
         if operation["state"] == "done":
             return self._finish_projection(operation_id, payload)
+        if not self._is_current(may_apply):
+            return self._stopped_result(operation_id, phase)
         if phase == "draft_submission_unknown":
             return self._reconcile_unknown_draft(
-                operation_id, operation, lock_key=lock_key, lock_owner=lock_owner
+                operation_id, operation, lock_key=lock_key, lock_owner=lock_owner,
+                may_apply=may_apply,
             )
 
         remote_id = payload.get("remote_draft_id")
         remote_state = ""
         if remote_id:
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             try:
                 remote = self.client.draft(remote_id).draft
             # Preserve the phase on any ordinary status transport/schema failure.
@@ -575,6 +657,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 return self._uncertain_result(
                     operation_id, phase, "Gateway status is unavailable; no effect was retried."
                 )
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             if not self._draft_matches(remote, payload):
                 raise WisdomValidationError(
                     "Authoritative publication draft no longer matches intent"
@@ -602,7 +686,9 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                     lock_key=lock_key, lock_owner=lock_owner,
                 )
 
-        policy = self._policy(payload["owner"])
+        if not self._is_current(may_apply):
+            return self._stopped_result(operation_id, phase)
+        policy = self._policy(payload["owner"], may_apply)
         current_policy = {
             "publication_mode": _value(policy, "publication_mode"),
             "version": _value(policy, "version"),
@@ -629,19 +715,33 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             }
 
         if phase == "intent":
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             self.store.assert_operation_lock(lock_key, lock_owner)
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             self.client.upload_private_objects(self._decode_objects(payload))
             self.store.advance_claimed(
                 operation_id, "objects_uploaded", entity_id=lock_key, owner=lock_owner
             )
             phase = "objects_uploaded"
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
         if phase == "objects_uploaded":
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             self.store.advance_claimed(
                 operation_id, "draft_submission_unknown",
                 entity_id=lock_key, owner=lock_owner,
             )
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, "draft_submission_unknown")
             try:
                 self.store.assert_operation_lock(lock_key, lock_owner)
+                if not self._is_current(may_apply):
+                    return self._stopped_result(
+                        operation_id, "draft_submission_unknown"
+                    )
                 remote = self.client.submit_draft(**payload["request"])
                 self.store.assert_operation_lock(lock_key, lock_owner)
                 payload = self._record_remote(
@@ -660,7 +760,11 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             )
             phase = "draft_submitted"
             remote_id = payload["remote_draft_id"]
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             remote = self.client.draft(remote_id).draft
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             if not self._draft_matches(remote, payload):
                 raise WisdomValidationError(
                     "Authoritative publication draft no longer matches intent"
@@ -678,11 +782,17 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             )
 
         if remote_state == "ready":
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
             self.store.advance_claimed(
                 operation_id, "approval_unknown", entity_id=lock_key, owner=lock_owner
             )
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, "approval_unknown")
             try:
                 self.store.assert_operation_lock(lock_key, lock_owner)
+                if not self._is_current(may_apply):
+                    return self._stopped_result(operation_id, "approval_unknown")
                 approved = self.client.approve(
                     remote_id,
                     content_hash=payload["hashes"]["content"],
@@ -700,11 +810,20 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             self.store.advance_claimed(
                 operation_id, "approved", entity_id=lock_key, owner=lock_owner
             )
+            phase = "approved"
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, phase)
+        if not self._is_current(may_apply):
+            return self._stopped_result(operation_id, phase)
         self.store.advance_claimed(
             operation_id, "publication_unknown", entity_id=lock_key, owner=lock_owner
         )
+        if not self._is_current(may_apply):
+            return self._stopped_result(operation_id, "publication_unknown")
         try:
             self.store.assert_operation_lock(lock_key, lock_owner)
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, "publication_unknown")
             published = self.client.publish(
                 remote_id, content_hash=payload["hashes"]["content"]
             )
@@ -747,10 +866,14 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             },
         }
 
-    def status(self, operation_id: str) -> dict[str, Any]:
+    def status(
+        self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Inspect durable local state without causing a network retry."""
 
+        self._require_current(may_apply)
         operation = self._operation(operation_id)
+        self._require_current(may_apply)
         if operation["state"] == "done":
             return self._finish_projection(operation_id, operation["payload"])
         return {
@@ -761,16 +884,22 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             "retry_safe": operation["phase"] in {"intent", "objects_uploaded"},
         }
 
-    def reopen(self, operation_id: str) -> dict[str, Any]:
+    def reopen(
+        self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Reconcile one exact operation; never create a second remote draft."""
 
+        self._require_current(may_apply)
         operation = self._operation(operation_id)
+        self._require_current(may_apply)
         if operation["state"] == "done":
             payload = operation["payload"]
             remote_id = payload.get("remote_draft_id")
             if not remote_id:
                 return self._finish_projection(operation_id, payload)
+            self._require_current(may_apply)
             remote = self.client.draft(remote_id).draft
+            self._require_current(may_apply)
             if not self._draft_matches(remote, payload):
                 raise WisdomValidationError(
                     "Authoritative publication draft no longer matches intent"
@@ -785,26 +914,35 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             raise WisdomConflict("This publication is already being reconciled")
         try:
             return self._drive(
-                operation_id, lock_key=lock_key, lock_owner=lock
+                operation_id, lock_key=lock_key, lock_owner=lock,
+                may_apply=may_apply,
             )
         finally:
             self.store.release_operation_lock(lock_key, lock)
 
-    def decline(self, operation_id: str) -> dict[str, Any]:
+    def decline(  # pylint: disable=too-many-return-statements,too-many-branches
+        self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Persist and reconcile one exact decline; never race publication recovery."""
 
+        self._require_current(may_apply)
         operation = self._operation(operation_id)
+        self._require_current(may_apply)
         lock_key = "publication:" + str(operation["entity_id"])
         lock = self.store.acquire_operation_lock(lock_key)
         if lock is None:
             raise WisdomConflict("This publication is already being reconciled")
         try:
             operation = self._operation(operation_id)
+            self._require_current(may_apply)
             payload = operation["payload"]
             remote_id = payload.get("remote_draft_id")
             if not remote_id:
                 raise WisdomConflict("Unknown draft submission cannot be cancelled safely")
+            self._require_current(may_apply)
             remote = self.client.draft(remote_id).draft
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, str(operation["phase"]))
             if not self._draft_matches(remote, payload):
                 raise WisdomValidationError(
                     "Authoritative publication draft no longer matches intent"
@@ -817,15 +955,22 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 )
             if state == "published":
                 raise WisdomConflict("Published content cannot be declined")
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, str(operation["phase"]))
             should_send = self.store.begin_publication_decline(
                 operation_id, entity_id=lock_key, owner=lock
             )
             if not should_send:
                 return self._drive(
-                    operation_id, lock_key=lock_key, lock_owner=lock
+                    operation_id, lock_key=lock_key, lock_owner=lock,
+                    may_apply=may_apply,
                 )
+            if not self._is_current(may_apply):
+                return self._stopped_result(operation_id, "decline_unknown")
             try:
                 self.store.assert_operation_lock(lock_key, lock)
+                if not self._is_current(may_apply):
+                    return self._stopped_result(operation_id, "decline_unknown")
                 result = self.client.decline(remote_id)
                 self.store.assert_operation_lock(lock_key, lock)
             # Decline may have committed before any ordinary failure surfaced.

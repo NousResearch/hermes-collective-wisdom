@@ -47,8 +47,9 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     * ((MAX_TREE_DEPTH + 1) * MAX_SEGMENT_BYTES + MAX_TREE_DEPTH + 256)
     + 64 * 1024
 )
-_SLASH_COMMANDS = frozenset(
-    {"setup", "status", "list", "browse", "show", "versions", "help",
+CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
+_SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
+    {"setup", "status", "settings", "mute", "sync", "list", "browse", "show", "versions", "help",
      "install", "installed", "check", "update", "uninstall", "installed-setup"}
 )
 _CHECK_LABELS = (
@@ -72,8 +73,8 @@ _PUBLIC_STATUS_STATES = {
     "degraded": "attention required",
     "unavailable": "unavailable",
 }
-_CLI_COMMANDS = ("setup", "status", "notifications", "mute", "sync", "inbox", "maintenance",
-                 "list", "browse", "show", "versions", "suggest", "review-week",
+_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "sync", "inbox",
+                 "maintenance", "list", "browse", "show", "versions", "suggest", "review-week",
                  "prepared", "publication", "install", "installed", "check", "update",
                  "installed-setup", "uninstall", "help")
 
@@ -115,6 +116,10 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         help="Accept the local telemetry and owner-private draft disclosure",
     )
     add("status", "Show local and Gateway Wisdom status")
+    settings = add("settings", "Inspect or explicitly change notification assessment mode")
+    settings.add_argument(
+        "notification_mode", nargs="?", default="status", choices=("status", "agent", "fixed")
+    )
     notifications = add("notifications", "Show durable local Wisdom notices")
     notifications.add_argument("--mark-seen", action="store_true")
     mute = add("mute", "Manage organization-wide proactive Wisdom notifications")
@@ -298,6 +303,14 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             result = service.setup(accept_disclosure=accepted)
         elif command == "status":
             result = service.status(include_operations=True)
+        elif command == "settings":
+            service.require_setup()
+            if args.notification_mode != "status":
+                service.set_notification_mode(args.notification_mode)
+            result = {
+                "delivery_mode": service.notification_mode(),
+                "writable": service.notification_mode_writable(),
+            }
         elif command == "notifications":
             result = service.notifications(mark_seen=bool(args.mark_seen))
         elif command == "mute":
@@ -405,11 +418,24 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
             if args:
                 raise _SlashUsageError("Usage: /wisdom help")
             return _slash_help()
+        if command in CONTRIBUTION_COMMANDS:
+            return (
+                "Contribution content is private. Use an admitted private review or the terminal "
+                "`hermes wisdom suggest`, `prepared`, and `publication` workflows. "
+                "Inspect the complete draft before explicit submission; "
+                "no private state was opened."
+            )
         if command == "setup":
             return (
                 "Set up Collective Wisdom\n\n"
                 "Run `hermes wisdom setup` in your terminal to review the disclosure "
                 "and configure this profile."
+            )
+        if command in {"settings", "mute", "sync"}:
+            return (
+                "Use an admitted private control or the terminal for notification settings "
+                "and synchronization.\n\n"
+                f"Run `hermes wisdom {command} status` to inspect first. Nothing has been changed."
             )
         if command in {
             "install", "installed", "check", "update", "uninstall", "installed-setup"
@@ -675,6 +701,14 @@ def _slash_help() -> str:
             "/wisdom versions <skill>",
             "/wisdom status",
             "/wisdom setup",
+            "/wisdom settings (private controls or terminal instructions)",
+            "/wisdom mute (private controls or terminal instructions)",
+            "/wisdom sync (private controls or terminal instructions)",
+            "/wisdom candidate <qualified-event-id> (private TUI or terminal instructions)",
+            "/wisdom suggest <skill> (private draft; never publishes)",
+            "/wisdom prepared <inspect|save|review> (private TUI or terminal instructions)",
+            "/wisdom publish <draft-id> (exact private review before submission)",
+            "/wisdom publication <review|status|reopen|decline> <target> (private controls)",
             "/wisdom install (terminal instructions)",
             "/wisdom installed (terminal instructions)",
             "/wisdom check (terminal instructions)",

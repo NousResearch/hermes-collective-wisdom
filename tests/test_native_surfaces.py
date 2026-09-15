@@ -72,7 +72,8 @@ class Service:
             "from_version": None, "update_mode": update_mode,
         }
 
-    def install_apply(self, receipt, **_kwargs):
+    def install_apply(self, receipt, **kwargs):
+        assert kwargs["may_apply"]() is True
         assert receipt == "install-receipt"
         Service.installs += 1
         return {"installed": True, "version": 2}
@@ -84,7 +85,8 @@ class Service:
     def native_update_inspect(self, _receipt):
         return [{"path": "SKILL.md", "content": "# exact", "hash": "d" * 64}]
 
-    def update_apply(self, _receipt):
+    def update_apply(self, _receipt, *, may_apply):
+        assert may_apply() is True
         Service.applies += 1
         return {"updated": True, "version": 2}
 
@@ -105,7 +107,8 @@ class Service:
             "setup_instruction": "Configure", "allowed": True, "owner": dict(OWNER),
         }
 
-    def installed_setup_apply(self, _receipt):
+    def installed_setup_apply(self, _receipt, *, may_apply):
+        assert may_apply() is True
         return {"state": "passed"}
 
 
@@ -468,6 +471,22 @@ def test_native_candidate_not_now_uses_snapshot_once_and_edits_original(
         assert receipt_count == 1
         assert not client.method_calls
         assert native_owner.call_count >= 4
+
+        local_presentations = []
+
+        async def notify(**kwargs):
+            local_presentations.append(kwargs)
+            return SimpleNamespace(outcome="rendered")
+
+        await runtime.present_local_assessments(
+            SimpleNamespace(
+                profile_name="default", session_id="other-session", turn_id="other-turn",
+                surface_id="tui:other-session", surface_generation=1, reason="reply",
+                notify=notify,
+            ),
+            get_delivery_mode=lambda: "agent", clock=lambda: 1_000.0,
+        )
+        assert not local_presentations
 
     asyncio.run(scenario())
 
@@ -949,7 +968,8 @@ def test_native_publication_uses_one_confirmation_and_original_card(tmp_path: Pa
                 "notice": "Nothing has been uploaded.",
             }
 
-        def publication_submit(self, receipt):
+        def publication_submit(self, receipt, *, may_apply):
+            assert may_apply() is True
             assert receipt == "publication-receipt"
             PublicationService.submits += 1
             return {
@@ -957,14 +977,16 @@ def test_native_publication_uses_one_confirmation_and_original_card(tmp_path: Pa
                 "publication_state": "pending_moderation", "remote_draft_id": "draft-remote",
             }
 
-        def publication_reopen(self, operation_id):
+        def publication_reopen(self, operation_id, *, may_apply):
+            assert may_apply() is True
             assert operation_id == "publication-operation"
             return {
                 "operation_id": operation_id, "state": "done",
                 "publication_state": "published", "remote_draft_id": "draft-remote",
             }
 
-        def publication_decline(self, operation_id):
+        def publication_decline(self, operation_id, *, may_apply):
+            assert may_apply() is True
             assert operation_id == "publication-operation"
             return {
                 "operation_id": operation_id, "state": "done",
@@ -1005,9 +1027,29 @@ def test_native_publication_uses_one_confirmation_and_original_card(tmp_path: Pa
 def test_concurrent_slack_callbacks_leave_newest_durable_view_on_card(tmp_path: Path):
     """A delayed older edit must not overwrite a newer deferred projection."""
 
+    class ConcurrentService(Service):
+        def prepare_review_deferral(self, plan):
+            return {
+                "owner": self.native_owner(),
+                "reference": {
+                    "kind": "skill", "skill_id": plan["skill_id"],
+                    "version": plan["version"],
+                },
+                "not_now_suppression_days": 7,
+            }
+
+        def defer_review(self, deferral, *, may_apply):
+            assert may_apply() is True
+            return {
+                "deferred": True,
+                "skill_id": deferral["reference"]["skill_id"],
+                "version": deferral["reference"]["version"],
+                "suppression_days": deferral["not_now_suppression_days"],
+            }
+
     async def scenario():
         runtime = NativeSurfaceRuntime(
-            tmp_path, "default", Service, FakeLlm(),
+            tmp_path, "default", ConcurrentService, FakeLlm(),
             lambda coro, **_kwargs: asyncio.create_task(coro),
         )
         app = SlackApp()

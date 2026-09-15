@@ -10,12 +10,18 @@ import uuid
 
 from .client import WisdomConflict, WisdomError
 from .client_outcome import ClientOperationOutcome, ClientOperationResponse
+from .errors import WisdomAuthError
 from .mediation_store import MediationStore
 from .preferences import WisdomPreferences, suppression_key
 
 logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
 SYNC_LEASE = 90
+
+
+def _require_current(may_apply):
+    if may_apply is not None and may_apply() is not True:
+        raise WisdomAuthError("Collective Wisdom review is no longer current")
 
 
 def create_schema(db):
@@ -182,8 +188,9 @@ class OperationOutbox:
     def identity(self, org):
         return WisdomPreferences(self.service, clock=self.clock).identity(org)
 
-    def flush(self, org):
+    def flush(self, org, *, may_apply=None):
         user = self.identity(org)
+        _require_current(may_apply)
         for _ in range(8):
             now = self.clock()
             with self.store.transaction() as db:
@@ -221,9 +228,12 @@ class OperationOutbox:
                 )
             state, failure = "settled", None
             try:
-                if self.identity(org) != user:
+                identity_current = self.identity(org)
+                _require_current(may_apply)
+                if identity_current != user:
                     return
                 report = ClientOperationOutcome.model_validate_json(row["outcome_json"])
+                _require_current(may_apply)
                 response = self.service.client.report_operation_outcome(
                     row["event_id"], report.model_dump(mode="json")
                 )
@@ -234,6 +244,8 @@ class OperationOutbox:
                     or response.outcome != report
                 ):
                     raise WisdomError("Invalid operation acknowledgement")
+            except WisdomAuthError:
+                raise
             except Exception as exc:
                 failure = (
                     "outcome_conflict"

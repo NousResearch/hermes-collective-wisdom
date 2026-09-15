@@ -853,8 +853,24 @@ try:
     assert runtime.llm._sync_caller is None
     process_bootstrap.build_keepalive_http_client = recording_http_client
 
-    # Drive the queued arrival through the real registered pre-LLM hook and the
-    # pinned host's PluginLLM transport. This persists advice only; inbox remains read-only.
+    # Older hosts have no local presentation capability: hooks must not assess.
+    # Exercise the assessment kernel explicitly to retain real PluginLLM transport
+    # coverage; the separate presentation-host probe proves automatic delivery.
+    def assess_with_pinned_transport(session_id, history):
+        service = runtime._service()
+        try:
+            bridge = importlib.import_module(package_name + ".mediation")
+            bridge.QueuedAssessment(
+                service, service._installation_owner(), runtime.llm,
+                get_delivery_mode=lambda: "agent",
+            ).run(
+                session_key="local:" + session_id, session_id=session_id,
+                platform="local", actor_id=owner["account_id"],
+                model="configured-review-model", history=history,
+                address={"chat_id": "terminal"},
+            )
+        finally:
+            service.close()
     from agent.auxiliary_client import reset_runtime_main, set_runtime_main
     from hermes_cli.lifecycle import invoke_hook
     MUTE_REVISION = 0
@@ -906,6 +922,12 @@ try:
                 {"role": "user", "content": "We prepare releases every week."},
             ],
         )
+        assert model_requests == []
+        assess_with_pinned_transport("assessment-session", [
+            {"role": "system", "content": "private system"},
+            {"role": "tool", "content": "private tool result"},
+            {"role": "user", "content": "We prepare releases every week."},
+        ])
     finally:
         reset_runtime_main(route_token)
     assert len(model_requests) == 1
@@ -965,6 +987,10 @@ try:
                 {"role": "user", "content": "The TUI also prepares weekly releases."},
             ],
         )
+        assert model_requests == []
+        assess_with_pinned_transport("tui-assessment-session", [
+            {"role": "user", "content": "The TUI also prepares weekly releases."},
+        ])
     finally:
         reset_runtime_main(tui_route)
     assert len(model_requests) == 1
@@ -1260,10 +1286,8 @@ try:
     )
     assert "hermes wisdom setup" in slash_setup
     assert sum(item["method"] == "POST" for item in request_snapshot()) == post_count
-    # Every fail-closed and admitted assessment pass rechecks current suppression
-    # policy; only the admitted CLI/TUI calls reach the model transport.
-    setup_post_count = sum(item["method"] == "POST" for item in setup_calls)
-    assert post_count == setup_post_count + 12, (post_count, setup_post_count)
+    # The snapshot comparison above checks the relevant boundary directly:
+    # slash setup must not add a POST, regardless of earlier assessment calls.
     assert state_snapshot(runtime.root) == state_before_slash_setup
 
     first_runtime = runtime

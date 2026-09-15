@@ -2,10 +2,11 @@
 
 ## Agreed Boundaries
 
-Implementation sequencing proves CLI, TUI, Telegram, and Slack first, followed
-by the shared UI backend, Desktop, and Dashboard. Release requires all six
-surfaces; M0-M8 is not a standalone release boundary. All use one workflow
-implementation.
+The selected initial delivery is stock-Agent-compatible native workflows and an
+external Desktop SDK handoff page. No Agent changes or shared native-context HTTP
+backend. Dashboard SDK work is lower priority; full embedded/six-surface parity is
+deferred. Keep one workflow implementation. Older milestone and bridge records
+below are historical and do not authorize host changes or block this initial scope.
 No legacy profiles need migration; only the developers used the reverted core
 feature. A fresh demo reset is a separately authorized operational step.
 
@@ -15,10 +16,46 @@ are verified merged. Their moderation, authorization, flag targeting, and
 manager-email logic stays server-side. Changes to their release harness or
 runtime contract pins are separate from moving Agent functionality.
 
-## Milestones
+## Local cadence simplification — 2026-09-15
+
+Shannon approved a simpler acceptance boundary: do not repeat the same advice in
+every session, and do not let background sessions receive or claim it away from
+an interactive surface. A synthetic continuation inside an eligible interactive
+session does not inherently disqualify that surface. This supersedes the proposed
+requirement for a comprehensive host turn-origin taxonomy.
+
+Reuse the existing host presentation opportunity and shared owner-scoped
+assessment/delivery records. Cooldown controls refresh frequency; durable item
+identity, leases and receipts prevent duplicate delivery. Neither renderer
+acceptance nor an eligible surface grants consent to install or publish. Existing
+owner, enrollment, mute, suppression and uncertain-outcome checks remain required.
+
+The plugin may change its earlier delivery-only callback arrangement if that
+provides a smaller correct implementation. Model work must retain the owning
+session's actual route and authorized context; no fabricated route, prompt/history
+mutation or new scheduler is implied by this design change. Verification status
+and any remaining host dependency are recorded in [TESTING.md](TESTING.md).
+
+## Historical generic TUI review bridge — superseded
+
+After the exact inspection journey, Shannon explicitly authorized a minimal
+generic review/action bridge in the isolated Agent worktree rather than another
+terminal-only handoff. That permission was subsequently withdrawn; this records
+the earlier design, not current authorization. The development host owns session-bound literal display, deliberate
+named selection and cancellation; Wisdom retains its existing receipt, ownership,
+install/update and separately approved setup kernels. No parallel consent engine,
+model approval, scheduler, or prompt/history change is introduced.
+
+The development host remains unpublished. Local code and fixture validation do
+not authorize installed-runtime changes, service calls, publication, or deployment.
+Stock-Agent fallback uses explicit terminal handoffs. Full embedded parity is
+deferred; development-host results do not prove stock local presentation.
+
+## Historical Full-Parity Milestones
 
 Feature-level estimates and acceptance live in [FEATURES.md](FEATURES.md).
-Milestone totals below are the approved budget, not additional work points.
+Milestone totals preserve the former full-parity baseline, not the current
+Option 1 acceptance requirements or additional work points.
 
 | ID | Deliverable | Depends on | Points | Exit boundary |
 | --- | --- | --- | ---: | --- |
@@ -45,7 +82,7 @@ not remaining-work calculations or delivery promises. Re-estimate from current
 evidence rather than carrying them forward as velocity. M9 can start after its
 dependencies; M10/M11 can proceed independently.
 
-## Delivery Order and PR Shape
+## Historical Delivery Order and PR Shape
 
 1. Land this planning/scaffold repository without registering functional tools.
 2. Prove M1 using existing host APIs and a narrow plugin-side account adapter.
@@ -86,7 +123,7 @@ release-smoke PR; any Agent API PR is conditional, not mandatory. Parallel task 
 exclusive write scopes and one integration owner. Preserve feature IDs and
 points rather than double-counting extraction as new work.
 
-## Desktop Release Phase
+## Deferred Full-Parity Desktop Phase
 
 Use an external unified package at `desktop/plugin.js`, importing only the
 supported Desktop SDK/React surface. Author maintainable source and build the
@@ -107,7 +144,7 @@ cached data and invalidate pending controls when that ownership changes.
 Account for local and remote backends, expiry, disable/reload, reconnects, and
 the SDK's OAuth-remote socket no-op: authenticated polling must work alone.
 
-## Dashboard Release Phase
+## Deferred Dashboard Phase
 
 Ship a separate `dashboard/manifest.json` and reviewed JS bundle using the
 Dashboard SDK's supplied React, authentication helpers, and tab/slot registry.

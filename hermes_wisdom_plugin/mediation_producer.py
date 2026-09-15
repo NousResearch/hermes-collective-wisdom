@@ -1,12 +1,13 @@
 """Bounded maintenance producer for owner-bound mediation candidates."""
 # pylint: disable=too-few-public-methods,too-many-arguments,too-many-locals
+# pylint: disable=too-many-instance-attributes
 # pylint: disable=unidiomatic-typecheck
 
 from __future__ import annotations
 
 from datetime import datetime, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .mediation_store import MediationStore
 from .preferences import WisdomPreferences, suppression_key
@@ -71,6 +72,7 @@ class MaintenanceMediationProducer:
         config: dict[str, Any] | None = None,
         at: datetime | None = None,
         timezone_info: tuple[tzinfo, str] | None = None,
+        authorized: Callable[[], bool] | None = None,
     ) -> None:
         self.service = service
         self.consumption = consumption
@@ -79,9 +81,13 @@ class MaintenanceMediationProducer:
         self.config = config or {}
         self.at = at
         self.timezone_info = timezone_info
+        self.authorized = authorized
 
     def _authorized(self) -> bool:
-        return self._store().get_metadata("qualification_owner") == self.owner
+        return bool(
+            self._store().get_metadata("qualification_owner") == self.owner
+            and (self.authorized is None or self.authorized())
+        )
 
     def _store(self):
         value = self.service.store

@@ -122,27 +122,21 @@ before labels, and expose details/assessments with Show/Hide controls. Do not em
 an extra success message or assessment wall when an existing card can be updated.
 Not Now records deferral, not rejection; manual browse/review remains available.
 
-## UI Backend and Frontends
+## Desktop Handoffs and Deferred UI Backend
 
-Add a thin shared `dashboard/plugin_api.py` router under
-`/api/plugins/hermes-collective-wisdom/`. The host uses this namespace for both
-Desktop and Dashboard despite the directory name. Endpoint families cover
-availability, discovery, inspections, drafts, reviews, operations, preferences,
-and status/events; bind each to the existing workflow service.
+The initial Desktop surface is an external SDK page at `desktop/plugin.js`,
+reachable through sidebar and palette contributions. It uses SDK components,
+read-only display context and explicit clipboard actions; it does not call a
+Wisdom HTTP API, execute commands or store authoritative workflow state.
 
-The server resolves identity from authenticated host context and revalidates
-every mutation. Frontend-provided profile hints, hidden buttons, and cached
-availability are not authorization. Pending reviews cannot survive a profile/
-account change as actionable controls.
+Commands are static shell-safe examples. Profile display is advisory and never
+interpolated into commands. Native execution must occur on the intended host and
+profile, where owner checks and fresh full review/approval remain mandatory.
+Clipboard failure is visible; copying never means execution or consent.
 
-Desktop uses its scoped `ctx.rest` and `ctx.socket`, with host contributions and
-components. Dashboard uses its separate registry and authenticated fetch/socket
-helpers. Share DTOs, validation, and small view-model transformations only where
-they remove real duplication; do not create a third universal UI framework.
-
-Browser storage may retain harmless view preferences, not receipts, credentials,
-or authoritative workflow state. Poll only while useful, cancel on unmount/
-profile switch, and use events as an optimization over reliable refresh.
+The proposed shared native-context HTTP backend is withdrawn. Full embedded
+private editing/actions and Dashboard SDK work are deferred. No Agent source
+changes, private host-manager lookup or separate service is part of this scope.
 
 ## Release Boundary
 

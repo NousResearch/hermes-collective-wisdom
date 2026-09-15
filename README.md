@@ -5,11 +5,13 @@ Agent into an external, opt-in plugin.
 
 **Status: development slice, terminal enrollment, discovery, manual installation,
 skill setup, named-skill manual updates/publication, and local native Slack/Telegram
-browse/install/update/setup/publication acceptance.** The native
+browse/install/update/setup/publication acceptance, plus a bounded development-host
+TUI install/update/setup review path.** The native
 entrypoint registers `hermes wisdom` and `/wisdom`, including while signed out.
 Credentials are resolved on invocation. Loading starts no polling or proactive
-delivery and does not change installed skills. Registered model tools remain
-unavailable without a current admitted private human turn.
+delivery and does not change installed skills. Registered model tools require
+the appropriate private native admission or bounded local read-tool grant;
+model-written text never approves installation, setup, or publication.
 
 In an admitted private Slack or Telegram conversation, `/wisdom settings`
 opens an owner-bound settings card. `Agent decides` enables eligible proactive
@@ -50,8 +52,9 @@ not install a skill. Noninteractive setup requires `--accept-disclosure`.
 `/wisdom browse`, `/wisdom show`, and `/wisdom versions` provide read-only,
 shared-chat-safe cards. Detail/version cards preserve exact source descriptions
 and trusted Portal links. An admitted private Slack/Telegram install can review
-every exact package byte and approve the bound receipt; shared chats and other
-slash install/installed/uninstall paths remain terminal-only. `/wisdom setup`
+every exact package byte and approve the bound receipt. Supported development
+TUI hosts provide the explicit action flow below; shared chats and unsupported
+hosts retain the terminal handoff. Slash uninstall remains terminal-only. `/wisdom setup`
 only points to the terminal; it cannot accept disclosure. Terminal installation
 requires an exact, enrolment-bound review receipt, valid
 for 24 hours before starting. Interactive install also supports a plain terminal
@@ -85,11 +88,101 @@ See the [execution tasks](docs/FIRST-RELEASE.md) and
 [reference parity ledger](docs/PARITY.md); extracted unit tests are not live
 feature acceptance.
 
-Agent PR #108645 is not a dependency. Keep integration in this plugin, including
-entitlement and proactive delivery; report any insurmountable API gap before
-proposing another Agent change. Existing host command surfaces stay unchanged.
+No Hermes Agent source changes are required or authorized for the current
+delivery. The native-context HTTP backend has been withdrawn. Earlier generic
+presentation/TUI bridges remain only in an unpublished development checkout,
+not a runtime dependency. On stock Agent, unsupported local presentation/actions
+use explicit terminal handoffs; development-host tests do not prove proactive
+CLI/TUI delivery on stock Agent.
+
+## Desktop SDK handoff surface
+
+The package ships `desktop/plugin.js`, using the public Desktop SDK and React.
+Enable the installed package's Desktop half in the app's plugin settings; this
+is separate from Python plugin enablement. The **Wisdom** sidebar entry and
+**Collective Wisdom: Open guide** palette command open the page.
+
+The page provides workflow guidance and explicit command-copy handoffs. It does
+not fetch private state, run commands, approve operations or require a Wisdom
+HTTP backend. Run commands in a terminal on the intended Hermes host/profile,
+then complete normal review and approval there. Remote Desktop connections do
+not make your local terminal a remote terminal.
+
+This is the approved initial reduced-scope delivery. Full embedded editing/actions
+and Dashboard SDK work are deferred. Native source archives/Git packages include
+the Desktop entry; the Python wheel alone is not a Desktop installer.
+
+## Historical development TUI review and actions
+
+On the authorized `shannonsands/plugin-local-presentation` host worktree:
+
+```text
+/wisdom install <skill-id>@v1
+/wisdom update <skill-id>
+/wisdom installed-setup inspect <skill-id> --version 1
+/wisdom installed-setup plan <skill-id> --version 1 --phase setup --index 0
+/wisdom installed
+/wisdom check <skill-id>
+/wisdom installed-setup status <skill-id> --version 1
+```
+
+Install/update opens the exact receipt-bound plan and verified package file
+contents. Arrow/page keys scroll the literal review; Tab selects a named action,
+then Enter confirms that selection. Initial Enter, Esc, and Ctrl+C cancel.
+Replacing a review resets the selection to Cancel. Neither viewing the review
+nor model prose grants consent.
+
+Install does not run setup. Setup inspection is read-only; a separate setup plan
+opens its own exact-command review and uses the existing guarded setup executor.
+`--accept-partial`, `--preserve-modified`, and `--accept-sensitive` are explicit
+choices where supported, not inferred from selecting an action. TUI slash receipt
+apply shortcuts are rejected; terminal plan/apply workflows are unchanged.
+
+Blocked plans and failed install/update review preparation offer an explicit
+`Recheck: /wisdom ...` command preserving the requested target and options. Run
+that command to obtain a fresh exact review; a prior selection never approves
+the replacement. This is a command handoff, not an in-modal Recheck button.
+Failures after entering apply remain uncertain, even if the exception mentions
+expiry: inspect installed/check/setup status before deciding on recovery. These
+TUI reads use existing owner-bound services and do not retry an operation or
+start setup. TUI setup status is the recorded `inspect` snapshot, not the terminal
+status method that polls handles and finalizes receipts. Recovery execution itself
+remains an explicit terminal workflow.
+
+The complete review must fit the host's 65,536-character bound. Oversized reviews
+fail closed with the existing terminal plan/receipt commands; the TUI does not
+silently truncate and approve them. Unknown apply outcomes require status/recovery
+inspection rather than an automatic retry. Cancellation revokes further adapter
+actions; a synchronous executor already started may finish, so cancellation is
+not proof of rollback. There is no released minimum host version for this
+optional API; older hosts retain the terminal handoff. This is not full
+TUI settings/recovery/publication parity or deployed acceptance.
+
+A reviewable TUI update also offers **Not Now** when the current organization
+suppression policy can be verified. This queues exact-version suppression in the
+existing durable preference outbox, without applying the update or changing its
+automatic-update policy. The displayed manual-reopen command creates a new review
+requiring another deliberate selection. If policy cannot be verified, manual
+update remains available but Not Now is omitted. Remote synchronization is
+separate; a local deferral reports pending sync rather than claiming delivery.
 
 ## Local qualification and weekly evidence
+
+Admitted private Slack/Telegram human turns now run a bounded due feed/weekly
+producer pass before the existing assessment step. The durable 60-second refresh
+claim prevents duplicate refreshes across turns or plugin recreation, including
+failed refresh attempts. This does not run automatic updates, renew consent, or
+start a background timer. Fixed mode disables this producer path.
+
+CLI/TUI use the optional host post-reply presentation opportunity for a bounded
+producer, assessment and delivery pass. Local pre-LLM capture reads the enrollment
+binding and retains the session's real model context and bounded conversation
+excerpt, but does not claim work or call a model. Background sessions without an
+interactive opportunity cannot claim or deliver advice. Shared durable state,
+not the refresh cooldown, prevents the same item appearing in every session.
+Older hosts without this capability retain manual maintenance/review and inbox
+inspection. See [verification](docs/TESTING.md).
+
 
 Enrolled profiles observe the host's successful skill-load and mutation facts
 through `on_skill_lifecycle`. Both reference qualification paths are local:
@@ -158,11 +251,15 @@ section before hashing. Upload/retry never adds or refreshes those claims.
 
 ## Queued recommendation assessments
 
-In the default `agent` notification mode, the next owning CLI/TUI or admitted
-private Slack/Telegram turn processes up to eight queued references through the
-registered `pre_llm_call` hook. This is a foreground bounded pass, not a poller,
-new worker, or delivery schedule. Explicit maintenance remains the producer;
-reading `inbox` still performs no assessment or network request.
+In the default `agent` notification mode, admitted private Slack/Telegram turns
+process up to eight queued references through `pre_llm_call`. CLI/TUI defer this
+work until the host's interactive post-reply opportunity, using the real owning
+turn's copied Python context rather than a guessed provider/model. The in-memory
+capture is owner/enrollment-bound, single-use, bounded to 32 sessions, replaced
+on the next capture, and cleared on unload. Missing routing waits; it does not
+fall back to another model. A newer unrouted turn discards the previous capture.
+This is a bounded callback, not a poller or schedule. Explicit maintenance stays
+available; reading `inbox` performs no assessment or network request.
 
 Shared arrivals use one structured request through the active owning model
 (`task=None`, no auxiliary route or provider override). Its bounded input contains
@@ -208,8 +305,9 @@ mode, preferences, source and lease before sending. Verified SDK receipts comple
 the durable delivery; an unknown outcome is never blindly resent. Advisory cards
 point to exact `wisdom_inspect` inputs and create no approval or publication
 consent. Unavailable assessments remain explicitly labeled, not invented prose.
-CLI/TUI retain the manual inbox: their proactive presentation requires a separate
-[host API decision](docs/HOST-API.md#verified-local-presentation-gap--2026-09-14).
+CLI/TUI proactive presentation uses the optional capability in the isolated
+[host worktree](docs/HOST-API.md); it is not yet published or installed. Without
+that capability, manual inbox inspection remains available.
 See the [native delivery gate](docs/TESTING.md#native-ready-advice-delivery-gate--2026-09-14)
 for local/recording-SDK evidence and the still-unverified live boundaries.
 

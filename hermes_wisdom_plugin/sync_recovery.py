@@ -1,5 +1,5 @@
 """Private receipt/report recovery. No message send or operation execution."""
-# pylint: disable=line-too-long,missing-class-docstring,missing-function-docstring,protected-access,too-many-return-statements
+# pylint: disable=line-too-long,missing-class-docstring,missing-function-docstring,protected-access,too-many-return-statements,too-many-branches
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import time
 
 from .client import WisdomError
 from .delivery_outbox import DeliveryOutbox, MAX_SYNC_ATTEMPTS
+from .errors import WisdomAuthError
 from .mediation_store import MediationStore
 from .operation_outbox import MAX_ATTEMPTS, OperationOutbox
 from .preferences import WisdomPreferences
@@ -24,8 +25,25 @@ class WisdomSyncRecovery:
         if self._identity() != (org, user):
             raise WisdomError("The active account changed; reopen sync status")
 
+    @staticmethod
+    def _require_current(may_apply):
+        if may_apply is not None and may_apply() is not True:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+
     def _rows(self, db, org, user):
         MediationStore._check_org(db, org)
+        preferences = db.execute(
+            """SELECT key,state,attempts,lease_until AS sync_until,last_error,
+            suppress_until AS expires_at FROM wisdom_preference_outbox
+            WHERE organization_id=? AND user_id=? AND state!='synced'""",
+            (org, user),
+        ).fetchall()
+        mutes = db.execute(
+            """SELECT mutation_id,state,attempts,lease_until AS sync_until,last_error,
+            expires_at FROM wisdom_mute_outbox
+            WHERE organization_id=? AND user_id=? AND state!='synced'""",
+            (org, user),
+        ).fetchall()
         deliveries = db.execute(
             """SELECT request_id,state,outcome,attempts,sync_until,last_error
             FROM wisdom_remote_delivery WHERE organization_id=? AND user_id=?
@@ -42,12 +60,20 @@ class WisdomSyncRecovery:
             WHERE o.organization_id=? AND o.user_id=? AND o.state!='settled'""",
             (org, user),
         ).fetchall()
-        return deliveries, operations
+        return preferences, mutes, deliveries, operations
 
     @staticmethod
     def _state(row, kind, now):
         if row["sync_until"] is not None and row["sync_until"] > now:
             return "syncing"
+        if kind in {"preference", "mute"}:
+            if row["state"] == "conflict":
+                return "conflict"
+            if row["state"] == "expired" or row["expires_at"] <= now:
+                return "expired"
+            if row["state"] == "failed" or row["attempts"] >= 3:
+                return "retryable"
+            return "pending"
         if kind == "delivery":
             if row["state"] == "settled":
                 return "uncertain"
@@ -66,35 +92,55 @@ class WisdomSyncRecovery:
                 return "retryable"
         return "pending"
 
+    @staticmethod
+    def _counts(kind, rows, now):
+        names = ["pending", "syncing", "retryable", "conflict"]
+        if kind in {"preference", "mute"}:
+            names.append("expired")
+        else:
+            names.extend(("uncertain", "waiting_for_receipt"))
+        counts = dict.fromkeys(names, 0)
+        for row in rows:
+            counts[WisdomSyncRecovery._state(row, kind, now)] += 1
+        return counts
+
     def status(self):
         org, user = self._identity()
         now = self.clock()
-        groups = {}
         with self.store.transaction() as db:
-            for kind, rows in zip(("delivery", "operation"), self._rows(db, org, user)):
-                counts = dict.fromkeys(
-                    (
-                        "pending",
-                        "syncing",
-                        "retryable",
-                        "conflict",
-                        "uncertain",
-                        "waiting_for_receipt",
-                    ),
-                    0,
+            rows = self._rows(db, org, user)
+            groups = {
+                kind: self._counts(kind, values, now)
+                for kind, values in zip(
+                    ("preference", "mute", "delivery", "operation"), rows
                 )
-                for row in rows:
-                    counts[self._state(row, kind, now)] += 1
-                groups[kind] = counts
+            }
         # No private references, transport identifiers, raw errors or payloads.
         self._check_identity(org, user)
         return {**groups, "can_retry": any(g["retryable"] for g in groups.values())}
 
-    def retry(self):
+    def retry(self, *, may_apply=None):
         org, user = self._identity()
         now = self.clock()
         with self.store.transaction() as db:
-            deliveries, operations = self._rows(db, org, user)
+            preferences, mutes, deliveries, operations = self._rows(db, org, user)
+            self._require_current(may_apply)
+            for row in preferences:
+                if self._state(row, "preference", now) == "retryable":
+                    db.execute(
+                        """UPDATE wisdom_preference_outbox SET state='pending',attempts=0,
+                        available_at=?,lease_token=NULL,lease_until=NULL,last_error=NULL
+                        WHERE organization_id=? AND user_id=? AND key=?""",
+                        (now, org, user, row["key"]),
+                    )
+            for row in mutes:
+                if self._state(row, "mute", now) == "retryable":
+                    db.execute(
+                        """UPDATE wisdom_mute_outbox SET state='pending',attempts=0,
+                        available_at=?,lease_token=NULL,lease_until=NULL,last_error=NULL
+                        WHERE organization_id=? AND user_id=? AND mutation_id=?""",
+                        (now, org, user, row["mutation_id"]),
+                    )
             for row in deliveries:
                 if self._state(row, "delivery", now) == "retryable":
                     db.execute(
@@ -112,13 +158,21 @@ class WisdomSyncRecovery:
         # Reconcile saved transport acceptance before reporting completed work.
         # Existing leases and immutable request keys make concurrent retries safe.
         self._check_identity(org, user)
-        WisdomPreferences(self.service, clock=self.clock).flush(org)
+        self._require_current(may_apply)
+        WisdomPreferences(self.service, clock=self.clock).flush(
+            org, may_apply=may_apply
+        )
         self._check_identity(org, user)
+        self._require_current(may_apply)
         DeliveryOutbox(
             self.service, clock=self.clock,
             owner=self.store.get_metadata("qualification_owner"),
-        ).flush(org)
+        ).flush(org, may_apply=may_apply)
         self._check_identity(org, user)
-        OperationOutbox(self.service, clock=self.clock).flush(org)
+        self._require_current(may_apply)
+        OperationOutbox(self.service, clock=self.clock).flush(
+            org, may_apply=may_apply
+        )
         self._check_identity(org, user)
+        self._require_current(may_apply)
         return self.status()

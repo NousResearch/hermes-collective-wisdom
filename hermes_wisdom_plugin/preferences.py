@@ -15,9 +15,15 @@ import uuid
 from datetime import datetime, timezone
 
 from .client import AgentLedPolicyResponse, WisdomError
+from .errors import WisdomAuthError, WisdomConflict
 from .mediation_store import MediationStore
 
 logger = logging.getLogger(__name__)
+
+
+def _require_current(may_apply) -> None:
+    if may_apply is not None and may_apply() is not True:
+        raise WisdomAuthError("Collective Wisdom review is no longer current")
 
 
 def suppression_key(reference: dict) -> str:
@@ -226,7 +232,7 @@ class WisdomPreferences:
             ),
         )
 
-    def prepare_mute_control(self, org: str) -> dict:
+    def prepare_mute_control(self, org: str, *, may_apply=None) -> dict:
         """Read authoritative state before binding a private native choice menu."""
         self.service.require_setup()
         user = self.identity(org)
@@ -235,6 +241,7 @@ class WisdomPreferences:
             raise WisdomError("Preference identity changed")
         if "revision" not in current.model_fields_set:
             raise WisdomError("Gateway must be updated before shared mute is available")
+        _require_current(may_apply)
         now, control_id = self.clock(), uuid.uuid4().hex
         with self.store.transaction() as db:
             MediationStore._check_org(db, org)
@@ -271,7 +278,7 @@ class WisdomPreferences:
         }
 
     def choose_mute_control(
-        self, org: str, control_id: str, duration: str | None
+        self, org: str, control_id: str, duration: str | None, *, may_apply=None
     ) -> dict:
         """Commit one choice per menu; repeats never extend expiry or rebase it."""
         self.service.require_setup()
@@ -285,7 +292,7 @@ class WisdomPreferences:
                 (control_id, org, user),
             ).fetchone()
             if control is None or control["expires_at"] <= now:
-                raise ValueError(
+                raise WisdomConflict(
                     "This notification control expired. Open /wisdom mute again."
                 )
             previous = db.execute(
@@ -295,14 +302,15 @@ class WisdomPreferences:
             previous_id = previous[0] if previous else None
             if control["selected_at"] is not None:
                 if control["duration"] != duration or previous_id != control_id:
-                    raise ValueError(
+                    raise WisdomConflict(
                         "This notification choice was superseded. Open /wisdom mute again."
                     )
             else:
                 if previous_id != control["prior_mutation_id"]:
-                    raise ValueError(
+                    raise WisdomConflict(
                         "Your notification preference changed. Open /wisdom mute again."
                     )
+                _require_current(may_apply)
                 self._stage_mute(
                     db,
                     org,
@@ -337,7 +345,7 @@ class WisdomPreferences:
             "request_expires_at": row["expires_at"],
         }
 
-    def flush_mute(self, org: str) -> None:
+    def flush_mute(self, org: str, *, may_apply=None) -> None:
         user, now, token = self.identity(org), self.clock(), uuid.uuid4().hex
         with self.store.transaction() as db:
             MediationStore._check_org(db, org)
@@ -359,11 +367,13 @@ class WisdomPreferences:
             ).fetchone()
             if row is None:
                 return
+            _require_current(may_apply)
             db.execute(
                 """UPDATE wisdom_mute_outbox SET state='syncing',attempts=attempts+1,lease_token=?,lease_until=?
                 WHERE organization_id=? AND user_id=?""",
                 (token, now + 60, org, user),
             )
+        _require_current(may_apply)
         try:
             if self.identity(org) != user:
                 raise WisdomError("Preference owner changed")
@@ -433,9 +443,9 @@ class WisdomPreferences:
                 ),
             )
 
-    def flush(self, org: str, *, limit: int = 10) -> None:
+    def flush(self, org: str, *, limit: int = 10, may_apply=None) -> None:
         user = self.identity(org)
-        self.flush_mute(org)
+        self.flush_mute(org, may_apply=may_apply)
         for _ in range(min(max(limit, 0), 10)):
             now, token = self.clock(), uuid.uuid4().hex
             with self.store.transaction() as db:
@@ -460,12 +470,14 @@ class WisdomPreferences:
                 ).fetchone()
                 if row is None:
                     return
+                _require_current(may_apply)
                 db.execute(
                     """UPDATE wisdom_preference_outbox SET state='syncing',
                   attempts=attempts+1,lease_token=?,lease_until=?
                   WHERE organization_id=? AND user_id=? AND key=?""",
                     (token, now + 60, org, user, row["key"]),
                 )
+            _require_current(may_apply)
             try:
                 if self.identity(org) != user:
                     raise WisdomError("Preference owner changed")
@@ -557,3 +569,13 @@ class WisdomPreferences:
                 "suppressed": {},
                 "error": type(exc).__name__,
             }
+    def gateway_mute(self, org: str) -> dict:
+        """Read authoritative mute state without creating a selectable control."""
+        self.service.require_setup()
+        user = self.identity(org)
+        current = self.service.client.recommendation_mute()
+        if current.org_id != org or self.identity(org) != user:
+            raise WisdomError("Preference identity changed")
+        if "revision" not in current.model_fields_set:
+            raise WisdomError("Gateway must be updated before shared mute is available")
+        return current.model_dump(mode="json")

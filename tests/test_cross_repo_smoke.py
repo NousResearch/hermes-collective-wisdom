@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -18,6 +20,65 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "scripts" / "test_wisdom_offline_acceptance.py"
+WRAPPER = PROJECT_ROOT / "scripts" / "test-wisdom-cross-repo.sh"
+
+
+@pytest.mark.parametrize("driver", ["delivery", "outbox", "publication"])
+def test_configured_gateway_driver_imports_external_package_without_alias(driver):
+    gateway = os.environ.get("WISDOM_GATEWAY_DIR")
+    if not gateway:
+        pytest.skip("WISDOM_GATEWAY_DIR is required for actual Gateway driver imports")
+    # Execute only the drivers' real Wisdom imports, never their service-backed main().
+    # This checks exported names as well as package provenance without starting services.
+    program = """
+import ast
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+path = pathlib.Path(sys.argv[2])
+source = path.read_text(encoding='utf-8')
+imports = [node for node in ast.walk(ast.parse(source))
+           if isinstance(node, ast.ImportFrom)
+           and (node.module or '').startswith('hermes_wisdom')]
+if imports:
+    exec(compile(ast.Module(body=imports, type_ignores=[]), str(path), 'exec'), {})
+else:
+    assert path.name == 'wisdom_publication_driver.py'
+    assert 'load_external_plugin(home)' in source and 'PluginManager' in source
+assert not any(name == 'hermes_wisdom' or name.startswith('hermes_wisdom.')
+               for name in sys.modules), 'retired package alias was imported'
+for name, module in list(sys.modules.items()):
+    if name == 'hermes_wisdom_plugin' or name.startswith('hermes_wisdom_plugin.'):
+        assert pathlib.Path(module.__file__).resolve().is_relative_to(root), name
+print('External package imports verified without running the service driver')
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, str(PROJECT_ROOT),
+         str(Path(gateway) / "test" / "e2e" / f"wisdom_{driver}_driver.py")],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publication_driver_calls_existing_client_methods():
+    """Import-only bootstrap must not hide dead calls in the service-backed lane."""
+    from hermes_wisdom_plugin.client import WisdomClient  # pylint: disable=import-outside-toplevel
+
+    gateway = os.environ.get("WISDOM_GATEWAY_DIR")
+    if not gateway:
+        pytest.skip("WISDOM_GATEWAY_DIR is required for publication driver contracts")
+    source = Path(gateway) / "test/e2e/wisdom_publication_driver.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    methods = {
+        node.func.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in {"publisher", "manager_client"}
+    }
+    assert methods, "Publication driver client calls were not inspected"
+    missing = sorted(name for name in methods if not callable(getattr(WisdomClient, name, None)))
+    assert not missing, f"Publication driver calls absent WisdomClient methods: {missing}"
 
 
 def _load_harness():
@@ -87,6 +148,123 @@ def test_portal_revision_requires_exact_clean_head(tmp_path: Path) -> None:
 
     with pytest.raises(harness.AcceptanceError, match="HEAD drift"):
         harness.verify_checkout(repo, pin, require_clean=True)
+
+
+def test_checkout_manifest_separates_immutable_pin_from_dirty_worktree(
+    tmp_path: Path,
+) -> None:
+    harness = _load_harness()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"],
+        check=True,
+    )
+    tracked = repo / "value.txt"
+    tracked.write_text("pin\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "pin"], check=True)
+    pin = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tracked.write_text("new head\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "new head"], check=True)
+    tracked.write_text("dirty bytes\n", encoding="utf-8")
+
+    identity = harness.verify_checkout(
+        repo, pin, require_clean=False, require_exact_head=False
+    )
+
+    assert identity["immutable_revision"] == {
+        "commit": pin,
+        "available": True,
+    }
+    assert identity["working_tree"]["head"] != pin
+    assert identity["working_tree"]["head_exact"] is False
+    assert identity["working_tree"]["dirty"] is True
+
+
+def test_required_contract_paths_must_remain_clean_when_other_paths_are_dirty(
+    tmp_path: Path,
+) -> None:
+    harness = _load_harness()
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "scripts").mkdir()
+    (repo / "src/contract.ts").write_text("export const version = 1\n")
+    (repo / "scripts/smoke.sh").write_text("true\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    (repo / "scripts/smoke.sh").write_text("set -e\ntrue\n")
+
+    assert harness.verify_clean_paths(repo, ("src",)) == ["src"]
+
+    (repo / "src/contract.ts").write_text("export const version = 2\n")
+    with pytest.raises(harness.AcceptanceError, match="pinned contract paths"):
+        harness.verify_clean_paths(repo, ("src",))
+
+
+def test_portal_pin_is_read_from_immutable_revision_not_dirty_worktree(
+    tmp_path: Path,
+) -> None:
+    harness = _load_harness()
+    repo = tmp_path / "portal"
+    pin_path = (
+        repo
+        / "apps/nous-account-service/src/server/sync/generated/"
+        "wisdom-plane-contract-pin.json"
+    )
+    pin_path.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"],
+        check=True,
+    )
+    expected = {
+        "gateway_contract": "a" * 40,
+        "openapi_sha256": "b" * 64,
+        "manifest_schema_sha256": "c" * 64,
+        "canonical_vectors_sha256": "d" * 64,
+    }
+    pin_path.write_text(
+        json.dumps(
+            {
+                "gatewayCommit": expected["gateway_contract"],
+                "openapiSha256": expected["openapi_sha256"],
+                "manifestSchemaSha256": expected["manifest_schema_sha256"],
+                "canonicalVectorsSha256": expected["canonical_vectors_sha256"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "portal pin"], check=True)
+    revision = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    pin_path.write_text("{}\n", encoding="utf-8")
+
+    evidence = harness._verify_portal_pin(  # pylint: disable=protected-access
+        repo, revision, expected
+    )
+
+    assert evidence["source_revision"] == revision
+    assert evidence["gatewayCommit"] == expected["gateway_contract"]
 
 
 def test_source_snapshot_handles_tracked_deletion_and_hashes_built_bytes(tmp_path: Path) -> None:
@@ -308,13 +486,62 @@ def test_portal_head_mismatch_fails_before_any_check(monkeypatch, tmp_path: Path
 
 def test_native_load_is_isolated_and_records_sdist_module_path(tmp_path: Path) -> None:
     harness = _load_harness()
-    command = harness._native_load_command(  # pylint: disable=protected-access
-        Path("/host/python"), tmp_path
+    command = harness._host_artifact_discovery_command(  # pylint: disable=protected-access
+        Path("/host/python"), Path("/agent/source"), tmp_path
     )
 
-    assert command[:2] == ["/host/python", "-I"]
-    assert "module_file" in command[3]
-    assert "is_relative_to(root.resolve())" in command[3]
+    assert command[:3] == ["/host/python", "-I", "-B"]
+    assert "module_file" in command[4]
+    assert "PluginManager" in command[4]
+    assert "hermes_wisdom" in command[4]
+    compile(command[4], "<host-artifact-discovery>", "exec")
+    assert command[-2:] == ["/agent/source", str(tmp_path)]
+
+
+def test_native_artifact_layout_requires_loader_manifest_and_package(tmp_path: Path) -> None:
+    harness = _load_harness()
+    root = tmp_path / "artifact"
+    package = root / "hermes_wisdom_plugin"
+    package.mkdir(parents=True)
+    (root / "__init__.py").write_text("from .hermes_wisdom_plugin import register\n")
+    (package / "__init__.py").write_text("def register(ctx): del ctx\n")
+
+    with pytest.raises(harness.AcceptanceError, match="plugin.yaml"):
+        harness.verify_native_artifact_layout(root)
+
+    (root / "plugin.yaml").write_text("name: hermes-collective-wisdom\n")
+    with pytest.raises(harness.AcceptanceError, match="desktop/plugin.js"):
+        harness.verify_native_artifact_layout(root)
+    (root / "desktop").mkdir()
+    (root / "desktop" / "plugin.js").write_text("export default {};\n")
+    evidence = harness.verify_native_artifact_layout(root)
+    assert evidence["desktop"] == "desktop/plugin.js"
+    assert evidence["native_loader"] == "__init__.py"
+    assert evidence["manifest"] == "plugin.yaml"
+    assert evidence["package"] == "hermes_wisdom_plugin"
+
+
+def test_gateway_driver_bootstrap_commands_pin_artifact_and_isolate_python(
+    tmp_path: Path,
+) -> None:
+    harness = _load_harness()
+    gateway = tmp_path / "gateway"
+    artifact = tmp_path / "artifact"
+    agent = tmp_path / "agent"
+
+    commands, environment = harness.gateway_driver_bootstrap_commands(
+        Path("/host/python"), agent, gateway, artifact
+    )
+
+    assert [command[-2:] for command in commands] == [
+        [str(gateway / "test/e2e/wisdom_delivery_driver.py"), "--offline-bootstrap"],
+        [str(gateway / "test/e2e/wisdom_outbox_driver.py"), "--offline-bootstrap"],
+        [str(gateway / "test/e2e/wisdom_publication_driver.py"), "--offline-bootstrap"],
+    ]
+    assert all(command[:3] == ["/host/python", "-I", "-B"] for command in commands)
+    assert environment["HERMES_AGENT_DIR"] == str(agent.resolve())
+    assert environment["HERMES_WISDOM_ARTIFACT_ROOT"] == str(artifact.resolve())
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 def test_built_wheel_and_sdist_package_bytes_match_snapshot(tmp_path: Path) -> None:
@@ -376,3 +603,17 @@ def test_report_never_claims_four_repo_or_live_acceptance() -> None:
     assert report["four_repo_acceptance"] is False
     assert report["live_acceptance"] is False
     assert json.dumps(report)
+
+
+def test_offline_wrapper_fails_closed_when_checkout_paths_are_missing() -> None:
+    completed = subprocess.run(
+        ["bash", str(WRAPPER)],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+
+    assert completed.returncode != 0
+    assert "WISDOM_GATEWAY_DIR" in completed.stderr

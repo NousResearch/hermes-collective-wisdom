@@ -156,7 +156,7 @@ def candidate_deferred_view(job: dict[str, Any]) -> NativeView:
     )
 
 
-class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
+class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """Own real SDK closures; all effects use exact durable consent receipts."""
 
     def __init__(self, root: Path, profile_name: str,  # pylint: disable=too-many-arguments
@@ -178,6 +178,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
         self._loops: dict[tuple[str, int], asyncio.AbstractEventLoop] = {}
         self._delivery_locks: dict[tuple[str, ...], asyncio.Lock] = {}
         self._tool_invocations: dict[tuple[str, str], tuple[float, NativeInvocation]] = {}
+        self._local_tool_routes: dict[
+            tuple[str, str], tuple[float, NativeInvocation, dict[str, str], dict[str, str]]
+        ] = {}
 
     @property
     def reviews(self) -> NativeReviewController:
@@ -197,6 +200,61 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
             self._loops.clear()
             self._delivery_locks.clear()
             self._tool_invocations.clear()
+            self._local_tool_routes.clear()
+
+    def admit_local_tool(  # pylint: disable=too-many-arguments
+        self, *, owner: dict[str, str], surface: str, session_id: str,
+        task_id: str, turn_id: str, route: dict[str, str],
+    ) -> None:
+        """Bind read-only model tools to one real CLI/TUI main-model turn."""
+
+        key = (str(task_id or ""), str(session_id or ""))
+        selected = {
+            name: str(route.get(name) or "").strip()
+            for name in ("session_id", "provider", "model")
+        }
+        if (
+            surface not in {"cli", "tui"}
+            or not all((*key, str(turn_id or ""), owner.get("account_id")))
+            or owner.get("profile_name") != self.profile_name
+            or selected["session_id"] != key[1]
+            or not all((selected["provider"], selected["model"]))
+        ):
+            raise PermissionError("Collective Wisdom local tool admission is unavailable.")
+        invocation = NativeInvocation(
+            platform=surface, profile=self.profile_name, chat_type="private",
+            chat_id=surface, actor_id=str(owner["account_id"]), actor_name="",
+            thread_id="", scope_id="", message_id="", session_key=f"local:{key[1]}",
+            adapter=None, host_session_id=key[1], task_id=key[0], turn_id=str(turn_id),
+        )
+        with self._lock:
+            if self._closed:
+                raise PermissionError("Collective Wisdom plugin is unloaded.")
+            self._local_tool_routes[key] = (
+                time.monotonic() + 600.0, invocation, selected, dict(owner),
+            )
+            while len(self._local_tool_routes) > 32:
+                self._local_tool_routes.pop(next(iter(self._local_tool_routes)))
+
+    def revoke_local_tool(self, *, session_id: str) -> None:
+        """Fence a prior local turn before considering a replacement admission."""
+
+        with self._lock:
+            for key, grant in list(self._local_tool_routes.items()):
+                if key[1] == session_id or grant[0] < time.monotonic():
+                    self._local_tool_routes.pop(key, None)
+
+    def validate_local_tool_owner(self, invocation: NativeInvocation, service: Any) -> None:
+        """Fence a local read against the exact service instance that will perform it."""
+
+        owner = service._installation_owner()  # pylint: disable=protected-access
+        current = self.tool_invocation(
+            task_id=invocation.task_id, session_id=invocation.host_session_id,
+        )
+        with self._lock:
+            grant = self._local_tool_routes.get((invocation.task_id, invocation.host_session_id))
+            if self._closed or grant is None or current != invocation or grant[3] != owner:
+                raise PermissionError("Collective Wisdom local tool ownership changed.")
 
     def hook(self, **kwargs: Any) -> None:
         """Capture a candidate gateway event without authorizing or acting on it."""
@@ -283,6 +341,22 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
             if self._closed:
                 raise PermissionError("Collective Wisdom plugin is unloaded.")
             value = self._tool_invocations.get(key)
+            local_value = self._local_tool_routes.get(key)
+        if local_value is not None:
+            from .mediation import _active_main_runtime  # pylint: disable=import-outside-toplevel
+            from .mediation_store import delivery_context_allowed  # pylint: disable=import-outside-toplevel
+            valid = bool(
+                local_value[0] >= time.monotonic()
+                and delivery_context_allowed()
+                and _active_main_runtime() == local_value[2]
+            )
+            if valid:
+                return local_value[1]
+            with self._lock:
+                self._local_tool_routes.pop(key, None)
+            raise PermissionError(
+                "Collective Wisdom model tools require an active admitted private human session."
+            )
         invocation = value[1] if value is not None else None
         valid = value is not None and value[0] >= time.monotonic()
         if valid and self.session_context is not None and invocation is not None:
@@ -337,6 +411,307 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
             )
 
         loop.call_soon_threadsafe(spawn, context=contextvars.copy_context())
+
+    def _local_admitted(self, opportunity: Any) -> bool:
+        """Accept only the host's current post-reply capability for this profile."""
+
+        with self._lock:
+            return bool(
+                not self._closed
+                and opportunity.profile_name == self.profile_name
+                and opportunity.reason == "reply"
+                and opportunity.session_id
+                and opportunity.turn_id
+                and opportunity.surface_id
+            )
+
+    async def present_local_assessments(  # pylint: disable=too-many-locals,broad-exception-caught
+        self, opportunity: Any, *, get_delivery_mode: Callable[[], str],
+        clock: Callable[[], float] = time.time, assessment: Any | None = None,
+    ) -> None:
+        """Produce, assess, and drain advice only through a host local opportunity."""
+
+        from .delivery_outbox import DeliveryOutbox  # pylint: disable=import-outside-toplevel
+        from .mediation import QueuedAssessment  # pylint: disable=import-outside-toplevel
+        from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
+
+        if not self._local_admitted(opportunity):
+            return
+        service = self.service_factory()
+        try:
+            owner = service.native_owner()
+            if (
+                owner.get("profile_name") != self.profile_name
+                or opportunity.profile_name != self.profile_name
+            ):
+                return
+            def admitted() -> bool:
+                return self._local_admitted(opportunity)
+            queue = MediationStore(service.store, owner=owner, clock=clock)
+            outbox = DeliveryOutbox(service, clock=clock, owner=owner)
+            checker = QueuedAssessment(
+                service, owner, None, get_delivery_mode=get_delivery_mode,
+                clock=clock, admission_current=admitted,
+            )
+            if not checker.delivery_current():
+                return
+            org = owner["organization_id"]
+            session_key = f"local:{opportunity.session_id}"
+            await asyncio.to_thread(
+                queue.register_session,
+                org,
+                session_key=session_key,
+                session_id=opportunity.session_id,
+                platform="local",
+                actor_id=owner["account_id"],
+                private=True,
+                available=True,
+                user_activity=True,
+                address={"chat_id": opportunity.surface_id},
+            )
+            if assessment is not None:
+                admission = threading.Event()
+                admission.set()
+
+                def assessment_admitted() -> bool:
+                    return admission.is_set() and admitted()
+
+                def assess() -> None:
+                    # A synchronous provider cannot be forcibly cancelled. Give it
+                    # its own connection lifetime, never the callback's service.
+                    worker_service = self.service_factory()
+                    try:
+                        worker_owner = worker_service._installation_owner()  # pylint: disable=protected-access
+                        if not assessment_admitted() or worker_owner != owner:
+                            return
+                        assessment.run_local(
+                            worker_service, owner,
+                            MediationStore(worker_service.store, owner=owner, clock=clock),
+                            opportunity, admission_current=assessment_admitted,
+                        )
+                    finally:
+                        worker_service.close()
+
+                def settled(task: asyncio.Task) -> None:
+                    if not task.cancelled() and (error := task.exception()) is not None:
+                        logger.warning(
+                            "Wisdom local assessment deferred (%s)", type(error).__name__,
+                        )
+
+                worker = asyncio.create_task(asyncio.to_thread(assess))
+                worker.add_done_callback(settled)
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    admission.clear()
+                    # The running call may finish, but no new authorized work may
+                    # start. Its own finally closes the connection when it exits.
+                    raise
+            if not checker.delivery_current():
+                return
+            await asyncio.to_thread(outbox.flush, org)
+            jobs = await asyncio.to_thread(
+                queue.claim, org, session_key, ready_only=True
+            )
+            try:
+                for job in jobs:
+                    if not await self._present_local_assessment(
+                        opportunity, job, checker, queue, outbox, org,
+                    ):
+                        break
+            finally:
+                # Release only still-ready captured leases, never a dispatched send.
+                # Keep this short SQLite cleanup synchronous even during cancellation.
+                for job in jobs:
+                    checker.defer_delivery(queue, org, job, queue.clock() + 60)
+        except Exception as exc:  # a host opportunity is advisory and fail-closed
+            logger.warning(
+                "Wisdom local presentation deferred (%s)", type(exc).__name__
+            )
+        finally:
+            service.close()
+
+    async def _prepare_assessment_delivery(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,broad-exception-caught
+        self, job: dict[str, Any], checker: Any, queue: Any, outbox: Any,
+        org: str, session_key: str,
+        current: Callable[[dict[str, Any]], dict[str, Any] | None], *,
+        before_policy_bind: Callable[[], None] | None = None,
+        log_native_failures: bool = False,
+    ) -> tuple[
+        dict[str, Any], str, dict[str, Any], dict[str, Any], NativeView,
+    ] | None:
+        """Reserve and begin one still-current assessment delivery."""
+
+        token = str(job.get("lease_token") or "")
+        if (
+            job.get("state") not in {"ready", "fallback"}
+            or job.get("owner_session") != session_key
+            or not token
+        ):
+            return None
+        if job.get("reference", {}).get("kind") == "candidate" and job.get("advice") is not None:
+            from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
+            try:
+                days = await asyncio.to_thread(
+                    WisdomPreferences(
+                        checker.service, clock=queue.clock
+                    ).review_suppression_days, org
+                )
+                if not checker.delivery_current():
+                    return None
+                if before_policy_bind is not None:
+                    before_policy_bind()
+                job = await asyncio.to_thread(
+                    queue.bind_candidate_policy, org, job["id"], token, days
+                )
+            except Exception as exc:
+                if log_native_failures:
+                    logger.warning(
+                        "Wisdom candidate delivery deferred before send (%s)",
+                        type(exc).__name__,
+                    )
+                checker.defer_delivery(queue, org, job, queue.clock() + 60)
+                return None
+        try:
+            initial_facts = await asyncio.to_thread(current, job)
+            view = assessment_view(job)
+            if initial_facts is None:
+                return None
+            if (
+                await asyncio.to_thread(current, job) != initial_facts
+                or not await asyncio.to_thread(queue.renew, org, job["id"], token)
+                or not checker.delivery_current()
+            ):
+                return None
+            request_id = await asyncio.to_thread(outbox.reserve, org, job)
+        except Exception as exc:
+            if log_native_failures:
+                logger.warning(
+                    "Wisdom native delivery deferred before send (%s)",
+                    type(exc).__name__,
+                )
+            checker.defer_delivery(queue, org, job, queue.clock() + 60)
+            return None
+        if request_id is None:
+            checker.defer_delivery(queue, org, job, queue.clock() + 60)
+            return None
+        try:
+            rows = await asyncio.to_thread(queue.assessments, org)
+            latest = next((row for row in rows if row["id"] == job["id"]), None)
+            if (
+                latest is None or latest.get("lease_token") != token
+                or latest.get("owner_session") != session_key
+                or latest.get("advice") != job.get("advice")
+                or await asyncio.to_thread(current, latest) != initial_facts
+            ):
+                await asyncio.to_thread(
+                    queue.cancel_reservation, org, job, queue.clock() + 60
+                )
+                return None
+            began = await asyncio.to_thread(
+                queue.begin_delivery, org, job["id"], token, request_id=request_id
+            )
+        except Exception:
+            await asyncio.to_thread(
+                queue.cancel_reservation, org, job, queue.clock() + 60
+            )
+            return None
+        if not began:
+            await asyncio.to_thread(
+                queue.cancel_reservation, org, job, queue.clock() + 60
+            )
+            return None
+        return job, token, initial_facts, latest, view
+
+    async def _present_local_assessment(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,broad-exception-caught
+        self, opportunity: Any, job: dict[str, Any], checker: Any,
+        queue: Any, outbox: Any, org: str,
+    ) -> bool:
+        """Settle one local literal render without treating advice as consent."""
+
+        session_key = f"local:{opportunity.session_id}"
+
+        def current(candidate: dict[str, Any]) -> dict[str, Any] | None:
+            if not self._local_admitted(opportunity):
+                return None
+            return checker.delivery_facts(queue, org, candidate)
+
+        prepared = await self._prepare_assessment_delivery(
+            job, checker, queue, outbox, org, session_key, current,
+        )
+        if prepared is None:
+            return False
+        job, token, initial_facts, latest, view = prepared
+        user_id = ""
+        try:
+            user_id = await asyncio.to_thread(outbox.identity, org)
+            ready = bool(
+                await asyncio.to_thread(current, latest) == initial_facts
+                and await asyncio.to_thread(
+                    queue.delivery_ready, org, job["id"], token, user_id=user_id
+                )
+                and checker.delivery_current()
+            )
+        except Exception:
+            ready = False
+        if not ready:
+            await asyncio.to_thread(queue.cancel_delivery, org, job["id"], token)
+            return False
+
+        notification_id = f"wisdom:{job['id']}"
+        try:
+            host_receipt = await opportunity.notify(
+                notification_id=notification_id, text=view.to_text()
+            )
+        except asyncio.CancelledError:
+            await asyncio.to_thread(queue.uncertain_delivery, org, job["id"], token)
+            raise
+        except Exception:
+            await asyncio.to_thread(queue.uncertain_delivery, org, job["id"], token)
+            return False
+        outcome = str(getattr(host_receipt.outcome, "value", host_receipt.outcome))
+        if outcome != "rendered":
+            if outcome == "not_rendered":
+                await asyncio.to_thread(queue.cancel_delivery, org, job["id"], token)
+            else:
+                await asyncio.to_thread(queue.uncertain_delivery, org, job["id"], token)
+            return False
+        from .delivery import DeliveryReceipt  # pylint: disable=import-outside-toplevel
+        receipt = DeliveryReceipt(
+            platform="local",
+            destination=opportunity.surface_id,
+            message_id=notification_id,
+            acknowledgement="transport_accepted",
+        )
+        try:
+            settlement_current = bool(
+                await asyncio.to_thread(outbox.identity, org) == user_id
+                and await asyncio.to_thread(current, latest) == initial_facts
+                and await asyncio.to_thread(
+                    queue.delivery_ready, org, job["id"], token, user_id=user_id
+                )
+                and checker.delivery_current()
+                and self._local_admitted(opportunity)
+            )
+        except Exception:
+            settlement_current = False
+        if not settlement_current:
+            await asyncio.to_thread(
+                queue.uncertain_delivery,
+                org,
+                job["id"],
+                token,
+                receipt=receipt,
+            )
+            return False
+        return await asyncio.to_thread(
+            queue.complete_delivery,
+            org,
+            job["id"],
+            token,
+            receipt=receipt,
+            introduced=False,
+        )
 
     def queue_model_consent(
         self, invocation: NativeInvocation, request: dict[str, Any],
@@ -606,92 +981,24 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
         finally:
             service.close()
 
-    async def _deliver_assessment(  # pylint: disable=too-many-arguments,too-many-locals,too-many-positional-arguments,too-many-return-statements,too-many-branches,broad-exception-caught
+    async def _deliver_assessment(  # pylint: disable=too-many-arguments,too-many-locals,too-many-positional-arguments,broad-exception-caught
         self, invocation: NativeInvocation, job: dict[str, Any], checker: Any,
         queue: Any, outbox: Any, org: str,
     ) -> None:
         """Deliver one already-leased row, distinguishing pre-send and unknown outcomes."""
 
-        token = str(job.get("lease_token") or "")
-        if (
-            job.get("state") not in {"ready", "fallback"}
-            or job.get("owner_session") != invocation.session_key
-            or not token
-        ):
-            return
-        if job.get("reference", {}).get("kind") == "candidate" and job.get("advice") is not None:
-            from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
-            try:
-                days = await asyncio.to_thread(
-                    WisdomPreferences(
-                        checker.service, clock=queue.clock
-                    ).review_suppression_days, org
-                )
-                if not checker.delivery_current():
-                    return
-                self._assert_active_adapter(invocation)
-                job = await asyncio.to_thread(
-                    queue.bind_candidate_policy, org, job["id"], token, days
-                )
-            except Exception as exc:  # no card may expose a control without its policy snapshot
-                logger.warning(
-                    "Wisdom candidate delivery deferred before send (%s)",
-                    type(exc).__name__,
-                )
-                checker.defer_delivery(queue, org, job, queue.clock() + 60)
-                return
-
         def current(candidate: dict[str, Any]) -> dict[str, Any] | None:
             self._assert_active_adapter(invocation)
             return checker.delivery_facts(queue, org, candidate)
 
-        try:
-            initial_facts = await asyncio.to_thread(current, job)
-            view = assessment_view(job)
-            if initial_facts is None:
-                return
-            if (
-                await asyncio.to_thread(current, job) != initial_facts
-                or not await asyncio.to_thread(queue.renew, org, job["id"], token)
-                or not checker.delivery_current()
-            ):
-                return
-            request_id = await asyncio.to_thread(outbox.reserve, org, job)
-        except Exception as exc:  # reservation intent is durable; no provider send was attempted
-            logger.warning(
-                "Wisdom native delivery deferred before send (%s)", type(exc).__name__
-            )
-            checker.defer_delivery(queue, org, job, queue.clock() + 60)
+        prepared = await self._prepare_assessment_delivery(
+            job, checker, queue, outbox, org, invocation.session_key, current,
+            before_policy_bind=lambda: self._assert_active_adapter(invocation),
+            log_native_failures=True,
+        )
+        if prepared is None:
             return
-        if request_id is None:
-            checker.defer_delivery(queue, org, job, queue.clock() + 60)
-            return
-        try:
-            rows = await asyncio.to_thread(queue.assessments, org)
-            latest = next((row for row in rows if row["id"] == job["id"]), None)
-            if (
-                latest is None or latest.get("lease_token") != token
-                or latest.get("owner_session") != invocation.session_key
-                or latest.get("advice") != job.get("advice")
-                or await asyncio.to_thread(current, latest) != initial_facts
-            ):
-                await asyncio.to_thread(
-                    queue.cancel_reservation, org, job, queue.clock() + 60
-                )
-                return
-            began = await asyncio.to_thread(
-                queue.begin_delivery, org, job["id"], token, request_id=request_id
-            )
-        except Exception:
-            await asyncio.to_thread(
-                queue.cancel_reservation, org, job, queue.clock() + 60
-            )
-            return
-        if not began:
-            await asyncio.to_thread(
-                queue.cancel_reservation, org, job, queue.clock() + 60
-            )
-            return
+        job, token, initial_facts, latest, view = prepared
         try:
             final_facts = await asyncio.to_thread(current, latest)
             user_id = await asyncio.to_thread(outbox.identity, org)
@@ -992,8 +1299,16 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes
                    invocation: NativeInvocation) -> dict[str, Any]:
         service = self.service_factory()
         try:
+            def effect_current() -> bool:
+                try:
+                    self._assert_active_adapter(invocation)
+                except PermissionError:
+                    return False
+                return True
+
             return await asyncio.to_thread(
-                self.reviews.act, service, record_id, invocation, action
+                self.reviews.act, service, record_id, invocation, action,
+                may_apply=effect_current,
             )
         finally:
             service.close()

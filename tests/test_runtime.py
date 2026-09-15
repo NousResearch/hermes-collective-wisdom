@@ -241,11 +241,15 @@ def test_installed_setup_methods_share_one_owner_bound_controller(tmp_path, monk
         def plan(self, skill_id, **values):
             return ("plan", skill_id, values)
 
-        def apply(self, receipt):
+        def apply(self, receipt, *, may_apply=None):
+            assert may_apply is None or may_apply() is True
             return ("apply", receipt)
 
         def status(self, skill_id, *, version=None):
             return ("status", skill_id, version)
+
+        def recovery_status(self, skill_id, operation_id):
+            return ("recovery-status", skill_id, operation_id)
 
         def recover(self, skill_id, operation_id, **values):
             return ("recover", skill_id, operation_id, values)
@@ -259,9 +263,37 @@ def test_installed_setup_methods_share_one_owner_bound_controller(tmp_path, monk
     )[0] == "plan"
     assert service.installed_setup_apply("receipt") == ("apply", "receipt")
     assert service.installed_setup_status("skill") == ("status", "skill", None)
-    assert service.installed_setup_recover(
-        "skill", "operation", acknowledged=True
-    )[-1] == {"acknowledged_effects_checked_and_stopped": True}
+    snapshot = service.installed_setup_recovery_inspect("skill", "operation")
+    assert snapshot == ("recovery-status", "skill", "operation")
+    recovered = service.installed_setup_recover(
+        "skill", "operation", acknowledged=True,
+        expected_recovery=snapshot, may_apply=lambda: True,
+    )
+    assert recovered[:-1] == ("recover", "skill", "operation")
+    assert recovered[-1]["acknowledged_effects_checked_and_stopped"] is True
+    assert recovered[-1]["expected_recovery"] == snapshot
+    assert recovered[-1]["may_apply"]() is True
+
+
+def test_install_apply_propagates_optional_invocation_authority(tmp_path, monkeypatch):
+    service = runtime.InvocationService(tmp_path / "state", ("default", tmp_path))
+    captured = []
+
+    class Executor:
+        def apply(self, receipt, accept_partial=False, *, may_apply=None):
+            captured.append((receipt, accept_partial, may_apply))
+            if may_apply is not None and may_apply() is not True:
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+            return {"installed": True}
+
+    monkeypatch.setattr(service, "_installation_services", lambda: (object(), Executor()))
+    def current():
+        return False
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        service.install_apply("receipt", accept_partial=True, may_apply=current)
+
+    assert captured == [("receipt", True, current)]
 
 
 def test_update_methods_share_one_owner_bound_reviewer_and_executor(tmp_path, monkeypatch):
@@ -275,7 +307,8 @@ def test_update_methods_share_one_owner_bound_reviewer_and_executor(tmp_path, mo
             return ("plan", skill_id, values)
 
     class Executor:
-        def apply(self, receipt):
+        def apply(self, receipt, *, may_apply=None):
+            assert may_apply is None or may_apply() is True
             return ("apply", receipt)
 
     monkeypatch.setattr(service, "_update_services", lambda: (Reviewer(), Executor()))
