@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 
 def safe_portal_url(value: object) -> str | None:
@@ -21,6 +21,12 @@ def safe_portal_url(value: object) -> str | None:
     if parsed.username is not None or parsed.password is not None:
         return None
     return value
+
+
+def portal_review_url(base_url: str, _organization_id: str, draft_id: str) -> str:
+    """Build the authenticated Portal route for one owner-private draft."""
+
+    return f"{base_url.rstrip('/')}/wisdom/review/{quote(draft_id, safe='')}"
 
 
 def portal_version_url(base_url: str | None, version: int) -> str | None:

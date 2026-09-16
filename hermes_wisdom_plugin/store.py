@@ -2026,6 +2026,23 @@ class WisdomStore:
                 return value
         return None
 
+    def publication_for_candidate_assessment(
+        self, assessment_id: str
+    ) -> dict[str, Any] | None:
+        """Return the pending publication durably linked to one candidate card."""
+
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM operation_journal WHERE kind='publication' AND state='pending'"
+            ).fetchall()
+        for row in rows:
+            value = dict(row)
+            payload = json.loads(value["payload_json"])
+            if payload.get("candidate_assessment_id") == assessment_id:
+                value["payload"] = payload
+                return value
+        return None
+
     def reauthorize_publication(
         self,
         *,
@@ -2055,6 +2072,8 @@ class WisdomStore:
             resume_phase = payload.pop("resume_phase", None)
             if not isinstance(resume_phase, str):
                 raise WisdomConflict("Publication recovery phase is unavailable")
+            if payload.get("requested_action") == "private_draft":
+                payload.pop("requested_action")
             payload["policy"] = policy
             db.execute(
                 "UPDATE operation_journal SET phase=?,payload_json=?,updated_at=? WHERE id=?",

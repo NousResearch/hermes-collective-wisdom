@@ -17,6 +17,7 @@ from test_contribution_review import reviewer
 
 from hermes_wisdom_plugin import publication as publication_module
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomError
+from hermes_wisdom_plugin.portal_urls import portal_review_url
 from hermes_wisdom_plugin.publication import PublicationController
 
 
@@ -168,6 +169,103 @@ def test_one_explicit_hash_bound_confirmation_uses_server_policy(tmp_path: Path,
     assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
     assert "publication_mode" not in result["submitted_request"]
     assert controller.status(result["operation_id"])["state"] == "done"
+
+
+def test_private_draft_stops_before_owner_approval_and_requires_fresh_confirmation(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path, mode="moderated")
+
+    initial_review = controller.review(prepared["draft_id"])
+    staged = controller.submit_private_draft(initial_review["receipt"])
+
+    assert staged == {
+        "operation_id": staged["operation_id"],
+        "state": "pending",
+        "phase": "policy_review_required",
+        "publication_state": "ready",
+        "remote_draft_id": "draft-1",
+        "retry_safe": False,
+        "detail": (
+            "Private draft submitted. Final sharing still requires a fresh "
+            "exact-package approval."
+        ),
+    }
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+    final_review = controller.review(staged["operation_id"])
+    result = controller.submit(final_review["receipt"])
+
+    assert result["publication_state"] == "pending_moderation"
+    assert client.state.calls == Counter(
+        upload=1, submit=1, approve=1, head=1, publish=1
+    )
+
+
+def test_private_draft_lost_submit_ack_reopens_after_restart_without_publication(
+    tmp_path: Path,
+):
+    controller, prepared, client, binding = publication(tmp_path)
+    client.state.fail_after_effect.add("submit")
+
+    uncertain = controller.submit_private_draft(
+        controller.review(prepared["draft_id"])["receipt"]
+    )
+
+    assert uncertain["phase"] == "draft_submission_unknown"
+    client.state.fail_after_effect.remove("submit")
+    restarted = PublicationController(
+        controller.store, controller.reviewer, client, lambda: dict(binding)
+    )
+    recovered = restarted.reopen(uncertain["operation_id"])
+
+    assert recovered["phase"] == "policy_review_required"
+    assert recovered["publication_state"] == "ready"
+    assert client.state.calls == Counter(upload=1, submit=1)
+    operation = restarted.store.operation(uncertain["operation_id"])
+    assert operation["payload"]["requested_action"] == "private_draft"
+
+    final_review = restarted.review(uncertain["operation_id"])
+    published = restarted.submit(final_review["receipt"])
+    assert published["publication_state"] == "published"
+    assert client.state.calls == Counter(
+        upload=1, submit=1, approve=1, head=1, publish=1
+    )
+    assert "requested_action" not in restarted.store.operation(
+        uncertain["operation_id"]
+    )["payload"]
+
+
+def test_private_draft_reopen_after_cancelled_upload_never_promotes_intent(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+    active = [True]
+    original_upload = client.upload_private_objects
+
+    def upload_then_cancel(objects):
+        result = original_upload(objects)
+        active[0] = False
+        return result
+
+    client.upload_private_objects = upload_then_cancel
+    stopped = controller.submit_private_draft(
+        controller.review(prepared["draft_id"])["receipt"],
+        may_apply=lambda: active[0],
+    )
+    assert stopped["phase"] == "objects_uploaded"
+
+    active[0] = True
+    client.state.policy_version += 1
+    recovered = controller.reopen(stopped["operation_id"])
+
+    assert recovered["phase"] == "policy_review_required"
+    assert client.state.calls == Counter(upload=1, submit=1)
+    assert controller.store.operation(stopped["operation_id"])["payload"]["policy"] == {
+        "publication_mode": "open", "version": 8,
+    }
+
+
+def test_portal_review_url_uses_authenticated_route_contract():
+    assert portal_review_url(
+        "https://portal.example/base/", "org:team", "draft/one"
+    ) == "https://portal.example/base/wisdom/review/draft%2Fone"
 
 
 @pytest.mark.parametrize("changed", ["content", "description", "manifest", "policy", "owner"])

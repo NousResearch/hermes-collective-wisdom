@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -29,6 +32,7 @@ from hermes_wisdom_plugin.delivery import DeliveryReceipt
 from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox
 from hermes_wisdom_plugin import mediation
 from hermes_wisdom_plugin.mediation_store import MediationStore
+from hermes_wisdom_plugin.native_review import NativeReviewController
 from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime, assessment_view
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
 from hermes_wisdom_plugin.native_slack import callback_invocation as slack_invocation
@@ -284,11 +288,13 @@ def test_candidate_assessment_handoff_uses_exact_event_inspection():
         },
     })
 
-    assert "wisdom_inspect" in view.notice
-    assert "kind=candidate" in view.notice
-    assert "identity=candidate-event-id" in view.notice
+    assert "wisdom_inspect" not in view.notice
+    assert "candidate-event-id" not in view.notice
+    assert "local-row-id" not in view.notice
     assert "/wisdom suggest" not in view.notice
     assert [(action.label, action.action) for action in view.actions] == [
+        ("Share", "candidate_share"),
+        ("Review in Portal", "candidate_portal"),
         ("Maybe Later", "candidate_defer")
     ]
     assert view.items[0].actions == []
@@ -306,6 +312,257 @@ def test_shared_skill_assessment_remains_without_not_now():
     })
 
     assert view.actions == [] and view.items[0].actions == []
+
+
+@pytest.mark.parametrize("action", ["share", "portal"])
+def test_candidate_action_reuses_exact_owner_route_and_separates_private_draft(
+    tmp_path: Path, action: str,
+):
+    store = WisdomStore(tmp_path / "state")
+    service = SimpleNamespace(
+        native_owner=Mock(return_value=dict(OWNER)),
+        native_candidate_prepare=Mock(return_value="local-draft"),
+        publication_review=Mock(side_effect=[
+            publication_review("local-draft"),
+            {**publication_review("local-draft"),
+             "operation_id": "publication-operation"},
+        ]),
+        publication_submit_private=Mock(return_value={
+            "operation_id": "publication-operation", "state": "pending",
+            "phase": "policy_review_required", "publication_state": "ready",
+            "remote_draft_id": "remote-draft",
+            "portal_url": "https://portal.example/wisdom/review/remote-draft?org_id=org",
+        }),
+    )
+    controller = NativeReviewController(store)
+    route = invocation(SlackAdapter())
+
+    record = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=action == "portal", may_apply=lambda: True,
+    )
+    replay = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=action == "portal", may_apply=lambda: True,
+    )
+
+    assert replay["id"] == record["id"]
+    assert record["operation"] == "publish" and record["state"] == "pending"
+    assert record["plan"]["candidate_assessment_id"] == "assessment-1"
+    assert service.native_candidate_prepare.call_count == 1
+    if action == "portal":
+        assert service.publication_submit_private.call_count == 1
+        receipt = service.publication_submit_private.call_args.args[0]
+        guard = service.publication_submit_private.call_args.kwargs["may_apply"]
+        assert receipt == "publication-receipt" and guard() is True
+        assert record["result"]["publication_state"] == "ready"
+        assert record["result"]["portal_url"].startswith("https://portal.example/")
+        assert service.publication_review.call_count == 2
+    else:
+        service.publication_submit_private.assert_not_called()
+        assert record["result"] is None
+        assert service.publication_review.call_count == 1
+
+
+def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_path: Path):
+    store = WisdomStore(tmp_path / "state")
+    uncertain = {
+        "operation_id": "publication-operation", "state": "uncertain",
+        "phase": "draft_submission_unknown", "remote_draft_id": None,
+    }
+    recovered = {
+        "operation_id": "publication-operation", "state": "pending",
+        "phase": "policy_review_required", "publication_state": "ready",
+        "remote_draft_id": "remote-draft",
+        "portal_url": "https://portal.example/wisdom/review/remote-draft?org_id=org",
+    }
+    service = SimpleNamespace(
+        store=store,
+        native_owner=Mock(return_value=dict(OWNER)),
+        native_candidate_prepare=Mock(return_value="local-draft"),
+        publication_review=Mock(side_effect=[
+            publication_review("local-draft"),
+            {**publication_review("local-draft"),
+             "operation_id": "publication-operation"},
+        ]),
+        publication_submit_private=Mock(return_value=uncertain),
+        publication_reopen_private=Mock(return_value=recovered),
+    )
+    controller = NativeReviewController(store)
+    route = invocation(SlackAdapter())
+
+    record = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=True, may_apply=lambda: True,
+    )
+    replay = NativeReviewController(WisdomStore(tmp_path / "state")).request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=True, may_apply=lambda: True,
+    )
+
+    assert replay["id"] == record["id"]
+    assert record["result"]["remote_draft_id"] == "remote-draft"
+    service.publication_submit_private.assert_called_once()
+    assert service.publication_submit_private.call_args.kwargs[
+        "candidate_assessment_id"
+    ] == "assessment-1"
+    service.publication_reopen_private.assert_called_once_with(
+        "publication-operation", may_apply=service.publication_reopen_private.call_args.kwargs[
+            "may_apply"
+        ]
+    )
+    service.native_candidate_prepare.assert_called_once_with("candidate-event")
+
+
+def test_candidate_portal_action_claims_before_concurrent_prepare_or_upload(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+):
+    root = tmp_path / "state"
+    store = WisdomStore(root)
+    prepare_started = Event()
+    release_prepare = Event()
+
+    def prepare(_event_id):
+        prepare_started.set()
+        assert release_prepare.wait(timeout=5)
+        return "local-draft"
+
+    service = SimpleNamespace(
+        store=store,
+        native_owner=Mock(return_value=dict(OWNER)),
+        native_candidate_prepare=Mock(side_effect=prepare),
+        publication_review=Mock(side_effect=[
+            publication_review("local-draft"),
+            {**publication_review("local-draft"),
+             "operation_id": "publication-operation"},
+        ]),
+        publication_submit_private=Mock(return_value={
+            "operation_id": "publication-operation", "state": "pending",
+            "phase": "policy_review_required", "publication_state": "ready",
+            "remote_draft_id": "remote-draft",
+            "portal_url": "https://portal.example/wisdom/review/remote-draft",
+        }),
+    )
+    route = invocation(SlackAdapter())
+    first = NativeReviewController(WisdomStore(root))
+    second = NativeReviewController(WisdomStore(root))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(
+            first.request_candidate_action, service, route, "candidate-event",
+            assessment_id="assessment-1", open_in_portal=True,
+            may_apply=lambda: True,
+        )
+        assert prepare_started.wait(timeout=5)
+        duplicate = pool.submit(
+            second.request_candidate_action, service, route, "candidate-event",
+            assessment_id="assessment-1", open_in_portal=True,
+            may_apply=lambda: True,
+        ).result(timeout=2)
+        release_prepare.set()
+        completed = pending.result(timeout=5)
+
+    assert duplicate["id"] == completed["id"]
+    assert duplicate["plan"]["candidate_action_state"] == "preparing"
+    assert service.native_candidate_prepare.call_count == 1
+    assert service.publication_submit_private.call_count == 1
+    with store.transaction() as db:
+        rows = db.execute(
+            "SELECT id FROM wisdom_consent WHERE "
+            "json_extract(plan_json,'$.candidate_assessment_id')='assessment-1'"
+        ).fetchall()
+    assert [row["id"] for row in rows] == [completed["id"]]
+
+
+def test_candidate_share_callback_updates_original_card_to_exact_final_review(tmp_path: Path):
+    async def scenario():  # pylint: disable=too-many-locals
+        store = WisdomStore(tmp_path / "state")
+        store.activate_installation_identity("install", "org")
+        store.bind_qualification_owner(OWNER)
+        local = tmp_path / "candidate"
+        local.mkdir()
+        (local / "SKILL.md").write_text("# Candidate\n", encoding="utf-8")
+        content_hash, tree = snapshot_tree(local)
+        skill_id = store.register_skill(
+            local, content_hash=content_hash, source_kind="local", tree=tree
+        )
+        event_id = store.emit_local_event(
+            kind="wisdom.candidate", skill_id=skill_id, content_hash=content_hash,
+            session_id="origin", task_id="task", qualification="high_usage",
+            payload={"local_reasons": {}, "consent_required": True, "networked": False},
+        )
+        queue = MediationStore(store, owner=OWNER, clock=lambda: 1_000.0)
+        adapter = SlackAdapter()
+        route = invocation(adapter)
+        queue.register_session(
+            "org", session_key=route.session_key, session_id="session-1",
+            platform="slack", actor_id=route.actor_id, private=True,
+            available=True, user_activity=True,
+            address={"chat_id": "D1", "thread_id": "", "scope_id": "W1"},
+        )
+        assessment_id = queue.enqueue_owned(
+            "org", f"candidate:{skill_id}:{content_hash}",
+            {"kind": "candidate", "local_skill_id": skill_id,
+             "content_hash": content_hash, "event_id": event_id},
+        )
+        job = queue.claim("org", route.session_key, assessment_only=True)[0]
+        assert queue.save_advice("org", assessment_id, job["lease_token"], {
+            "assessment_id": assessment_id, "relevance": "recommend",
+            "title": "Candidate", "explanation": "You use this often.",
+            "provenance": {"kind": "local_qualification"},
+        })
+        delivered = queue.claim("org", route.session_key, ready_only=True)[0]
+        queue.bind_candidate_policy("org", assessment_id, delivered["lease_token"], 7)
+        assert queue.begin_delivery("org", assessment_id, delivered["lease_token"])
+        assert queue.complete_delivery(
+            "org", assessment_id, delivered["lease_token"],
+            receipt=DeliveryReceipt(
+                platform="slack", destination="D1", message_id="card-1",
+                scope_id="W1", acknowledgement="provider_accepted",
+            ),
+        )
+        service = SimpleNamespace(
+            store=store, close=Mock(), native_owner=Mock(return_value=dict(OWNER)),
+            native_candidate_prepare=Mock(return_value="local-draft"),
+            publication_review=Mock(return_value=publication_review("local-draft")),
+            publication_submit_private=Mock(),
+        )
+        runtime = NativeSurfaceRuntime(
+            tmp_path / "state", "default", lambda: service, FakeLlm(),
+            lambda coro, **_kwargs: asyncio.create_task(coro),
+        )
+        app = SlackApp()
+        runtime.wire_slack(app, adapter)
+        row = queue.assessments("org")[0]
+        original_blocks = slack_blocks(assessment_view(row), assessment_id)
+        button = _slack_action(original_blocks, "Share")
+        body: dict[str, Any] = callback_body()
+        body["message"]["blocks"] = original_blocks
+
+        foreign: dict[str, Any] = callback_body()
+        foreign["user"]["id"] = "U9"
+        foreign["message"]["blocks"] = original_blocks
+        with pytest.raises(PermissionError):
+            await runtime._slack_callback(
+                app, adapter, runtime._leases[("slack", id(adapter))], foreign, button
+            )
+        service.native_candidate_prepare.assert_not_called()
+
+        await runtime._slack_callback(
+            app, adapter, runtime._leases[("slack", id(adapter))], body, button
+        )
+
+        assert len(app.client.edits) == 1
+        assert app.client.edits[0]["ts"] == "card-1"
+        assert _slack_action(app.client.edits[0]["blocks"], "Share My Skill")
+        service.publication_submit_private.assert_not_called()
+        pending = runtime.reviews.pending(OWNER, invocation=route)
+        assert len(pending) == 1
+        record = runtime.reviews.load(pending[0]["id"])
+        assert record["message_id"] == "card-1"
+        assert record["plan"]["candidate_assessment_id"] == assessment_id
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

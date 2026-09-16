@@ -703,6 +703,57 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         return result
 
+    def publication_submit_private(
+        self, receipt, *, may_apply: Callable[[], bool] | None = None,
+        candidate_assessment_id: str | None = None,
+    ):
+        """Submit exact bytes as an owner-private draft without approving publication."""
+
+        from .portal_urls import portal_review_url  # pylint: disable=import-outside-toplevel
+
+        _require_current(may_apply)
+        result = self._publication_service().submit_private_draft(
+            receipt, may_apply=may_apply,
+            candidate_assessment_id=candidate_assessment_id,
+        )
+        self.check_owner()
+        _require_current(may_apply)
+        remote_id = str(result.get("remote_draft_id") or "")
+        if not remote_id:
+            return result
+        owner = self._installation_owner()
+        account = self.account
+        if account is None:
+            raise WisdomAuthError("Collective Wisdom account is unavailable")
+        return {
+            **result,
+            "portal_url": portal_review_url(
+                account.portal_base_url, owner["organization_id"], remote_id
+            ),
+        }
+
+    def publication_reopen_private(
+        self, operation_id, *, may_apply: Callable[[], bool] | None = None,
+    ):
+        """Reconcile one private draft and attach its owner Portal URL."""
+
+        from .portal_urls import portal_review_url  # pylint: disable=import-outside-toplevel
+
+        result = self.publication_reopen(operation_id, may_apply=may_apply)
+        remote_id = str(result.get("remote_draft_id") or "")
+        if not remote_id:
+            return result
+        owner = self._installation_owner()
+        account = self.account
+        if account is None:
+            raise WisdomAuthError("Collective Wisdom account is unavailable")
+        return {
+            **result,
+            "portal_url": portal_review_url(
+                account.portal_base_url, owner["organization_id"], remote_id
+            ),
+        }
+
     def publication_status(self, operation_id):
         """Inspect durable publication state without a network retry."""
 

@@ -812,6 +812,10 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         card_id = self.card_id
         payload = self.current_card_payload()
         assert "Hermes thinks the following skill would be useful" in payload["text"]
+        assert "wisdom_inspect" not in payload["text"]
+        assert event_id not in payload["text"]
+        assert self.has_button("Share")
+        assert self.has_button("Review in Portal")
         assert self.has_button("Maybe Later")
         delivered = next(
             row for row in queue.assessments("org-1") if row["id"] == assessment_id
