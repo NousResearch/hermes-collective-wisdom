@@ -220,29 +220,43 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 parent_session_id=str(kwargs.get("parent_session_id") or ""),
             )
         except PermissionError:
+            logger.warning(
+                "Collective Wisdom lifecycle admission rejected (reason=capture_rejected)"
+            )
             return None
         if invocation is None:
             return None
         if self.session_context is not None:
             try:
                 host_context = self.session_context()
+                expected_context = {
+                    "platform": invocation.platform,
+                    "profile": invocation.profile,
+                    "chat_id": invocation.chat_id,
+                    "user_id": invocation.actor_id,
+                    "thread_id": invocation.thread_id,
+                    "scope_id": invocation.scope_id,
+                    "message_id": invocation.message_id,
+                    "session_key": invocation.session_key,
+                    "session_id": invocation.host_session_id,
+                }
+                mismatched_fields = [
+                    name for name, value in expected_context.items()
+                    if not isinstance(host_context, dict)
+                    or str(host_context.get(name) or "") != value
+                ]
             except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Collective Wisdom lifecycle admission rejected "
+                    "(reason=context_unavailable)"
+                )
                 return None
-            expected_context = {
-                "platform": invocation.platform,
-                "profile": invocation.profile,
-                "chat_id": invocation.chat_id,
-                "user_id": invocation.actor_id,
-                "thread_id": invocation.thread_id,
-                "scope_id": invocation.scope_id,
-                "message_id": invocation.message_id,
-                "session_key": invocation.session_key,
-                "session_id": invocation.host_session_id,
-            }
-            if not isinstance(host_context, dict) or any(
-                str(host_context.get(name) or "") != value
-                for name, value in expected_context.items()
-            ):
+            if mismatched_fields:
+                logger.warning(
+                    "Collective Wisdom lifecycle admission rejected "
+                    "(reason=context_mismatch; fields=%s)",
+                    ",".join(mismatched_fields),
+                )
                 return None
         with self._lock:
             self._tool_invocations[(invocation.task_id, invocation.host_session_id)] = (
