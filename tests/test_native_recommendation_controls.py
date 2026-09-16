@@ -53,6 +53,21 @@ class RecommendationService(Service):
         return {"deferred": True}
 
 
+def test_multiple_delivered_recommendations_keep_independent_controls(tmp_path):
+    store = WisdomStore(tmp_path)
+    service = RecommendationService(store)
+    controller = NativeReviewController(store)
+    route = native_invocation()
+    first = controller.request_recommendation(service, route, shared_job(), shared_facts())
+    controller.bind_delivery(first["id"], route, "card-1")
+    second = controller.request_recommendation(service, route, shared_job(), shared_facts())
+    controller.bind_delivery(second["id"], route, "card-2")
+    assert controller.load(first["id"])["state"] == "pending"
+    result = controller.act(service, first["id"], replace(route, message_id="card-1"),
+                            "recommendation.details")
+    assert "Exact version" in controller.view(result).to_text()
+
+
 def test_recipient_offer_enters_exact_policy_review_without_installing(tmp_path: Path):
     store = WisdomStore(tmp_path)
     service = RecommendationService(store)

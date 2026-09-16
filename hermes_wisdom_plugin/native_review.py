@@ -695,14 +695,15 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         identity = secrets.token_urlsafe(12)
         with self.store.transaction() as db:
             self._record_session_db(db, org, invocation, now)
-            db.execute(
-                "UPDATE wisdom_consent SET state='superseded',"
-                "state_revision=state_revision+1,updated_at=? "
-                "WHERE organization_id=? AND owner_session=? AND actor_id=? AND platform=? "
-                "AND operation=? AND state IN ('pending','deferred','expired')",
-                (now, org, invocation.session_key, invocation.actor_id,
-                 invocation.platform, operation),
-            )
+            if operation != "recommendation":
+                db.execute(
+                    "UPDATE wisdom_consent SET state='superseded',"
+                    "state_revision=state_revision+1,updated_at=? "
+                    "WHERE organization_id=? AND owner_session=? AND actor_id=? AND platform=? "
+                    "AND operation=? AND state IN ('pending','deferred','expired')",
+                    (now, org, invocation.session_key, invocation.actor_id,
+                     invocation.platform, operation),
+                )
             db.execute(
                 _CONSENT_INSERT,
                 (identity, org, invocation.session_key, invocation.actor_id,

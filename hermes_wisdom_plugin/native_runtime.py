@@ -21,8 +21,6 @@ from typing import Any, Callable
 
 from .native_context import InvocationCapture, NativeInvocation
 from .native_review import (
-    NativeAction,
-    NativeItem,
     NativeReviewController,
     NativeView,
     assessment_view,
