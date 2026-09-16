@@ -533,10 +533,18 @@ class Journey:  # pylint: disable=too-many-instance-attributes
             {"chat.postMessage", "chat.update"}
             if self.platform == "slack" else {"sendMessage", "editMessageText"}
         )
-        return next(
+        payload = dict(next(
             payload for method, payload in reversed(self.transport.calls)
             if method in endpoints
-        )
+        ))
+        if self.platform == "telegram":
+            for method, update in reversed(self.transport.calls):
+                if method in endpoints:
+                    break
+                if method == "editMessageReplyMarkup":
+                    payload["reply_markup"] = update.get("reply_markup")
+                    break
+        return payload
 
     async def click(self, label, *, actor="U1", card_id=None, payload=None):
         target_card = str(card_id or self.card_id)
@@ -551,7 +559,9 @@ class Journey:  # pylint: disable=too-many-instance-attributes
                 "user": {"id": actor, "name": actor.lower()}, "team": {"id": "W1"},
                 "channel": {"id": "D1"},
                 "container": {"type": "message", "channel_id": "D1", "message_ts": target_card},
-                "message": {"ts": target_card, "blocks": payload["blocks"]},
+                "message": {
+                    "ts": target_card, "blocks": payload["blocks"], "text": payload["text"],
+                },
                 "actions": [{**button, "action_ts": str(self.callback_counter)}],
             }
             response = await self.native.async_dispatch(
@@ -670,7 +680,7 @@ class Journey:  # pylint: disable=too-many-instance-attributes
     async def deliver_candidate_and_defer(  # pylint: disable=too-many-locals,too-many-statements
         self,
     ):
-        """Exercise candidate Not Now through the discovered plugin and real SDK callback."""
+        """Exercise candidate Maybe Later through the discovered plugin and real SDK callback."""
 
         local = self.profile / "skills" / "sdk-candidate"
         local.mkdir(parents=True)
@@ -747,21 +757,22 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         await self.set_card_from_last_send()
         card_id = self.card_id
         payload = self.current_card_payload()
-        assert "Local qualification advice" in payload["text"]
-        assert self.has_button("Not Now")
+        assert "Hermes thinks the following skill would be useful" in payload["text"]
+        assert self.has_button("Maybe Later")
         delivered = next(
             row for row in queue.assessments("org-1") if row["id"] == assessment_id
         )
         assert delivered["reference"]["not_now_suppression_days"] == 7
 
-        edits_before = self.count_calls({"chat.update", "editMessageText"})
-        await self.click("Not Now", actor="U9", card_id=card_id, payload=payload)
-        assert self.count_calls({"chat.update", "editMessageText"}) == edits_before
-        await self.click("Not Now", card_id=card_id, payload=payload)
-        assert self.count_calls({"chat.update", "editMessageText"}) == edits_before + 1
+        edit_methods = {"chat.update", "editMessageText", "editMessageReplyMarkup"}
+        edits_before = self.count_calls(edit_methods)
+        await self.click("Maybe Later", actor="U9", card_id=card_id, payload=payload)
+        assert self.count_calls(edit_methods) == edits_before
+        await self.click("Maybe Later", card_id=card_id, payload=payload)
+        assert self.count_calls(edit_methods) == edits_before + 1
         deferred = self.current_card_payload()
-        assert "Candidate deferred" in deferred["text"]
-        assert not self.has_button("Not Now")
+        assert deferred["text"] == payload["text"]
+        assert not self.has_button("Maybe Later")
         with self.store.transaction() as database:
             suppression = database.execute(
                 "SELECT suppress_until,created_at FROM wisdom_preference_outbox"
@@ -775,8 +786,8 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         assert len(self.runtime.reviews.pending(self.owner)) == consent_before
         assert policy_requests == policy_requests_after_delivery, policy_requests
 
-        await self.click("Not Now", card_id=card_id, payload=payload)
-        assert self.count_calls({"chat.update", "editMessageText"}) == edits_before + 1
+        await self.click("Maybe Later", card_id=card_id, payload=payload)
+        assert self.count_calls(edit_methods) == edits_before + 1
 
         service = self.service()
         try:
@@ -910,7 +921,9 @@ class Journey:  # pylint: disable=too-many-instance-attributes
             if expected is not install_pages[-1]:
                 await self.click("Next page")
         assert installed_bytes
-        await self.click("Approve exact package")
+        await self.click("Looks good.")
+        assert self.client.remote_version != 1
+        await self.click("Install")
         assert self.client.remote_version == 1
         self.client.latest = 2
 
@@ -1006,7 +1019,9 @@ class Journey:  # pylint: disable=too-many-instance-attributes
             if mode == "file"
         }
         assert reconstructed == expected_files
-        await self.click("Approve exact package")
+        await self.click("Looks good.")
+        assert self.client.remote_version == 1
+        await self.click("Update")
         assert self.client.remote_version == 2
 
         completed_payload = self.latest(self.edit_endpoint)
@@ -1121,18 +1136,18 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         publication_review = self.current_card_payload()
         assert "Exact SDK publication review." in publication_review["text"]
         assert "sha256:" + "f" * 64 in publication_review["text"]
-        await self.click("Yes, share")
+        await self.click("Share My Skill")
         pending_publication = self.current_card_payload()
         assert self.card_id == publication_card
         assert "Pending moderation" in pending_publication["text"]
-        assert action_url(pending_publication, self.platform, "View in Portal") == (
+        assert action_url(pending_publication, self.platform, "View details") == (
             "https://portal.nousresearch.com/wisdom/review/remote-draft?org_id=org-1"
         )
         await self.click("Check status")
         published = self.current_card_payload()
         assert self.card_id == publication_card
-        assert "Published" in published["text"]
-        assert action_url(published, self.platform, "View in Portal") == (
+        assert "Shared!" in published["text"]
+        assert action_url(published, self.platform, "View details") == (
             "https://portal.nousresearch.com/wisdom/skills/skill-1?org_id=org-1"
         )
 

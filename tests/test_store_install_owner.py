@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from review_test_support import _owner
 
 from hermes_wisdom_plugin.errors import WisdomConflict
 from hermes_wisdom_plugin.store import (
@@ -17,19 +18,6 @@ from hermes_wisdom_plugin.store import (
     SCHEMA_VERSION,
     WisdomStore,
 )
-
-
-def _owner(**changes: str) -> dict[str, str]:
-    value = {
-        "profile_name": "default",
-        "profile_home": "/profiles/default",
-        "account_id": "account-1",
-        "organization_id": "org-1",
-        "base_url": "https://gateway.example",
-        "installation_id": "install-1",
-    }
-    value.update(changes)
-    return value
 
 
 def _install(skill_id: str, owner=None) -> dict:

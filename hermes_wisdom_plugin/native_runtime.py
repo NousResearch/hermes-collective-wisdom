@@ -1,4 +1,8 @@
-"""Native Slack/Telegram consent flow and model-assisted durable setup resumption."""
+"""Native Slack/Telegram consent flow and model-assisted durable setup resumption.
+
+Silent post-deferral control removal is adapted from `hbizi`'s work in
+shannonsands/hermes-agent#5 (ea40400b, 872759a9), under the MIT license.
+"""
 # pylint: disable=too-many-lines
 
 from __future__ import annotations
@@ -69,11 +73,12 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
     reference = job.get("reference")
     if not isinstance(reference, dict):
         raise ValueError("ready assessment reference is missing")
+    kind = reference.get("kind")
     fallback = advice is None and job.get("state") == "fallback"
     if fallback:
-        kind = reference.get("kind")
-        identity_key = "local_skill_id" if kind == "candidate" else "skill_id"
-        identity = _assessment_text(reference.get(identity_key), 256)
+        identity = _assessment_text(
+            reference.get("local_skill_id" if kind == "candidate" else "skill_id"), 256,
+        )
         advice = {
             "relevance": "digest",
             "title": identity,
@@ -98,27 +103,29 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
     provenance_kind = str(
         provenance.get("kind") if isinstance(provenance, dict) else ""
     )
-    if reference.get("kind") == "candidate":
+    if kind == "candidate":
         if provenance_kind != "local_qualification":
             raise ValueError("candidate advice provenance is invalid")
         _assessment_text(reference.get("local_skill_id"), 256)
         event_id = _assessment_text(reference.get("event_id"), 128)
-        label = (
-            "Local qualification review unavailable"
-            if fallback else "Local qualification advice"
+        summary = "Local qualification review unavailable" if fallback else ""
+        preamble = (
+            "" if fallback else
+            "Hermes thinks the following skill would be useful to the rest of your team:"
         )
         handoff = (
             "Ask Hermes to inspect this exact local candidate with wisdom_inspect "
             f"(kind=candidate, identity={event_id})"
         )
-    elif reference.get("kind") == "skill":
+    elif kind == "skill":
         if provenance_kind != "agent_assessed":
             raise ValueError("shared advice provenance is invalid")
         identity = _assessment_text(reference.get("skill_id"), 256)
         version = reference.get("version")
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
             raise ValueError("shared advice version is invalid")
-        label = "Agent assessment unavailable" if fallback else "Agent-assessed advice"
+        summary = "Agent assessment unavailable" if fallback else "Agent-assessed advice"
+        preamble = ""
         handoff = (
             "Ask Hermes to inspect the exact published version with wisdom_inspect "
             f"(kind=skill, identity={identity}, version={version}); /wisdom show "
@@ -128,15 +135,15 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
         raise ValueError("assessment reference is unsupported")
     return NativeView(
         title="Hermes Collective Wisdom",
-        summary=label,
-        items=[NativeItem(title=title, detail=explanation)],
+        summary=summary,
+        items=[NativeItem(title=title, detail=explanation, preamble=preamble)],
         notice=(
             f"{handoff}. This is advisory only; nothing was installed, approved, "
             "or shared."
         ),
         actions=(
-            [NativeAction(label="Not Now", action="candidate_defer")]
-            if reference.get("kind") == "candidate" and not fallback else []
+            [NativeAction(label="Maybe Later", action="candidate_defer")]
+            if kind == "candidate" and not fallback else []
         ),
     )
 
@@ -153,7 +160,48 @@ def candidate_deferred_view(job: dict[str, Any]) -> NativeView:
             "This candidate will stay suppressed for the organization-policy period. "
             "Nothing was installed, approved, published, or shared."
         ),
+        dismissed=True,
     )
+
+
+async def _edit_slack_projection(
+    native: Any, invocation: NativeInvocation, body: dict[str, Any],
+    view: NativeView, record_id: str,
+) -> None:
+    """Edit a review, or preserve original message content while dismissing controls."""
+    from .native_slack import blocks  # pylint: disable=import-outside-toplevel
+
+    if view.dismissed:
+        message = body.get("message") or {}
+        original = message.get("blocks")
+        if not isinstance(original, list):
+            raise ValueError("Original Slack card is required for silent dismissal.")
+        rendered = [
+            {key: value for key, value in block.items() if key != "accessory"}
+            for block in original
+            if isinstance(block, dict) and block.get("type") != "actions"
+        ]
+        text = str(message.get("text") or view.to_text())
+    else:
+        rendered, text = blocks(view, record_id), view.to_text()
+    await native.client.chat_update(
+        channel=invocation.chat_id, ts=invocation.message_id, text=text, blocks=rendered,
+    )
+
+
+async def _edit_telegram_projection(query: Any, view: NativeView, record_id: str) -> None:
+    """Edit a review, or remove only its Telegram controls."""
+    if view.dismissed:
+        from telegram.error import BadRequest  # pylint: disable=import-outside-toplevel,import-error
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest as exc:
+            # A confirmed control removal is idempotent in the real SDK.
+            if "message is not modified" not in str(exc).lower():
+                raise
+        return
+    from .native_telegram import keyboard, text  # pylint: disable=import-outside-toplevel
+    await query.edit_message_text(text=text(view), reply_markup=keyboard(view, record_id))
 
 
 class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
@@ -806,7 +854,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             query = getattr(update, "callback_query", None)
             if query is None:
                 return
-            await query.answer(text="Checking current state")
+            await query.answer()
             try:
                 await self._telegram_callback(native, adapter, token, query)
             except Exception:  # pylint: disable=broad-exception-caught  # native errors are rendered, never leaked to PTB
@@ -1103,9 +1151,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
     async def _slack_callback(  # pylint: disable=too-many-locals
         self, native: Any, adapter: Any, token: object,
                               body: dict[str, Any], action_payload: dict[str, Any]) -> None:
-        from .native_slack import (  # pylint: disable=import-outside-toplevel
-            blocks, callback_invocation,
-        )
+        from .native_slack import callback_invocation  # pylint: disable=import-outside-toplevel
         self._assert_lease("slack", adapter, token)
         record_id, action = parse_callback(str(action_payload.get("value") or ""))
         if action == "candidate_defer":
@@ -1139,9 +1185,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     guard()
                     view = candidate_deferred_view(projected)
                     try:
-                        await native.client.chat_update(
-                            channel=invocation.chat_id, ts=invocation.message_id,
-                            text=view.to_text(), blocks=blocks(view, record_id),
+                        await _edit_slack_projection(
+                            native, invocation, body, view, record_id,
                         )
                     except Exception as exc:  # the edit may have reached Slack
                         await asyncio.to_thread(
@@ -1162,9 +1207,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             )
             view = self.reviews.view(projected)
             try:
-                await native.client.chat_update(
-                    channel=invocation.chat_id, ts=invocation.message_id,
-                    text=view.to_text(), blocks=blocks(view, projected_id),
+                await _edit_slack_projection(
+                    native, invocation, body, view, projected_id,
                 )
                 await asyncio.to_thread(
                     self.reviews.delivery_confirmed, projected_id,
@@ -1198,9 +1242,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
     async def _telegram_callback(  # pylint: disable=too-many-locals
         self, _native: Any, adapter: Any, token: object,
                                  query: Any) -> None:
-        from .native_telegram import (  # pylint: disable=import-outside-toplevel
-            callback_invocation, keyboard, text,
-        )
+        from .native_telegram import callback_invocation  # pylint: disable=import-outside-toplevel
         self._assert_lease("telegram", adapter, token)
         record_id, action = parse_callback(str(getattr(query, "data", "") or ""))
         if action == "candidate_defer":
@@ -1234,9 +1276,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     guard()
                     view = candidate_deferred_view(projected)
                     try:
-                        await query.edit_message_text(
-                            text=text(view), reply_markup=keyboard(view, record_id)
-                        )
+                        await _edit_telegram_projection(query, view, record_id)
                     except Exception as exc:  # the edit may have reached Telegram
                         await asyncio.to_thread(
                             queue.candidate_edit_uncertain, org, record_id,
@@ -1256,9 +1296,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             )
             view = self.reviews.view(projected)
             try:
-                await query.edit_message_text(
-                    text=text(view), reply_markup=keyboard(view, projected_id)
-                )
+                await _edit_telegram_projection(query, view, projected_id)
                 await asyncio.to_thread(
                     self.reviews.delivery_confirmed, projected_id,
                     expected_revision=revision, attempt=attempt,

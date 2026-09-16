@@ -10,14 +10,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from review_test_support import _content, _files, _owner, _spec
 
 from hermes_wisdom_plugin.contract import (
-    ContentFile, derive_content_hash, org_directory_name, sha256_address,
+    org_directory_name, sha256_address,
 )
 from hermes_wisdom_plugin.errors import WisdomValidationError
 from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.update_review import UpdateReviewer, VerifiedUpdate
-from test_install_review import Host, _files, _owner, _spec
+from test_install_review import Host
 
 
 class Client:
@@ -39,17 +40,6 @@ class Client:
         files[0] = ("SKILL.md", "file", b"# Managed v2\n")
         return files
 
-    @staticmethod
-    def _content(files):
-        records = [
-            ContentFile(path=path, mode=mode, hash=sha256_address(body))
-            for path, mode, body in files
-        ]
-        return SimpleNamespace(
-            commit="sha256:" + "c" * 64,
-            content_hash=derive_content_hash(records),
-        )
-
     def installations(self, installation_id):
         self.calls.append(("installations", installation_id))
         return [dict(self.remote)] if self.remote is not None else []
@@ -68,7 +58,7 @@ class Client:
     def version(self, skill_id, version):
         self.calls.append(("version", skill_id, version))
         files = self.files[version]
-        content = self._content(files)
+        content = _content(files)
         manifest = next(body for path, _, body in files if path == "skill.manifest.json")
         spec = json.loads(manifest)["requirements"]
         return SimpleNamespace(
@@ -87,7 +77,7 @@ class Client:
     def content(self, skill_id, version, **kwargs):
         self.calls.append(("content", skill_id, version, kwargs))
         files = self.files[version]
-        return self._content(files), list(files)
+        return _content(files), list(files)
 
 
 class Store:
@@ -136,7 +126,7 @@ def _reviewer(tmp_path, *, client=None):
     record = {
         "skill_id": "skill-1", "org_id": owner["organization_id"],
         "slug": "managed-skill", "version": 1,
-        "content_hash": Client._content(_files()).content_hash,
+        "content_hash": _content(_files()).content_hash,
         "baseline": baseline, "target_path": str(target),
         "update_mode": "MANUAL", "state": "active", "owner": owner,
     }
@@ -211,7 +201,7 @@ def test_plan_binds_prior_authority_incoming_bytes_and_clean_local_snapshot(tmp_
         "installed_version": 1, "latest_version": 2,
         "takedown_generation": 7, "update_mode": "MANUAL", "skill_state": "active",
     }
-    assert plan["content_hash"] == Client._content(Client._version_two()).content_hash
+    assert plan["content_hash"] == _content(Client._version_two()).content_hash
     assert plan["modified"] is False
     assert (target / "SKILL.md").read_bytes() == b"# Managed\n"
 

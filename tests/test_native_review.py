@@ -16,31 +16,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from native_test_support import (
+    native_invocation as invocation,
+    owner as owner_fixture,
+    publication_review,
+)
 
 from hermes_wisdom_plugin.client import WisdomMuteResponse
-from hermes_wisdom_plugin.native_context import NativeInvocation
 from hermes_wisdom_plugin.native_review import NativeReviewController
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import text as telegram_text
 from hermes_wisdom_plugin.store import WisdomStore
 
 
-OWNER = {
-    "profile_name": "default", "profile_home": "/tmp/profile",
-    "account_id": "member", "organization_id": "org", "base_url": "https://g.invalid",
-    "installation_id": "install",
-}
-
-
-def invocation(**changes):
-    values = {
-        "platform": "slack", "profile": "default", "chat_type": "dm",
-        "chat_id": "D1", "actor_id": "U1", "actor_name": "Shannon",
-        "thread_id": "T1", "scope_id": "W1", "message_id": "request-1",
-        "session_key": "slack:W1:D1:U1", "adapter": object(),
-    }
-    values.update(changes)
-    return NativeInvocation(**values)
+OWNER = owner_fixture()
 
 
 class Service:
@@ -528,25 +517,35 @@ def test_reference_controls_exact_inspection_defer_and_manual_reopen(tmp_path: P
     assert [action.label for action in view.actions] == [
         "Show checks", "Not Now", "Review first", "Update"
     ]
-    assert "Nothing changes until you use the confirmation control." in view.detail
-    assert "Hermes recommendation:" not in view.detail
+    assert "Nothing changes until you use the confirmation control." in view.to_text()
+    assert "Hermes recommendation:" not in view.to_text()
 
     inspected = controller.act(
         service, record["id"], invocation(message_id="card-1"), "review.0"
     )
     inspected_view = controller.view(inspected)
     assert inspected_view.title == "Review proposed package"
-    assert "# exact" in inspected_view.detail
-    assert [action.label for action in inspected_view.actions][-1] == "Approve exact package"
+    assert "# exact" in inspected_view.items[0].detail
+    assert [(a.label, a.action) for a in inspected_view.actions] == [("Looks good.", "back")]
     assert inspected_view.notice == (
         "Nothing is uploaded by reviewing. Setup and verification require separate permission."
     )
+
+    returned = controller.act(
+        service, record["id"], invocation(message_id="card-1"), "back"
+    )
+    assert service.applies == 0 and not service.deferrals
+    assert returned["state"] == "pending" and returned["inspection"] is None
+    assert "Update" in [action.label for action in controller.view(returned).actions]
 
     deferred = controller.act(
         service, record["id"], invocation(message_id="card-1"), "defer"
     )
     assert deferred["state"] == "deferred"
     assert controller.view(deferred).summary == "Deferred on this surface"
+    assert controller.view(deferred).dismissed
+    with pytest.raises(PermissionError):
+        controller.act(service, record["id"], invocation(message_id="card-1"), "confirm")
     reopened = controller.request(service, invocation(message_id="request-2"), "skill-1")
     assert reopened["id"] != record["id"]
     assert controller.load(record["id"])["state"] == "superseded"
@@ -903,7 +902,7 @@ def test_separate_acknowledgements_create_fresh_exact_reviews(tmp_path: Path):
         original = current
 
     assert current["plan"]["allowed"] is True
-    assert current["plan"]["preservation"]["destination"] in controller.view(current).detail
+    assert current["plan"]["preservation"]["destination"] in controller.view(current).to_text()
 
 
 def test_defer_command_reopen_and_expired_recheck_create_bound_successors(tmp_path: Path):
@@ -920,9 +919,7 @@ def test_defer_command_reopen_and_expired_recheck_create_bound_successors(tmp_pa
     assert deferred["state"] == "deferred"
     # The pinned source has no deferred-card Reopen control. Explicitly invoking
     # the original /wisdom update flow creates the successor instead.
-    assert [(action.label, action.action) for action in controller.view(deferred).actions] == [
-        ("Show checks", "checks.show")
-    ]
+    assert not controller.view(deferred).actions
     shown = controller.act(
         service, record["id"], invocation(message_id="card-1"), "checks.show"
     )
@@ -1507,21 +1504,16 @@ def test_publication_confirmation_is_removed_when_exact_review_is_truncated(
 ):
     class PublicationService(Service):
         def publication_review(self, draft_id):
-            return {
-                "draft_id": draft_id, "editorial_name": "Large publication",
-                "receipt": "publication-receipt", "description": "z" * 7000,
-                "files": [{"path": "SKILL.md", "hash": "e" * 64}],
-                "hashes": {
-                    "content": "sha256:" + "f" * 64,
-                    "author_description": "sha256:" + "a" * 64,
-                    "package_manifest": "sha256:" + "b" * 64,
-                },
-                "security_check": {"status": "pass", "summary": "No known matches."},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "moderated", "policy_version": 7,
-                "notice": "Nothing has been uploaded.", "allowed": True,
-                "owner": dict(self.owner),
-            }
+            return publication_review(
+                draft_id,
+                editorial_name="Large publication",
+                description="z" * 7000,
+                files=[{"path": "SKILL.md", "hash": "e" * 64}],
+                security_check={"status": "pass", "summary": "No known matches."},
+                notice="Nothing has been uploaded.",
+                allowed=True,
+                owner=self.owner,
+            )
 
         def publication_submit(self, _receipt, *, may_apply):
             assert may_apply() is True
@@ -1535,7 +1527,7 @@ def test_publication_confirmation_is_removed_when_exact_review_is_truncated(
     view = controller.view(record)
     assert view.summary == "Complete review required in terminal"
     assert [action.label for action in view.actions] == []
-    assert "publication review draft-large --json" in view.detail
+    assert "publication review draft-large --json" in view.to_text()
     with pytest.raises(PermissionError, match="cannot be shown"):
         controller.act(
             service, record["id"],
@@ -1549,19 +1541,11 @@ def test_native_publication_handoffs_never_interpolate_display_controls(
 ):
     class PublicationService(Service):
         def publication_review(self, _draft_id):
-            return {
-                "draft_id": unsafe_id,
-                "receipt": "publication-receipt", "description": "z" * 7000,
-                "files": [{"path": "SKILL.md", "hash": "e" * 64}],
-                "hashes": {
-                    "content": "sha256:" + "f" * 64,
-                    "author_description": "sha256:" + "a" * 64,
-                    "package_manifest": "sha256:" + "b" * 64,
-                },
-                "security_check": {"status": "pass"},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "moderated", "policy_version": 7,
-            }
+            return publication_review(
+                unsafe_id,
+                description="z" * 7000,
+                files=[{"path": "SKILL.md", "hash": "e" * 64}],
+            )
 
     controller = NativeReviewController(WisdomStore(tmp_path))
     service = PublicationService()
@@ -1569,9 +1553,9 @@ def test_native_publication_handoffs_never_interpolate_display_controls(
     record = controller.request_publication(service, request, unsafe_id)
     view = controller.view(record)
 
-    assert unsafe_id not in view.detail
+    assert unsafe_id not in view.to_text()
     assert unsafe_id not in view.items[0].title
-    assert "<draft-id>" in view.detail
+    assert "<draft-id>" in view.to_text()
 
 
 def test_publication_terminal_status_is_monotonic_and_duplicate_callbacks_do_not_poll(
@@ -1583,19 +1567,13 @@ def test_publication_terminal_status_is_monotonic_and_duplicate_callbacks_do_not
             self.reopens = 0
 
         def publication_review(self, draft_id):
-            return {
-                "draft_id": draft_id, "editorial_name": "Reviewed publication",
-                "receipt": "publication-receipt", "description": "Exact description",
-                "files": [{"path": "SKILL.md", "hash": "sha256:" + "d" * 64}],
-                "hashes": {
-                    "content": "sha256:" + "f" * 64,
-                    "author_description": "sha256:" + "a" * 64,
-                    "package_manifest": "sha256:" + "b" * 64,
-                },
-                "security_check": {"status": "pass"},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "moderated", "policy_version": 7,
-            }
+            return publication_review(
+                draft_id,
+                files=[{
+                    "path": "SKILL.md", "hash": "sha256:" + "d" * 64,
+                    "content_utf8": "# Reviewed publication\n",
+                }],
+            )
 
         def publication_submit(self, receipt, *, may_apply):
             assert may_apply() is True
@@ -1619,17 +1597,27 @@ def test_publication_terminal_status_is_monotonic_and_duplicate_callbacks_do_not
     request = invocation()
     record = controller.request_publication(service, request, "draft-1")
     review_view = controller.view(record)
-    assert "prepared inspect draft-1 --json" in review_view.detail
-    assert "prepared save <payload.json> --json" in review_view.detail
+    assert "prepared inspect draft-1 --json" in review_view.to_text()
+    assert "prepared save <payload.json> --json" in review_view.to_text()
     controller.bind_delivery(record["id"], request, "publication-card")
     callback = invocation(message_id="publication-card")
+
+    inspected = controller.act(service, record["id"], callback, "inspect")
+    inspection_view = controller.view(inspected)
+    assert inspection_view.summary == "SKILL.md - 1/1"
+    assert "# Reviewed publication" in inspection_view.items[0].detail
+    assert "Share with" not in [action.label for action in inspection_view.actions]
+    assert [action.label for action in inspection_view.actions] == ["Looks good."]
+
+    pending = controller.act(service, record["id"], callback, "back")
+    assert pending["inspection"] is None
     pending = controller.act(service, record["id"], callback, "confirm")
     assert controller.view(pending).summary == "Pending moderation"
 
     published = controller.act(service, record["id"], callback, "publication.status")
     duplicate = controller.act(service, record["id"], callback, "publication.status")
 
-    assert controller.view(published).summary == "Published"
+    assert controller.view(published).summary == "Shared!"
     assert duplicate["result"]["publication_state"] == "published"
     assert service.reopens == 1
 
@@ -1641,18 +1629,7 @@ def test_publication_submit_fails_closed_when_native_invocation_disconnects(tmp_
             self.submits = 0
 
         def publication_review(self, draft_id):
-            return {
-                "draft_id": draft_id, "receipt": "publication-receipt",
-                "description": "Exact description", "files": [],
-                "hashes": {
-                    "content": "sha256:" + "f" * 64,
-                    "author_description": "sha256:" + "a" * 64,
-                    "package_manifest": "sha256:" + "b" * 64,
-                },
-                "security_check": {"status": "pass"},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "open", "policy_version": 7,
-            }
+            return publication_review(draft_id, files=[], publication_mode="open")
 
         def publication_submit(self, _receipt, *, may_apply):
             if may_apply() is not True:
@@ -1693,18 +1670,7 @@ def test_publication_callback_rechecks_invocation_after_owner_reread(tmp_path: P
             return dict(self.owner)
 
         def publication_review(self, draft_id):
-            return {
-                "draft_id": draft_id, "receipt": "publication-receipt",
-                "description": "Exact description", "files": [],
-                "hashes": {
-                    "content": "sha256:" + "f" * 64,
-                    "author_description": "sha256:" + "a" * 64,
-                    "package_manifest": "sha256:" + "b" * 64,
-                },
-                "security_check": {"status": "pass"},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "open", "policy_version": 7,
-            }
+            return publication_review(draft_id, files=[], publication_mode="open")
 
         def publication_submit(self, _receipt, *, may_apply):
             if may_apply() is not True:
@@ -1738,18 +1704,7 @@ def test_rejected_publication_is_terminal_on_original_card(
 ):
     class PublicationService(Service):
         def publication_review(self, draft_id):
-            return {
-                "draft_id": draft_id, "receipt": "publication-receipt",
-                "description": "Exact description", "files": [],
-                "hashes": {
-                    "content": "sha256:" + "f" * 64,
-                    "author_description": "sha256:" + "a" * 64,
-                    "package_manifest": "sha256:" + "b" * 64,
-                },
-                "security_check": {"status": "pass"},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "moderated", "policy_version": 7,
-            }
+            return publication_review(draft_id, files=[])
 
         def publication_submit(self, _receipt, *, may_apply):
             assert may_apply() is True
@@ -1778,4 +1733,5 @@ def test_rejected_publication_is_terminal_on_original_card(
 
     assert view.summary == summary
     assert [action.label for action in view.actions] == []
-    assert "moderation" in view.detail.lower() or "requested changes" in view.detail.lower()
+    text = view.to_text().lower()
+    assert "moderation" in text or "requested changes" in text

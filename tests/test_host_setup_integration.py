@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
-import pytest
+from host_probe_support import (
+    immutable_host_checkout,
+    isolated_host_environment,
+    run_host_python,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -292,15 +293,6 @@ print("reopened CLI setup state passed")
 '''
 
 
-def _git(agent_path: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", *arguments], cwd=agent_path, capture_output=True,
-        text=True, timeout=10, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
-
-
 def _environment(tmp_path: Path, agent_path: Path, marker_dir: Path) -> dict[str, str]:
     profile = tmp_path / "profile"
     profile.mkdir()
@@ -308,62 +300,44 @@ def _environment(tmp_path: Path, agent_path: Path, marker_dir: Path) -> dict[str
         "terminal:\n  backend: local\napprovals:\n  mode: manual\n",
         encoding="utf-8",
     )
-    paths = [str(PROJECT_ROOT), str(agent_path)]
-    if dependencies := os.environ.get("WISDOM_HOST_DEPENDENCIES"):
-        paths.append(dependencies)
-    return {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(tmp_path),
-        "HERMES_HOME": str(profile),
-        "HERMES_INTERACTIVE": "1",
-        "HERMES_SESSION_ID": "synthetic-wisdom-cli-session",
-        "WISDOM_AGENT_DIR": str(agent_path),
-        "WISDOM_MARKER_DIR": str(marker_dir),
-        "WISDOM_STATE_DIR": str(tmp_path / "wisdom-state"),
-        "PYTHONPATH": os.pathsep.join(paths),
-        "PYTHONNOUSERSITE": "1",
-    }
+    environment = isolated_host_environment(
+        home=tmp_path,
+        hermes_home=profile,
+        host_path=agent_path,
+        python_paths=(PROJECT_ROOT, agent_path),
+    )
+    environment.update(
+        {
+            "HERMES_INTERACTIVE": "1",
+            "HERMES_SESSION_ID": "synthetic-wisdom-cli-session",
+            "WISDOM_MARKER_DIR": str(marker_dir),
+            "WISDOM_STATE_DIR": str(tmp_path / "wisdom-state"),
+        }
+    )
+    return environment
 
 
 def test_clean_host_background_setup_is_single_spawn_and_restart_safe(tmp_path: Path) -> None:
     """Exercise real guards, registry ownership, ack loss, and a fresh process."""
 
-    agent_dir = os.environ.get("WISDOM_AGENT_DIR")
-    if not agent_dir:
-        pytest.skip("Set WISDOM_AGENT_DIR to the unmodified Agent checkout")
-    agent_path = Path(agent_dir).resolve()
-    assert _git(agent_path, "rev-parse", "HEAD") == EXPECTED_HOST_REVISION
-    assert _git(agent_path, "status", "--porcelain") == ""
-
-    marker_dir = tmp_path / "markers"
-    marker_dir.mkdir()
-    environment = _environment(tmp_path, agent_path, marker_dir)
-    interpreter = os.environ.get("WISDOM_HOST_PYTHON", sys.executable)
-    first = subprocess.run(
-        [interpreter, "-c", FIRST_PROBE], cwd=marker_dir, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert first.returncode == 0, f"{first.stderr}\nstdout:\n{first.stdout}"
-    assert first.stdout.strip() == "clean-host Wisdom background setup boundary passed"
-
-    second = subprocess.run(
-        [interpreter, "-c", SECOND_PROBE], cwd=marker_dir, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert second.returncode == 0, f"{second.stderr}\nstdout:\n{second.stdout}"
-    assert second.stdout.strip().startswith("fresh-process status=")
-    assert (marker_dir / "attempts").read_text(encoding="utf-8") == "x"
-
-    vertical = subprocess.run(
-        [interpreter, "-c", VERTICAL_PROBE], cwd=marker_dir, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert vertical.returncode == 0, f"{vertical.stderr}\nstdout:\n{vertical.stdout}"
-    assert vertical.stdout.strip() == "CLI install-through-setup journey passed"
-    reopened = subprocess.run(
-        [interpreter, "-c", REOPEN_PROBE], cwd=marker_dir, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert reopened.returncode == 0, f"{reopened.stderr}\nstdout:\n{reopened.stdout}"
-    assert reopened.stdout.strip() == "reopened CLI setup state passed"
-    assert _git(agent_path, "status", "--porcelain") == ""
+    with immutable_host_checkout(EXPECTED_HOST_REVISION) as agent_path:
+        marker_dir = tmp_path / "markers"
+        marker_dir.mkdir()
+        environment = _environment(tmp_path, agent_path, marker_dir)
+        first = run_host_python(
+            ["-c", FIRST_PROBE], cwd=marker_dir, environment=environment, timeout=30
+        )
+        assert first.stdout.strip() == "clean-host Wisdom background setup boundary passed"
+        second = run_host_python(
+            ["-c", SECOND_PROBE], cwd=marker_dir, environment=environment, timeout=30
+        )
+        assert second.stdout.strip().startswith("fresh-process status=")
+        assert (marker_dir / "attempts").read_text(encoding="utf-8") == "x"
+        vertical = run_host_python(
+            ["-c", VERTICAL_PROBE], cwd=marker_dir, environment=environment, timeout=30
+        )
+        assert vertical.stdout.strip() == "CLI install-through-setup journey passed"
+        reopened = run_host_python(
+            ["-c", REOPEN_PROBE], cwd=marker_dir, environment=environment, timeout=30
+        )
+        assert reopened.stdout.strip() == "reopened CLI setup state passed"

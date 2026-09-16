@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from review_test_support import _content
 
 from hermes_wisdom_plugin.contract import org_directory_name
 from hermes_wisdom_plugin.install_execution import InstallExecutor
@@ -477,7 +478,7 @@ def real_executor(tmp_path):
     store.record_install({
         "skill_id": "skill-1", "org_id": owner["organization_id"],
         "slug": "managed-skill", "version": 1,
-        "content_hash": client._content(client.files[1]).content_hash,
+        "content_hash": _content(client.files[1]).content_hash,
         "baseline": baseline, "target_path": str(target),
         "update_mode": "MANUAL", "state": "active", "owner": owner,
     })
@@ -623,7 +624,7 @@ def test_native_recovery_reconciles_real_executor_after_post_apply_inspection_lo
                 raise OSError("post-apply inspection response lost")
             return {
                 "skill_id": skill_id, "version": version,
-                "content_hash": client._content(client.files[2]).content_hash,
+                "content_hash": _content(client.files[2]).content_hash,
                 "state": "setup_required", "ready_to_use": None,
             }
 

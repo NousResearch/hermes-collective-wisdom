@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from native_test_support import native_invocation, owner as owner_fixture, publication_review
 
 from hermes_wisdom_plugin.client import (
     AgentLedNotificationDefaults,
@@ -26,7 +27,6 @@ from hermes_wisdom_plugin.client_delivery import ClientDeliveryResponse
 from hermes_wisdom_plugin.delivery import DeliveryReceipt
 from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox
 from hermes_wisdom_plugin.mediation_store import MediationStore
-from hermes_wisdom_plugin.native_context import NativeInvocation
 from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime, assessment_view
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
 from hermes_wisdom_plugin.native_slack import callback_invocation as slack_invocation
@@ -35,10 +35,7 @@ from hermes_wisdom_plugin.qualification import snapshot_tree
 from hermes_wisdom_plugin.store import WisdomStore
 
 
-OWNER = {
-    "profile_name": "default", "profile_home": "/tmp/profile", "account_id": "member",
-    "organization_id": "org", "base_url": "https://g.invalid", "installation_id": "install",
-}
+OWNER = owner_fixture()
 
 
 class Service:
@@ -181,11 +178,7 @@ class SlackAdapter:
 
 
 def invocation(adapter):
-    return NativeInvocation(
-        platform="slack", profile="default", chat_type="dm", chat_id="D1",
-        actor_id="U1", actor_name="Shannon", thread_id="", scope_id="W1",
-        message_id="request-1", session_key="slack:W1:D1:U1", adapter=adapter,
-    )
+    return native_invocation(adapter, thread_id="")
 
 
 def callback_body():
@@ -294,7 +287,7 @@ def test_candidate_assessment_handoff_uses_exact_event_inspection():
     assert "identity=candidate-event-id" in view.notice
     assert "/wisdom suggest" not in view.notice
     assert [(action.label, action.action) for action in view.actions] == [
-        ("Not Now", "candidate_defer")
+        ("Maybe Later", "candidate_defer")
     ]
     assert view.items[0].actions == []
 
@@ -386,7 +379,8 @@ def test_native_candidate_not_now_uses_snapshot_once_and_edits_original(
         app = SlackApp()
         runtime.wire_slack(app, adapter)
         row = queue.assessments("org")[0]
-        button = _slack_action(slack_blocks(assessment_view(row), assessment_id), "Not Now")
+        original_blocks = slack_blocks(assessment_view(row), assessment_id)
+        button = _slack_action(original_blocks, "Maybe Later")
 
         if late_close == "snapshot":
             from hermes_wisdom_plugin import qualification  # pylint: disable=import-outside-toplevel
@@ -410,9 +404,11 @@ def test_native_candidate_not_now_uses_snapshot_once_and_edits_original(
         if source_changed:
             (local / "SKILL.md").write_text("# Changed candidate\n", encoding="utf-8")
         app.client.fail_edit = edit_fails
+        body = callback_body()
+        body["message"]["blocks"] = original_blocks
         action = runtime._slack_callback(
             app, adapter, runtime._leases[("slack", id(adapter))],
-            callback_body(), button,
+            body, button,
         )
         if source_changed or late_close:
             with pytest.raises(PermissionError):
@@ -450,8 +446,9 @@ def test_native_candidate_not_now_uses_snapshot_once_and_edits_original(
         assert len(app.client.edits) == 1
         assert app.client.edits[0]["ts"] == "card-1"
         if not edit_fails:
-            assert "Candidate deferred" in app.client.edits[0]["text"]
-            assert "Not Now" not in app.client.edits[0]["text"]
+            assert app.client.edits[0]["blocks"] == [
+                block for block in original_blocks if block["type"] != "actions"
+            ]
 
         app.client.fail_edit = False
         await runtime._slack_callback(
@@ -938,7 +935,10 @@ def test_native_install_review_is_hash_bound_and_setup_remains_separate(tmp_path
             )
 
         await act(review)
-        approve = _slack_action(app.client.edits[-1]["blocks"], "Approve exact package")
+        back = _slack_action(app.client.edits[-1]["blocks"], "Looks good.")
+        await act(back)
+        assert Service.installs == 0
+        approve = _slack_action(app.client.edits[-1]["blocks"], "Install")
         await act(approve)
         assert Service.installs == 1
         assert "Setup queued" in app.client.edits[-1]["text"]
@@ -953,20 +953,18 @@ def test_native_publication_uses_one_confirmation_and_original_card(tmp_path: Pa
         submits = 0
 
         def publication_review(self, draft_id):
-            return {
-                "draft_id": draft_id, "receipt": "publication-receipt",
-                "description": "Share exact reviewed behavior.",
-                "files": [{"path": "SKILL.md", "hash": "a" * 64}],
-                "hashes": {
+            return publication_review(
+                draft_id,
+                description="Share exact reviewed behavior.",
+                files=[{"path": "SKILL.md", "hash": "a" * 64}],
+                hashes={
                     "content": "sha256:" + "b" * 64,
                     "author_description": "sha256:" + "c" * 64,
                     "package_manifest": "sha256:" + "d" * 64,
                 },
-                "security_check": {"status": "pass", "summary": "No known matches detected."},
-                "professionalism_check": {"status": "pass"},
-                "publication_mode": "moderated", "policy_version": 7,
-                "notice": "Nothing has been uploaded.",
-            }
+                security_check={"status": "pass", "summary": "No known matches detected."},
+                notice="Nothing has been uploaded.",
+            )
 
         def publication_submit(self, receipt, *, may_apply):
             assert may_apply() is True
@@ -1003,7 +1001,7 @@ def test_native_publication_uses_one_confirmation_and_original_card(tmp_path: Pa
         adapter = SlackAdapter()
         runtime.wire_slack(app, adapter)
         assert await runtime.begin_publication(invocation(adapter), "local-draft") is None
-        confirm = _slack_action(app.client.posts[-1]["blocks"], "Yes, share")
+        confirm = _slack_action(app.client.posts[-1]["blocks"], "Share My Skill")
 
         async def act(button):
             await runtime._slack_callback(  # pylint: disable=protected-access
@@ -1019,7 +1017,7 @@ def test_native_publication_uses_one_confirmation_and_original_card(tmp_path: Pa
         await act(refresh)
         assert PublicationService.submits == 1
         assert app.client.edits[-1]["ts"] == "card-1"
-        assert "Published" in app.client.edits[-1]["text"]
+        assert "Shared!" in app.client.edits[-1]["text"]
 
     asyncio.run(scenario())
 
@@ -1076,12 +1074,16 @@ def test_concurrent_slack_callbacks_leave_newest_durable_view_on_card(tmp_path: 
         async def ack():
             return None
 
+        body = callback_body()
+        body["message"].update({
+            "blocks": app.client.posts[0]["blocks"], "text": app.client.posts[0]["text"],
+        })
         first = asyncio.create_task(
-            app.handler_for(review["action_id"])(ack, callback_body(), review)
+            app.handler_for(review["action_id"])(ack, body, review)
         )
         await asyncio.wait_for(first_edit_entered.wait(), timeout=1)
         second = asyncio.create_task(
-            app.handler_for(defer["action_id"])(ack, callback_body(), defer)
+            app.handler_for(defer["action_id"])(ack, body, defer)
         )
         await asyncio.sleep(0.05)
         assert not second.done(), "newer callback must wait for the active card edit"
@@ -1090,7 +1092,8 @@ def test_concurrent_slack_callbacks_leave_newest_durable_view_on_card(tmp_path: 
 
         record_id = review["value"].split(":")[-1]
         assert runtime.reviews.load(record_id)["state"] == "deferred"
-        assert "Deferred on this surface" in app.client.edits[-1]["text"]
+        assert app.client.edits[-1]["text"] == app.client.posts[0]["text"]
+        assert not any(block.get("type") == "actions" for block in app.client.edits[-1]["blocks"])
 
     asyncio.run(scenario())
 

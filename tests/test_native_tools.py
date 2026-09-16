@@ -4,6 +4,8 @@ import json
 
 from types import SimpleNamespace
 
+import pytest
+
 from hermes_wisdom_plugin.native_tools import NativeModelTools
 
 
@@ -79,6 +81,34 @@ def test_candidate_is_private_and_skill_version_is_exact():
     )) == {"kind": "skill", "skill_id": "skill-1", "version": 7}
     assert ("candidate", "event-1") in service.calls
     assert ("skill", "skill-1", 7) in service.calls
+
+
+@pytest.mark.parametrize("identity", ["skill-1", "absent"])
+def test_installed_inspection_selects_only_the_requested_skill(identity):
+    """Installed inspection preserves exact rows and separate setup status."""
+    model_tools, service = tools()
+    result = json.loads(model_tools.inspect({
+        "kind": "installed", "identity": identity, "version": 2,
+    }))
+    assert result == {
+        "installed": [{"skill_id": "skill-1", "version": 2}] if identity == "skill-1" else [],
+        "setup": {"skill_id": identity, "version": 2, "ready_to_use": False},
+    }
+    assert service.calls == [("installed",), ("setup", identity, 2), ("close",)]
+
+
+@pytest.mark.parametrize("installed", [
+    {"installations": [{"skill_id": "skill-1"}]},
+    [{"id": "skill-1"}],
+    [None],
+])
+def test_installed_contract_errors_do_not_return_partial_success(monkeypatch, installed):
+    """Internal contract drift surfaces as an error and still closes the service."""
+    model_tools, service = tools()
+    monkeypatch.setattr(service, "list_installations", lambda: installed)
+    with pytest.raises((KeyError, TypeError)):
+        model_tools.inspect({"kind": "installed", "identity": "skill-1", "version": 2})
+    assert service.calls == [("close",)]
 
 
 def test_present_reports_queued_not_presented():

@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 
 import pytest
+from review_test_support import _content
 
 from hermes_wisdom_plugin.automatic_updates import AutomaticUpdateMaintenance
 from hermes_wisdom_plugin.commands import build_parser, run_cli
@@ -43,7 +44,7 @@ def _automatic(tmp_path, mode="AUTO_WITH_NOTICE"):
     store.record_install({
         "skill_id": "skill-1", "org_id": owner["organization_id"],
         "slug": "managed-skill", "version": 1,
-        "content_hash": client._content(client.files[1]).content_hash,
+        "content_hash": _content(client.files[1]).content_hash,
         "baseline": baseline, "target_path": str(target),
         "update_mode": mode, "state": "active", "owner": owner,
     })

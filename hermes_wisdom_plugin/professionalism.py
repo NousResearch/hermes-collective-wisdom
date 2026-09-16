@@ -22,7 +22,7 @@ CHECK_LABELS = {
     "sexual_or_graphic_language": "Sexual or graphic language",
     "manipulative_or_spam": "Manipulative, deceptive, or spam-like wording",
 }
-PASS_TEXT = "Safe to share at work ✓ (no inappropriate content found)"
+PASS_TEXT = "✅ Safe for work (no inappropriate content detected)"
 ADVISORY_TEXT = "Needs a look before sharing at work (possible inappropriate content)"
 
 

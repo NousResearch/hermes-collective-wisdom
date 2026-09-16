@@ -1,4 +1,8 @@
-"""Thin owner-private coordinator for manually selected local contributions."""
+"""Thin owner-private coordinator for manually selected local contributions.
+
+Teammate-usefulness author-copy wording is adapted from `hbizi`'s work in
+shannonsands/hermes-agent#5 (d68368b7), under this repository's MIT license.
+"""
 
 from __future__ import annotations
 
@@ -85,9 +89,11 @@ def _draft_author_description(skill_markdown: str, llm: Any) -> str:
                     "role": "system",
                     "content": (
                         "Write one concise, outcome-oriented plain-text description of this "
-                        "Hermes skill. Do not claim quality, safety, usage, popularity, or "
-                        "platform verification. Return only the description, at most 600 "
-                        "characters."
+                        "Hermes skill. Explain in simple terms what this skill does and why it "
+                        "would be useful to teammates of the current user. Ground the description "
+                        "only in the provided skill; do not add unsupported claims or private "
+                        "details. Do not claim quality, safety, usage, popularity, or platform "
+                        "verification. Return only the description, at most 600 characters."
                     ),
                 },
                 {"role": "user", "content": skill_markdown[:24_000]},

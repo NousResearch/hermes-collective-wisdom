@@ -1,7 +1,7 @@
-# Target Architecture
+# Architecture
 
-This is an implementation map, not a description of completed functionality.
-Milestone 0 has only an inert entrypoint and no runtime dependencies.
+The [feature tracker](FEATURES.md) distinguishes implemented workflows from
+planned features and records automated and live acceptance separately.
 
 ## Ownership
 
@@ -12,10 +12,8 @@ Milestone 0 has only an inert entrypoint and no runtime dependencies.
 | Surface adapters | Commands, native cards, callback translation, UI rendering | Independent copies of install/publish business logic |
 | Gateway/Portal | Scoped remote access, content storage, publication policy, moderation, manager email | Local user setup approval or active-session guessing |
 
-The repository will keep a thin native registration entrypoint and a Python
-package with domain/workflow, storage, host integration, and surface adapters.
-Do not introduce those layers as empty abstractions in milestone 0; add modules
-as their feature slices need them. Preserve relative imports for native loading.
+The native registration entrypoint delegates to the Python workflow, storage,
+host-integration and surface adapters. Relative imports support native loading.
 
 ## Data Flow
 

@@ -182,6 +182,33 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     assert overlay != source
 
 
+def test_generated_author_copy_explains_teammate_usefulness_without_unsupported_claims(
+    tmp_path: Path,
+):
+    profile = tmp_path / "profile"
+    source = make_skill(profile)
+    binding = owner(profile)
+    llm = RecordingLlm()
+    value = ContributionReviewer(
+        WisdomStore(tmp_path / "state"),
+        Host(profile / "skills", frontmatter={"name": "reviewed-skill"}),
+        lambda: dict(binding),
+        llm=llm,
+    )
+
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+
+    author_call = next(
+        call for call in llm.calls if call.get("schema_name") == "author_description"
+    )
+    prompt = author_call["messages"][0]["content"]
+    assert "simple terms what this skill does" in prompt
+    assert "why it would be useful to teammates" in prompt
+    assert "unsupported claims" in prompt
+    assert result["drafted_description"] == "Draft incident reviews with a repeatable checklist."
+    assert (source / "SKILL.md").is_file()
+
+
 def test_saved_prepared_edit_updates_exact_hashes_without_mutating_source(tmp_path: Path):
     value, source, _binding = reviewer(tmp_path)
     original = (source / "SKILL.md").read_bytes()

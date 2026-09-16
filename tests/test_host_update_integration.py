@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
-import pytest
+from host_probe_support import (
+    immutable_host_checkout,
+    isolated_host_environment,
+    run_host_python,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_HOST_REVISION = "bf51fee548ceaa28d2c299a41c0f65066c04c061"
@@ -271,51 +272,33 @@ print("fresh-process updated setup state passed")
 '''
 
 
-def _git(agent_path: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", *arguments], cwd=agent_path, capture_output=True,
-        text=True, timeout=10, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
-
-
 def test_pinned_host_manual_update_preserves_edits_and_reopens_safely(tmp_path: Path):
     """Exercise U1 through the pinned host without touching a live profile."""
-    agent_dir = os.environ.get("WISDOM_AGENT_DIR")
-    if not agent_dir:
-        pytest.skip("Set WISDOM_AGENT_DIR to the unmodified Agent checkout")
-    agent_path = Path(agent_dir).resolve()
-    assert _git(agent_path, "rev-parse", "HEAD") == EXPECTED_HOST_REVISION
-    assert _git(agent_path, "status", "--porcelain") == ""
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    (profile / "config.yaml").write_text(
-        "terminal:\n  backend: local\napprovals:\n  mode: manual\n", encoding="utf-8"
-    )
-    dependencies = os.environ.get("WISDOM_HOST_DEPENDENCIES")
-    paths = [str(PROJECT_ROOT), str(agent_path)]
-    if dependencies:
-        paths.append(dependencies)
-    environment = {
-        "PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path),
-        "HERMES_HOME": str(profile), "HERMES_INTERACTIVE": "1",
-        "HERMES_SESSION_ID": "wisdom-update-integration",
-        "WISDOM_AGENT_DIR": str(agent_path),
-        "WISDOM_STATE_DIR": str(tmp_path / "state"),
-        "PYTHONPATH": os.pathsep.join(paths), "PYTHONNOUSERSITE": "1",
-    }
-    interpreter = os.environ.get("WISDOM_HOST_PYTHON", sys.executable)
-    first = subprocess.run(
-        [interpreter, "-c", UPDATE_PROBE], cwd=tmp_path, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert first.returncode == 0, f"{first.stderr}\nstdout:\n{first.stdout}"
-    assert first.stdout.strip() == "pinned-host CLI update journey passed"
-    reopened = subprocess.run(
-        [interpreter, "-c", REOPEN_PROBE], cwd=tmp_path, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert reopened.returncode == 0, f"{reopened.stderr}\nstdout:\n{reopened.stdout}"
-    assert reopened.stdout.strip() == "fresh-process updated setup state passed"
-    assert _git(agent_path, "status", "--porcelain") == ""
+    with immutable_host_checkout(EXPECTED_HOST_REVISION) as agent_path:
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        (profile / "config.yaml").write_text(
+            "terminal:\n  backend: local\napprovals:\n  mode: manual\n",
+            encoding="utf-8",
+        )
+        environment = isolated_host_environment(
+            home=tmp_path,
+            hermes_home=profile,
+            host_path=agent_path,
+            python_paths=(PROJECT_ROOT, agent_path),
+        )
+        environment.update(
+            {
+                "HERMES_INTERACTIVE": "1",
+                "HERMES_SESSION_ID": "wisdom-update-integration",
+                "WISDOM_STATE_DIR": str(tmp_path / "state"),
+            }
+        )
+        first = run_host_python(
+            ["-c", UPDATE_PROBE], cwd=tmp_path, environment=environment, timeout=30
+        )
+        assert first.stdout.strip() == "pinned-host CLI update journey passed"
+        reopened = run_host_python(
+            ["-c", REOPEN_PROBE], cwd=tmp_path, environment=environment, timeout=30
+        )
+        assert reopened.stdout.strip() == "fresh-process updated setup state passed"

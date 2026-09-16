@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
-import pytest
+from host_probe_support import (
+    immutable_host_checkout,
+    isolated_host_environment,
+    run_host_python,
+    write_no_auth_refresh_sitecustomize,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -618,71 +620,28 @@ finally:
 '''
 
 
-def _git(agent_path: Path, *arguments: str) -> str:
-    """Read one fact from the pinned, unmodified host checkout."""
-
-    result = subprocess.run(
-        ["git", *arguments],
-        cwd=agent_path,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert result.returncode == 0, f"{result.stderr}\nstdout:\n{result.stdout}"
-    return result.stdout.strip()
-
-
 def test_clean_host_manual_install_lifecycle(tmp_path: Path) -> None:
     """Plan, apply, discover and uninstall through an unmodified Hermes host."""
 
-    agent_dir = os.environ.get("WISDOM_AGENT_DIR")
-    if not agent_dir:
-        pytest.skip("Set WISDOM_AGENT_DIR to the unmodified Agent checkout")
-    agent_path = Path(agent_dir).resolve()
-    assert (agent_path / "hermes_cli" / "plugins.py").is_file()
-    assert _git(agent_path, "rev-parse", "HEAD") == EXPECTED_HOST_REVISION
-    assert _git(agent_path, "status", "--porcelain") == ""
-
-    profile = tmp_path / ".hermes" / "profiles" / "wisdom-install-probe"
-    plugins = profile / "plugins"
-    plugins.mkdir(parents=True)
-    (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
-    (profile / "config.yaml").write_text(
-        f"plugins:\n  enabled:\n    - {PLUGIN_ID}\n", encoding="utf-8"
-    )
-
-    refresh_guard = tmp_path / "refresh-guard"
-    refresh_guard.mkdir()
-    (refresh_guard / "sitecustomize.py").write_text(
-        "from hermes_cli import auth\n"
-        "def forbidden_refresh(*_args, **_kwargs):\n"
-        "    raise AssertionError('Wisdom commands must not refresh credentials')\n"
-        "auth.resolve_nous_runtime_credentials = forbidden_refresh\n",
-        encoding="utf-8",
-    )
-
-    paths = [str(refresh_guard), str(PROJECT_ROOT), str(agent_path)]
-    if dependencies := os.environ.get("WISDOM_HOST_DEPENDENCIES"):
-        paths.append(dependencies)
-    environment = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(tmp_path),
-        "HERMES_HOME": str(profile),
-        "WISDOM_AGENT_DIR": str(agent_path),
-        "WISDOM_PLUGIN_ROOT": str(PROJECT_ROOT),
-        "PYTHONPATH": os.pathsep.join(paths),
-        "PYTHONNOUSERSITE": "1",
-    }
-    result = subprocess.run(
-        [os.environ.get("WISDOM_HOST_PYTHON", sys.executable), "-c", PROBE],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, f"{result.stderr}\nstdout:\n{result.stdout}"
-    assert result.stdout.strip() == "clean-host Wisdom manual install integration passed"
-    assert _git(agent_path, "status", "--porcelain") == ""
+    with immutable_host_checkout(
+        EXPECTED_HOST_REVISION, required_path="hermes_cli/plugins.py"
+    ) as agent_path:
+        profile = tmp_path / ".hermes" / "profiles" / "wisdom-install-probe"
+        plugins = profile / "plugins"
+        plugins.mkdir(parents=True)
+        (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
+        (profile / "config.yaml").write_text(
+            f"plugins:\n  enabled:\n    - {PLUGIN_ID}\n", encoding="utf-8"
+        )
+        refresh_guard = write_no_auth_refresh_sitecustomize(tmp_path)
+        environment = isolated_host_environment(
+            home=tmp_path,
+            hermes_home=profile,
+            host_path=agent_path,
+            python_paths=(refresh_guard, PROJECT_ROOT, agent_path),
+        )
+        environment["WISDOM_PLUGIN_ROOT"] = str(PROJECT_ROOT)
+        result = run_host_python(
+            ["-c", PROBE], cwd=tmp_path, environment=environment, timeout=120
+        )
+        assert result.stdout.strip() == "clean-host Wisdom manual install integration passed"

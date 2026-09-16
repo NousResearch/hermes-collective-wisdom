@@ -163,6 +163,11 @@ def test_shared_pending_becomes_ready_with_exact_schema_route_and_bounded_contex
         "kind": "agent_assessed", "provider": "active-provider", "model": "active-model",
     }
     call = llm.calls[0]
+    assert "what the skill does" in call["instructions"]
+    assert "why it could help this user's known work" in call["instructions"]
+    assert "plain, concise prose" in call["instructions"]
+    assert "Never invent workload or organization details" in call["instructions"]
+    assert "Do not repeat routine passing checks" in call["instructions"]
     assert call["task"] is None
     assert call["schema_name"] == "collective_wisdom.recommendations"
     assert call["temperature"] == 0.0 and call["max_tokens"] == 2400

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+from host_probe_support import (
+    immutable_host_checkout,
+    isolated_host_environment,
+    run_host_python,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -564,100 +567,77 @@ asyncio.run(main())
 '''
 
 
-def _git(path: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", *arguments], cwd=path, capture_output=True, text=True,
-        timeout=10, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
-
-
 def test_pinned_host_native_admission_and_lifecycle(tmp_path: Path) -> None:
     """Use real discovery, gateway admission/dispatch, bounded hooks and ctx services."""
-    agent_dir = os.environ.get("WISDOM_AGENT_DIR")
-    if not agent_dir:
-        pytest.skip("Set WISDOM_AGENT_DIR to the unmodified Agent checkout")
-    agent_path = Path(agent_dir).resolve()
-    assert _git(agent_path, "rev-parse", "HEAD") == EXPECTED_HOST_REVISION
-    assert _git(agent_path, "status", "--porcelain") == ""
-
-    profile = tmp_path / ".hermes" / "profiles" / "default"
-    plugins = profile / "plugins"
-    plugins.mkdir(parents=True)
-    (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
-    (profile / "config.yaml").write_text(
-        f"plugins:\n  enabled:\n    - {PLUGIN_ID}\n  hook_callback_timeout: 5\n"
-        "model:\n  provider: custom:fallback\n  default: fallback-model\n"
-        "fallback_providers:\n"
-        "  - provider: custom:fallback\n"
-        "    model: fallback-model\n"
-        "    base_url: https://fallback.invalid/v1\n"
-        "custom_providers:\n"
-        "  - name: fallback\n"
-        "    base_url: https://fallback.invalid/v1\n"
-        "    api_key: fallback-key\n"
-        "    model: fallback-model\n",
-        encoding="utf-8",
-    )
-    paths = [str(PROJECT_ROOT), str(agent_path)]
-    if dependencies := os.environ.get("WISDOM_HOST_DEPENDENCIES"):
-        paths.append(dependencies)
-    environment = {
-        "PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path),
-        "HERMES_HOME": str(profile), "WISDOM_PLUGIN_ROOT": str(PROJECT_ROOT),
-        "WISDOM_AGENT_DIR": str(agent_path), "PYTHONPATH": os.pathsep.join(paths),
-        "HERMES_SYNC_BASE_URL": "https://gateway.invalid",
-        "PYTHONNOUSERSITE": "1", "SLACK_ALLOWED_USERS": "U1,U2",
-    }
-    interpreter = os.environ.get("WISDOM_HOST_PYTHON", sys.executable)
-    result = subprocess.run(
-        [interpreter, "-c", PROBE], cwd=tmp_path, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert result.returncode == 0, f"{result.stderr}\nstdout:\n{result.stdout}"
-    assert result.stdout.strip() == "pinned-host native admission/lifecycle passed"
-    assert _git(agent_path, "status", "--porcelain") == ""
+    with immutable_host_checkout(EXPECTED_HOST_REVISION) as agent_path:
+        profile = tmp_path / ".hermes" / "profiles" / "default"
+        plugins = profile / "plugins"
+        plugins.mkdir(parents=True)
+        (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
+        (profile / "config.yaml").write_text(
+            f"plugins:\n  enabled:\n    - {PLUGIN_ID}\n  hook_callback_timeout: 5\n"
+            "model:\n  provider: custom:fallback\n  default: fallback-model\n"
+            "fallback_providers:\n"
+            "  - provider: custom:fallback\n"
+            "    model: fallback-model\n"
+            "    base_url: https://fallback.invalid/v1\n"
+            "custom_providers:\n"
+            "  - name: fallback\n"
+            "    base_url: https://fallback.invalid/v1\n"
+            "    api_key: fallback-key\n"
+            "    model: fallback-model\n",
+            encoding="utf-8",
+        )
+        environment = isolated_host_environment(
+            home=tmp_path,
+            hermes_home=profile,
+            host_path=agent_path,
+            python_paths=(PROJECT_ROOT, agent_path),
+        )
+        environment.update(
+            {
+                "WISDOM_PLUGIN_ROOT": str(PROJECT_ROOT),
+                "HERMES_SYNC_BASE_URL": "https://gateway.invalid",
+                "SLACK_ALLOWED_USERS": "U1,U2",
+            }
+        )
+        result = run_host_python(
+            ["-c", PROBE], cwd=tmp_path, environment=environment, timeout=30
+        )
+        assert result.stdout.strip() == "pinned-host native admission/lifecycle passed"
 
 
 @pytest.mark.parametrize("platform", ["slack", "telegram"])
 def test_pinned_host_real_sdk_native_journey(tmp_path: Path, platform: str) -> None:
     """Dispatch the full update/setup journey through each real platform SDK."""
-    agent_dir = os.environ.get("WISDOM_AGENT_DIR")
-    if not agent_dir:
-        pytest.skip("Set WISDOM_AGENT_DIR to the unmodified Agent checkout")
-    agent_path = Path(agent_dir).resolve()
-    assert _git(agent_path, "rev-parse", "HEAD") == EXPECTED_HOST_REVISION
-    assert _git(agent_path, "status", "--porcelain") == ""
-    profile = tmp_path / platform / "profile"
-    plugins = profile / "plugins"
-    plugins.mkdir(parents=True)
-    (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
-    (profile / "config.yaml").write_text(
-        f"plugins:\n  enabled:\n    - {PLUGIN_ID}\n"
-        "terminal:\n  backend: local\napprovals:\n  mode: manual\n",
-        encoding="utf-8",
-    )
-    paths = [str(PROJECT_ROOT), str(agent_path)]
-    if dependencies := os.environ.get("WISDOM_HOST_DEPENDENCIES"):
-        paths.append(dependencies)
-    environment = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(tmp_path),
-        "HERMES_HOME": str(profile),
-        "WISDOM_PLUGIN_ROOT": str(PROJECT_ROOT),
-        "PYTHONPATH": os.pathsep.join(paths),
-        "PYTHONNOUSERSITE": "1",
-        "SLACK_ALLOWED_USERS": "U1",
-        "TELEGRAM_ALLOWED_USERS": "1",
-    }
-    interpreter = os.environ.get("WISDOM_HOST_PYTHON", sys.executable)
-    probe = PROJECT_ROOT / "tests" / "native_sdk_journey_probe.py"
-    result = subprocess.run(
-        [interpreter, str(probe), platform, str(tmp_path / platform)],
-        cwd=tmp_path, env=environment, capture_output=True, text=True,
-        timeout=60, check=False,
-    )
-    assert result.returncode == 0, f"{result.stderr}\nstdout:\n{result.stdout}"
-    assert result.stdout.strip() == f"real {platform} SDK journey passed"
-    assert _git(agent_path, "status", "--porcelain") == ""
+    with immutable_host_checkout(EXPECTED_HOST_REVISION) as agent_path:
+        profile = tmp_path / platform / "profile"
+        plugins = profile / "plugins"
+        plugins.mkdir(parents=True)
+        (plugins / PLUGIN_ID).symlink_to(PROJECT_ROOT, target_is_directory=True)
+        (profile / "config.yaml").write_text(
+            f"plugins:\n  enabled:\n    - {PLUGIN_ID}\n"
+            "terminal:\n  backend: local\napprovals:\n  mode: manual\n",
+            encoding="utf-8",
+        )
+        environment = isolated_host_environment(
+            home=tmp_path,
+            hermes_home=profile,
+            host_path=agent_path,
+            python_paths=(PROJECT_ROOT, agent_path),
+        )
+        environment.update(
+            {
+                "WISDOM_PLUGIN_ROOT": str(PROJECT_ROOT),
+                "SLACK_ALLOWED_USERS": "U1",
+                "TELEGRAM_ALLOWED_USERS": "1",
+            }
+        )
+        probe = PROJECT_ROOT / "tests" / "native_sdk_journey_probe.py"
+        result = run_host_python(
+            [str(probe), platform, str(tmp_path / platform)],
+            cwd=tmp_path,
+            environment=environment,
+            timeout=60,
+        )
+        assert result.stdout.strip() == f"real {platform} SDK journey passed"

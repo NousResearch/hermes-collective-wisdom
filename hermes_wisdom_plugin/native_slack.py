@@ -69,7 +69,10 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
             "type": "mrkdwn", "text": slack_section_text(view.summary),
         }})
     for item_index, item in enumerate(view.items[:_MAX_ITEMS]):
-        body = f"*{item.title}*"
+        body = ""
+        if item.preamble:
+            body = item.preamble + "\n\n"
+        body += f"*{item.title}*"
         if item.detail:
             body += "\n" + item.detail
         rendered.append({"type": "section", "text": {

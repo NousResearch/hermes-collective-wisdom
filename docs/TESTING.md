@@ -22,6 +22,24 @@ Seven optional modified-host presentation/journey tests are intentionally
 excluded when their separate environment variables are unset. Test fixtures use
 disposable state; this does not authorize running arbitrary live-platform probes.
 
+### Gallery copy and dismissal adaptation
+
+The plugin adapts the presentation intent of
+[hbizi's Agent PR #5](https://github.com/shannonsands/hermes-agent/pull/5)
+(reference head `872759a954dfac46681a25f2c7153a60bc989607`, including its PR #4
+predecessor). This is a plugin-side adaptation, not an Agent cherry-pick.
+
+Regression coverage must preserve assessment-first recommendations, truthful
+passing-check summaries, visible material warnings, exact consent, silent
+original-card dismissal and non-approving return from complete file inspection.
+Existing mute commands/settings remain organization-wide, not recipient-only.
+Cards use “your organization” rather than inventing a display name. There is no
+automatic share-packaging job or corresponding packaging-failure notification.
+Neither one-click approval of unseen generated content nor embedded Desktop/
+Dashboard galleries are introduced by this adaptation.
+
+Recording-SDK checks are not deployed Slack/Telegram acceptance.
+
 ### Required behavioral evidence
 
 - Recommendation delivery: reject background invocations before assessment,

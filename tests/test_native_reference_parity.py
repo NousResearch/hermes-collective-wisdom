@@ -20,8 +20,10 @@ import sys
 from types import ModuleType
 
 import pytest
+from native_test_support import publication_review
 
-from hermes_wisdom_plugin.native_review import project_view, recommendation_view
+from hermes_wisdom_plugin.native_review import project_view
+from hermes_wisdom_plugin.native_runtime import assessment_view
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import keyboard
 
@@ -110,8 +112,9 @@ def test_command_review_pending_and_expanded_checks_match_reference():
             "managed",
             "\nVersion: v2\nCompatibility: compatible"
             "\nNothing changes until you use the confirmation control."
-            "\n\n✅ Security check\nNo issues detected"
-            "\n➖ Professionalism check (agent-assessed, advisory): Unavailable",
+            "\n\n✅ No security issues detected\nNo issues detected"
+            "\n➖ Professionalism check (agent-assessed, advisory): Unavailable"
+            "\n⚠️ Organization policy: Advisory\nReview network access.",
             [],
         )],
         "navigation": [],
@@ -125,15 +128,16 @@ def test_command_review_pending_and_expanded_checks_match_reference():
         "text": "Hermes Collective Wisdom\n\nPending\n\nmanaged"
         "\n\nVersion: v2\nCompatibility: compatible"
         "\nNothing changes until you use the confirmation control."
-        "\n\n✅ Security check\nNo issues detected"
-        "\n➖ Professionalism check (agent-assessed, advisory): Unavailable",
+        "\n\n✅ No security issues detected\nNo issues detected"
+        "\n➖ Professionalism check (agent-assessed, advisory): Unavailable"
+        "\n⚠️ Organization policy: Advisory\nReview network access.",
     }
 
     expanded = project_view(_update_record(checks_expanded=True))
     assert expanded.items[0].detail == (
         "\nVersion: v2\nCompatibility: compatible"
         "\nNothing changes until you use the confirmation control."
-        "\n\n✅ Security check\nNo issues detected\n✅ Private keys"
+        "\n\n✅ No security issues detected\nNo issues detected\n✅ No private keys detected"
         "\n⚠️ Organization policy: Advisory (1 finding)"
         "\n  Review network access.\nThese checks are not a security certification."
         "\n\n➖ Professionalism check (agent-assessed, advisory): Unavailable"
@@ -146,39 +150,80 @@ def test_command_review_pending_and_expanded_checks_match_reference():
     ]
 
 
-def test_recommendation_assessment_uses_supplied_reason_and_reference_fallback():
-    hidden = recommendation_view(
-        _update_record(),
-        {"title": "managed", "explanation": "Adds rollback readiness", "relevance": "recommend"},
-    )
-    assert hidden.summary == "Hermes recommendations for your setup"
-    assert hidden.items[0].detail == (
-        "\n\nPackage facts: managed · v2\nCompatibility: compatible"
-        "\n\n✅ Security check\nNo issues detected"
-        "\n➖ Professionalism check (agent-assessed, advisory): Unavailable"
-        "\nNothing is changed by this recommendation."
-    )
-    assert _actions(hidden.items[0].actions) == [
-        ("View Assessment", "assessment.show", False),
+def test_contributor_and_published_views_use_pr5_copy_and_controls():
+    base = {
+        "id": "publication-id", "state": "pending", "operation": "publish",
+        "checks_expanded": False, "inspection": None, "result": None,
+        "plan": publication_review(
+            editorial_name="Incident Review",
+            description="Turns incident notes into a repeatable team review.",
+            files=[{"path": "SKILL.md", "hash": "a" * 64}],
+            hashes={
+                "content": "sha256:" + "b" * 64,
+                "author_description": "sha256:" + "c" * 64,
+                "package_manifest": "sha256:" + "d" * 64,
+            },
+            review_deferral={"not_now_suppression_days": 7},
+            allowed=True,
+        ),
+    }
+
+    pending = project_view(base)
+    assert pending.summary == "Ready For Review"
+    assert "Publication policy: moderated" in pending.items[0].detail
+    assert all(value in pending.items[0].detail for value in base["plan"]["hashes"].values())
+    assert _actions(pending.actions) == [
         ("Show checks", "checks.show", False),
-        ("Not Now", "defer", False),
-        ("Review first", "inspect", False),
-        ("Update", "confirm", True),
+        ("Maybe Later", "defer", False),
+        ("Share My Skill", "confirm", True),
     ]
-    shown = recommendation_view(
-        _update_record(),
-        {"title": "managed", "explanation": "Adds rollback readiness", "relevance": "recommend"},
-        assessment_expanded=True,
+
+    published = project_view({
+        **base,
+        "state": "completed",
+        "result": {
+            "publication_state": "published",
+            "portal_url": "https://portal.example/skills/incident-review",
+        },
+    })
+    assert published.summary == "Shared!"
+    assert published.items[0].detail == "Your skill is now shared with your organization."
+    assert _actions(published.actions) == [
+        ("View details", None, False),
+    ]
+
+
+def test_candidate_advice_uses_supportive_preamble_and_maybe_later():
+    view = assessment_view({
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Incident Review",
+            "explanation": "Turns recurring incident notes into a repeatable review.",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local-skill-id",
+            "event_id": "candidate-event-id",
+        },
+    })
+
+    assert view.summary == ""
+    assert view.items[0].preamble == (
+        "Hermes thinks the following skill would be useful to the rest of your team:"
     )
-    assert shown.items[0].detail.startswith(
-        "Hermes recommendation: Adds rollback readiness\n\nPackage facts:"
-    )
-    fallback = recommendation_view(
-        _update_record(),
-        {"title": "managed", "explanation": "", "relevance": "recommend"},
-        assessment_expanded=True,
-    )
-    assert fallback.items[0].detail.startswith("Assessment unavailable:\n\nPackage facts:")
+    assert _actions(view.actions) == [("Maybe Later", "candidate_defer", False)]
+
+
+def test_project_review_keeps_update_policy_and_warnings_visible():
+    record = _update_record()
+    record["operation"] = "install"
+    record["plan"]["update_mode"] = "MANUAL"
+
+    view = project_view(record)
+
+    assert "Future updates: Manual" in view.items[0].detail
+    assert "Organization policy: Advisory" in view.items[0].detail
+    assert "Review network access." in view.items[0].detail
 
 
 def test_exact_inspection_preserves_notice_navigation_and_action_order():
@@ -198,8 +243,7 @@ def test_exact_inspection_preserves_notice_navigation_and_action_order():
         "actions": [
             ("Previous page", "inspect.0", False),
             ("Next page", "inspect.2", False),
-            ("Not Now", "defer", False),
-            ("Approve exact package", "confirm", True),
+            ("Looks good.", "back", False),
         ],
         "notice": (
             "Nothing is uploaded by reviewing. Setup and verification require "
@@ -254,8 +298,9 @@ def test_completed_update_and_assessment_projection_match_reference():
     shown = project_view(record, assessment_expanded=True)
     assert shown.items[0].detail == (
         "Assessment before this operation:\nAdds rollback readiness"
-        "\n\n✅ Security check\nNo issues detected"
+        "\n\n✅ No security issues detected\nNo issues detected"
         "\n➖ Professionalism check (agent-assessed, advisory): Unavailable"
+        "\n⚠️ Organization policy: Advisory\nReview network access."
     )
     assert _actions(shown.actions) == [
         ("Check setup", "setup.status", False),
@@ -346,7 +391,7 @@ def test_platform_layout_keeps_navigation_notice_and_global_action_groups(monkey
     ]
     assert rendered[1]["elements"][0]["text"]["text"] == "Back to first page"
     assert [item["text"]["text"] for item in rendered[-1]["elements"]] == [
-        "Previous page", "Next page", "Not Now", "Approve exact package"
+        "Previous page", "Next page", "Looks good."
     ]
     for block in rendered:
         action_ids = [
@@ -376,5 +421,5 @@ def test_platform_layout_keeps_navigation_notice_and_global_action_groups(monkey
     markup = keyboard(view, "native-id")
     assert [[button.text for button in row] for row in markup.inline_keyboard] == [
         ["Back to first page"],
-        ["Previous page", "Next page", "Not Now", "Approve exact package"],
+        ["Previous page", "Next page", "Looks good."],
     ]

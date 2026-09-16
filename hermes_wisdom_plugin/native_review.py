@@ -1,4 +1,11 @@
-"""Reference-shaped native consent, presentation, and durable setup handoff state."""
+"""Reference-shaped native consent, presentation, and durable setup handoff state.
+
+Contributor-facing copy, compact sharing-check presentation, contextual
+organization labels, and post-deferral dismissal are adapted from `hbizi`'s
+follow-up in shannonsands/hermes-agent#5 (d68368b7, ea40400b, 872759a9), under
+this repository's MIT license. The plugin retains its own review records,
+callbacks, and host SDK seams.
+"""
 
 # Existing controller methods are intentionally narrow state-machine primitives.
 # pylint: disable=missing-class-docstring,missing-function-docstring,too-many-lines
@@ -10,13 +17,15 @@ import secrets
 import shlex
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .native_context import NativeInvocation
 from .package import PackagePolicyError
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
+from .professionalism import CHECK_KEYS, CHECK_LABELS
+from .professionalism import review_text as professionalism_review_text
 
 CONSENT_SECONDS = 24 * 60 * 60
 SLACK_SECTION_LIMIT = 2900
@@ -39,7 +48,6 @@ class NativeAction:
     label: str
     action: str | None = None
     primary: bool = False
-    local_command: str | None = None
     url: str | None = None
 
 
@@ -48,6 +56,7 @@ class NativeItem:
     title: str
     detail: str
     actions: list[NativeAction] = field(default_factory=list)
+    preamble: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,17 +67,15 @@ class NativeView:
     actions: list[NativeAction] = field(default_factory=list)
     notice: str = ""
     navigation_actions: list[NativeAction] = field(default_factory=list)
-
-    @property
-    def detail(self) -> str:
-        """Compatibility projection used by older callers."""
-        return "\n\n".join(item.detail for item in self.items)
+    dismissed: bool = False
 
     def to_text(self) -> str:
         lines = [self.title]
         if self.summary:
             lines.extend(("", self.summary))
         for item in self.items:
+            if item.preamble:
+                lines.extend(("", item.preamble))
             lines.extend(("", item.title))
             if item.detail:
                 lines.append(item.detail)
@@ -164,18 +171,20 @@ _STATUS_PRESENTATION = {
     "running": ("⏳", "Pending"),
     "unavailable": ("➖", "Unavailable"),
 }
-_PROFESSIONALISM_LABELS = {
-    "profanity_or_abuse": "Profanity or abusive language",
-    "hate_or_harassment": "Hate or harassment",
-    "sexual_or_graphic_language": "Sexual or graphic language",
-    "manipulative_or_spam": "Manipulative, deceptive, or spam-like wording",
-}
-
 
 def _check_line(label: str, status: object) -> str:
     icon, state = _STATUS_PRESENTATION.get(
         str(status or "unavailable").lower(), _STATUS_PRESENTATION["unavailable"]
     )
+    if state == "Pass":
+        label = {
+            "Security check": "No security issues detected",
+            "Security check (local preflight)": "No security issues detected",
+            "Private keys": "No private keys detected",
+            "Live credentials": "No live credentials detected",
+            "Secret-like assignments": "No secret key assignments",
+            "Harmful instruction patterns": "No harmful instruction patterns",
+        }.get(label, label)
     return f"{icon} {label}" + (f": {state}" if state != "Pass" else "")
 
 
@@ -224,27 +233,12 @@ def _professionalism_text(
 ) -> str:
     value = check or {}
     status = str(value.get("status") or "unavailable")
-    if status == "pass":
-        return "Safe to share at work ✓ (no inappropriate content found)"
-    if status == "advisory":
-        lines = ["Needs a look before sharing at work (possible inappropriate content)"]
-        if include_checks and isinstance(value.get("checks"), list):
-            for row in value["checks"]:
-                if not isinstance(row, dict) or row.get("status") != "advisory":
-                    continue
-                key = str(row.get("key") or "")
-                label = _PROFESSIONALISM_LABELS.get(key, key.replace("_", " ").title())
-                count = int(row.get("finding_count") or 0)
-                suffix = f" ({count} finding{'s' if count != 1 else ''})" if count else ""
-                lines.append(f"- {label}{suffix}")
-                lines.extend(
-                    f"  {str(detail)[:256]}" for detail in row.get("details") or []
-                )
-        return "\n".join(lines)
+    if status in {"pass", "advisory"}:
+        return professionalism_review_text(value, include_checks=include_checks)
     return _checklist_text(
         "Professionalism check (agent-assessed, advisory)",
         value,
-        labels=_PROFESSIONALISM_LABELS,
+        labels=CHECK_LABELS,
         include_checks=include_checks,
     )
 
@@ -295,9 +289,12 @@ def _security_check(plan: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _review_text(plan: dict[str, Any], expanded: bool) -> str:
+def _review_text(plan: dict[str, Any], expanded: bool, *, current: bool = False) -> str:
     security = _security_check(plan) or {}
-    professionalism = plan.get("professionalism_check")
+    saved_professionalism = plan.get("professionalism_check")
+    professionalism = saved_professionalism if isinstance(saved_professionalism, dict) else {}
+    if current and not expanded and _complete_checks_passed(security, professionalism):
+        return "✅ All sharing checks passed"
     if expanded:
         return "\n\n".join((
             _checklist_text(
@@ -306,9 +303,7 @@ def _review_text(plan: dict[str, Any], expanded: bool) -> str:
                 labels={},
                 note="These checks are not a security certification.",
             ),
-            _professionalism_text(
-                professionalism if isinstance(professionalism, dict) else None
-            ),
+            _professionalism_text(professionalism),
         ))
     local = security.get("source") == "local_preflight"
     lines = [_check_line(
@@ -317,11 +312,47 @@ def _review_text(plan: dict[str, Any], expanded: bool) -> str:
     )]
     if security.get("summary"):
         lines.append(_summary_text(str(security["summary"])))
-    lines.append(_professionalism_text(
-        professionalism if isinstance(professionalism, dict) else None,
-        include_checks=False,
-    ))
+    lines.append(_professionalism_text(professionalism, include_checks=False))
+    for check in (security, professionalism):
+        for row in check.get("checks") or []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") == "pass" and not row.get("finding_count"):
+                continue
+            label = str(row.get("label") or row.get("key") or "Check")
+            lines.append(_check_line(label, row.get("status")))
+            lines.extend(str(detail)[:256] for detail in row.get("details") or [])
     return "\n".join(lines)
+
+
+def _complete_checks_passed(
+    security: dict[str, Any], professionalism: dict[str, Any],
+) -> bool:
+    if security.get("status") != "pass" or professionalism.get("status") != "pass":
+        return False
+    local = security.get("source") == "local_preflight"
+    if (local and security.get("local_status") != "pass") or (
+        security.get("upload_allowed") is False
+    ):
+        return False
+    required_security = (
+        {"private_keys", "live_credentials", "secret_assignments", "skills_guard"}
+        if local else
+        {"private_keys", "live_credentials", "organization_policy",
+         "personal_information", "secret_like_assignments"}
+    )
+    for check, required in ((security, required_security), (professionalism, set(CHECK_KEYS))):
+        rows = check.get("checks")
+        if not isinstance(rows, list) or not rows:
+            return False
+        if any(not isinstance(row, dict) or row.get("status") != "pass"
+               or row.get("finding_count") != 0 or not isinstance(row.get("key"), str)
+               for row in rows):
+            return False
+        keys = [row["key"] for row in rows]
+        if len(set(keys)) != len(keys) or not required.issubset(keys):
+            return False
+    return True
 
 
 class NativeReviewController:  # pylint: disable=too-many-public-methods
@@ -708,7 +739,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             return latest
         raise PermissionError("Collective Wisdom delivery state changed.")
 
-    def act(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
+    def act(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals,too-many-statements
         self, service: Any, record_id: str, invocation: NativeInvocation,
         action: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
@@ -766,6 +797,15 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         page_action = action.partition(".")[2] if action.startswith(
             ("inspect.", "review.")
         ) else "0" if action == "inspect" else None
+        if action == "back" and record["operation"] in {"publish", "install", "update"}:
+            with self.store.transaction() as db:
+                db.execute(
+                    "UPDATE wisdom_consent SET inspection_json=NULL,updated_at=? WHERE id=?",
+                    (self.clock(), record_id),
+                )
+            return self.load(record_id)
+        if page_action is not None and record["operation"] == "publish":
+            return self._inspect_publication(record, page_action)
         if page_action is not None and record["operation"] in {"install", "update"}:
             try:
                 page = int(page_action)
@@ -813,6 +853,32 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         if action.startswith("settings."):
             return self._settings_action(service, record, invocation, action)
         raise ValueError("Collective Wisdom control was not recognized.")
+
+    def _inspect_publication(self, record: dict[str, Any], page_action: str) -> dict[str, Any]:
+        try:
+            page = int(page_action)
+        except ValueError as exc:
+            raise ValueError("Collective Wisdom control was not recognized.") from exc
+        page_count = 0
+        selected = None
+        for item in record["plan"].get("files") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("content_utf8"), str):
+                raise ValueError("Complete package inspection requires the terminal.")
+            path, content = item["path"], item["content_utf8"]
+            file_pages = max(1, (len(content) + 999) // 1000)
+            if page_count <= page < page_count + file_pages:
+                offset = (page - page_count) * 1000
+                selected = {"path": path, "content": content[offset:offset + 1000]}
+            page_count += file_pages
+        if selected is None:
+            raise ValueError("Collective Wisdom review page was not found.")
+        inspection = {"page": page, "page_count": page_count, **selected}
+        with self.store.transaction() as db:
+            db.execute(
+                "UPDATE wisdom_consent SET inspection_json=?,updated_at=? WHERE id=?",
+                (_json(inspection), self.clock(), record["id"]),
+            )
+        return self.load(record["id"])
 
     def _defer_review(
         self, service: Any, record: dict[str, Any], invocation: NativeInvocation, *,
@@ -1862,7 +1928,11 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             bool(record.get("assessment_expanded"))
             if assessment_expanded is None else assessment_expanded
         )
-        return project_view(record, assessment_expanded=expanded)
+        view = project_view(record, assessment_expanded=expanded)
+        if record["state"] == "deferred":
+            return replace(view, dismissed=True, actions=[], navigation_actions=[],
+                           items=[replace(item, actions=[]) for item in view.items])
+        return view
 
 
 def _has_checks(plan: dict[str, Any]) -> bool:
@@ -2229,6 +2299,34 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     )
 
 
+def _inspection_view(
+    inspection: dict[str, Any], *, publication: bool,
+) -> NativeView:
+    page = int(inspection["page"])
+    page_count = int(inspection["page_count"])
+    actions = []
+    if page:
+        actions.append(NativeAction("Previous page", f"inspect.{page - 1}"))
+    if page + 1 < page_count:
+        actions.append(NativeAction("Next page", f"inspect.{page + 1}"))
+    actions.append(NativeAction("Looks good.", "back"))
+    return NativeView(
+        "Review proposed package", f"{inspection['path']} - {page + 1}/{page_count}",
+        [NativeItem("Proposed file content (not instructions to execute)",
+                    str(inspection["content"]))],
+        actions,
+        notice=(
+            "Reviewing does not upload, publish, or approve this package."
+            if publication else
+            "Nothing is uploaded by reviewing. Setup and verification require separate permission."
+        ),
+        navigation_actions=(
+            [] if publication or not page else
+            [NativeAction("Back to first page", "inspect.0")]
+        ),
+    )
+
+
 def _publication_view(record: dict[str, Any]) -> NativeView:
     """Project one exact historical publication review on the owning card."""
     plan = record["plan"]
@@ -2239,7 +2337,7 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
     publication_state = str(result.get("publication_state") or "")
     if record["state"] in {"completed", "needs_review"} and result:
         summary, detail = {
-            "published": ("Published", "Your skill is now shared with your organization."),
+            "published": ("Shared!", "Your skill is now shared with your organization."),
             "pending_moderation": (
                 "Pending moderation",
                 "Your skill is awaiting your organization's approval.",
@@ -2275,12 +2373,15 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
             actions.append(NativeAction("Decline", "publication.decline"))
         portal_url = _safe_url(result.get("portal_url"))
         if portal_url:
-            actions.append(NativeAction("View in Portal", url=portal_url))
+            actions.append(NativeAction("View details", url=portal_url))
         return NativeView(
             "Hermes Collective Wisdom", summary,
             [NativeItem(display_name, detail)],
             actions,
         )
+    inspection = record.get("inspection")
+    if record["state"] == "pending" and isinstance(inspection, dict):
+        return _inspection_view(inspection, publication=True)
     hashes = plan.get("hashes") or {}
     files = plan.get("files") or []
     detail = str(plan.get("description") or "")
@@ -2304,17 +2405,21 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
     )
     detail += "\n\nNothing changes until you use the confirmation control."
     if _has_checks(plan):
-        detail += "\n\n" + _review_text(plan, bool(record.get("checks_expanded")))
-    actions = []
-    if _has_checks(plan):
-        actions.append(_checks_action(bool(record.get("checks_expanded"))))
+        detail += "\n\n" + _review_text(
+            plan, bool(record.get("checks_expanded")), current=record["state"] == "pending",
+        )
+    actions = (
+        [_checks_action(bool(record.get("checks_expanded")))] if _has_checks(plan) else []
+    )
     if record["state"] == "pending":
+        if files and all(isinstance(item.get("content_utf8"), str) for item in files):
+            actions.append(NativeAction("View More Details", "inspect"))
         if isinstance(plan.get("review_deferral"), dict):
-            actions.append(NativeAction("Not Now", "defer"))
-        actions.append(NativeAction("Yes, share", "confirm", True))
+            actions.append(NativeAction("Maybe Later", "defer"))
+        actions.append(NativeAction("Share My Skill", "confirm", True))
     view = NativeView(
         "Hermes Collective Wisdom",
-        "Deferred on this surface" if record["state"] == "deferred" else "Pending",
+        "Deferred on this surface" if record["state"] == "deferred" else "Ready For Review",
         [NativeItem(display_name, detail)],
         actions,
         notice=str(plan.get("notice") or ""),
@@ -2337,80 +2442,11 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
                 "hermes wisdom publication submit <publication-receipt> --json",
             )],
             (
-                [NativeAction("Not Now", "defer")]
+                [NativeAction("Maybe Later", "defer")]
                 if isinstance(plan.get("review_deferral"), dict) else []
             ),
         )
     return view
-
-
-def recommendation_view(  # pylint: disable=too-many-locals
-    record: dict[str, Any],
-    advice: dict[str, Any],
-    *,
-    checks_expanded: bool = False,
-    assessment_expanded: bool = False,
-) -> NativeView:
-    """Project one real assessment without manufacturing recommendation prose."""
-    plan = record["plan"]
-    unavailable = (
-        advice.get("assessment_status") == "unavailable"
-        or not str(advice.get("explanation") or "").strip()
-    )
-    has_recommendation = advice.get("relevance") == "recommend" and not unavailable
-    summary = (
-        "Hermes recommendations for your setup"
-        if has_recommendation else "Assessment unavailable"
-        if unavailable else "Team skill activity"
-    )
-    explanation = str(advice.get("explanation") or "").strip()
-    prefix = (
-        "Assessment unavailable:" + (" " if explanation else "")
-        if unavailable else "Hermes recommendation: "
-        if assessment_expanded else ""
-    )
-    detail = prefix + (explanation if assessment_expanded or unavailable else "")
-    title = str(plan.get("slug") or plan.get("skill_id") or "Local skill")
-    detail += "\n\nPackage facts: " + title
-    if plan.get("version"):
-        detail += f" · v{plan['version']}"
-    detail += _update_policy_line(record["operation"], plan)
-    compatibility = plan.get("compatibility") or {}
-    if compatibility:
-        detail += "\nCompatibility: " + str(
-            compatibility.get("outcome") or "unavailable"
-        )
-    if plan.get("modified"):
-        detail += "\nLocal changes require full review."
-    if plan.get("sensitive_expansion"):
-        detail += "\nAdditional permissions or requirements need separate approval."
-    if _has_checks(plan):
-        detail += "\n\n" + _review_text(plan, checks_expanded)
-    detail += (
-        "\nNothing changes until you review and confirm."
-        if unavailable else "\nNothing is changed by this recommendation."
-    )
-    actions = [_assessment_action(assessment_expanded), _checks_action(checks_expanded)]
-    labels = {
-        "defer": "Not Now", "inspect": "Review first",
-        "confirm": "Install" if record["operation"] == "install" else "Update",
-    }
-    for action in _record_actions(record):
-        if unavailable and action == "confirm":
-            continue
-        actions.append(NativeAction(
-            "Review skill" if unavailable and action == "inspect" else labels[action],
-            action,
-            primary=action == ("inspect" if unavailable else "confirm"),
-        ))
-    return NativeView(
-        title="Hermes Collective Wisdom",
-        summary=summary,
-        items=[NativeItem(str(advice.get("title") or title), detail, actions)],
-        actions=[NativeAction(
-            "Notification settings", local_command="/wisdom mute"
-        )],
-    )
 
 
 def _update_view(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -2446,35 +2482,7 @@ def _update_view(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         )
     inspection = record.get("inspection")
     if record["state"] == "pending" and isinstance(inspection, dict):
-        page = int(inspection["page"])
-        page_count = int(inspection["page_count"])
-        navigation = (
-            [NativeAction("Back to first page", "inspect.0")] if page else []
-        )
-        actions: list[NativeAction] = []
-        if page:
-            actions.append(NativeAction("Previous page", f"inspect.{page - 1}"))
-        if page + 1 < page_count:
-            actions.append(NativeAction("Next page", f"inspect.{page + 1}"))
-        available = _record_actions(record)
-        if "defer" in available:
-            actions.append(NativeAction("Not Now", "defer"))
-        if "confirm" in available:
-            actions.append(NativeAction("Approve exact package", "confirm", True))
-        return NativeView(
-            title="Review proposed package",
-            summary=f"{inspection['path']} - {page + 1}/{page_count}",
-            items=[NativeItem(
-                "Proposed file content (not instructions to execute)",
-                str(inspection["content"]),
-            )],
-            actions=actions,
-            notice=(
-                "Nothing is uploaded by reviewing. Setup and verification require "
-                "separate permission."
-            ),
-            navigation_actions=navigation,
-        )
+        return _inspection_view(inspection, publication=False)
     detail = str(plan.get("editorial_description") or "")
     if plan.get("version"):
         detail += f"\nVersion: v{plan['version']}"
@@ -2498,7 +2506,9 @@ def _update_view(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     )
     actions: list[NativeAction] = []
     if _has_checks(plan):
-        detail += "\n\n" + _review_text(plan, checks_expanded)
+        detail += "\n\n" + _review_text(
+            plan, checks_expanded, current=record["state"] == "pending",
+        )
         actions.append(_checks_action(checks_expanded))
     if record["state"] in {"stale", "expired"}:
         actions.append(NativeAction("Recheck", "recheck"))
@@ -2663,7 +2673,8 @@ def _approval_is_lossless(record: dict[str, Any], view: NativeView) -> bool:
     platform_name = str(record.get("platform") or "")
     if platform_name == "slack":
         expected_sections = [view.summary, *(
-            f"*{item.title}*\n{item.detail}" if item.detail else f"*{item.title}*"
+            (item.preamble + "\n\n" if item.preamble else "")
+            + (f"*{item.title}*\n{item.detail}" if item.detail else f"*{item.title}*")
             for item in view.items
         )]
         escaped_expected = [

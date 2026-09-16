@@ -118,14 +118,8 @@ class NativeModelTools:
                 result = service.native_skill_inspect(identity, version=args.get("version"))
             elif kind == "installed":
                 installed = service.list_installations()
-                rows = (
-                    installed.get("installations", installed)
-                    if isinstance(installed, dict) else installed
-                )
                 result = {
-                    "installed": [row for row in rows if isinstance(row, dict) and str(
-                        row.get("skill_id") or row.get("id") or ""
-                    ) == identity],
+                    "installed": [row for row in installed if row["skill_id"] == identity],
                     "setup": service.installed_setup_inspect(
                         identity, version=args.get("version")
                     ),

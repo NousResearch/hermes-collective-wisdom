@@ -407,9 +407,9 @@ explicit terminal inspect/plan/apply handoff; a forged callback is still refused
 
 ## Release Scope and Sequence
 
-- Implementation sequencing starts with CLI, TUI, Telegram, and Slack, then the
-  shared UI backend, Desktop, and Dashboard.
-- Release requires all six surfaces, including Desktop and Dashboard.
+- Initial delivery is stock-Agent native workflows plus the external Desktop
+  command-copy guide. No Agent patches or shared UI backend are required.
+- Dashboard and full embedded six-surface parity are deferred.
 - Release acceptance includes the deployed endpoints exercised with Shannon's
   Nous Portal login; mocks, component stories, and local scripts do not suffice.
 - Fresh installation only; no migration from the reverted core implementation.
@@ -421,11 +421,8 @@ explicit terminal inspect/plan/apply handoff; a forged callback is still refused
   [the source baseline](docs/SOURCES.md).
 
 Start with the [feature tracker](docs/FEATURES.md). It is the source of truth for
-implementation, automated verification, and live acceptance. The
-[migration plan](docs/MIGRATION.md) defines sequencing. The original planning
-baseline was **66 points for the core-surface sequence, 31 for UI completion,
-97 total, or 120-125 with contingency**. These are historical estimates, not
-remaining-work or delivery promises.
+implementation, automated verification, and live acceptance. Historical
+full-parity sequencing and estimates remain in the [migration plan](docs/MIGRATION.md).
 
 ## Development
 
