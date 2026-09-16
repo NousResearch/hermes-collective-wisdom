@@ -7,7 +7,7 @@ Milestone 0 has only an inert entrypoint and no runtime dependencies.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| Hermes host | Trusted invocation identity, session lifecycle, plugin loading and native surface access | Wisdom policy or special-case command logic |
+| Hermes host | Existing caller admission/reply routing, credentials, session lifecycle, plugin loading and native surface access | Wisdom policy or special-case command logic |
 | Python plugin | Local state, package preparation, scans, qualification, plans/receipts, recommendations, operation reconciliation | Server authorization or forged user consent |
 | Surface adapters | Commands, native cards, callback translation, UI rendering | Independent copies of install/publish business logic |
 | Gateway/Portal | Scoped remote access, content storage, publication policy, moderation, manager email | Local user setup approval or active-session guessing |
@@ -59,6 +59,15 @@ platform message references only with appropriate acknowledgement. Repeated
 callbacks and worker recovery must converge on one recorded operation outcome.
 
 ## Commands, Tools, and Presentation
+
+Entitlement belongs in the plugin, with a narrow version-tested adapter to
+existing host account readers. Check at initialization and before protected
+operations; use refresh-free background checks and invalidate pending work on
+ownership changes. Do not require new auth-event hooks or core help/menu changes.
+An unavailable installed command may return a concise denial. Ordinary replies
+use host caller routing, not a new context framework. Native approval callbacks
+and proactive delivery retain their distinct ownership/destination checks.
+See [the simplification requirement](FIRST-RELEASE.md#simplification-requirement-2026-09-12).
 
 Use one parser/controller for `hermes wisdom ...` and `/wisdom ...`. First keep
 CLI/TUI text interactions complete and deterministic, then map the same views

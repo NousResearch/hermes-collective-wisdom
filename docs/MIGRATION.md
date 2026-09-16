@@ -24,7 +24,7 @@ Milestone totals below are the approved budget, not additional work points.
 | ID | Deliverable | Depends on | Points | Exit boundary |
 | --- | --- | --- | ---: | --- |
 | M0 | Scaffold, docs, tracker, quality | None | 3 | Clean install/lint/tests/build; initial main pushed |
-| M1 | Generic host extension contracts | M0 | 13 | Neutral fixtures prove context, availability, lifecycle |
+| M1 | Plugin-first host integration | M0 | 13 | Existing routing, plugin entitlement, callback binding and lifecycle verified; host extensions only for proven gaps |
 | M2 | Plugin foundation and surface wiring | M1 | 8 | Fresh-profile entitlement/state/commands/contracts work |
 | M3 | Browse, inspect, install, setup | M2 | 8 | First manual CLI/TUI consumption flow works |
 | M4 | Updates and preferences | M3 | 8 | Policies, protected edits, defer/reopen/mute work |
@@ -48,8 +48,9 @@ effort. M9 can start after its dependencies; M10/M11 can proceed independently.
 ## Delivery Order and PR Shape
 
 1. Land this planning/scaffold repository without registering functional tools.
-2. Propose M1 host APIs against current Agent in independent PRs. Include neutral
-   sample consumers and actual call-site tests; no Wisdom names or business rules.
+2. Prove M1 using existing host APIs and a narrow plugin-side account adapter.
+   No core command/menu changes or PR #108645 dependency for entitlement. Propose
+   a generic host extension only for a demonstrated callback/lifecycle gap.
 3. Build the manual CLI/TUI browse-inspect-confirm-install path using the shared
    service. Keep package checks and exact-version consent intact from the start.
 4. Add update, preference, and publishing workflows as separate slices. Preserve
@@ -61,10 +62,13 @@ effort. M9 can start after its dependencies; M10/M11 can proceed independently.
 7. Add the shared UI API, then Desktop and Dashboard independently. Use the
    same operation service, not parallel frontend-controlled implementations.
 
-Keep mechanical extraction distinct from behavioral changes. A PR should
-usually complete one feature or an inseparable dependency pair. If a feature is
-too large to review, split it before coding and allocate its existing points
-to child records; do not silently double-count the parent and children.
+The approved execution breakdown is [FIRST-RELEASE.md](FIRST-RELEASE.md).
+Selectively copy working code and its tests before adapting plugin boundaries.
+Keep mechanical extraction distinct from behavioral changes within a PR; a task
+does not require its own PR. Default to three plugin delivery PRs and one Gateway
+release-smoke PR; any Agent API PR is conditional, not mandatory. Parallel task worktrees have
+exclusive write scopes and one integration owner. Preserve feature IDs and
+points rather than double-counting extraction as new work.
 
 ## Desktop Follow-Up
 

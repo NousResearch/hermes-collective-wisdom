@@ -1,10 +1,16 @@
 # Contributing
 
-## One Reviewable Slice
+## Reviewable Extraction Slices
 
 Pick a feature from [FEATURES.md](docs/FEATURES.md). State its ID, dependencies,
 acceptance criteria, and intended write scope in the PR. Keep generic Hermes
 host changes in a separate upstream PR and link the dependency here.
+
+Copy coherent working code with its tests before adapting integration. Record
+source symbols and test dispositions in the slice's verification note. Separate
+mechanical extraction and adaptation into commits where practical; tasks share
+delivery PRs according to docs/FIRST-RELEASE.md, not one PR per feature. Each
+parallel worker owns a separate worktree and an exclusive write scope.
 
 Use `codex/<short-topic>` for new development branches. Initial repository
 bootstrapping uses `main`; normal work should use reviewed PRs.

@@ -1,12 +1,11 @@
-"""Native Hermes loading and inert-registration tests."""
+"""Native Hermes loading and lazy command-registration tests."""
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,24 +46,39 @@ def test_root_loader_uses_synthetic_namespace_relative_import() -> None:
         unload_native_plugin(module_name)
 
 
-def test_register_is_a_docstring_only_no_op() -> None:
-    """Registration neither uses the host context nor contains future behavior."""
+def test_register_is_lazy_and_owns_both_command_handles(tmp_path, monkeypatch) -> None:
+    """Signed-out registration creates no local state or network clients."""
     module_name, plugin = load_native_plugin()
     try:
-        assert plugin.register(object()) is None
+        runtime_module = __import__(
+            f"{module_name}.hermes_wisdom_plugin.runtime", fromlist=["CommandRuntime"]
+        )
+        monkeypatch.setattr(runtime_module, "current_profile", lambda: ("default", tmp_path))
+        monkeypatch.setattr(
+            runtime_module.HermesAccountAdapter, "current",
+            lambda: (_ for _ in ()).throw(AssertionError("registration read credentials")),
+        )
+        entries = {}
+        disposed = []
+
+        def register_cli(name, _help, setup, handler):
+            entries["cli"] = (name, setup, handler)
+            return SimpleNamespace(dispose=lambda: disposed.append("cli"))
+
+        def register_slash(name, handler, **_kwargs):
+            entries["slash"] = (name, handler)
+            return SimpleNamespace(dispose=lambda: disposed.append("slash"))
+
+        context = SimpleNamespace(
+            state=SimpleNamespace(data_dir=tmp_path / "plugin-data" / "wisdom"),
+            register_cli_command=register_cli, register_command=register_slash,
+            on_unload=lambda callback: entries.update(unload=callback),
+        )
+        assert plugin.register(context) is None
+        assert entries["cli"][0] == entries["slash"][0] == "wisdom"
+        assert not list(tmp_path.iterdir())
+        entries["unload"]()
+        entries["unload"]()
+        assert disposed == ["slash", "cli"]
     finally:
         unload_native_plugin(module_name)
-
-    source = (PROJECT_ROOT / "hermes_wisdom_plugin" / "__init__.py").read_text(
-        encoding="utf-8"
-    )
-    tree = ast.parse(source)
-    register_node = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "register"
-    )
-    assert len(register_node.body) == 1
-    assert isinstance(register_node.body[0], ast.Expr)
-    assert isinstance(register_node.body[0].value, ast.Constant)
-    assert isinstance(register_node.body[0].value.value, str)

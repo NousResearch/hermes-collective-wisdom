@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-collective-wisdom"
 version = "0.1.0.dev0"
-description = "Inert native scaffold for the Hermes Collective Wisdom plugin."
+description = "External Hermes Collective Wisdom plugin, under development."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.14"
-dependencies = []
+dependencies = ["packaging==26.0", "pydantic==2.13.4", "requests==2.33.0"]
 
 [project.optional-dependencies]
 dev = [
@@ -22,6 +22,9 @@ dev = [
 [tool.setuptools]
 packages = ["hermes_wisdom_plugin"]
 include-package-data = false
+
+[tool.setuptools.package-data]
+hermes_wisdom_plugin = ["contracts/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

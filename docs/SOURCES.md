@@ -11,6 +11,7 @@ in historical documents.
 | Squash merge | `a6ee31f55aad08cc51ba348db2febacd541eec01` |
 | Revert | `0dcadf6f41c8e267a68d696d9adef009a691ca43` |
 | Audited current Agent | `31d0a2428e9db346d6781da66f5b37ff3e12def2` |
+| Plugin-only account/lifecycle re-audit | `bf51fee548ceaa28d2c299a41c0f65066c04c061` (unmodified upstream; not PR #108645) |
 | Gateway feature merge | PR 255, `1a1d0d7a71edb617d6d4aae453a2609080561874` |
 | Portal feature merge | PR 1022, `dc1cdb3449e89331244cc9cc132f842da44ab353` |
 | Observed Gateway main | `e90db09107fe674b72c7ff696f7e7fcd32dfd64c` |
@@ -59,6 +60,16 @@ not be added to it. Deferral removes them from first-release scope, not from the
 overall plan. Do not equate file/line reduction with preserved functionality.
 
 ## Supporting References
+
+Manual-installation pattern review (not runtime dependencies):
+
+| Plugin | Immutable revision | Pattern used |
+| --- | --- | --- |
+| `NousResearch/hermes-plugin-sprites` | `a4881e07385beff6b440b5338dec7a415d5f1be5` | Extracted implementation, narrow host adapter, profile isolation |
+| `NousResearch/hermes-telegram-business` | `98c60afc00d36c885bb040ebe973b1aa908886c0` | Explicit domain approval and durable owner-bound state |
+| `NousResearch/hermes-media-studio` | `e8d59971d2b7901405b39dac7b03bdd616272d0d` | Persisted operations, recovery and cleanup |
+| `NousResearch/hermes-example-plugins` | `38fe0fb53eff98d477f807432e965429e665ca33` | Small single-surface registration examples; no reusable TUI confirmation API |
+| `NousResearch/plugins` | `ec29e587b832fcdf6b075dbba592ca12e67579a7` | Profile-scoped frontend state and disposal; UI-only examples are not Python confirmation APIs |
 
 - Current host: `hermes_cli/plugins.py`, `plugins_manifest.py`, `plugins_state.py`.
 - Desktop: `website/docs/developer-guide/desktop-plugin-sdk.md` and

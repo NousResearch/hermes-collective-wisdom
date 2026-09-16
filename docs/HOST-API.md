@@ -4,6 +4,13 @@ Audited against Agent `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
 See [SOURCES.md](SOURCES.md) for immutable source notation. Proposed interfaces
 below are **not present or implemented** by this repository today.
 
+A partial command-only experiment exists on the rejected Agent PR #108645:
+[historical H1 evidence](verification/H1-commands.md). It is not a dependency.
+The 2026-09-12 simplification decision requires plugin-owned checks and unchanged
+host command surfaces. Exhaust existing APIs for proactive delivery as well;
+report any insurmountable gap before proposing another Agent PR.
+Targeted re-audit: Agent `bf51fee548ceaa28d2c299a41c0f65066c04c061`.
+
 ## Reuse Existing Interfaces
 
 | Need | Existing API / source | Constraint |
@@ -24,39 +31,100 @@ below are **not present or implemented** by this repository today.
 | Shared UI API | `dashboard/plugin_api.py` exports FastAPI router | Backend enablement is separate from renderer enablement |
 
 Private immutable Git install is already supported. `requires_hermes` can enforce
-the minimum released host version once required hooks ship. Manifest/API metadata
+the minimum tested host version. Manifest/API metadata
 does not substitute for runtime checks: an unavailable mandatory hook must
 disable the affected feature with a clear diagnostic, not activate a bypass.
 
-## Required Generic Host Work
+## Plugin-First Integration
 
-### H1: Trusted Invocation Context
+### H1: Ordinary Commands and Native Actions
 
-Expose a host-authored immutable context to plugin command/tool/lifecycle
-handlers: profile/account ownership, session key, surface, authenticated actor
-and route, conversation generation, and execution origin (root user-facing,
-subagent, background). Missing or ambiguous context fails closed for delivery.
+Use `register_cli_command` and `register_command`. Ordinary replies return via
+the host's calling session; rely on host admission instead of adding a second
+identity/routing layer. Shared slash handlers receive raw arguments, not actor
+context. Do not infer identity from arguments or process-global last-user state.
 
-Keep existing handlers backward-compatible. Do not require plugins to inspect
-private manager fields, mutable process-wide environment variables, adapter
-internals, or model-supplied arguments to determine identity. Tests must exercise
-real dispatch sites, including delegated tools and background workers.
+Use native Telegram/Slack handler inputs for callback actor/message binding and
+group privacy. Keep host admission/pairing intact when adding native handlers.
+Account entitlement and callback ownership are different checks; an entitled
+bot account does not authorize every person who can click a shared card.
+Audit proactive/tool delivery independently; ordinary reply routing alone does
+not prove that a subagent or background task has a human-facing destination.
 
-### H2: Command Availability
+### Command Availability: Plugin-Owned Gate
 
-Provide a generic availability predicate in command metadata and apply it to
-discovery/completion/menu paths as well as direct dispatch. Plugins use it to
-hide unavailable capabilities and reject expired credentials without rebuilding
-mid-conversation prompts/toolsets. Handler/service authorization remains required.
+Only installed/enabled plugins register Wisdom features. Installed but
+unavailable commands may remain visible and return a concise denial. No core
+help/menu/completion changes or mid-conversation toolset rebuild is required.
+Check current entitlement at initialization and before every protected action;
+background gates recheck local state without refresh or model calls. Cache and
+pending-action invalidation must cover account/profile/org changes and expiry.
 
-The predicate is cheap and read-only. It must not refresh credentials or contact
-a model. Stale native platform menus cannot confer authority on an old command.
-Scope any polling/refresh to affected clients, not global configuration churn.
+The current hook list has session/lifecycle hooks but no dedicated auth or
+org-switch events. Use suitable existing hooks as optimizations, not a required
+login-event contract. Per-operation reads provide enforcement independently of
+periodic checks. Existing supervised tasks are sufficient for local polling.
+
+### Account and Request Boundary: Narrow Plugin Adapter
+
+The follow-up audit at the same Agent baseline found no supported plugin-facing
+account snapshot or authenticated request API. `get_config`/`set_config` and
+`ctx.state` are not credential APIs. An invocation's admitted messaging actor is
+also not an organization access token.
+
+Host-owned building blocks already exist:
+
+- `hermes_cli/auth_nous.py:get_nous_auth_status_local` is refresh-free, but is an
+  internal display projection without the organization/scope fields needed here.
+- `hermes_cli/nous_account.py:get_nous_portal_account_info` can fall through to a
+  refresh. It is not safe to call from completion or availability predicates.
+- Token decoding and `resolve_nous_runtime_credentials` remain host internals.
+  Local token claims are availability hints, not a substitute for Gateway's
+  verification and execution-time authorization.
+
+The absence of a plugin facade does not mandate a new host API. First implement
+a narrow plugin-side adapter over the existing host account/credential readers,
+with compatibility tests against the pinned Agent revision. The local status
+reader's `logged_in` flag alone is not entitlement: it can mean a refresh token
+exists despite an unusable access token. Preserve the existing claims/expiry
+checks and fail closed on missing inputs. Document any internal API coupling.
+Bind reads and requests to the current profile/account; do not persist refresh
+tokens or accept model-provided identity. Do not add a generic network framework,
+extra credential store, or replacement JWT parser/OAuth flow.
+An actual authorized request may use the host's existing refresh policy;
+visibility and completion must never initiate refresh or network work.
+
+The extracted plugin client uses explicit providers in tests. That does not
+complete workflow integration. The [account adapter](verification/F1-account.md)
+now passes denial/expiry/profile-switch checks against unmodified upstream.
+It uses `get_provider_auth_state` and the existing host decoder, not a new API.
+CLI/slash registration now supports explicit terminal onboarding and safe
+discovery. Credentials are resolved per invocation; slash mutation requests
+are static terminal handoffs. Neither registration nor status starts recovery.
+
+### Manual Installation: Narrow Host Guard Adapter
+
+The terminal installation slice uses the pinned host's `scan_skill` and
+`should_allow_install(force=False)`, plus its existing target validators. These
+are tested internal imports, not a new public host API. Static capability reads
+do not execute commands, refresh credentials, load plugins, or probe networks.
+Unavailable guards fail closed. The destructive Hub replacement installer is
+not used.
+
+The plugin owns exact-content receipts, journals, atomic promotion and
+recoverable removal. Staging under `.hub/collective-wisdom` and trash under
+`.archive/collective-wisdom` use directories excluded by the actual host skill
+scanner; committed `_wisdom/<org>/<slug>` skills remain discoverable. Plain
+terminal confirmation does not use remembered tool approvals or private TUI
+modals. See [manual installation evidence](verification/manual-installation.md)
+for the tested boundaries and outstanding live acceptance.
 
 ### H3: Post-Delivery and Idle-Session Integration
 
-Expose host-owned post-response delivery facts and a safe idle-session work
-boundary, carrying H1 context and generation fencing. A generated response is
+First audit existing hooks and native delivery results for post-response facts
+and safe idle execution. Only a demonstrated missing capability justifies a
+small generic host extension. Preserve session/operation fencing without
+requiring the draft universal H1 context. A generated response is
 not necessarily a delivered response. A queued event is not a delivery receipt.
 
 Support typed plugin workflow events without synthesizing human-authored input.
@@ -66,8 +134,8 @@ Expose startup/shutdown opportunity sufficient to use supervised plugin tasks.
 
 Existing `inject_message` is not this interface: it creates conversational
 input, and its queued return does not prove delivery. Core adapter
-post-delivery/idle internals are evidence to extract a generic interface, not
-private APIs for this plugin to call directly.
+post-delivery/idle internals are investigation evidence, not permission to patch
+core routing or call private adapter internals by default.
 
 ### UI Follow-Up
 
