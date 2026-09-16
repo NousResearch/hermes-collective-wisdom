@@ -62,9 +62,9 @@ def test_maintenance_queues_enriched_feed_and_weekly_evidence_without_model_or_s
     service = _service(tmp_path)
     service.require_setup = Mock()
     service.client.feed.return_value = _feed()
-    service.client.version.return_value = SimpleNamespace(
+    service.client.skill.return_value = SimpleNamespace(
         skill={"id": "skill-feed", "slug": "team-skill"},
-        version={"version": 2, "published_by_user_id": "account-2"},
+        versions=[{"version": 2, "published_by_user_id": "account-2"}],
     )
     from hermes_wisdom_plugin.client import FeedEvent
     service.client.feed.return_value = _feed(FeedEvent(
@@ -137,6 +137,48 @@ def test_maintenance_queues_enriched_feed_and_weekly_evidence_without_model_or_s
     assert inspected["event_id"] == event["id"] and inspected["networked"] is False
 
 
+def test_self_publisher_contract_metadata_drains_without_queue(tmp_path):
+    service = _service(tmp_path)
+    service.require_setup = Mock()
+    from hermes_wisdom_plugin.client import FeedEvent
+
+    service.client.feed.return_value = _feed(FeedEvent(
+        event_id="own-feed", kind="new", skill_id="skill-feed", version=2,
+        takedown_generation=0, installation_id=None, update_mode=None,
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    service.client.skill.return_value = SimpleNamespace(
+        skill={"id": "skill-feed", "slug": "team-skill"},
+        versions=[{"version": 2, "published_by_user_id": "account-1"}],
+    )
+    owner = _owner(service)
+    service.store.bind_qualification_owner(owner)
+    _preferences(service.client)
+    consumption = WisdomConsumption(
+        service.store, service.client,
+        config={"notifications": {"new_skills": "immediate"}},
+    )
+
+    consumption.poll_feed()
+    assert consumption.refresh_metadata() == {
+        "attempted": 1, "enriched": 1, "more": False,
+    }
+    result = MaintenanceMediationProducer(
+        service, consumption, owner, skills_root=tmp_path / "skills",
+        config={"notifications": {"delivery_mode": "agent"}}, at=NOW,
+        timezone_info=(timezone.utc, "UTC"),
+    ).produce(_policy())
+
+    assert result == {"queued": 0, "feed": 0, "weekly": 0, "more": False}
+    assert consumption.notifications() == {"events": [], "more": False}
+    assert [item["event_id"] for item in consumption.activity()["events"]] == [
+        "own-feed",
+    ]
+    assert consumption.refresh_metadata() == {
+        "attempted": 0, "enriched": 0, "more": False,
+    }
+
+
 def test_repeated_maintenance_reaches_feed_tail_and_weekly_candidate_once(tmp_path):
     service = _service(tmp_path)
     service.require_setup = Mock()
@@ -151,9 +193,9 @@ def test_repeated_maintenance_reaches_feed_tail_and_weekly_candidate_once(tmp_pa
         for index in range(9)
     ]
     service.client.feed.return_value = _feed(*events)
-    service.client.version.side_effect = lambda skill_id, version: SimpleNamespace(
+    service.client.skill.side_effect = lambda skill_id: SimpleNamespace(
         skill={"id": skill_id, "slug": skill_id},
-        version={"version": version, "published_by_user_id": "account-2"},
+        versions=[{"version": 1, "published_by_user_id": "account-2"}],
     )
     root = tmp_path / "skills"
     path, _content_hash = _skill(root)
