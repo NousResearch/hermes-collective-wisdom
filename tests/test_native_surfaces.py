@@ -27,6 +27,7 @@ from hermes_wisdom_plugin.client import (
 from hermes_wisdom_plugin.client_delivery import ClientDeliveryResponse
 from hermes_wisdom_plugin.delivery import DeliveryReceipt
 from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox
+from hermes_wisdom_plugin import mediation
 from hermes_wisdom_plugin.mediation_store import MediationStore
 from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime, assessment_view
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
@@ -1412,6 +1413,123 @@ def test_lifecycle_rejects_host_session_context_route_mismatch(tmp_path: Path):
         assert not called.is_set()
 
     asyncio.run(scenario())
+
+
+def test_cached_gateway_lifecycle_uses_matching_active_runtime_session(tmp_path: Path, monkeypatch):
+    async def scenario():
+        route = {
+            "platform": "slack", "profile": "default", "chat_id": "D1",
+            "user_id": "U1", "thread_id": "", "scope_id": "W1",
+            "message_id": "request-2", "session_key": "slack:W1:D1:U1",
+            "session_id": "",
+        }
+        active = {
+            "session_id": "durable-session-1", "provider": "fixture-provider",
+            "model": "active-model",
+        }
+        monkeypatch.setattr(mediation, "_active_main_runtime", lambda: dict(active))
+        runtime = NativeSurfaceRuntime(
+            tmp_path, "default", Service, FakeLlm(), lambda *_args, **_kwargs: None,
+            session_context=lambda: dict(route),
+        )
+        adapter = SlackAdapter()
+        source = SimpleNamespace(
+            platform=SimpleNamespace(value="slack"), profile="default", chat_type="dm",
+            chat_id="D1", user_id="U1", user_name="Shannon", thread_id="", scope_id="W1",
+        )
+        event = SimpleNamespace(
+            source=source, message_id="request-2", internal=False,
+            get_command=lambda: "", get_command_args=lambda: "",
+        )
+        gateway = SimpleNamespace(
+            _session_key_for_source=lambda _source: "slack:W1:D1:U1",
+            _adapter_for_source=lambda _source: adapter,
+            _is_user_authorized_for_source=lambda _source: True,
+        )
+        runtime.hook(event=event, gateway=gateway)
+        await asyncio.to_thread(
+            runtime.lifecycle_hook, model="active-model", session_id="durable-session-1",
+            task_id="host-task-1", turn_id="turn-1", platform="slack",
+            sender_id="U1", parent_session_id="",
+        )
+
+        admitted = await asyncio.to_thread(
+            runtime.tool_invocation,
+            task_id="host-task-1", session_id="durable-session-1",
+        )
+        assert admitted.host_session_id == "durable-session-1"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("conflicting-session", "durable-session-1", "host-task-1", "durable-session-1"),
+        ("", "", "host-task-1", "durable-session-1"),
+        ("", "other-session", "host-task-1", "durable-session-1"),
+        ("", "durable-session-1", "other-task", "durable-session-1"),
+        ("", "durable-session-1", "host-task-1", "other-session"),
+    ],
+)
+def test_cached_gateway_binding_rejects_conflicts_and_missing_proof(
+    tmp_path: Path, monkeypatch, case
+):
+    context_session, runtime_session, tool_task, tool_session = case
+    route = {
+        "platform": "slack", "profile": "default", "chat_id": "D1",
+        "user_id": "U1", "thread_id": "", "scope_id": "W1",
+        "message_id": "request-2", "session_key": "slack:W1:D1:U1",
+        "session_id": context_session,
+    }
+    active = {
+        "session_id": runtime_session, "provider": "fixture-provider",
+        "model": "active-model",
+    } if runtime_session else None
+    monkeypatch.setattr(
+        mediation, "_active_main_runtime", lambda: dict(active) if active else None,
+    )
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", Service, FakeLlm(), lambda *_args, **_kwargs: None,
+        session_context=lambda: dict(route),
+    )
+    captured = replace(
+        invocation(SlackAdapter()), message_id="request-2",
+        host_session_id="durable-session-1", task_id="host-task-1", turn_id="turn-1",
+    )
+    runtime._tool_invocations[("host-task-1", "durable-session-1")] = (
+        float("inf"), captured,
+    )
+
+    with pytest.raises(PermissionError, match="active admitted private human session"):
+        runtime.tool_invocation(task_id=tool_task, session_id=tool_session)
+
+
+def test_cached_gateway_tool_rejects_owner_change_after_admission(tmp_path: Path, monkeypatch):
+    route = {
+        "platform": "slack", "profile": "default", "chat_id": "D1",
+        "user_id": "U1", "thread_id": "", "scope_id": "W1",
+        "message_id": "request-2", "session_key": "slack:W1:D1:U1", "session_id": "",
+    }
+    monkeypatch.setattr(mediation, "_active_main_runtime", lambda: {
+        "session_id": "durable-session-1", "provider": "fixture-provider",
+        "model": "active-model",
+    })
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", Service, FakeLlm(), lambda *_args, **_kwargs: None,
+        session_context=lambda: dict(route),
+    )
+    captured = replace(
+        invocation(SlackAdapter()), message_id="request-2",
+        host_session_id="durable-session-1", task_id="host-task-1", turn_id="turn-1",
+    )
+    runtime._tool_invocations[("host-task-1", "durable-session-1")] = (
+        float("inf"), captured,
+    )
+    route["user_id"] = "U9"
+
+    with pytest.raises(PermissionError, match="active admitted private human session"):
+        runtime.tool_invocation(task_id="host-task-1", session_id="durable-session-1")
 
 
 def test_model_tool_revalidates_live_host_context_and_retires_stale_authority(tmp_path: Path):
