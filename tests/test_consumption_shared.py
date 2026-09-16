@@ -86,14 +86,14 @@ def test_exact_version_self_publisher_is_not_advised_but_next_teammate_version_i
     service.client.feed.return_value = _feed(
         _event("own-version", version=2), _event("teammate-version", version=3)
     )
-    service.client.version.side_effect = [
+    service.client.skill.side_effect = [
         SimpleNamespace(
-            version={"version": 2, "published_by_user_id": "account-1"},
             skill={"id": "skill-1", "slug": "shared"},
+            versions=[{"version": 2, "published_by_user_id": "account-1"}],
         ),
         SimpleNamespace(
-            version={"version": 3, "published_by_user_id": "account-2"},
             skill={"id": "skill-1", "slug": "shared"},
+            versions=[{"version": 3, "published_by_user_id": "account-2"}],
         ),
     ]
     consumption = WisdomConsumption(
@@ -103,7 +103,7 @@ def test_exact_version_self_publisher_is_not_advised_but_next_teammate_version_i
     )
     consumption.poll_feed()
     assert consumption.notifications()["events"] == []
-    assert service.client.version.call_count == 0
+    assert service.client.skill.call_count == 0
     assert consumption.refresh_metadata() == {"attempted": 2, "enriched": 2, "more": False}
 
     projected = consumption.notifications()
@@ -150,14 +150,13 @@ def test_maintenance_metadata_enrichment_is_bounded_and_validates_exact_referenc
     ]
     service.client.feed.return_value = _feed(*events)
 
-    def detail(skill_id, version):
-        assert version == 1
+    def detail(skill_id):
         return SimpleNamespace(
             skill={"id": skill_id, "slug": f"shared-{skill_id}"},
-            version={"version": version, "published_by_user_id": "account-2"},
+            versions=[{"version": 1, "published_by_user_id": "account-2"}],
         )
 
-    service.client.version.side_effect = detail
+    service.client.skill.side_effect = detail
     consumption = WisdomConsumption(
         service.store, service.client,
         config={"notifications": {"new_skills": "immediate"}},
@@ -165,18 +164,18 @@ def test_maintenance_metadata_enrichment_is_bounded_and_validates_exact_referenc
     consumption.poll_feed()
 
     assert consumption.notifications() == {"events": [], "more": True}
-    assert service.client.version.call_count == 0
+    assert service.client.skill.call_count == 0
     assert consumption.refresh_metadata() == {"attempted": 8, "enriched": 8, "more": True}
-    assert service.client.version.call_count == 8
+    assert service.client.skill.call_count == 8
     assert len(consumption.notifications()["events"]) == 8
-    assert service.client.version.call_count == 8
+    assert service.client.skill.call_count == 8
 
 
 def test_mismatched_version_metadata_never_authorizes_advice(tmp_path):
     service = _service(tmp_path)
-    service.client.version.return_value = SimpleNamespace(
+    service.client.skill.return_value = SimpleNamespace(
         skill={"id": "different-skill", "slug": "wrong"},
-        version={"version": 999, "published_by_user_id": "account-2"},
+        versions=[{"version": 999, "published_by_user_id": "account-2"}],
     )
     consumption = WisdomConsumption(
         service.store, service.client,

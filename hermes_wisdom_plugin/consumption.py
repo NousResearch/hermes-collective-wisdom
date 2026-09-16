@@ -151,16 +151,22 @@ class WisdomConsumption:
             skill_id = str(row["skill_id"])
             version = int(row["version"])
             try:
-                detail = self.client.version(skill_id, version)
+                detail = self.client.skill(skill_id)
                 if self._binding() != binding:
                     raise WisdomAuthError("Wisdom feed owner changed during metadata refresh")
                 skill = getattr(detail, "skill", None)
-                version_data = getattr(detail, "version", None)
+                versions = getattr(detail, "versions", None)
+                version_data = next(
+                    (
+                        item for item in versions
+                        if isinstance(item, dict) and item.get("version") == version
+                    ),
+                    None,
+                ) if isinstance(versions, list) else None
                 exact_version = bool(
                     isinstance(skill, dict)
                     and skill.get("id") == skill_id
                     and isinstance(version_data, dict)
-                    and version_data.get("version") == version
                 )
                 slug = skill.get("slug") if isinstance(skill, dict) else None
                 publisher = (
