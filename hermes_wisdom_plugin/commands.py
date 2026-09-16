@@ -5,15 +5,19 @@ and the read-only projections from ``gateway/wisdom_command.py``, both at
 ``0924f7946b937c2ed02d083fc26752d577c54b3b``. Host registration, service
 construction, native callbacks, and all mutations remain outside this module.
 """
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
+import stat
 import sys
+import unicodedata
+from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .errors import (
     WisdomAuthError,
@@ -22,14 +26,31 @@ from .errors import (
     WisdomNotFound,
     WisdomValidationError,
 )
-from .package import PackagePolicyError
+from .package import (
+    MAX_FILES,
+    MAX_SEGMENT_BYTES,
+    MAX_TREE_BYTES,
+    MAX_TREE_DEPTH,
+    PackagePolicyError,
+)
+from .portal_urls import portal_version_url as _version_url
+from .portal_urls import safe_portal_url as _safe_url
 
 
 PAGE_SIZE = 5
 _MAX_PAGE = 10_000
-_SLASH_COMMANDS = frozenset(
-    {"setup", "status", "list", "browse", "show", "versions", "help",
-     "install", "installed", "uninstall"}
+# A valid package can contain control characters that JSON expands to six bytes.
+# The remaining terms bound maximum paths plus the fixed inspect envelope.
+MAX_PREPARED_PAYLOAD_BYTES = (
+    MAX_TREE_BYTES * 6
+    + MAX_FILES
+    * ((MAX_TREE_DEPTH + 1) * MAX_SEGMENT_BYTES + MAX_TREE_DEPTH + 256)
+    + 64 * 1024
+)
+CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
+_SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
+    {"setup", "status", "settings", "mute", "sync", "list", "browse", "show", "versions", "help",
+     "install", "installed", "check", "update", "uninstall", "installed-setup"}
 )
 _CHECK_LABELS = (
     ("security_check", "Security check"),
@@ -52,15 +73,30 @@ _PUBLIC_STATUS_STATES = {
     "degraded": "attention required",
     "unavailable": "unavailable",
 }
-_CLI_COMMANDS = ("setup", "status", "list", "browse", "show", "versions",
-                 "install", "installed", "uninstall", "help")
+_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "sync", "inbox",
+                 "maintenance", "list", "browse", "show", "versions", "suggest", "review-week",
+                 "prepared", "publication", "install", "installed", "check", "update",
+                 "installed-setup", "uninstall", "help")
 
 
 class _SlashUsageError(ValueError):
     """A locally generated, safe-to-render slash usage error."""
 
 
-def build_parser(parser: argparse.ArgumentParser) -> None:
+class _DuplicateJsonKey(ValueError):
+    """One JSON object repeated a key and is therefore ambiguous."""
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    """Return the stable fields used to fence a local JSON read."""
+
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    return tuple(getattr(value, field) for field in fields)
+
+
+def build_parser(  # pylint: disable=too-many-statements,too-many-locals
+    parser: argparse.ArgumentParser,
+) -> None:
     """Populate an already-created ``hermes wisdom`` argument parser."""
 
     parser.set_defaults(_wisdom_parser=parser)
@@ -80,13 +116,99 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
         help="Accept the local telemetry and owner-private draft disclosure",
     )
     add("status", "Show local and Gateway Wisdom status")
+    settings = add("settings", "Inspect or explicitly change notification assessment mode")
+    settings.add_argument(
+        "notification_mode", nargs="?", default="status", choices=("status", "agent", "fixed")
+    )
+    notifications = add("notifications", "Show durable local Wisdom notices")
+    notifications.add_argument("--mark-seen", action="store_true")
+    mute = add("mute", "Manage organization-wide proactive Wisdom notifications")
+    mute.add_argument(
+        "mute_duration", nargs="?", default="status",
+        choices=["status", "1d", "1w", "30d", "forever", "off"],
+    )
+    sync = add("sync", "Inspect or retry saved delivery and operation reports")
+    sync.add_argument("sync_action", nargs="?", default="status", choices=["status", "retry"])
+    add("inbox", "Read local Wisdom activity without polling or delivery")
+    maintenance = add("maintenance", "Explicitly refresh feed and policy authority")
+    maintenance.add_argument("--refresh-policy", action="store_true")
+    maintenance.add_argument(
+        "--apply-automatic", action="store_true",
+        help="Apply only updates freshly authorized by automatic server policy",
+    )
     add("list", "List published Collective Wisdom skills")
-    browse = add("browse", "Search the organization catalog by keyword")
-    browse.add_argument("query", nargs="?")
-    show = add("show", "Show one published skill")
-    show.add_argument("skill_id")
-    versions = add("versions", "List published versions")
-    versions.add_argument("skill_id")
+    add("browse", "Search the organization catalog by keyword").add_argument(
+        "query", nargs="?"
+    )
+    add("show", "Show one published skill").add_argument("skill_id")
+    add("versions", "List published versions").add_argument("skill_id")
+    suggest = add("suggest", "Prepare one manually selected owner-private local draft")
+    suggest.add_argument("skill")
+    suggest.add_argument(
+        "--allow-model-review",
+        action="store_true",
+        help=(
+            "Authorize sending the exact private package and owner description to "
+            "the current model provider for editorial and professionalism review"
+        ),
+    )
+    review_week = add(
+        "review-week", "Queue this week's local review under current Gateway policy"
+    )
+    review_week.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview bounded local evidence without queueing or calling a model",
+    )
+    prepared = commands.add_parser(
+        "prepared", help="Inspect, save, or re-review one owner-private local draft"
+    )
+    prepared_actions = prepared.add_subparsers(dest="prepared_action", required=True)
+
+    def prepared_action(name: str, help_text: str) -> argparse.ArgumentParser:
+        action = prepared_actions.add_parser(name, help=help_text)
+        action.add_argument(
+            "--json", action="store_true", help="Emit stable machine-readable JSON"
+        )
+        return action
+
+    prepared_action("inspect", "Export the complete exact editable payload").add_argument(
+        "draft_id"
+    )
+    prepared_action("save", "Save one complete hash-bound JSON payload").add_argument(
+        "payload"
+    )
+    review = prepared_action("review", "Re-run checks for the exact current draft")
+    review.add_argument("draft_id")
+    review.add_argument(
+        "--allow-model-review", action="store_true",
+        help="Authorize sending exact draft content to the configured model provider",
+    )
+    publication = commands.add_parser(
+        "publication", help="Review, submit, and reconcile exact contribution publication"
+    )
+    publication_actions = publication.add_subparsers(
+        dest="publication_action", required=True
+    )
+
+    def publication_action(name: str, help_text: str) -> argparse.ArgumentParser:
+        action = publication_actions.add_parser(name, help=help_text)
+        action.add_argument(
+            "--json", action="store_true", help="Emit stable machine-readable JSON"
+        )
+        return action
+
+    publication_action(
+        "review", "Review exact bytes, checks, and current server policy"
+    ).add_argument("draft_id")
+    publication_action(
+        "submit", "Explicitly submit one exact publication review receipt"
+    ).add_argument("receipt")
+    for action_name, help_text in (
+        ("status", "Inspect durable publication state without network retry"),
+        ("reopen", "Reconcile an uncertain publication without duplicate submission"),
+        ("decline", "Decline or withdraw one known remote draft when safe"),
+    ):
+        publication_action(action_name, help_text).add_argument("operation_id")
     install = add("install", "Review or apply an exact managed skill installation")
     install.add_argument("reference", nargs="?", default="")
     install.add_argument("--plan", action="store_true", help="Create a review without installing")
@@ -95,6 +217,58 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
                          help="Acknowledge partial or setup-required compatibility")
     install.add_argument("--update-mode", choices=["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"])
     add("installed", "Inspect this enrolment's managed installations")
+    add("check", "Check one managed skill for an authoritative update").add_argument(
+        "skill_id"
+    )
+    update = add("update", "Review or apply one exact managed skill update")
+    update.add_argument("skill_id", nargs="?", default="")
+    update.add_argument("--plan", action="store_true", help="Create a review without updating")
+    update.add_argument("--apply-receipt", help="Apply an explicitly reviewed update receipt")
+    update.add_argument(
+        "--preserve-modified", action="store_true",
+        help="Review a durable unmanaged copy of exact edited bytes before replacement",
+    )
+    update.add_argument(
+        "--accept-sensitive", action="store_true",
+        help="Bind acceptance of newly requested sensitive capabilities into the review",
+    )
+    update.add_argument(
+        "--accept-partial", action="store_true",
+        help="Bind acceptance of partial or setup-required compatibility into the review",
+    )
+    installed_setup = commands.add_parser(
+        "installed-setup", help="Inspect and separately approve installed-skill setup"
+    )
+    setup_actions = installed_setup.add_subparsers(dest="setup_action", required=True)
+
+    def setup_action(name: str, help_text: str) -> argparse.ArgumentParser:
+        action = setup_actions.add_parser(name, help=help_text)
+        action.add_argument(
+            "--json", action="store_true", help="Emit stable machine-readable JSON"
+        )
+        return action
+
+    inspect_setup = setup_action("inspect", "Inspect guidance and prerequisites")
+    inspect_setup.add_argument("skill_id")
+    inspect_setup.add_argument("--version", type=int)
+    plan_setup = setup_action("plan", "Review one exact setup action")
+    plan_setup.add_argument("skill_id")
+    plan_setup.add_argument("--version", type=int, required=True)
+    plan_setup.add_argument(
+        "--phase", choices=["prerequisite", "setup", "verify"], required=True
+    )
+    plan_setup.add_argument("--index", type=int, default=0)
+    plan_setup.add_argument("--command", default="")
+    setup_action("apply", "Apply one setup review receipt").add_argument("receipt")
+    status_setup = setup_action("status", "Reconcile and inspect setup progress")
+    status_setup.add_argument("skill_id")
+    status_setup.add_argument("--version", type=int)
+    recover_setup = setup_action("recover", "Review or abandon uncertain setup work")
+    recover_setup.add_argument("skill_id")
+    recover_setup.add_argument("operation_id")
+    recover_setup.add_argument(
+        "--acknowledge-effects-checked-and-stopped", action="store_true"
+    )
     uninstall = add("uninstall", "Move a managed skill to recoverable trash")
     uninstall.add_argument("skill_id")
     uninstall.add_argument("--yes", action="store_true", help="Confirm recoverable removal")
@@ -129,6 +303,27 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             result = service.setup(accept_disclosure=accepted)
         elif command == "status":
             result = service.status(include_operations=True)
+        elif command == "settings":
+            service.require_setup()
+            if args.notification_mode != "status":
+                service.set_notification_mode(args.notification_mode)
+            result = {
+                "delivery_mode": service.notification_mode(),
+                "writable": service.notification_mode_writable(),
+            }
+        elif command == "notifications":
+            result = service.notifications(mark_seen=bool(args.mark_seen))
+        elif command == "mute":
+            result = service.mute(args.mute_duration)
+        elif command == "sync":
+            result = service.sync_retry() if args.sync_action == "retry" else service.sync_status()
+        elif command == "inbox":
+            result = service.inbox()
+        elif command == "maintenance":
+            result = service.maintenance(
+                refresh_policy=bool(args.refresh_policy),
+                apply_automatic=bool(args.apply_automatic),
+            )
         elif command == "list":
             service.require_setup()
             result = service.list_skills()
@@ -141,12 +336,30 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         elif command == "versions":
             service.require_setup()
             result = {"versions": service.versions(args.skill_id)}
+        elif command == "suggest":
+            result = service.suggest(
+                args.skill, allow_model_review=bool(args.allow_model_review)
+            )
+        elif command == "review-week":
+            result = service.review_week(dry_run=bool(args.dry_run))
+        elif command == "prepared":
+            result = _prepared_cli(args, service)
+        elif command == "publication":
+            result = _publication_cli(args, service)
         elif command == "install":
             result = _install_cli(args, service)
             if result is None:
                 return 7
         elif command == "installed":
             result = {"installations": service.list_installations()}
+        elif command == "check":
+            result = service.check_update(args.skill_id)
+        elif command == "update":
+            result = _update_cli(args, service)
+            if result is None:
+                return 7
+        elif command == "installed-setup":
+            result = _installed_setup_cli(args, service)
         elif command == "uninstall":
             result = _uninstall_cli(args, service)
             if result is None:
@@ -205,13 +418,28 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
             if args:
                 raise _SlashUsageError("Usage: /wisdom help")
             return _slash_help()
+        if command in CONTRIBUTION_COMMANDS:
+            return (
+                "Contribution content is private. Use an admitted private review or the terminal "
+                "`hermes wisdom suggest`, `prepared`, and `publication` workflows. "
+                "Inspect the complete draft before explicit submission; "
+                "no private state was opened."
+            )
         if command == "setup":
             return (
                 "Set up Collective Wisdom\n\n"
                 "Run `hermes wisdom setup` in your terminal to review the disclosure "
                 "and configure this profile."
             )
-        if command in {"install", "installed", "uninstall"}:
+        if command in {"settings", "mute", "sync"}:
+            return (
+                "Use an admitted private control or the terminal for notification settings "
+                "and synchronization.\n\n"
+                f"Run `hermes wisdom {command} status` to inspect first. Nothing has been changed."
+            )
+        if command in {
+            "install", "installed", "check", "update", "uninstall", "installed-setup"
+        }:
             return _terminal_handoff(command)
         if command == "status":
             if args:
@@ -252,6 +480,118 @@ def _uninstall_cli(args, service):
     return service.uninstall(args.skill_id)
 
 
+def _publication_cli(args, service):
+    """Dispatch explicit publication review, confirmation, and recovery."""
+
+    action = args.publication_action
+    if action == "review":
+        return service.publication_review(args.draft_id)
+    if action == "submit":
+        return service.publication_submit(args.receipt)
+    if action == "status":
+        return service.publication_status(args.operation_id)
+    if action == "reopen":
+        return service.publication_reopen(args.operation_id)
+    if action == "decline":
+        return service.publication_decline(args.operation_id)
+    raise PackagePolicyError("unsupported publication action")
+
+
+def _prepared_cli(args, service):
+    """Dispatch the bounded local draft adapter; it has no submission action."""
+
+    if args.prepared_action == "inspect":
+        return service.prepared_inspect(args.draft_id)
+    if args.prepared_action == "review":
+        return service.prepared_review(
+            args.draft_id, allow_model_review=bool(args.allow_model_review)
+        )
+    if args.prepared_action == "save":
+        payload = _read_prepared_payload(Path(args.payload))
+        return service.prepared_save(
+            payload["draft_id"],
+            author_description=payload["author_description"],
+            files=payload["files"],
+            expected_hashes=payload["expected_hashes"],
+        )
+    raise PackagePolicyError("unsupported prepared draft action")
+
+
+def _read_prepared_payload(  # pylint: disable=too-many-branches
+    path: Path,
+) -> dict[str, Any]:
+    """Read one bounded regular JSON input without following a final symlink."""
+
+    maximum = MAX_PREPARED_PAYLOAD_BYTES
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise PackagePolicyError("prepared save payload must be a regular JSON file") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise PackagePolicyError("prepared save payload must be a regular JSON file")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PackagePolicyError("prepared save payload must be a regular JSON file") from exc
+    try:
+        opened = os.fstat(descriptor)
+
+        if not stat.S_ISREG(opened.st_mode) or _file_identity(opened) != _file_identity(before):
+            raise PackagePolicyError("prepared save payload changed while reading")
+        if opened.st_size > maximum:
+            raise PackagePolicyError(
+                f"prepared save payload exceeds {MAX_PREPARED_PAYLOAD_BYTES} bytes"
+            )
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        if len(body) > maximum or _file_identity(path.lstat()) != _file_identity(opened):
+            raise PackagePolicyError("prepared save payload changed while reading")
+    finally:
+        os.close(descriptor)
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise _DuplicateJsonKey(f"duplicate JSON key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except _DuplicateJsonKey as exc:
+        raise PackagePolicyError(str(exc)) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PackagePolicyError("prepared save payload is not valid UTF-8 JSON") from exc
+    required = {"draft_id", "author_description", "files", "expected_hashes"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise PackagePolicyError(
+            "prepared save payload requires only draft_id, author_description, "
+            "files, and expected_hashes"
+        )
+    if not isinstance(value["draft_id"], str) or not isinstance(
+        value["author_description"], str
+    ) or not isinstance(value["files"], list) or not isinstance(
+        value["expected_hashes"], dict
+    ):
+        raise PackagePolicyError("prepared save payload has invalid field types")
+    return value
+
+
 def _install_cli(args, service):
     """Reference CLI plan/apply contract; a JSON review never implies approval."""
     if args.apply_receipt:
@@ -274,10 +614,66 @@ def _install_cli(args, service):
     return service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
 
 
+def _update_cli(args, service):
+    """Keep all acknowledgements in the reviewed plan, never apply-time flags."""
+    acknowledgements = (
+        args.preserve_modified or args.accept_sensitive or args.accept_partial
+    )
+    if args.apply_receipt:
+        if args.skill_id or args.plan or acknowledgements:
+            raise PackagePolicyError(
+                "--apply-receipt cannot change the reviewed skill or acknowledgements"
+            )
+        return service.update_apply(args.apply_receipt)
+    if not args.skill_id:
+        raise PackagePolicyError("update requires a skill id or --apply-receipt")
+    plan = service.update_plan(
+        args.skill_id,
+        preserve_modified=args.preserve_modified,
+        accept_sensitive=args.accept_sensitive,
+        accept_partial=args.accept_partial,
+    )
+    if args.plan or args.json:
+        return plan
+    _emit(plan, as_json=False)
+    if not sys.stdin.isatty():
+        raise PackagePolicyError(
+            "noninteractive update requires --plan then --apply-receipt"
+        )
+    answer = input("Apply this exact reviewed update plan? [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        return None
+    return service.update_apply(plan["receipt"])
+
+
+def _installed_setup_cli(args, service):
+    """Dispatch explicit setup controls; no conversational confirmation exists."""
+    if args.setup_action == "inspect":
+        return service.installed_setup_inspect(args.skill_id, version=args.version)
+    if args.setup_action == "plan":
+        return service.installed_setup_plan(
+            args.skill_id, version=args.version, phase=args.phase,
+            index=args.index, command=args.command,
+        )
+    if args.setup_action == "apply":
+        return service.installed_setup_apply(args.receipt)
+    if args.setup_action == "status":
+        return service.installed_setup_status(args.skill_id, version=args.version)
+    if args.setup_action == "recover":
+        return service.installed_setup_recover(
+            args.skill_id, args.operation_id,
+            acknowledged=args.acknowledge_effects_checked_and_stopped,
+        )
+    raise PackagePolicyError("unsupported installed setup action")
+
+
 def _terminal_handoff(command):
     instructions = {
         "install": "hermes wisdom install <skill-id> --plan",
         "installed": "hermes wisdom installed",
+        "check": "hermes wisdom check <skill-id>",
+        "update": "hermes wisdom update <skill-id> --plan",
+        "installed-setup": "hermes wisdom installed-setup inspect <skill-id>",
         "uninstall": "hermes wisdom uninstall <skill-id>",
     }
     return ("Use the terminal for private installation review and confirmation.\n\n"
@@ -292,7 +688,7 @@ def _emit(value: Any, *, as_json: bool) -> None:
     elif isinstance(value, (dict, list)):
         print(json.dumps(value, indent=2, ensure_ascii=False, default=str))
     else:
-        print(value)
+        print(_without_controls(value))
 
 
 def _slash_help() -> str:
@@ -305,8 +701,19 @@ def _slash_help() -> str:
             "/wisdom versions <skill>",
             "/wisdom status",
             "/wisdom setup",
+            "/wisdom settings (private controls or terminal instructions)",
+            "/wisdom mute (private controls or terminal instructions)",
+            "/wisdom sync (private controls or terminal instructions)",
+            "/wisdom candidate <qualified-event-id> (private TUI or terminal instructions)",
+            "/wisdom suggest <skill> (private draft; never publishes)",
+            "/wisdom prepared <inspect|save|review> (private TUI or terminal instructions)",
+            "/wisdom publish <draft-id> (exact private review before submission)",
+            "/wisdom publication <review|status|reopen|decline> <target> (private controls)",
             "/wisdom install (terminal instructions)",
             "/wisdom installed (terminal instructions)",
+            "/wisdom check (terminal instructions)",
+            "/wisdom update (terminal instructions)",
+            "/wisdom installed-setup (terminal instructions)",
             "/wisdom uninstall (terminal instructions)",
             "/wisdom help",
         )
@@ -613,13 +1020,19 @@ def _positive_version(value: object) -> int | None:
     )
 
 
+def _without_controls(value: object) -> str:
+    return "".join(
+        " " if unicodedata.category(character) == "Cc" else character
+        for character in str(value)
+    )
+
+
 def _text(value: object, *, limit: int = 512) -> str:
-    text = " ".join(str(value).split())
-    return text[:limit]
+    return " ".join(_without_controls(value).split())[:limit]
 
 
 def _slash_command(command: str, argument: str) -> str:
-    return "/wisdom " + shlex.join((command, argument))
+    return "/wisdom " + shlex.join((command, _without_controls(argument)))
 
 
 def _slash_command_without_argument(command: str) -> str:
@@ -629,26 +1042,6 @@ def _slash_command_without_argument(command: str) -> str:
 def _paged_command(command: str, argument: str, page: int) -> str:
     parts = [command]
     if argument:
-        parts.append(argument)
+        parts.append(_without_controls(argument))
     parts.extend(("--page", str(page)))
     return "/wisdom " + shlex.join(parts)
-
-
-def _safe_url(value: object) -> str | None:
-    if not isinstance(value, str) or len(value) > 2048:
-        return None
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    return value
-
-
-def _version_url(base_url: str | None, version: int) -> str | None:
-    if not base_url:
-        return None
-    parsed = urlsplit(base_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query["version"] = str(version)
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))

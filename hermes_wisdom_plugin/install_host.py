@@ -18,7 +18,7 @@ from typing import Any
 
 from .compatibility import LocalCapabilities
 from .contract import SystemSpecification
-from .package import PackagePolicyError
+from .package import PackagePolicyError, PackageSecurityDecision
 
 
 def _distribution_version(name: str) -> str | None:
@@ -75,6 +75,43 @@ class InstallationHost:
         """Return this reviewer's profile-scoped skills root."""
 
         return self.profile_home / "skills"
+
+    @property
+    def hermes_version(self) -> str:
+        """Return the active, profile-checked host version."""
+
+        self._check_profile()
+        version = str(getattr(self._module("hermes_cli"), "__version__", "")).strip()
+        if not version:
+            raise PackagePolicyError("required Hermes host version is unavailable")
+        self._check_profile()
+        return version
+
+    def parse_skill_frontmatter(self, source: Path) -> dict[str, object]:
+        """Parse one local SKILL.md through the supported host utility."""
+
+        self._check_profile()
+        skill_md = source / "SKILL.md"
+        if source.is_symlink() or skill_md.is_symlink():
+            raise PackagePolicyError("local skill source is unsafe")
+        try:
+            parse = getattr(self._module("agent.skill_utils"), "parse_frontmatter")
+            frontmatter, _body = parse(skill_md.read_text(encoding="utf-8"))
+        except PackagePolicyError:
+            raise
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            raise PackagePolicyError("local skill frontmatter is unavailable") from exc
+        if not isinstance(frontmatter, dict):
+            raise PackagePolicyError("local skill frontmatter is unavailable")
+        self._check_profile()
+        return {str(key): value for key, value in frontmatter.items()}
+
+    def check_package_security(self, overlay: Path) -> PackageSecurityDecision:
+        """Adapt the host scan to the package kernel's fail-closed protocol."""
+
+        scan = self.scan(overlay)
+        allowed = scan.get("allowed")
+        return PackageSecurityDecision(allowed=allowed if isinstance(allowed, bool) else None)
 
     @staticmethod
     def _module(name: str) -> Any:

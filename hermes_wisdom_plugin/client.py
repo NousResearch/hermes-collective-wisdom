@@ -1,19 +1,27 @@
 """Bounded, schema-validated Gateway client for Wisdom discovery."""
+# pylint: disable=line-too-long,missing-class-docstring,missing-function-docstring,unidiomatic-typecheck,too-many-public-methods
 
 from __future__ import annotations
 
 import base64
 import json
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
+from .client_delivery import (
+    ClientDeliveryClaim, ClientDeliveryResponse, Identifier, receipt_projection,
+)
+from .client_outcome import ClientOperationOutcome, ClientOperationResponse
 from .contract import SystemSpecification, parse_manifest_bytes
+from .delivery import DeliveryReceipt
 from .errors import (
     WisdomAuthError,
     WisdomConflict,
@@ -158,6 +166,139 @@ class InstallationIdentity(WireModel):
     state: Literal["active"]
 
 
+class AgentLedNotificationDefaults(WireModel):
+    """Server-owned notification defaults included in publication policy."""
+
+    skill_ready_to_share: bool
+    teammate_published: bool
+    update_available: bool
+
+
+class AgentLedPolicyResponse(WireModel):
+    """Current server publication routing policy and stale-review version."""
+
+    org_id: str = Field(min_length=1, max_length=512)
+    usage_evidence_window_days: int = Field(ge=1, le=90)
+    min_aggregate_invocations: int = Field(ge=1, le=10_000)
+    consecutive_day_usage_counts: bool
+    repeated_edits_count: bool
+    max_recommendations_per_user_per_week: int = Field(ge=0, le=100)
+    publication_mode: Literal["open", "moderated", "managed"]
+    install_popularity_threshold: int = Field(ge=1, le=100_000)
+    notification_defaults: AgentLedNotificationDefaults
+    manager_review_email_cadence: Literal["immediate", "daily"]
+    not_now_suppression_days: int = Field(ge=1, le=365)
+    version: int = Field(ge=1)
+    updated_by_user_id: str | None
+
+
+class WisdomSuppression(WireModel):
+    key: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    suppress_until: str
+
+
+class WisdomSuppressionResponse(WisdomSuppression):
+    org_id: str = Field(min_length=1, max_length=512)
+
+
+class WisdomSuppressionList(WireModel):
+    org_id: str = Field(min_length=1, max_length=512)
+    suppressions: list[WisdomSuppression] = Field(max_length=100)
+
+
+class WisdomMuteResponse(WireModel):
+    org_id: str = Field(min_length=1, max_length=512)
+    muted: bool
+    duration: Literal["1_day", "1_week", "30_days", "forever"] | None
+    muted_until: str | None
+    forever: bool
+    revision: int = Field(default=0, ge=0)
+    mutation_id: str | None = None
+    updated_at: str | None = None
+
+
+class FeedEvent(WireModel):
+    model_config = ConfigDict(extra="allow", strict=False)
+    event_id: str = Field(min_length=1, max_length=512)
+    kind: Literal["new", "updated", "archived", "taken_down", "restored",
+                  "installed", "installation_updated", "uninstalled"]
+    skill_id: str = Field(min_length=1, max_length=512)
+    version: int | None = Field(default=None, gt=0)
+    takedown_generation: int | None = Field(default=None, ge=0)
+    installation_id: str | None
+    update_mode: Literal["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"] | None
+    occurred_at: datetime
+
+
+class Feed(WireModel):
+    model_config = ConfigDict(extra="allow", strict=False)
+    events: list[FeedEvent] = Field(max_length=100)
+    next_cursor: str = Field(max_length=_MAX_CURSOR_BYTES)
+    has_more: bool
+
+
+class Draft(WireModel):
+    """Owner-private Gateway draft; names intentionally match the wire."""
+
+    id: str = Field(min_length=1, max_length=512)
+    supersedesDraftId: str | None = None
+    orgId: str = Field(min_length=1, max_length=512)
+    ownerUserId: str = Field(min_length=1, max_length=512)
+    slug: str = Field(min_length=1, max_length=512)
+    draftCommit: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    contentHash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    authorDescription: str | None
+    authorDescriptionHash: str | None
+    state: Literal[
+        "vetting", "ready", "owner_approved", "publishing",
+        "pending_moderation", "changes_requested", "published",
+        "declined", "invalidated",
+    ]
+    moderationNote: str | None = None
+    moderationDeciderUserId: str | None = None
+    moderationDecidedAt: str | None = None
+    packageManifestHash: str | None
+    packageManifestSchemaVersion: int | None
+    systemSpec: SystemSpecification | None
+    scan: dict[str, Any] | None
+    scanVerdict: str | None
+    security_check: dict[str, Any] | None = None
+    professionalism_check: dict[str, Any] | None = None
+    explanation: str | None
+    updatedAt: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def require_return_metadata(self):
+        """Returned-for-changes drafts require complete moderation metadata."""
+
+        if self.state == "changes_requested" and not all((
+            self.moderationNote,
+            self.moderationDeciderUserId,
+            self.moderationDecidedAt,
+        )):
+            raise ValueError("changes_requested drafts require complete moderator metadata")
+        return self
+
+
+class DraftDetail(WireModel):
+    """Owner draft plus the Gateway's effective policy projection."""
+
+    draft: Draft
+    effective_policy: dict[str, Any]
+
+
+class DraftResponse(WireModel):
+    """Single draft mutation response."""
+
+    draft: Draft
+
+
+class DraftList(WireModel):
+    """Bounded owner-private draft listing used for reconciliation."""
+
+    drafts: list[Draft] = Field(max_length=10_000)
+
+
 class WisdomClient:
     """Bounded discovery and explicit installation-enrolment client."""
 
@@ -170,6 +311,9 @@ class WisdomClient:
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         session: requests.Session | None = None,
         install_credential_provider: CredentialProvider | None = None,
+        publish_credential_provider: CredentialProvider | None = None,
+        owner_user_id: str | None = None,
+        route_base_url: str | None = None,
     ) -> None:
         if not callable(credential_provider):
             raise TypeError("credential_provider must be callable")
@@ -183,19 +327,32 @@ class WisdomClient:
             raise ValueError("timeout must be a finite positive number")
         if not _is_plain_int(max_response_bytes) or max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be a positive integer")
-        self._credential_provider = credential_provider
-        self._install_credential_provider = install_credential_provider
+        self._credential_providers = {
+            "read": credential_provider,
+            "install": install_credential_provider,
+            "publish": publish_credential_provider,
+        }
         self._closed = False
+        self._consumption_identity = (owner_user_id, route_base_url)
         self.timeout = normalized_timeout
         self.max_response_bytes = max_response_bytes
         self.session = session or requests.Session()
 
-    def _credentials(self, *, install: bool = False) -> WisdomGatewayCredentials:
+    @property
+    def owner_user_id(self) -> str | None:
+        return self._consumption_identity[0]
+
+    @property
+    def route_base_url(self) -> str | None:
+        return self._consumption_identity[1]
+
+    def _credentials(
+        self, *, install: bool = False, publish: bool = False
+    ) -> WisdomGatewayCredentials:
         try:
-            provider = self._install_credential_provider if install else self._credential_provider
-            if provider is None:
-                raise WisdomAuthError("Installation registration requires Wisdom install access")
-            credentials = provider()
+            credentials = self._credential_provider(
+                install=install, publish=publish
+            )()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             raise WisdomAuthError("Collective Wisdom credentials are unavailable") from exc
         if not isinstance(credentials, WisdomGatewayCredentials):
@@ -227,6 +384,30 @@ class WisdomClient:
         if not endpoint_valid or not credential_values_valid:
             raise WisdomAuthError("Collective Wisdom credentials are unavailable")
         return WisdomGatewayCredentials(base_url.rstrip("/"), token, org_id)
+
+    def _credential_provider(
+        self, *, install: bool, publish: bool
+    ) -> CredentialProvider:
+        """Select one non-overlapping request scope."""
+
+        if install and publish:
+            raise WisdomAuthError("Collective Wisdom credentials are unavailable")
+        scope = "install" if install else "publish" if publish else "read"
+        provider = self._credential_providers[scope]
+        if provider is None:
+            operation = "Publication" if publish else "Installation registration"
+            raise WisdomAuthError(
+                f"{operation} requires the corresponding Wisdom access"
+            )
+        return provider
+
+    @property
+    def display_org_id(self) -> str:
+        return self.expected_organization_id
+
+    @property
+    def identity(self) -> dict[str, str | None]:
+        return {"owner": self.owner_user_id}
 
     def organization_context(self) -> WisdomOrganizationContext:
         """Return the configured organization binding without reading credentials."""
@@ -272,47 +453,10 @@ class WisdomClient:
                 "Collective Wisdom Gateway returned a malformed response"
             ) from exc
 
-    def _request(  # pylint: disable=too-many-arguments,too-many-locals
-        self,
-        path: str,
-        *,
-        model: type[BaseModel],
-        params: dict[str, Any] | None = None,
-        method: str = "GET",
-        json_body: dict[str, Any] | None = None,
-        sync_root: bool = False,
-        install: bool = False,
-    ) -> Any:
-        if self._closed:
-            raise WisdomError("Collective Wisdom client is closed")
-        credentials = self._credentials(install=install)
-        request_options = {"json": json_body} if json_body is not None else {}
-        url = (
-            f"{credentials.base_url}/v1/sync/{path}"
-            if sync_root else self._url(credentials, path)
-        )
-        try:
-            response = self.session.request(
-                method,
-                url,
-                headers={
-                    "Authorization": f"Bearer {credentials.access_token}",
-                    "Accept": "application/json",
-                },
-                params=params,
-                timeout=self.timeout,
-                stream=True,
-                allow_redirects=False,
-                **request_options,
-            )
-            try:
-                body = self._read_response_body(response)
-            finally:
-                response.close()
-        except requests.Timeout as exc:
-            raise WisdomError("Collective Wisdom Gateway timed out") from exc
-        except requests.RequestException as exc:
-            raise WisdomError("Collective Wisdom Gateway is unavailable") from exc
+    @staticmethod
+    def _raise_for_status(response: requests.Response, body: Any) -> None:
+        """Translate one bounded Gateway response into public client errors."""
+
         error = body.get("error") if isinstance(body, dict) else None
         code = error if isinstance(error, str) else None
         if response.status_code in (401, 403):
@@ -343,6 +487,57 @@ class WisdomClient:
                 status=response.status_code,
                 code=code,
             )
+
+    def _request(  # pylint: disable=too-many-arguments,too-many-locals
+        self,
+        path: str,
+        *,
+        model: type[BaseModel] | None,
+        params: dict[str, Any] | None = None,
+        method: str = "GET",
+        json_body: dict[str, Any] | None = None,
+        sync_root: bool = False,
+        install: bool = False,
+        publish: bool = False,
+        files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+    ) -> Any:
+        if self._closed:
+            raise WisdomError("Collective Wisdom client is closed")
+        credentials = self._credentials(install=install, publish=publish)
+        request_options: dict[str, Any] = {}
+        if json_body is not None:
+            request_options["json"] = json_body
+        if files is not None:
+            request_options["files"] = files
+        url = (
+            f"{credentials.base_url}/v1/sync/{path}"
+            if sync_root else self._url(credentials, path)
+        )
+        try:
+            response = self.session.request(
+                method,
+                url,
+                headers={
+                    "Authorization": f"Bearer {credentials.access_token}",
+                    "Accept": "application/json",
+                },
+                params=params,
+                timeout=self.timeout,
+                stream=True,
+                allow_redirects=False,
+                **request_options,
+            )
+            try:
+                body = self._read_response_body(response)
+            finally:
+                response.close()
+        except requests.Timeout as exc:
+            raise WisdomError("Collective Wisdom Gateway timed out") from exc
+        except requests.RequestException as exc:
+            raise WisdomError("Collective Wisdom Gateway is unavailable") from exc
+        self._raise_for_status(response, body)
+        if model is None:
+            return body
         try:
             return model.model_validate(body)
         except ValidationError as exc:
@@ -356,6 +551,216 @@ class WisdomClient:
         if "wisdom" not in result.features:
             raise WisdomAuthError("Gateway does not advertise Collective Wisdom")
         return result
+
+    def agent_led_policy(self) -> AgentLedPolicyResponse:
+        """Read and bind the current server publication routing policy."""
+
+        result = self._request("agent-led/policy", model=AgentLedPolicyResponse)
+        if result.org_id != self.expected_organization_id:
+            raise WisdomError("Publication policy does not match the active organization")
+        return result
+
+    def _preference_org(self, response):
+        if response.org_id != self.expected_organization_id:
+            raise WisdomError("Preference does not match the active organization")
+        return response
+
+    def _delivery_identity(self) -> tuple[str, str]:
+        owner = self.owner_user_id
+        if not isinstance(owner, str) or not owner:
+            raise WisdomAuthError("Notification delivery requires an active account")
+        return self.expected_organization_id, owner
+
+    def _delivery_response(
+        self, response, identity, claim, *, event_id: str | None = None
+    ) -> ClientDeliveryResponse:
+        expected = (*identity, claim.request_id, claim.reference, event_id)
+        actual = (
+            response.org_id, response.recipient_user_id, response.request_id,
+            response.reference, event_id if event_id is None else response.event_id,
+        )
+        if self._delivery_identity() != identity or actual != expected:
+            raise WisdomError("Notification delivery response does not match the request")
+        return response
+
+    def claim_notification_delivery(self, request_id: str, reference: dict) -> ClientDeliveryResponse:
+        identity = self._delivery_identity()
+        claim = ClientDeliveryClaim(request_id=request_id, reference=reference)
+        response = self._request(
+            "agent-led/deliveries/claim", model=ClientDeliveryResponse,
+            method="POST", json_body=claim.model_dump(mode="json"),
+        )
+        return self._delivery_response(response, identity, claim)
+
+    def settle_notification_delivery(self, event_id: str, request_id: str, reference: dict, *,
+                                     outcome: Literal["acknowledged", "not_sent", "uncertain"],
+                                     receipt: DeliveryReceipt | None = None) -> ClientDeliveryResponse:
+        identity = self._delivery_identity()
+        claim = ClientDeliveryClaim(request_id=request_id, reference=reference)
+        TypeAdapter(Identifier).validate_python(event_id, strict=True)
+        if (outcome == "acknowledged") != (receipt is not None):
+            raise WisdomValidationError("Only acknowledged delivery requires a receipt")
+        body: dict[str, Any] = {"request_id": request_id, "outcome": outcome}
+        if receipt is not None:
+            body["receipt"] = receipt_projection(receipt).model_dump(mode="json")
+        result = self._request(f"agent-led/deliveries/{quote(event_id, safe='')}/settle",
+                               model=ClientDeliveryResponse, method="POST", json_body=body)
+        self._delivery_response(result, identity, claim, event_id=event_id)
+        if result.state != outcome:
+            raise WisdomError("Notification delivery settlement was not acknowledged")
+        return result
+
+    def report_operation_outcome(self, event_id: str, outcome: dict) -> ClientOperationResponse:
+        TypeAdapter(Identifier).validate_python(event_id, strict=True)
+        report = ClientOperationOutcome.model_validate(outcome)
+        return self._request(f"agent-led/deliveries/{quote(event_id, safe='')}/outcomes",
+                             model=ClientOperationResponse, method="POST",
+                             json_body=report.model_dump(mode="json"))
+
+    def suppress_recommendation(self, key: str) -> WisdomSuppressionResponse:
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", key):
+            raise WisdomValidationError("Invalid suppression key")
+        return self._preference_org(self._request(
+            f"agent-led/suppressions/{quote(key, safe='')}", model=WisdomSuppressionResponse,
+            method="PUT", json_body={}))
+
+    def recommendation_suppressions(self, keys: list[str]) -> list[WisdomSuppression]:
+        if len(keys) > 100 or len(set(keys)) != len(keys) or any(
+                not re.fullmatch(r"sha256:[a-f0-9]{64}", key) for key in keys):
+            raise WisdomValidationError("Expected up to 100 distinct suppression keys")
+        result = self._preference_org(self._request(
+            "agent-led/suppressions/check", model=WisdomSuppressionList, method="POST",
+            json_body={"keys": keys}))
+        if any(row.key not in keys for row in result.suppressions):
+            raise WisdomError("Gateway returned unexpected suppression keys")
+        return result.suppressions
+
+    def recommendation_mute(self) -> WisdomMuteResponse:
+        return self._preference_org(self._request(
+            "agent-led/mute", model=WisdomMuteResponse, params={"include_revision": "1"}))
+
+    def set_recommendation_mute(self, duration: str | None, *, expected_revision: int | None = None,
+                                mutation_id: str | None = None,
+                                requested_at: str | None = None) -> WisdomMuteResponse:
+        if duration not in {None, "1_day", "1_week", "30_days", "forever"}:
+            raise WisdomValidationError("Unsupported mute duration")
+        guarded = any(value is not None for value in (expected_revision, mutation_id, requested_at))
+        if guarded and (type(expected_revision) is not int or not mutation_id or not requested_at):
+            raise WisdomValidationError("Queued mute requires revision, mutation ID and request time")
+        body = {"duration": duration}
+        if guarded:
+            body.update(expected_revision=expected_revision, mutation_id=mutation_id,
+                        requested_at=requested_at)
+        return self._preference_org(self._request(
+            "agent-led/mute", model=WisdomMuteResponse,
+            method="DELETE" if duration is None and not guarded else "PUT",
+            json_body=body if duration is not None or guarded else None))
+
+    def feed(self, cursor: str | None = None, *, installation_id: str | None = None) -> Feed:
+        params: dict[str, str] = {}
+        if cursor:
+            params["cursor"] = cursor
+        if installation_id:
+            params["installation_id"] = installation_id
+        return self._request("feed", model=Feed, params=params or None)
+
+    def upload_private_objects(
+        self, objects: dict[str, tuple[str, bytes]]
+    ) -> dict[str, Any]:
+        """Upload exact raw CAS objects to the owner's private sync namespace."""
+
+        multipart = [
+            (digest, (kind, body, "application/octet-stream"))
+            for digest, (kind, body) in objects.items()
+        ]
+        return self._request(
+            "objects", model=None, method="POST", sync_root=True,
+            publish=True, files=multipart,
+        )
+
+    def submit_draft(  # pylint: disable=too-many-arguments
+        self,
+        *,
+        slug: str,
+        commit: str,
+        content_hash: str,
+        description: str,
+        description_hash: str,
+        manifest_hash: str,
+        professionalism_review: dict[str, Any] | None = None,
+    ) -> Draft:
+        """Submit owner-private bytes for authoritative Gateway vetting."""
+
+        del description_hash, manifest_hash  # checked against the response by the controller
+        payload: dict[str, Any] = {
+            "slug": slug,
+            "draft_commit": commit,
+            "content_hash": content_hash,
+            "author_description": description,
+        }
+        if professionalism_review is not None:
+            payload["professionalism_review"] = professionalism_review
+        return self._request(
+            "drafts", model=DraftResponse, method="POST",
+            json_body=payload, publish=True,
+        ).draft
+
+    def list_drafts(self) -> list[Draft]:
+        """List current caller's owner-private drafts for exact reconciliation."""
+
+        return self._request("drafts", model=DraftList, publish=True).drafts
+
+    def draft(self, draft_id: str) -> DraftDetail:
+        """Read one owner-private draft and its effective policy."""
+
+        return self._request(
+            f"drafts/{_quoted_identifier(draft_id, 'draft_id')}",
+            model=DraftDetail,
+            publish=True,
+        )
+
+    def approve(  # pylint: disable=too-many-arguments
+        self,
+        draft_id: str,
+        *,
+        content_hash: str,
+        description_hash: str,
+        manifest_hash: str,
+    ) -> Draft:
+        """Bind owner approval to all reviewed hashes."""
+
+        return self._request(
+            f"drafts/{_quoted_identifier(draft_id, 'draft_id')}/approve",
+            model=DraftResponse,
+            method="POST",
+            json_body={
+                "content_hash": content_hash,
+                "author_description_hash": description_hash,
+                "package_manifest_hash": manifest_hash,
+            },
+            publish=True,
+        ).draft
+
+    def publish(self, draft_id: str, *, content_hash: str) -> dict[str, Any]:
+        """Ask the Gateway to route publication under current server policy."""
+
+        return self._request(
+            f"drafts/{_quoted_identifier(draft_id, 'draft_id')}/publish",
+            model=None,
+            method="POST",
+            json_body={"content_hash": content_hash, "base_commit": None},
+            publish=True,
+        )
+
+    def decline(self, draft_id: str) -> dict[str, Any]:
+        """Decline or withdraw an owner draft according to server semantics."""
+
+        return self._request(
+            f"drafts/{_quoted_identifier(draft_id, 'draft_id')}/decline",
+            model=None,
+            method="POST",
+            publish=True,
+        )
 
     def register_identity(self, installation_id: str) -> InstallationIdentity:
         """Register a reserved identity; authorization is read afresh for this POST."""

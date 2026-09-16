@@ -7,13 +7,55 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
+import shlex
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from hermes_wisdom_plugin.commands import PAGE_SIZE, build_parser, run_cli, run_slash
+from hermes_wisdom_plugin.commands import (
+    MAX_PREPARED_PAYLOAD_BYTES,
+    PAGE_SIZE,
+    build_parser,
+    run_cli,
+    run_slash,
+)
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound
+
+
+@pytest.mark.parametrize("choice", ["status", "agent", "fixed"])
+def test_cli_notification_settings_are_explicit_and_status_does_not_write(choice, capsys):
+    service = SimpleNamespace(mode="agent", calls=[])
+    service.require_setup = lambda: service.calls.append(("require_setup",))
+
+    def set_mode(mode):
+        service.calls.append(("set_notification_mode", mode))
+        service.mode = mode
+
+    service.notification_mode = lambda: service.mode
+    service.notification_mode_writable = lambda: True
+    service.set_notification_mode = set_mode
+    args = _parser().parse_args(["settings", choice, "--json"])
+    assert run_cli(args, service) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "delivery_mode": "agent" if choice == "status" else choice,
+        "writable": True,
+    }
+    assert service.calls == (
+        [("require_setup",)] if choice == "status"
+        else [("require_setup",), ("set_notification_mode", choice)]
+    )
+
+
+@pytest.mark.parametrize("command", ["settings fixed", "mute forever", "sync retry"])
+def test_shared_slash_controls_only_offer_terminal_handoff(command):
+    service = _Service()
+    output = run_slash(command, service)
+    assert f"hermes wisdom {command.split()[0]} status" in output
+    assert f"/wisdom {command.split()[0]}" in run_slash("help", service)
+    assert not service.calls
 
 
 def _parser():
@@ -22,7 +64,7 @@ def _parser():
     return parser
 
 
-class _Service:
+class _Service:  # pylint: disable=too-many-public-methods
     def __init__(self):
         self.calls = []
         self.rows = [
@@ -80,6 +122,89 @@ class _Service:
     def versions(self, skill_id):
         self.calls.append(("versions", skill_id))
         return self.resolve_skill(skill_id)["versions"]
+
+    def check_update(self, skill_id):
+        self.calls.append(("check_update", skill_id))
+        return {"skill_id": skill_id, "state": "update_available"}
+
+    def suggest(self, skill_name, *, allow_model_review=False):
+        self.calls.append(("suggest", skill_name, allow_model_review))
+        return {
+            "state": "prepared",
+            "skill_name": skill_name,
+            "professionalism_check": {
+                "status": "pass" if allow_model_review else "unavailable"
+            },
+            "network_submission": False,
+        }
+
+    def review_week(self, *, dry_run=False):
+        self.calls.append(("review_week", dry_run))
+        return {"queued": not dry_run, "dry_run": dry_run, "network_submission": False}
+
+    def prepared_inspect(self, draft_id):
+        self.calls.append(("prepared_inspect", draft_id))
+        return {"draft_id": draft_id, "files": [], "hashes": {}}
+
+    def prepared_save(self, draft_id, *, author_description, files, expected_hashes):
+        self.calls.append((
+            "prepared_save", draft_id, author_description, files, expected_hashes
+        ))
+        return {"draft_id": draft_id, "drafted_description": author_description}
+
+    def prepared_review(self, draft_id, *, allow_model_review=False):
+        self.calls.append(("prepared_review", draft_id, allow_model_review))
+        return {"draft_id": draft_id, "professionalism_check": {
+            "status": "pass" if allow_model_review else "unavailable"
+        }}
+
+    def publication_review(self, draft_id):
+        self.calls.append(("publication_review", draft_id))
+        return {"draft_id": draft_id, "receipt": "wpub_review"}
+
+    def publication_submit(self, receipt):
+        self.calls.append(("publication_submit", receipt))
+        return {"operation_id": "op-1", "publication_state": "published"}
+
+    def publication_status(self, operation_id):
+        self.calls.append(("publication_status", operation_id))
+        return {"operation_id": operation_id, "state": "done"}
+
+    def publication_reopen(self, operation_id):
+        self.calls.append(("publication_reopen", operation_id))
+        return {"operation_id": operation_id, "publication_state": "pending_moderation"}
+
+    def publication_decline(self, operation_id):
+        self.calls.append(("publication_decline", operation_id))
+        return {"operation_id": operation_id, "publication_state": "declined"}
+
+    def update_plan(self, skill_id, **values):
+        self.calls.append(("update_plan", skill_id, values))
+        return {"skill_id": skill_id, "receipt": "wip_update", **values}
+
+    def update_apply(self, receipt):
+        self.calls.append(("update_apply", receipt))
+        return {"updated": True, "receipt": receipt}
+
+    def installed_setup_inspect(self, skill_id, *, version=None):
+        self.calls.append(("installed_setup_inspect", skill_id, version))
+        return {"skill_id": skill_id, "state": "setup_required"}
+
+    def installed_setup_plan(self, skill_id, *, version, phase, index, command):
+        self.calls.append(("installed_setup_plan", skill_id, version, phase, index, command))
+        return {"receipt": "wip_setup", "step": {"command": command}}
+
+    def installed_setup_apply(self, receipt):
+        self.calls.append(("installed_setup_apply", receipt))
+        return {"state": "passed"}
+
+    def installed_setup_status(self, skill_id, *, version=None):
+        self.calls.append(("installed_setup_status", skill_id, version))
+        return {"skill_id": skill_id, "state": "verification_required"}
+
+    def installed_setup_recover(self, skill_id, operation_id, *, acknowledged=False):
+        self.calls.append(("installed_setup_recover", skill_id, operation_id, acknowledged))
+        return {"state": "abandoned"}
 
     def resolve_skill(self, reference):
         self.calls.append(("resolve_skill", reference))
@@ -158,6 +283,8 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
         "browse": ["incident", "--json"],
         "show": ["skill-1", "--json"],
         "versions": ["skill-1", "--json"],
+        "suggest": ["local-skill", "--json"],
+        "review-week": ["--dry-run", "--json"],
         "help": ["--json"],
     }
     for command, trailing in cases.items():
@@ -165,7 +292,171 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
         assert args.wisdom_command == command
         assert args.json is True
     assert "install" in parser.format_help()
-    assert "update" not in parser.format_help()
+    assert "check" in parser.format_help()
+    assert "update" in parser.format_help()
+
+
+def test_cli_review_week_uses_public_owner_authorized_service_path_without_model_flag(capsys):
+    parser = _parser()
+    service = _Service()
+    args = parser.parse_args(["review-week", "--dry-run", "--json"])
+    assert not hasattr(args, "allow_model_review")
+    assert run_cli(args, service) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "queued": False, "dry_run": True, "network_submission": False
+    }
+    assert service.calls == [("review_week", True)]
+
+
+def test_cli_suggest_requires_explicit_model_disclosure_authorization(capsys):
+    parser = _parser()
+    service = _Service()
+
+    assert run_cli(
+        parser.parse_args(["suggest", "local-skill", "--json"]), service
+    ) == 0
+    local = json.loads(capsys.readouterr().out)
+    assert local["professionalism_check"]["status"] == "unavailable"
+    assert ("suggest", "local-skill", False) in service.calls
+
+    assert run_cli(
+        parser.parse_args([
+            "suggest", "local-skill", "--allow-model-review", "--json"
+        ]),
+        service,
+    ) == 0
+    reviewed = json.loads(capsys.readouterr().out)
+    assert reviewed["professionalism_check"]["status"] == "pass"
+    assert ("suggest", "local-skill", True) in service.calls
+
+
+def test_cli_prepared_inspect_save_and_review_use_explicit_payload(tmp_path, capsys):
+    parser = _parser()
+    service = _Service()
+    payload = {
+        "draft_id": "local:draft-1",
+        "author_description": "Owner copy.",
+        "files": [{"path": "SKILL.md", "content_utf8": "# Edited\n"}],
+        "expected_hashes": {
+            "content": "sha256:old-content",
+            "author_description": "sha256:old-description",
+            "package_manifest": "sha256:old-manifest",
+        },
+    }
+    payload_path = tmp_path / "draft.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert run_cli(
+        parser.parse_args(["prepared", "inspect", "local:draft-1", "--json"]), service
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["draft_id"] == "local:draft-1"
+    assert run_cli(
+        parser.parse_args(["prepared", "save", str(payload_path), "--json"]), service
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["drafted_description"] == "Owner copy."
+    assert run_cli(parser.parse_args([
+        "prepared", "review", "local:draft-1", "--allow-model-review", "--json"
+    ]), service) == 0
+    assert json.loads(capsys.readouterr().out)["professionalism_check"]["status"] == "pass"
+    assert ("prepared_save", "local:draft-1", "Owner copy.", payload["files"],
+            payload["expected_hashes"]) in service.calls
+
+
+@pytest.mark.parametrize("duplicate", [
+    '"draft_id":"local:first","draft_id":"local:last"',
+    '"expected_hashes":{"content":"first","content":"last"}',
+])
+def test_cli_prepared_save_rejects_duplicate_json_keys(tmp_path, capsys, duplicate):
+    parser = _parser()
+    service = _Service()
+    fields = {
+        "draft_id": '"draft_id":"local:draft-1"',
+        "author_description": '"author_description":"Owner copy."',
+        "files": '"files":[]',
+        "expected_hashes": '"expected_hashes":{}',
+    }
+    if duplicate.startswith('"draft_id"'):
+        fields["draft_id"] = duplicate
+    else:
+        fields["expected_hashes"] = duplicate
+    payload_path = tmp_path / "duplicate.json"
+    payload_path.write_text("{" + ",".join(fields.values()) + "}", encoding="utf-8")
+
+    assert run_cli(
+        parser.parse_args(["prepared", "save", str(payload_path), "--json"]), service
+    ) == 6
+    assert "duplicate JSON key" in json.loads(capsys.readouterr().out)["error"]
+    assert not any(call[0] == "prepared_save" for call in service.calls)
+
+
+def test_cli_prepared_save_rejects_payload_above_derived_bound(tmp_path, capsys):
+    parser = _parser()
+    service = _Service()
+    payload_path = tmp_path / "oversized.json"
+    payload_path.write_bytes(b" " * (MAX_PREPARED_PAYLOAD_BYTES + 1))
+
+    assert run_cli(
+        parser.parse_args(["prepared", "save", str(payload_path), "--json"]), service
+    ) == 6
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert str(MAX_PREPARED_PAYLOAD_BYTES) in error
+    assert not any(call[0] == "prepared_save" for call in service.calls)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_cli_prepared_save_rejects_non_regular_payload_without_opening(
+    tmp_path: Path, capsys, kind: str
+):
+    parser = _parser()
+    service = _Service()
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    path = tmp_path / "unsafe.json"
+    if kind == "symlink":
+        path.symlink_to(target)
+    else:
+        os.mkfifo(path)
+
+    assert run_cli(
+        parser.parse_args(["prepared", "save", str(path), "--json"]), service
+    ) == 6
+    assert "regular" in json.loads(capsys.readouterr().out)["error"]
+    assert not any(call[0] == "prepared_save" for call in service.calls)
+
+
+def test_cli_check_and_update_dispatch_exact_receipt_bound_actions(capsys):
+    parser = _parser()
+    service = _Service()
+
+    assert run_cli(parser.parse_args(["check", "skill-1", "--json"]), service) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "update_available"
+    assert run_cli(parser.parse_args([
+        "update", "skill-1", "--plan", "--preserve-modified",
+        "--accept-sensitive", "--accept-partial", "--json",
+    ]), service) == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["preserve_modified"] is True
+    assert ("update_plan", "skill-1", {
+        "preserve_modified": True,
+        "accept_sensitive": True,
+        "accept_partial": True,
+    }) in service.calls
+    assert run_cli(parser.parse_args([
+        "update", "--apply-receipt", "wip_update", "--json"
+    ]), service) == 0
+    assert json.loads(capsys.readouterr().out)["updated"] is True
+    assert ("update_apply", "wip_update") in service.calls
+
+
+def test_update_apply_cannot_smuggle_new_plan_acknowledgements(capsys):
+    parser = _parser()
+    service = _Service()
+    result = run_cli(parser.parse_args([
+        "update", "--apply-receipt", "wip_update", "--accept-sensitive", "--json"
+    ]), service)
+    assert result == 6
+    assert not service.calls
+    assert "cannot change" in json.loads(capsys.readouterr().out)["error"]
 
 
 @pytest.mark.parametrize(
@@ -189,6 +480,30 @@ def test_cli_dispatch_shapes_and_exit_parity(argv, expected_call, expected_key, 
         assert ("require_setup",) in service.calls
 
 
+def test_installed_setup_cli_dispatches_exact_review_and_recovery(capsys):
+    parser = _parser()
+    service = _Service()
+    command = "printf 'exact '  "
+    cases = [
+        (["installed-setup", "inspect", "skill-1", "--version", "1", "--json"],
+         ("installed_setup_inspect", "skill-1", 1)),
+        (["installed-setup", "plan", "skill-1", "--version", "1", "--phase", "setup",
+          "--index", "0", "--command", command, "--json"],
+         ("installed_setup_plan", "skill-1", 1, "setup", 0, command)),
+        (["installed-setup", "apply", "wip_setup", "--json"],
+         ("installed_setup_apply", "wip_setup")),
+        (["installed-setup", "status", "skill-1", "--json"],
+         ("installed_setup_status", "skill-1", None)),
+        (["installed-setup", "recover", "skill-1", "operation-1",
+          "--acknowledge-effects-checked-and-stopped", "--json"],
+         ("installed_setup_recover", "skill-1", "operation-1", True)),
+    ]
+    for argv, expected in cases:
+        assert run_cli(parser.parse_args(argv), service) == 0
+        json.loads(capsys.readouterr().out)
+        assert expected in service.calls
+
+
 def test_cli_json_is_sorted_and_help_has_machine_shape(capsys):
     service = _Service()
     service.status = lambda **_kwargs: {"z": 1, "a": 2}
@@ -199,6 +514,22 @@ def test_cli_json_is_sorted_and_help_has_machine_shape(capsys):
 
     assert run_cli(_parser().parse_args(["help", "--json"]), service) == 0
     assert json.loads(capsys.readouterr().out)["commands"][-1] == "help"
+
+
+def test_cli_sanitizes_human_scalar_output_without_changing_json_data(
+    capsys, monkeypatch
+):
+    service = _Service()
+    raw = "résumé 🦝\x1b[2J"
+    monkeypatch.setattr(service, "status", lambda **_kwargs: raw)
+
+    assert run_cli(_parser().parse_args(["status"]), service) == 0
+    human_output = capsys.readouterr().out
+    assert "résumé 🦝" in human_output
+    assert "\x1b" not in human_output
+
+    assert run_cli(_parser().parse_args(["status", "--json"]), service) == 0
+    assert json.loads(capsys.readouterr().out) == raw
 
 
 def test_cli_setup_noninteractive_requires_switch(monkeypatch, capsys):
@@ -245,6 +576,22 @@ def test_cli_preserves_typed_error_exit_codes(error, capsys):
 
     assert run_cli(_parser().parse_args(["status", "--json"]), service) == error.exit_code
     assert json.loads(capsys.readouterr().out)["category"] == error.exit_code
+
+
+def test_publication_terminal_commands_are_explicit_and_inspectable(capsys):
+    parser = _parser()
+    service = _Service()
+    cases = [
+        (["publication", "review", "local:draft", "--json"], ("publication_review", "local:draft")),
+        (["publication", "submit", "wpub_review", "--json"], ("publication_submit", "wpub_review")),
+        (["publication", "status", "op-1", "--json"], ("publication_status", "op-1")),
+        (["publication", "reopen", "op-1", "--json"], ("publication_reopen", "op-1")),
+        (["publication", "decline", "op-1", "--json"], ("publication_decline", "op-1")),
+    ]
+    for argv, expected in cases:
+        assert run_cli(parser.parse_args(argv), service) == 0
+        assert json.loads(capsys.readouterr().out)
+        assert service.calls[-1] == expected
 
 
 def test_cli_redacts_unexpected_exceptions(capsys):
@@ -309,15 +656,27 @@ def test_slash_setup_with_any_arguments_is_instruction_only():
     assert not service.calls
 
 
-def test_slash_help_advertises_only_read_commands_and_terminal_setup():
-    output = run_slash("help", _Service())
+def test_slash_help_distinguishes_reads_private_reviews_and_terminal_instructions():
+    service = _Service()
+    output = run_slash("help", service)
 
     for command in ("browse", "show", "versions", "status", "setup", "help"):
         assert f"/wisdom {command}" in output
-    for command in ("update", "share", "review", "publish"):
+    for command in ("share", "review"):
         assert f"/wisdom {command}" not in output
-    for command in ("install", "installed", "uninstall"):
+    for command in ("candidate", "suggest", "prepared", "publish", "publication"):
+        assert f"/wisdom {command} " in output
+    for command in ("install", "installed", "check", "update", "uninstall"):
         assert f"/wisdom {command} (terminal instructions)" in output
+    assert not service.calls
+
+
+@pytest.mark.parametrize("command", ["check skill-1", "update skill-1 --plan"])
+def test_slash_update_state_is_private_terminal_handoff(command):
+    service = _Service()
+    output = run_slash(command, service)
+    assert "Use the terminal" in output
+    assert not service.calls
 
 
 def test_slash_status_uses_an_explicit_shared_chat_whitelist():
@@ -353,6 +712,30 @@ def test_slash_browse_omits_account_local_install_and_private_check_details():
         "Install",
     ):
         assert private not in output
+
+
+def test_slash_browse_sanitizes_untrusted_text_and_navigation_controls():
+    service = _Service()
+    service.rows[0]["slug"] = "résumé-helper"
+    service.rows[0]["author_description"] = "Keep Unicode 🦝\x1b[2J\x07"
+
+    output = run_slash("browse 'café\x1b[31m'", service)
+
+    assert "résumé-helper" in output
+    assert "Keep Unicode 🦝" in output
+    assert "café" in output
+    assert "Next: /wisdom browse 'café [31m' --page 2" in output
+    assert "\x1b" not in output
+    assert "\x07" not in output
+
+
+def test_slash_navigation_preserves_full_query():
+    query = "café  " + "long-query" * 60
+    service = _Service()
+    output = run_slash(shlex.join(("browse", query)), service)
+    next_command = next(line.removeprefix("Next: ") for line in output.splitlines()
+                        if line.startswith("Next: "))
+    assert shlex.split(next_command) == ["/wisdom", "browse", query, "--page", "2"]
 
 
 def test_slash_show_renders_published_metadata_requirements_states_and_portal():
@@ -480,7 +863,20 @@ def test_slash_drops_unsafe_portal_links():
     assert "user:secret" not in output
 
 
-@pytest.mark.parametrize("command", ["update --all", "share local"])
+def test_slash_drops_portal_links_with_pre_normalization_controls():
+    service = _Service()
+    detail = service.resolve_skill("skill-1")
+    detail["portal_url"] = "https://example.org/\nspoof"
+    service.resolve_skill = lambda reference: detail
+
+    show = run_slash("show skill-1", service)
+    versions = run_slash("versions skill-1", service)
+
+    assert "View in Portal" not in show
+    assert "View in Portal" not in versions
+
+
+@pytest.mark.parametrize("command", ["share local"])
 def test_slash_rejects_mutation_commands_without_service_calls(command):
     service = _Service()
 

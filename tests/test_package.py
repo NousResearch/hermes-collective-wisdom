@@ -559,10 +559,70 @@ def test_preparation_requires_positive_host_security_verdict(
     """Blocked and unavailable host guards both fail preparation."""
 
     skill = make_skill(tmp_path)
+    original = (skill / "SKILL.md").read_bytes()
     with pytest.raises(PackagePolicyError, match="security guard"):
         prepare_package(
             skill,
             host=_Host(allowed=allowed),
+            overlay_root=tmp_path / "overlays",
+            author_description="A valid description.",
+            owner="owner",
+            installation_id="installation-123456",
+        )
+    assert (skill / "SKILL.md").read_bytes() == original
+
+
+def test_repeated_preparation_never_deletes_an_edited_overlay(tmp_path: Path):
+    """The package kernel refuses to replace a previously prepared private overlay."""
+
+    skill = make_skill(tmp_path)
+    overlays = tmp_path / "overlays"
+    package = prepare_package(
+        skill,
+        overlay_root=overlays,
+        author_description="A valid description.",
+        owner="owner",
+        installation_id="installation-123456",
+    )
+    overlay_skill = package.overlay / "SKILL.md"
+    overlay_skill.write_text("owner-edited private overlay\n", encoding="utf-8")
+
+    with pytest.raises(PackagePolicyError, match="existing draft"):
+        prepare_package(
+            skill,
+            overlay_root=overlays,
+            author_description="A valid description.",
+            owner="owner",
+            installation_id="installation-123456",
+        )
+    assert overlay_skill.read_text(encoding="utf-8") == "owner-edited private overlay\n"
+
+
+def test_source_race_is_rejected_instead_of_mixing_file_versions(
+    tmp_path: Path, monkeypatch
+):
+    """A source mutation during snapshotting cannot produce a mixed package."""
+
+    skill = make_skill(tmp_path)
+    original_reader = package_module._read_regular_file  # pylint: disable=protected-access
+    changed = False
+
+    def racing_reader(
+        path: Path, *, display_path: str, max_bytes: int | None = None
+    ) -> bytes:
+        nonlocal changed
+        body = original_reader(
+            path, display_path=display_path, max_bytes=max_bytes
+        )
+        if not changed and path == skill / "SKILL.md":
+            changed = True
+            path.write_text("changed during preparation\n", encoding="utf-8")
+        return body
+
+    monkeypatch.setattr(package_module, "_read_regular_file", racing_reader)
+    with pytest.raises(PackagePolicyError, match="source changed"):
+        prepare_package(
+            skill,
             overlay_root=tmp_path / "overlays",
             author_description="A valid description.",
             owner="owner",

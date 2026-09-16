@@ -19,7 +19,7 @@ from .errors import WisdomConflict
 
 
 SCHEMA_FAMILY = "hermes_wisdom_plugin.profile_store"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 _OWNER_KEYS = (
     "profile_name", "profile_home", "account_id",
     "organization_id", "base_url", "installation_id",
@@ -51,11 +51,15 @@ def _decode_install_row(row: dict[str, Any]) -> None:
     row["owner"] = json.loads(owner_json) if owner_json is not None else None
 
 
+def _draft_owner_key(draft_id: str) -> str:
+    return f"contribution_draft_owner:{draft_id}"
+
+
 class UnsupportedSchemaError(RuntimeError):
     """The database is not an exact current-schema profile store."""
 
 
-CURRENT_SCHEMA_SQL = """
+BASE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -229,6 +233,8 @@ CREATE TABLE IF NOT EXISTS feed_state (
   generation INTEGER NOT NULL DEFAULT 0,
   organization_id TEXT,
   installation_id TEXT,
+  owner_user_id TEXT,
+  base_url TEXT,
   resume_required INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS feed_event (
@@ -279,6 +285,89 @@ CREATE INDEX IF NOT EXISTS professionalism_review_queue
   ON professionalism_review(state, available_at);
 """
 
+NATIVE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS wisdom_agent_session (
+  organization_id TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  address_json TEXT NOT NULL,
+  last_activity_at REAL NOT NULL,
+  PRIMARY KEY(organization_id, session_key)
+);
+CREATE TABLE IF NOT EXISTS wisdom_consent (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  owner_session TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  state TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  result_json TEXT,
+  expires_at REAL NOT NULL,
+  delivery_state TEXT NOT NULL,
+  delivery_error TEXT,
+  request_message_id TEXT,
+  message_id TEXT,
+  checks_expanded INTEGER NOT NULL DEFAULT 0,
+  inspection_json TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  delivery_revision INTEGER NOT NULL DEFAULT 0,
+  delivery_attempt INTEGER NOT NULL DEFAULT 0,
+  assessment_expanded INTEGER NOT NULL DEFAULT 0,
+  state_revision INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS wisdom_consent_owner
+  ON wisdom_consent(organization_id,owner_session,created_at);
+CREATE TABLE IF NOT EXISTS wisdom_setup_handoff (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  consent_id TEXT NOT NULL UNIQUE,
+  owner_session TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  state TEXT NOT NULL,
+  lease_token TEXT,
+  lease_until REAL,
+  last_error TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  FOREIGN KEY(consent_id) REFERENCES wisdom_consent(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS wisdom_setup_handoff_queue
+  ON wisdom_setup_handoff(organization_id,owner_session,state,created_at);
+"""
+
+WEEKLY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS wisdom_assessment (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  origin_session TEXT,
+  reference_json TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  owner_session TEXT,
+  advice_json TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  UNIQUE(organization_id,event_key)
+);
+CREATE INDEX IF NOT EXISTS wisdom_assessment_queue
+  ON wisdom_assessment(organization_id,state,created_at);
+CREATE TABLE IF NOT EXISTS wisdom_candidate_defer (
+  assessment_id TEXT PRIMARY KEY,
+  suppress_until REAL NOT NULL,
+  deferred_at REAL NOT NULL,
+  FOREIGN KEY(assessment_id) REFERENCES wisdom_assessment(id) ON DELETE CASCADE
+);
+"""
+
+CURRENT_SCHEMA_SQL = BASE_SCHEMA_SQL + NATIVE_SCHEMA_SQL + WEEKLY_SCHEMA_SQL
+
 
 class WisdomStore:
     """Profile-local SQLite persistence rooted in host-provided plugin data."""
@@ -308,8 +397,19 @@ class WisdomStore:
                     "VALUES(1,?,?)",
                     (SCHEMA_FAMILY, SCHEMA_VERSION),
                 )
-            elif existing_version == 1:
-                db.execute("ALTER TABLE managed_install ADD COLUMN owner_json TEXT")
+            elif existing_version in {1, 2, 3, 4}:
+                if existing_version == 1:
+                    db.execute("ALTER TABLE managed_install ADD COLUMN owner_json TEXT")
+                upgrade_sql = (
+                    NATIVE_SCHEMA_SQL + WEEKLY_SCHEMA_SQL
+                    if existing_version < 3
+                    else WEEKLY_SCHEMA_SQL
+                )
+                for statement in upgrade_sql.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                db.execute("ALTER TABLE feed_state ADD COLUMN owner_user_id TEXT")
+                db.execute("ALTER TABLE feed_state ADD COLUMN base_url TEXT")
                 db.execute(
                     "UPDATE schema_meta SET value=? WHERE key='schema_version'",
                     (str(SCHEMA_VERSION),),
@@ -352,10 +452,10 @@ class WisdomStore:
             raise UnsupportedSchemaError(
                 f"Foreign schema family {identity[0]!r}; expected {SCHEMA_FAMILY!r}"
             )
-        if identity[2] != "integer" or identity[1] not in (1, SCHEMA_VERSION):
+        if identity[2] != "integer" or identity[1] not in (1, 2, 3, 4, SCHEMA_VERSION):
             raise UnsupportedSchemaError(
                 f"Unsupported plugin schema version {identity[1]!r}; "
-                f"expected integer 1 or {SCHEMA_VERSION}"
+                f"expected integer 1, 2, 3, 4, or {SCHEMA_VERSION}"
             )
         if "schema_meta" not in tables:
             raise UnsupportedSchemaError("Incomplete Collective Wisdom plugin schema")
@@ -368,6 +468,12 @@ class WisdomStore:
             )
         if identity[1] == 1:
             cls._validate_v1_schema(db)
+        elif identity[1] == 2:
+            cls._validate_v2_schema(db)
+        elif identity[1] == 3:
+            cls._validate_v3_schema(db)
+        elif identity[1] == 4:
+            cls._validate_v4_schema(db)
         else:
             cls._validate_current_schema(db)
         return int(identity[1])
@@ -376,7 +482,11 @@ class WisdomStore:
     def _validate_v1_schema(cls, db: sqlite3.Connection) -> None:
         expected_db = sqlite3.connect(":memory:")
         try:
-            v1_sql = CURRENT_SCHEMA_SQL.replace(
+            v1_sql = cls._without_feed_owner_columns(
+                CURRENT_SCHEMA_SQL.replace(NATIVE_SCHEMA_SQL, "").replace(
+                    WEEKLY_SCHEMA_SQL, ""
+                )
+            ).replace(
                 "  updated_at TEXT NOT NULL,\n  owner_json TEXT\n",
                 "  updated_at TEXT NOT NULL\n",
                 1,
@@ -398,6 +508,70 @@ class WisdomStore:
             )
 
     @classmethod
+    def _validate_v2_schema(cls, db: sqlite3.Connection) -> None:
+        expected_db = sqlite3.connect(":memory:")
+        try:
+            expected_db.executescript(cls._without_feed_owner_columns(
+                CURRENT_SCHEMA_SQL.replace(NATIVE_SCHEMA_SQL, "").replace(
+                    WEEKLY_SCHEMA_SQL, ""
+                )
+            ))
+            expected = cls._schema_objects(expected_db)
+        finally:
+            expected_db.close()
+        actual = cls._schema_objects(db)
+        invalid = sorted(
+            name for name, definition in expected.items() if actual.get(name) != definition
+        )
+        if invalid:
+            raise UnsupportedSchemaError(
+                "Incomplete or incompatible Collective Wisdom plugin schema objects: "
+                + ", ".join(invalid)
+            )
+
+    @classmethod
+    def _validate_v3_schema(cls, db: sqlite3.Connection) -> None:
+        expected_db = sqlite3.connect(":memory:")
+        try:
+            expected_db.executescript(cls._without_feed_owner_columns(
+                CURRENT_SCHEMA_SQL.replace(WEEKLY_SCHEMA_SQL, "")
+            ))
+            expected = cls._schema_objects(expected_db)
+        finally:
+            expected_db.close()
+        actual = cls._schema_objects(db)
+        invalid = sorted(
+            name for name, definition in expected.items() if actual.get(name) != definition
+        )
+        if invalid:
+            raise UnsupportedSchemaError(
+                "Incomplete or incompatible Collective Wisdom plugin schema objects: "
+                + ", ".join(invalid)
+            )
+
+    @classmethod
+    def _validate_v4_schema(cls, db: sqlite3.Connection) -> None:
+        expected_db = sqlite3.connect(":memory:")
+        try:
+            expected_db.executescript(cls._without_feed_owner_columns(CURRENT_SCHEMA_SQL))
+            expected = cls._schema_objects(expected_db)
+        finally:
+            expected_db.close()
+        actual = cls._schema_objects(db)
+        invalid = sorted(
+            name for name, definition in expected.items() if actual.get(name) != definition
+        )
+        if invalid:
+            raise UnsupportedSchemaError(
+                "Incomplete or incompatible Collective Wisdom plugin schema objects: "
+                + ", ".join(invalid)
+            )
+
+    @staticmethod
+    def _without_feed_owner_columns(sql: str) -> str:
+        return sql.replace("  owner_user_id TEXT,\n  base_url TEXT,\n", "")
+
+    @classmethod
     def _validate_current_schema(cls, db: sqlite3.Connection) -> None:
         expected_db = sqlite3.connect(":memory:")
         try:
@@ -409,6 +583,21 @@ class WisdomStore:
         invalid = sorted(
             name for name, definition in expected.items() if actual.get(name) != definition
         )
+        if "feed_state" in invalid:
+            migrated_db = sqlite3.connect(":memory:")
+            try:
+                migrated_db.executescript(
+                    cls._without_feed_owner_columns(CURRENT_SCHEMA_SQL)
+                )
+                migrated_db.execute(
+                    "ALTER TABLE feed_state ADD COLUMN owner_user_id TEXT"
+                )
+                migrated_db.execute("ALTER TABLE feed_state ADD COLUMN base_url TEXT")
+                migrated = cls._schema_objects(migrated_db)["feed_state"]
+            finally:
+                migrated_db.close()
+            if actual.get("feed_state") == migrated:
+                invalid.remove("feed_state")
         if invalid == ["managed_install"]:
             migrated_db = sqlite3.connect(":memory:")
             try:
@@ -505,6 +694,41 @@ class WisdomStore:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, json.dumps(value, sort_keys=True, allow_nan=False)),
         )
+
+    def bind_qualification_owner(self, owner: dict[str, str]) -> bool:
+        """Bind local qualification evidence to one exact enrolled account.
+
+        A changed owner keeps historical rows for audit, but tombstones their local-skill
+        identities and retires unfinished recommendation work so a new enrolment starts with
+        fresh counters instead of inheriting another account's evidence.
+        """
+        encoded = _encode_owner(owner)
+        if encoded is None:  # pragma: no cover - guarded by _encode_owner
+            raise ValueError("qualification owner is required")
+        key = "qualification_owner"
+        now = utc_now()
+        with self.transaction() as db:
+            row = db.execute("SELECT value FROM schema_meta WHERE key=?", (key,)).fetchone()
+            previous = str(row[0]) if row else None
+            if previous == encoded:
+                return False
+            if previous is not None:
+                db.execute(
+                    "UPDATE local_skill SET deleted_at=?,updated_at=? WHERE deleted_at IS NULL",
+                    (now, now),
+                )
+                db.execute(
+                    "UPDATE wisdom_assessment SET state='retired',owner_session=NULL,updated_at=? "
+                    "WHERE state NOT IN ('retired','reviewed') AND "
+                    "json_extract(reference_json,'$.kind') IN ('weekly_review','candidate')",
+                    (datetime.now(timezone.utc).timestamp(),),
+                )
+            db.execute(
+                "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, encoded),
+            )
+        return previous is not None
 
     def register_skill(
         self,
@@ -658,6 +882,66 @@ class WisdomStore:
                 (skill_id, since),
             ).fetchone()
             return int(row[0]) if row else 0
+
+    def resolve_ambiguous_refinement(
+        self,
+        skill_id: str,
+        *,
+        from_hash: str,
+        to_hash: str,
+        classification: str,
+        structural: dict[str, Any],
+        owner: dict[str, str],
+        due_at: str | None,
+        session_id: str | None,
+        task_id: str | None,
+    ) -> bool:
+        """Apply one advisory result only to its exact current owner/content snapshot."""
+        if classification not in {"meaningful", "non_meaningful"}:
+            raise ValueError("invalid refinement classification")
+        encoded_owner = _encode_owner(owner)
+        if encoded_owner is None:
+            return False
+        with self.transaction() as db:
+            bound = db.execute(
+                "SELECT value FROM schema_meta WHERE key='qualification_owner'"
+            ).fetchone()
+            skill = db.execute(
+                "SELECT current_hash,deleted_at FROM local_skill WHERE id=?", (skill_id,)
+            ).fetchone()
+            refinement = db.execute(
+                "SELECT classification FROM refinement "
+                "WHERE skill_id=? AND from_hash=? AND to_hash=?",
+                (skill_id, from_hash, to_hash),
+            ).fetchone()
+            owner_matches = bound is not None and str(bound[0]) == encoded_owner
+            skill_matches = (
+                skill is not None
+                and skill["deleted_at"] is None
+                and str(skill["current_hash"] or "") == to_hash
+            )
+            refinement_matches = (
+                refinement is not None and refinement["classification"] == "ambiguous"
+            )
+            if not all((owner_matches, skill_matches, refinement_matches)):
+                return False
+            db.execute(
+                "UPDATE refinement SET classification=?,structural_json=? "
+                "WHERE skill_id=? AND from_hash=? AND to_hash=? AND classification='ambiguous'",
+                (
+                    classification, json.dumps(structural, sort_keys=True),
+                    skill_id, from_hash, to_hash,
+                ),
+            )
+            if classification == "meaningful" and due_at:
+                db.execute(
+                    "INSERT INTO stability_job(skill_id,content_hash,due_at,state,evaluated_at,session_id,task_id) "
+                    "VALUES(?,?,?,'pending',NULL,?,?) ON CONFLICT(skill_id,content_hash) "
+                    "DO UPDATE SET due_at=excluded.due_at,state='pending',evaluated_at=NULL,"
+                    "session_id=excluded.session_id,task_id=excluded.task_id",
+                    (skill_id, to_hash, due_at, session_id, task_id),
+                )
+            return True
 
     def schedule_stability(
         self,
@@ -1129,6 +1413,62 @@ class WisdomStore:
                 [(event_id, surface, delivered_at) for event_id in event_ids],
             )
 
+    def enqueue_weekly_assessment(
+        self,
+        organization_id: str,
+        event_key: str,
+        reference: dict[str, Any],
+        *,
+        origin_session: str | None = None,
+    ) -> str:
+        """Durably enqueue one organization/week identity across processes."""
+        identity = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).timestamp()
+        with self.transaction() as db:
+            active = db.execute(
+                "SELECT verified_org_id FROM installation_identity WHERE singleton=1"
+            ).fetchone()
+            if active is None or active[0] != organization_id:
+                raise ValueError("Wisdom organization is no longer active")
+            db.execute(
+                "INSERT INTO wisdom_assessment("
+                "id,organization_id,event_key,origin_session,reference_json,state,"
+                "owner_session,advice_json,created_at,updated_at"
+                ") VALUES(?,?,?,?,?,'pending',NULL,NULL,?,?) "
+                "ON CONFLICT(organization_id,event_key) DO NOTHING",
+                (
+                    identity, organization_id, event_key, origin_session,
+                    json.dumps(reference, sort_keys=True), now, now,
+                ),
+            )
+            return str(db.execute(
+                "SELECT id FROM wisdom_assessment WHERE organization_id=? AND event_key=?",
+                (organization_id, event_key),
+            ).fetchone()[0])
+
+    @staticmethod
+    def _decode_weekly_assessment(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["reference"] = json.loads(value.pop("reference_json"))
+        advice = value.pop("advice_json")
+        value["advice"] = json.loads(advice) if advice else None
+        return value
+
+    def weekly_assessment(self, assessment_id: str) -> dict[str, Any] | None:
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT * FROM wisdom_assessment WHERE id=?", (assessment_id,)
+            ).fetchone()
+        return self._decode_weekly_assessment(row) if row else None
+
+    def weekly_assessments(self, organization_id: str) -> list[dict[str, Any]]:
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM wisdom_assessment WHERE organization_id=? ORDER BY created_at,id",
+                (organization_id,),
+            ).fetchall()
+        return [self._decode_weekly_assessment(row) for row in rows]
+
     def dismiss_candidate(self, skill_id: str, content_hash: str) -> None:
         now = utc_now()
         with self.transaction() as db:
@@ -1304,12 +1644,58 @@ class WisdomStore:
                 ),
             )
 
+    def replace_prepared_draft(
+        self,
+        draft_id: str,
+        *,
+        expected_owner: dict[str, str],
+        expected_hashes: dict[str, str],
+        values: dict[str, str],
+    ) -> bool:
+        """CAS one prepared draft's durable overlay pointer and exact hashes."""
+
+        encoded_owner = _encode_owner(expected_owner)
+        if encoded_owner is None:  # pragma: no cover - guarded by _encode_owner
+            raise ValueError("contribution draft owner is required")
+        now = utc_now()
+        with self.transaction() as db:
+            cursor = db.execute(
+                "UPDATE local_draft SET overlay_path=?,draft_commit=?,description=?,"
+                "content_hash=?,description_hash=?,manifest_hash=?,updated_at=? "
+                "WHERE id=? AND state='prepared' AND content_hash=? "
+                "AND description_hash=? AND manifest_hash=? AND EXISTS ("
+                "SELECT 1 FROM schema_meta WHERE key=? AND value=?)",
+                (
+                    values["overlay_path"],
+                    values.get("draft_commit"),
+                    values["description"],
+                    values["content_hash"],
+                    values["description_hash"],
+                    values["manifest_hash"],
+                    now,
+                    draft_id,
+                    expected_hashes["content"],
+                    expected_hashes["author_description"],
+                    expected_hashes["package_manifest"],
+                    _draft_owner_key(draft_id),
+                    encoded_owner,
+                ),
+            )
+            return cursor.rowcount == 1
+
     def draft(self, draft_id: str) -> dict[str, Any] | None:
         with self.transaction() as db:
             row = db.execute(
                 "SELECT * FROM local_draft WHERE id=?", (draft_id,)
             ).fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            value = dict(row)
+            owner = db.execute(
+                "SELECT value FROM schema_meta WHERE key=?", (_draft_owner_key(draft_id),)
+            ).fetchone()
+            value["owner"] = json.loads(owner[0]) if owner is not None else None
+            return value
 
     def prepared_draft(self, skill_id: str, source_hash: str) -> dict[str, Any] | None:
         with self.transaction() as db:
@@ -1318,7 +1704,34 @@ class WisdomStore:
                 "AND state='prepared' ORDER BY updated_at DESC LIMIT 1",
                 (skill_id, source_hash),
             ).fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            value = dict(row)
+            owner = db.execute(
+                "SELECT value FROM schema_meta WHERE key=?",
+                (_draft_owner_key(str(row["id"])),),
+            ).fetchone()
+            value["owner"] = json.loads(owner[0]) if owner is not None else None
+            return value
+
+    def bind_draft_owner(
+        self,
+        draft_id: str,
+        owner: dict[str, str],
+        *,
+        _db: sqlite3.Connection | None = None,
+    ) -> None:
+        """Persist the full enrollment owner alongside one private draft."""
+
+        encoded = _encode_owner(owner)
+        if encoded is None:
+            raise ValueError("contribution draft owner is required")
+        with self.transaction() if _db is None else nullcontext(_db) as db:
+            db.execute(
+                "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_draft_owner_key(draft_id), encoded),
+            )
 
     def latest_draft_for_source(
         self, skill_id: str, source_hash: str
@@ -1374,6 +1787,56 @@ class WisdomStore:
             ).fetchone()
             return dict(row) if row else None
 
+    def publication_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        """Read one unconsumed publication review receipt by its opaque ID."""
+
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT * FROM review_receipt WHERE id=? AND consumed_at IS NULL",
+                (receipt_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def begin_publication(
+        self,
+        *,
+        receipt_id: str,
+        draft_id: str,
+        entity_id: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """Atomically consume final authorization and persist exact send intent."""
+
+        operation_id = str(uuid.uuid4())
+        now = utc_now()
+        with self.transaction() as db:
+            receipt = db.execute(
+                "SELECT id FROM review_receipt WHERE id=? AND draft_id=? "
+                "AND consumed_at IS NULL",
+                (receipt_id, draft_id),
+            ).fetchone()
+            if receipt is None:
+                raise WisdomConflict("Publication review receipt is missing or already used")
+            existing = db.execute(
+                "SELECT id,payload_json FROM operation_journal "
+                "WHERE kind='publication' AND entity_id=? AND state='pending'",
+                (entity_id,),
+            ).fetchone()
+            if existing is not None:
+                if json.loads(existing["payload_json"]) != payload:
+                    raise WisdomConflict("A different publication operation is already pending")
+                return str(existing["id"])
+            db.execute(
+                "INSERT INTO operation_journal VALUES(?, 'publication', ?, 'intent', ?, "
+                "'pending', ?, ?)",
+                (operation_id, entity_id, json.dumps(payload, sort_keys=True), now, now),
+            )
+            db.execute(
+                "UPDATE review_receipt SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
+                (now, receipt_id),
+            )
+        return operation_id
+
     def consume_receipt(self, draft_id: str, *, _db: sqlite3.Connection | None = None) -> None:
         with self.transaction() if _db is None else nullcontext(_db) as db:
             db.execute(
@@ -1417,6 +1880,90 @@ class WisdomStore:
         value["payload"] = json.loads(value["payload_json"])
         return value
 
+    def completed_automatic_updates(
+        self, owner: dict[str, str]
+    ) -> list[dict[str, Any]]:
+        """Return completed policy-authorized updates for local notice repair."""
+
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM operation_journal WHERE kind='update' "
+                "AND state='done' AND phase='gateway_recorded' ORDER BY updated_at,id"
+            ).fetchall()
+        completed = []
+        for row in rows:
+            value = dict(row)
+            payload = json.loads(value["payload_json"])
+            if (
+                payload.get("owner") == owner
+                and payload.get("authorization", {}).get("kind") == "automatic_policy"
+                and isinstance(payload.get("result"), dict)
+                and payload["result"].get("updated") is True
+            ):
+                value["payload"] = payload
+                completed.append(value)
+        return completed
+
+    def persist_automatic_update_notice(
+        self, operation_id: str, owner: dict[str, str]
+    ) -> str:
+        """Project one completed automatic update into the owned local feed exactly once."""
+
+        event_id = "automatic-update:" + operation_id
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT * FROM operation_journal WHERE id=? AND kind='update' "
+                "AND state='done' AND phase='gateway_recorded'",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise WisdomConflict("automatic update is not durably complete")
+            payload = json.loads(row["payload_json"])
+            result = payload.get("result")
+            if (
+                payload.get("owner") != owner
+                or payload.get("authorization", {}).get("kind") != "automatic_policy"
+                or not isinstance(result, dict)
+                or result.get("updated") is not True
+            ):
+                raise WisdomConflict("automatic update notice authority is invalid")
+            checkpoint = db.execute(
+                "SELECT * FROM feed_state WHERE singleton=1"
+            ).fetchone()
+            expected = {
+                "organization_id": owner.get("organization_id"),
+                "installation_id": owner.get("installation_id"),
+                "owner_user_id": owner.get("account_id"),
+                "base_url": owner.get("base_url"),
+            }
+            if checkpoint is None or any(
+                checkpoint[key] != value for key, value in expected.items()
+            ):
+                raise WisdomConflict("automatic update notice owner is no longer active")
+            event = {
+                "event_id": event_id,
+                "kind": "installation_updated",
+                "skill_id": str(payload["skill_id"]),
+                "version": int(result["version"]),
+                "installation_id": owner["installation_id"],
+                "update_mode": str(result["effective_update_mode"]),
+                "occurred_at": str(row["updated_at"]),
+                "skill_name": str(payload["slug"]),
+                "metadata_skill_id": str(payload["skill_id"]),
+                "metadata_version": int(result["version"]),
+                "metadata_verified": True,
+            }
+            db.execute(
+                "INSERT OR IGNORE INTO feed_event VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    event_id, event["kind"], event["skill_id"], event["version"],
+                    event["installation_id"], event["update_mode"],
+                    json.dumps(event, sort_keys=True), "immediate", row["updated_at"],
+                    None, None, row["updated_at"],
+                ),
+            )
+        return event_id
+
     def replace_operation_payload(
         self, operation_id: str, payload: dict[str, Any]
     ) -> None:
@@ -1431,6 +1978,151 @@ class WisdomStore:
             db.execute(
                 "UPDATE operation_journal SET phase=?,state=?,updated_at=? WHERE id=?",
                 (phase, "done" if done else "pending", utc_now(), operation_id),
+            )
+
+    @staticmethod
+    def _assert_lock_row(
+        db: sqlite3.Connection, entity_id: str, owner: str, now: str
+    ) -> None:
+        row = db.execute(
+            "SELECT owner,expires_at FROM operation_lock WHERE entity_id=?", (entity_id,)
+        ).fetchone()
+        if row is None or row["owner"] != owner or row["expires_at"] <= now:
+            raise WisdomConflict("Collective Wisdom operation lease was lost")
+
+    def advance_claimed(
+        self,
+        operation_id: str,
+        phase: str,
+        *,
+        entity_id: str,
+        owner: str,
+    ) -> None:
+        """Advance only while the caller still owns the unexpired operation lease."""
+
+        now = utc_now()
+        with self.transaction() as db:
+            self._assert_lock_row(db, entity_id, owner, now)
+            cursor = db.execute(
+                "UPDATE operation_journal SET phase=?,state='pending',updated_at=? "
+                "WHERE id=? AND state='pending'",
+                (phase, now, operation_id),
+            )
+            if cursor.rowcount != 1:
+                raise WisdomConflict("Collective Wisdom publication state changed")
+
+    def publication_for_local_draft(self, draft_id: str) -> dict[str, Any] | None:
+        """Return the one pending publication bound to an exact local draft."""
+
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM operation_journal WHERE kind='publication' AND state='pending'"
+            ).fetchall()
+        for row in rows:
+            value = dict(row)
+            payload = json.loads(value["payload_json"])
+            if payload.get("local_draft_id") == draft_id:
+                value["payload"] = payload
+                return value
+        return None
+
+    def reauthorize_publication(
+        self,
+        *,
+        receipt_id: str,
+        operation_id: str,
+        policy: dict[str, Any],
+        entity_id: str,
+        owner: str,
+    ) -> None:
+        """Consume a fresh review and resume the same stalled operation atomically."""
+
+        now = utc_now()
+        with self.transaction() as db:
+            self._assert_lock_row(db, entity_id, owner, now)
+            receipt = db.execute(
+                "SELECT id FROM review_receipt WHERE id=? AND consumed_at IS NULL",
+                (receipt_id,),
+            ).fetchone()
+            row = db.execute(
+                "SELECT phase,payload_json FROM operation_journal WHERE id=? "
+                "AND kind='publication' AND state='pending'",
+                (operation_id,),
+            ).fetchone()
+            if receipt is None or row is None or row["phase"] != "policy_review_required":
+                raise WisdomConflict("Publication review receipt is missing or already used")
+            payload = json.loads(row["payload_json"])
+            resume_phase = payload.pop("resume_phase", None)
+            if not isinstance(resume_phase, str):
+                raise WisdomConflict("Publication recovery phase is unavailable")
+            payload["policy"] = policy
+            db.execute(
+                "UPDATE operation_journal SET phase=?,payload_json=?,updated_at=? WHERE id=?",
+                (resume_phase, json.dumps(payload, sort_keys=True), now, operation_id),
+            )
+            db.execute(
+                "UPDATE review_receipt SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
+                (now, receipt_id),
+            )
+
+    def begin_publication_decline(
+        self, operation_id: str, *, entity_id: str, owner: str
+    ) -> bool:
+        """Persist decline intent before its remote effect; return false when already pending."""
+
+        now = utc_now()
+        with self.transaction() as db:
+            self._assert_lock_row(db, entity_id, owner, now)
+            row = db.execute(
+                "SELECT phase,state,payload_json FROM operation_journal WHERE id=? "
+                "AND kind='publication'",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise WisdomConflict("Publication operation not found")
+            if row["state"] == "pending" and row["phase"] == "decline_unknown":
+                return False
+            if row["state"] != "done":
+                raise WisdomConflict("Publication must be reconciled before it can be declined")
+            payload = json.loads(row["payload_json"])
+            payload["requested_action"] = "decline"
+            db.execute(
+                "UPDATE operation_journal SET phase='decline_unknown',state='pending',"
+                "payload_json=?,updated_at=? WHERE id=?",
+                (json.dumps(payload, sort_keys=True), now, operation_id),
+            )
+            return True
+
+    def complete_publication(
+        self,
+        operation_id: str,
+        payload: dict[str, Any],
+        state: str,
+        *,
+        entity_id: str | None = None,
+        owner: str | None = None,
+    ) -> None:
+        """Commit authoritative outcome and both local projections in one transaction."""
+
+        now = utc_now()
+        encoded = json.dumps(payload, sort_keys=True)
+        with self.transaction() as db:
+            if entity_id is not None and owner is not None:
+                self._assert_lock_row(db, entity_id, owner, now)
+            db.execute(
+                "UPDATE operation_journal SET phase=?,state='done',payload_json=?,updated_at=? "
+                "WHERE id=?",
+                (state, encoded, now, operation_id),
+            )
+            remote_id = payload.get("remote_draft_id")
+            if remote_id:
+                db.execute(
+                    "UPDATE local_draft SET state=?,updated_at=? WHERE id=?",
+                    (state, now, remote_id),
+                )
+            db.execute(
+                "UPDATE local_draft SET state=?,updated_at=? WHERE id=?",
+                (state, now, payload["local_draft_id"]),
             )
 
     def pending_operations(self) -> list[dict[str, Any]]:
@@ -1549,6 +2241,64 @@ class WisdomStore:
                 (utc_now(), skill_id),
             )
 
+    def bind_feed_owner(
+        self,
+        organization_id: str,
+        installation_id: str,
+        owner_user_id: str,
+        base_url: str,
+    ) -> dict[str, Any]:
+        """Bind cursor/events to one exact org and installation generation.
+
+        Switching either key retires the previous projection before a new network
+        request. This prevents a reconnect from exposing or resuming another
+        account's feed while retaining a monotonic generation fence.
+        """
+
+        if not all((organization_id, installation_id, owner_user_id, base_url)):
+            raise ValueError("feed owner requires organization, installation, account, and route")
+        now = utc_now()
+        with self.transaction() as db:
+            active = db.execute(
+                "SELECT verified_org_id,installation_id FROM installation_identity WHERE singleton=1"
+            ).fetchone()
+            if (
+                active is None
+                or active["verified_org_id"] != organization_id
+                or active["installation_id"] != installation_id
+            ):
+                raise WisdomConflict("Wisdom feed owner is no longer active")
+            row = db.execute("SELECT * FROM feed_state WHERE singleton=1").fetchone()
+            changed = bool(row and (
+                row["organization_id"] != organization_id
+                or row["installation_id"] != installation_id
+                or row["owner_user_id"] != owner_user_id
+                or row["base_url"] != base_url
+            ))
+            generation = (int(row["generation"]) if row else 0) + int(changed)
+            if changed:
+                db.execute("DELETE FROM feed_event_delivery")
+                db.execute("DELETE FROM feed_event")
+            db.execute(
+                """INSERT INTO feed_state(singleton,cursor,updated_at,generation,
+                   organization_id,installation_id,owner_user_id,base_url,resume_required)
+                   VALUES(1,NULL,?,?,?,?,?,?,0)
+                   ON CONFLICT(singleton) DO UPDATE SET
+                   cursor=CASE WHEN feed_state.organization_id=excluded.organization_id
+                     AND feed_state.installation_id=excluded.installation_id
+                     AND feed_state.owner_user_id=excluded.owner_user_id
+                     AND feed_state.base_url=excluded.base_url
+                     THEN feed_state.cursor ELSE NULL END,
+                   updated_at=excluded.updated_at,generation=excluded.generation,
+                   organization_id=excluded.organization_id,
+                   installation_id=excluded.installation_id,
+                   owner_user_id=excluded.owner_user_id,base_url=excluded.base_url,
+                   resume_required=0""",
+                (now, generation, organization_id, installation_id, owner_user_id, base_url),
+            )
+            current = db.execute("SELECT * FROM feed_state WHERE singleton=1").fetchone()
+            return dict(current)
+
     def feed_cursor(self) -> str | None:
         return self.feed_position()[0]
 
@@ -1566,6 +2316,8 @@ class WisdomStore:
                 "generation": 0,
                 "organization_id": None,
                 "installation_id": None,
+                "owner_user_id": None,
+                "base_url": None,
                 "resume_required": 0,
             }
 
@@ -1647,6 +2399,8 @@ class WisdomStore:
         telegram_due_at: str | None = None,
         surface: str | None = None,
         surface_due_at: str | None = None,
+        owner: dict[str, str] | None = None,
+        expected_generation: int | None = None,
     ) -> list[dict[str, Any]]:
         query = "SELECT e.* FROM feed_event e WHERE 1=1"
         params: list[str] = []
@@ -1669,24 +2423,82 @@ class WisdomStore:
             params.extend([surface, surface_due_at])
         query += " ORDER BY e.created_at,e.event_id"
         with self.transaction() as db:
+            if owner is not None:
+                checkpoint = db.execute(
+                    "SELECT * FROM feed_state WHERE singleton=1"
+                ).fetchone()
+                if checkpoint is None or any(
+                    checkpoint[key] != owner[key]
+                    for key in (
+                        "organization_id", "installation_id", "owner_user_id", "base_url"
+                    )
+                ):
+                    raise WisdomConflict(
+                        "Wisdom feed belongs to a previous account; run maintenance to refresh it",
+                        code="account_session_changed",
+                    )
+                if (
+                    expected_generation is not None
+                    and int(checkpoint["generation"]) != expected_generation
+                ):
+                    raise WisdomConflict(
+                        "Wisdom feed changed while it was being read; run maintenance and retry",
+                        code="account_session_changed",
+                    )
             rows = [dict(row) for row in db.execute(query, params).fetchall()]
         for row in rows:
             row["payload"] = json.loads(row.pop("payload_json"))
         return rows
 
-    def enrich_feed_event(self, event_id: str, values: dict[str, str]) -> None:
+    def enrich_feed_event(
+        self,
+        event_id: str,
+        values: dict[str, Any],
+        *,
+        owner: dict[str, str] | None = None,
+        expected_generation: int | None = None,
+    ) -> None:
         """Persist bounded presentation metadata alongside an immutable event."""
 
         allowed = {
             key: value
             for key, value in values.items()
-            if key in {"editorial_name", "editorial_description"}
-            and isinstance(value, str)
-            and (key == "editorial_description" or bool(value))
+            if key in {
+                "editorial_name", "editorial_description", "skill_name",
+                "published_by_user_id", "metadata_skill_id", "metadata_version",
+                "metadata_verified",
+            }
+            and (
+                isinstance(value, str)
+                or (
+                    key == "metadata_version"
+                    and isinstance(value, int)
+                    and not isinstance(value, bool)
+                )
+                or (key == "metadata_verified" and isinstance(value, bool))
+            )
+            and (key in {"editorial_description", "metadata_verified"} or bool(value))
         }
         if not allowed:
             return
         with self.transaction() as db:
+            if owner is not None:
+                checkpoint = db.execute(
+                    "SELECT * FROM feed_state WHERE singleton=1"
+                ).fetchone()
+                if checkpoint is None or any(
+                    checkpoint[key] != owner[key]
+                    for key in (
+                        "organization_id", "installation_id", "owner_user_id", "base_url"
+                    )
+                ) or (
+                    expected_generation is not None
+                    and int(checkpoint["generation"]) != expected_generation
+                ):
+                    raise WisdomConflict(
+                        "Wisdom feed changed during metadata refresh; run maintenance and retry",
+                        code="account_session_changed",
+                    )
             row = db.execute(
                 "SELECT payload_json FROM feed_event WHERE event_id=?", (event_id,)
             ).fetchone()

@@ -12,8 +12,8 @@ mechanical extraction and adaptation into commits where practical; tasks share
 delivery PRs according to docs/FIRST-RELEASE.md, not one PR per feature. Each
 parallel worker owns a separate worktree and an exclusive write scope.
 
-Use `codex/<short-topic>` for new development branches. Initial repository
-bootstrapping uses `main`; normal work should use reviewed PRs.
+Use `shannonsands/<feature>` for new development branches. Normal work should
+use reviewed PRs.
 
 Before changing implementation, consult the pinned source baseline and current
 host API. The old implementation is behavioral evidence, not an instruction
@@ -42,6 +42,11 @@ production logs. Git history is the audit trail; do not maintain duplicate
 status spreadsheets or detached feature lists.
 
 ## Compatibility and Release
+
+CLI, TUI, Telegram, and Slack come first in implementation sequencing, but
+Desktop and Dashboard are also release requirements. Release evidence must
+include deployed endpoints exercised with Shannon's Nous Portal login; mocks
+and local scripts alone are insufficient.
 
 No runtime network download of code or schemas. Pin reviewed plugin and host
 revisions. The full OpenAPI artifact may be fetched for development/CI only,

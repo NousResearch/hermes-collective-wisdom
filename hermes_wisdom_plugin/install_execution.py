@@ -22,6 +22,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .package import PackagePolicyError
+from .setup_lock import managed_operation_guard
 
 
 class InstallExecutor:
@@ -29,11 +30,11 @@ class InstallExecutor:
 
     def __init__(
         self,
-        client: object,
-        store: object,
-        receipts: object,
-        reviewer: object,
-        host: object,
+        client: Any,
+        store: Any,
+        receipts: Any,
+        reviewer: Any,
+        host: Any,
         owner: Callable[[], dict],
     ) -> None:
         self.client = client
@@ -43,22 +44,56 @@ class InstallExecutor:
         self.host = host
         self.owner = owner
 
-    def apply(self, receipt: str, accept_partial: bool = False) -> dict:
+    @staticmethod
+    def _require_current(may_apply: Callable[[], bool] | None) -> None:
+        if may_apply is not None and may_apply() is not True:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+
+    def apply(
+        self,
+        receipt: str,
+        accept_partial: bool = False,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Exclude setup starters while applying one reviewed installation."""
+        plan = self.receipts.load(receipt, allow_started=True)
+        self._require_current(may_apply)
+        skill_id = _required_text(plan, "skill_id")
+        with managed_operation_guard(Path(self.store.root), skill_id):
+            return self._apply(
+                receipt, accept_partial=accept_partial, may_apply=may_apply
+            )
+
+    def _apply(
+        self,
+        receipt: str,
+        accept_partial: bool = False,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
         """Apply one exact reviewed receipt, or resume its unfinished operation."""
         owner = self._owner()
+        self._require_current(may_apply)
         plan = self.receipts.load(receipt, allow_started=True)
+        self._require_current(may_apply)
         completed = self.receipts.outcome(receipt)
         if completed is not None:
             return completed
         skill_id = _required_text(plan, "skill_id")
+        self._require_current(may_apply)
         lock = self.store.acquire_operation_lock(skill_id)
         if not lock:
             raise PackagePolicyError("another managed operation is already active for this skill")
         try:
+            self._require_current(may_apply)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             conflicting = self._pending("uninstall", skill_id)
-            if conflicting:
+            if conflicting or self._pending("update", skill_id):
                 raise PackagePolicyError("another managed operation is pending for this skill")
+            if self._pending("wisdom_setup", skill_id):
+                raise PackagePolicyError("a setup operation is pending for this skill")
             pending = self._pending("install", skill_id)
             if pending:
                 payload = _operation_payload(pending)
@@ -67,14 +102,27 @@ class InstallExecutor:
                     raise PackagePolicyError(
                         "another install receipt is already pending for this skill"
                     )
-                self._repair_install_start(str(pending["id"]), payload)
+                self._require_current(may_apply)
+                self._repair_install_start(
+                    str(pending["id"]), payload, may_apply=may_apply
+                )
+                self._require_current(may_apply)
                 self.store.assert_operation_lock(skill_id, lock)
-                return self._resume_install(str(pending["id"]), payload, lock)
-            return self._start_install(plan, receipt, owner, lock, accept_partial)
+                return self._resume_install(
+                    str(pending["id"]), payload, lock, may_apply=may_apply
+                )
+            return self._start_install(
+                plan, receipt, owner, lock, accept_partial, may_apply=may_apply
+            )
         finally:
             self.store.release_operation_lock(skill_id, lock)
 
     def uninstall(self, skill_id: str) -> dict:
+        """Exclude setup starters while beginning recoverable removal."""
+        with managed_operation_guard(Path(self.store.root), skill_id):
+            return self._uninstall(skill_id)
+
+    def _uninstall(self, skill_id: str) -> dict:
         """Remove one owner-managed skill into recoverable hidden storage."""
         owner = self._owner()
         lock = self.store.acquire_operation_lock(skill_id)
@@ -83,8 +131,10 @@ class InstallExecutor:
         try:
             self._assert_owner(owner)
             conflicting = self._pending("install", skill_id)
-            if conflicting:
+            if conflicting or self._pending("update", skill_id):
                 raise PackagePolicyError("another managed operation is pending for this skill")
+            if self._pending("wisdom_setup", skill_id):
+                raise PackagePolicyError("a setup operation is pending for this skill")
             pending = self._pending("uninstall", skill_id)
             if pending:
                 payload = _operation_payload(pending)
@@ -183,14 +233,24 @@ class InstallExecutor:
         }
 
     def _start_install(
-        self, plan: dict, receipt: str, owner: dict, lock: str, accept_partial: bool
+        self,
+        plan: dict,
+        receipt: str,
+        owner: dict,
+        lock: str,
+        accept_partial: bool,
+        *,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict:
         existing = self.store.installation(_required_text(plan, "skill_id"))
+        self._require_current(may_apply)
         if existing:
             self._require_record_owner(existing, owner)
             if existing.get("state") == "active":
                 raise PackagePolicyError("managed installation already exists")
+            self._require_current(may_apply)
             inactive_target = self._validated_record_target(existing, owner)
+            self._require_current(may_apply)
             if inactive_target.exists() or inactive_target.is_symlink():
                 raise PackagePolicyError("inactive managed target still exists")
         outcome = _compatibility_outcome(plan)
@@ -199,16 +259,21 @@ class InstallExecutor:
         if outcome in {"partial", "compatible_after_setup"} and not accept_partial:
             raise PackagePolicyError("explicit --accept-partial is required")
         verified = self.reviewer.verify(plan)
+        self._require_current(may_apply)
         self._assert_owner(owner)
+        self._require_current(may_apply)
         self.store.assert_operation_lock(_required_text(plan, "skill_id"), lock)
         skill_id = _required_text(verified.plan, "skill_id")
         if skill_id != plan["skill_id"] or verified.plan.get("receipt") != receipt:
             raise WisdomValidationError("verified install does not match its receipt")
         slug = _safe_segment(verified.plan.get("slug"), "skill slug")
+        self._require_current(may_apply)
         target = self._target(owner, slug)
+        self._require_current(may_apply)
         if target.exists() or target.is_symlink():
             raise PackagePolicyError("managed target already exists")
         self.host.validate_target(target)
+        self._require_current(may_apply)
         payload = {
             **dict(verified.plan),
             "owner": owner,
@@ -222,13 +287,19 @@ class InstallExecutor:
             "accepted_partial": bool(accept_partial),
         }
         operation_id = self.store.journal("install", skill_id, "staged", payload)
+        self._require_current(may_apply)
         staging = self._staging_path(operation_id)
         payload["staging_path"] = str(staging)
+        self._require_current(may_apply)
         self.store.replace_operation_payload(operation_id, payload)
-        self._bind_install_receipt(receipt, operation_id)
+        self._require_current(may_apply)
+        self._bind_install_receipt(receipt, operation_id, may_apply=may_apply)
+        self._require_current(may_apply)
         try:
             _write_staging(staging, verified.files)
+            self._require_current(may_apply)
             scan = self.host.scan(staging)
+            self._require_current(may_apply)
             try:
                 _require_scan(scan, verified.plan.get("local_scan"), accept_partial)
             except PackagePolicyError:
@@ -238,38 +309,55 @@ class InstallExecutor:
             payload["local_scan"] = scan
             self.store.replace_operation_payload(operation_id, payload)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(skill_id, lock)
-            return self._resume_install(operation_id, payload, lock)
+            return self._resume_install(
+                operation_id, payload, lock, may_apply=may_apply
+            )
         except BaseException:
             if staging.exists() and not self._pending("install", skill_id):
                 shutil.rmtree(staging)
             raise
 
-    def _resume_install(self, operation_id: str, payload: dict, lock: str) -> dict:
+    def _resume_install(
+        self,
+        operation_id: str,
+        payload: dict,
+        lock: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
         operation = self.store.operation(operation_id)
         if not operation:
             raise PackagePolicyError("install recovery journal is missing")
         owner = self._owner()
+        self._require_current(may_apply)
         self._require_payload_owner(payload, owner)
         self.store.assert_operation_lock(payload["skill_id"], lock)
         phase = str(operation["phase"])
         staging = Path(payload["staging_path"])
         target = Path(payload["target_path"])
+        self._require_current(may_apply)
         self._validate_operation_paths(
             staging, target, owner, operation_id, payload["slug"]
         )
         if phase == "staged":
-            verified, scan_path = self._revalidate_staged(payload, staging, target)
+            verified, scan_path = self._revalidate_staged(
+                payload, staging, target, may_apply=may_apply
+            )
             if not staging.exists() and not target.exists():
                 _write_staging(staging, verified.files)
+                self._require_current(may_apply)
                 scan_path = staging
             scan = self.host.scan(scan_path)
+            self._require_current(may_apply)
             _require_scan(
                 scan,
                 verified.plan.get("local_scan"),
                 bool(payload.get("accepted_partial")),
             )
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
             if staging.is_dir():
                 _require_tree(staging, payload["baseline"])
@@ -277,10 +365,13 @@ class InstallExecutor:
                 if target.exists() or target.is_symlink():
                     raise PackagePolicyError("managed target collision during install")
                 self._assert_owner(owner)
+                self._require_current(may_apply)
                 self.store.assert_operation_lock(payload["skill_id"], lock)
                 _durable_replace(staging, target)
+                self._require_current(may_apply)
             elif target.is_dir():
                 _require_tree(target, payload["baseline"])
+                self._require_current(may_apply)
             else:
                 raise PackagePolicyError("staged install bytes are unavailable")
             self.store.advance(operation_id, "files_committed")
@@ -288,12 +379,15 @@ class InstallExecutor:
         if phase == "files_committed":
             _require_tree(target, payload["baseline"])
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
             self.store.record_install(self._install_record(payload, owner, "active"))
+            self._require_current(may_apply)
             self.store.advance(operation_id, "local_ledger_committed")
             phase = "local_ledger_committed"
         if phase == "local_ledger_committed":
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
             try:
                 server = self.client.record_install(
@@ -308,19 +402,23 @@ class InstallExecutor:
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 if _permanent_gateway_error(exc):
                     self._assert_owner(owner)
+                    self._require_current(may_apply)
                     self.store.assert_operation_lock(payload["skill_id"], lock)
                     self._quarantine_rejected(
-                        operation_id, payload, target, owner, lock
+                        operation_id, payload, target, owner, lock,
+                        may_apply=may_apply,
                     )
                     raise
                 return self._pending_result(payload, operation_id, exc)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
             mode = _field(server, "effective_update_mode")
             self.store.record_install({
                 **self._install_record(payload, owner, "active"),
                 "update_mode": mode,
             })
+            self._require_current(may_apply)
             result = self._success_result(payload, target, mode)
             payload["result"] = result
             self.store.replace_operation_payload(operation_id, payload)
@@ -331,6 +429,7 @@ class InstallExecutor:
         if phase == "gateway_recorded":
             result = payload.get("result") or self.receipts.outcome(payload["receipt"])
             if result:
+                self._require_current(may_apply)
                 self.receipts.complete(payload["receipt"], result)
                 self.store.advance(operation_id, "gateway_recorded", done=True)
                 return result
@@ -338,25 +437,44 @@ class InstallExecutor:
             result = payload.get("result")
             if not isinstance(result, dict):
                 raise PackagePolicyError("rejected install recovery outcome is missing")
+            self._require_current(may_apply)
             self.receipts.complete(payload["receipt"], result)
             self.store.advance(operation_id, "gateway_rejected", done=True)
             return result
         raise PackagePolicyError(f"unsupported install recovery phase: {phase}")
 
-    def _repair_install_start(self, operation_id: str, payload: dict) -> None:
+    def _repair_install_start(
+        self,
+        operation_id: str,
+        payload: dict,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> None:
         if payload.get("staging_path") is None:
             payload["staging_path"] = str(self._staging_path(operation_id))
+            self._require_current(may_apply)
             self.store.replace_operation_payload(operation_id, payload)
-        self._bind_install_receipt(payload["receipt"], operation_id)
+            self._require_current(may_apply)
+        self._bind_install_receipt(
+            payload["receipt"], operation_id, may_apply=may_apply
+        )
 
-    def _bind_install_receipt(self, receipt: str, operation_id: str) -> None:
+    def _bind_install_receipt(
+        self,
+        receipt: str,
+        operation_id: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> None:
         metadata = self.store.get_metadata("install_receipt:" + receipt)
+        self._require_current(may_apply)
         if not isinstance(metadata, dict):
             # The receipt boundary rejects missing or invalid authority records.
             self.receipts.start(receipt, operation_id)
             return
         bound = metadata.get("operation_id")
         if bound is None:
+            self._require_current(may_apply)
             self.receipts.start(receipt, operation_id)
         elif bound != operation_id:
             raise WisdomConflict("Install receipt is already bound to another operation")
@@ -422,16 +540,29 @@ class InstallExecutor:
         raise PackagePolicyError(f"unsupported uninstall recovery phase: {phase}")
 
     def _quarantine_rejected(
-        self, operation_id: str, payload: dict, target: Path, owner: dict, lock: str
+        self,
+        operation_id: str,
+        payload: dict,
+        target: Path,
+        owner: dict,
+        lock: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
     ) -> None:
         trash = self._trash_path(operation_id, payload["slug"])
+        self._require_current(may_apply)
         trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._require_current(may_apply)
         if target.exists() and not trash.exists():
             _same_filesystem(target, trash.parent)
+            self._require_current(may_apply)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
             _durable_replace(target, trash)
+            self._require_current(may_apply)
         self.store.deactivate_install(payload["skill_id"])
+        self._require_current(may_apply)
         payload["trash_path"] = str(trash)
         result = {
             "installed": False,
@@ -585,10 +716,17 @@ class InstallExecutor:
         self.host.validate_target(target)
 
     def _revalidate_staged(
-        self, payload: dict, staging: Path, target: Path
-    ) -> tuple[object, Path]:
+        self,
+        payload: dict,
+        staging: Path,
+        target: Path,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> tuple[Any, Path]:
         plan = self.receipts.load(payload["receipt"], allow_started=True)
+        self._require_current(may_apply)
         verified = self.reviewer.verify(plan)
+        self._require_current(may_apply)
         _require_verified_match(payload, verified)
         outcome = _compatibility_outcome(verified.plan)
         if outcome == "blocked_pending_action":

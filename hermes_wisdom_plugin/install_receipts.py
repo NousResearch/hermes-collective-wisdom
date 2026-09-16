@@ -29,16 +29,21 @@ def _bytes(value):
 class InstallReceipts:
     """Immutable review files whose digest and progress live in profile SQLite."""
 
+    OPERATION = "install"
+    JOURNAL_KIND = "install"
+    KEY_PREFIX = "install_receipt:"
+    LABEL = "Install"
+
     def __init__(self, store, owner, *, clock=time.time):
         self.store = store
         self.owner = owner
         self.clock = clock
 
-    @staticmethod
-    def _key(receipt):
+    @classmethod
+    def _key(cls, receipt):
         if not isinstance(receipt, str) or _RECEIPT.fullmatch(receipt) is None:
-            raise WisdomValidationError("Invalid install receipt identifier")
-        return "install_receipt:" + receipt
+            raise WisdomValidationError(f"Invalid {cls.OPERATION} receipt identifier")
+        return cls.KEY_PREFIX + receipt
 
     @contextmanager
     def _directory(self):
@@ -70,7 +75,7 @@ class InstallReceipts:
         owner = self.owner()
         now = self.clock()
         receipt = "wip_" + uuid.uuid4().hex
-        value = {**plan, "receipt": receipt, "operation": "install", "owner": owner,
+        value = {**plan, "receipt": receipt, "operation": self.OPERATION, "owner": owner,
                  "created_at": now, "expires_at": now + REVIEW_SECONDS}
         raw = _bytes(value)
         if len(raw) > _MAX_PLAN_BYTES:
@@ -98,7 +103,7 @@ class InstallReceipts:
         if not isinstance(record, dict) or record.get("owner") != owner:
             raise WisdomAuthError("Install receipt does not belong to this enrolment")
         with self._directory() as directory:
-            descriptor = os.open(receipt + ".json", os.O_RDONLY | os.O_NOFOLLOW,
+            descriptor = os.open(receipt + ".json", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
                                  dir_fd=directory)
             with os.fdopen(descriptor, "rb") as stream:
                 info = os.fstat(stream.fileno())
@@ -112,8 +117,8 @@ class InstallReceipts:
         except (ValueError, UnicodeError) as exc:
             raise WisdomValidationError("Invalid install receipt") from exc
         if (not isinstance(plan, dict) or plan.get("owner") != owner
-                or plan.get("receipt") != receipt or plan.get("operation") != "install"):
-            raise WisdomValidationError("Invalid install receipt binding")
+                or plan.get("receipt") != receipt or plan.get("operation") != self.OPERATION):
+            raise WisdomValidationError(f"Invalid {self.OPERATION} receipt binding")
         if self.owner() != owner:
             raise WisdomAuthError("Installation owner changed")
         return plan, record
@@ -125,10 +130,12 @@ class InstallReceipts:
             row = db.execute("SELECT * FROM operation_journal WHERE id=?",
                              (record.get("operation_id") or "",)).fetchone()
             operation = {**dict(row), "payload": json.loads(row["payload_json"])} if row else None
-        if (operation is None or operation["kind"] != "install"
+        if (operation is None or operation["kind"] != self.JOURNAL_KIND
                 or operation["payload"].get("owner") != record["owner"]
                 or operation["payload"].get("receipt") != receipt):
-            raise WisdomConflict("Install recovery does not match the reviewed operation")
+            raise WisdomConflict(
+                f"{self.LABEL} recovery does not match the reviewed operation"
+            )
         return operation
 
     def load(self, receipt, *, allow_started=False):

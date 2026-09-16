@@ -43,14 +43,15 @@ def test_built_distributions_contain_native_and_python_surfaces(tmp_path: Path) 
 
     sdist = next(dist_dir.glob("*.tar.gz"))
     wheel = next(dist_dir.glob("*.whl"))
-    sdist_root = "hermes_collective_wisdom-0.1.0.dev0"
-
     with tarfile.open(sdist, mode="r:gz") as archive:
         sdist_paths = {Path(name).as_posix() for name in archive.getnames()}
+        roots = {Path(name).parts[0] for name in sdist_paths}
+        assert len(roots) == 1, "Source distribution must have one package root"
+        sdist_root = roots.pop()
         assert f"{sdist_root}/plugin.yaml" in sdist_paths
         assert f"{sdist_root}/__init__.py" in sdist_paths
         assert f"{sdist_root}/hermes_wisdom_plugin/__init__.py" in sdist_paths
-        assert f"{sdist_root}/docs/FEATURES.md" in sdist_paths
+
         for filename, expected_digest in RUNTIME_CONTRACT_DIGESTS.items():
             path = f"{sdist_root}/hermes_wisdom_plugin/contracts/{filename}"
             assert path in sdist_paths

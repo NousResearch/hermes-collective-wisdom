@@ -1,7 +1,7 @@
-# Target Architecture
+# Architecture
 
-This is an implementation map, not a description of completed functionality.
-Milestone 0 has only an inert entrypoint and no runtime dependencies.
+The [feature tracker](FEATURES.md) distinguishes implemented workflows from
+planned features and records automated and live acceptance separately.
 
 ## Ownership
 
@@ -12,10 +12,8 @@ Milestone 0 has only an inert entrypoint and no runtime dependencies.
 | Surface adapters | Commands, native cards, callback translation, UI rendering | Independent copies of install/publish business logic |
 | Gateway/Portal | Scoped remote access, content storage, publication policy, moderation, manager email | Local user setup approval or active-session guessing |
 
-The repository will keep a thin native registration entrypoint and a Python
-package with domain/workflow, storage, host integration, and surface adapters.
-Do not introduce those layers as empty abstractions in milestone 0; add modules
-as their feature slices need them. Preserve relative imports for native loading.
+The native registration entrypoint delegates to the Python workflow, storage,
+host-integration and surface adapters. Relative imports support native loading.
 
 ## Data Flow
 
@@ -58,6 +56,44 @@ Keep states for not-sent, confirmed-sent, and uncertain-send distinct. Persist
 platform message references only with appropriate acknowledgement. Repeated
 callbacks and worker recovery must converge on one recorded operation outcome.
 
+The shared consumption slice binds its feed checkpoint to the exact account,
+organization, installation, Gateway base route, and monotonic generation. Every
+page is transactionally persisted before projection; replayed event IDs are
+idempotent. Explicit maintenance clears a stale projection before its next request
+and caches at most eight exact skill/version/publisher metadata records per pass.
+Passive inbox and notification reads verify the stored owner and generation before
+reading rows; they never rebind, poll, fetch metadata, run a model, deliver, or
+mutate installations.
+
+Explicit maintenance also owns two bounded producers. Mediation production persists at
+most eight exact owner-bound feed/weekly references after current policy, mute, and
+suppression checks. Owner-scoped queue membership is applied before the feed projection
+bound, so retries reach later feed rows and qualified weekly evidence while preserving the
+weekly policy cap and cooldown. Counts reflect atomic inserts; queueing does not alter native
+seen/delivery state. It neither assesses nor delivers them. Automatic update production
+uses a durable owner-bound rotating cursor, so installations beyond the first eight are
+eventually considered. It admits only fresh `AUTO_WITH_NOTICE`/`REQUIRED` authority and
+reuses the hardened update journal and replacement executor. Completed operations project
+idempotent `installation_updated` events into the same local feed; restart repairs a
+missing projection from the completed journal without replaying filesystem or Gateway
+effects. `MANUAL`, ambiguous, incompatible, unsafe, and unauthorized work remains review.
+
+Mediation, mute/suppression preferences, delivery reservations, and operation
+outcomes use additive SQLite tables. A delivery request ID is saved before the
+Gateway claim. Claim and settlement responses must match the exact organization,
+recipient, request, reference, and event. A lost or remotely uncertain send settles
+as `uncertain` and is not reclaimed; a remote deferral is not immediately replayed.
+Setup is never reported as an install/update outcome, and verified completion
+follows the ordered `files_installed` report.
+
+### Publication transaction boundary
+
+A publication receipt authorizes one exact owner, local draft, immutable file-byte snapshot, content/description/manifest hashes, and observed Gateway policy. CAS blobs, trees, and the commit are serialized from that snapshot; publication must not walk the mutable overlay again after review. Immediately before first upload the controller revalidates current owner, canonical source fingerprint, exact reviewed hashes, and the current local security guard.
+
+The SQLite operation journal records each external-effect intent before sending it. Draft submission, approval, publication, and decline have explicit unknown-outcome phases. Recovery first reads or lists the authoritative owner-private remote draft and verifies its exact slug, commit, content, description, and manifest identity. It retries only after that state proves the effect is still safe; an ambiguous exception is never treated as non-delivery. A policy change blocks only uncommitted work and requires a new receipt bound to the same operation; it cannot hide a remote terminal outcome or create a second draft.
+
+Publication leases fence durable phase changes and external-effect completion by lock key, holder, and unexpired lease. Decline intent is persisted before the request, so reopen cannot accidentally resume approval/publication while cancellation is uncertain. Completing an operation updates its journal payload, local draft state, and remote-draft projection in one SQLite transaction; repeated terminal recovery repairs missing projections idempotently.
+
 ## Commands, Tools, and Presentation
 
 Entitlement belongs in the plugin, with a narrow version-tested adapter to
@@ -84,27 +120,21 @@ before labels, and expose details/assessments with Show/Hide controls. Do not em
 an extra success message or assessment wall when an existing card can be updated.
 Not Now records deferral, not rejection; manual browse/review remains available.
 
-## UI Backend and Frontends
+## Desktop Handoffs and Deferred UI Backend
 
-Add a thin shared `dashboard/plugin_api.py` router under
-`/api/plugins/hermes-collective-wisdom/`. The host uses this namespace for both
-Desktop and Dashboard despite the directory name. Endpoint families cover
-availability, discovery, inspections, drafts, reviews, operations, preferences,
-and status/events; bind each to the existing workflow service.
+The initial Desktop surface is an external SDK page at `desktop/plugin.js`,
+reachable through sidebar and palette contributions. It uses SDK components,
+read-only display context and explicit clipboard actions; it does not call a
+Wisdom HTTP API, execute commands or store authoritative workflow state.
 
-The server resolves identity from authenticated host context and revalidates
-every mutation. Frontend-provided profile hints, hidden buttons, and cached
-availability are not authorization. Pending reviews cannot survive a profile/
-account change as actionable controls.
+Commands are static shell-safe examples. Profile display is advisory and never
+interpolated into commands. Native execution must occur on the intended host and
+profile, where owner checks and fresh full review/approval remain mandatory.
+Clipboard failure is visible; copying never means execution or consent.
 
-Desktop uses its scoped `ctx.rest` and `ctx.socket`, with host contributions and
-components. Dashboard uses its separate registry and authenticated fetch/socket
-helpers. Share DTOs, validation, and small view-model transformations only where
-they remove real duplication; do not create a third universal UI framework.
-
-Browser storage may retain harmless view preferences, not receipts, credentials,
-or authoritative workflow state. Poll only while useful, cancel on unmount/
-profile switch, and use events as an optimization over reliable refresh.
+The proposed shared native-context HTTP backend is withdrawn. Full embedded
+private editing/actions and Dashboard SDK work are deferred. No Agent source
+changes, private host-manager lookup or separate service is part of this scope.
 
 ## Release Boundary
 

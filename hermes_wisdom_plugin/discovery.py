@@ -9,7 +9,7 @@ from the original service are deliberately outside this kernel.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode
 
 from .errors import WisdomNotFound, WisdomValidationError
@@ -139,6 +139,20 @@ class Discovery:
         skill_id = _reference(skill_id)
         detail = self._response(lambda: self.client.skill(skill_id))
         return list(detail.versions)
+
+    def version(self, skill_id: str, version: int) -> dict[str, Any]:
+        """Return one exact positive published version with identity checks."""
+        skill_id = _reference(skill_id)
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise WisdomValidationError("Wisdom version is invalid")
+        client = cast(Any, self.client)
+        detail = self._response(lambda: client.version(skill_id, version))
+        result = detail.model_dump(mode="json")
+        skill = result.get("skill") or {}
+        version_row = result.get("version") or {}
+        if skill.get("id") != skill_id or version_row.get("version") != version:
+            raise WisdomValidationError("Wisdom version identity changed")
+        return result
 
     def _portal_skill_url(self, skill_id: str) -> str:
         return (

@@ -25,7 +25,7 @@ instructions. Installation is not setup approval or verified readiness.
 | CLI `installed` | Intentional addition: reference advertised this but omitted its parser registration |
 | CLI receipt files | Hardened with enrolment binding, file containment/integrity, 24-hour expiry and retained operation outcome |
 | Native consent, callback, mediation and operation-outbox tests | Deferred to native surface slice; terminal receipts do not replace actor/message binding |
-| Setup execution/verification, update modes and automatic update tests | Deferred; storing effective policy does not implement its worker |
+| Setup execution/verification, update modes and automatic update tests | Deferred in this historical installation slice; C3 now has separate terminal setup coverage in the parity ledger. Automatic update work remains deferred. |
 | Legacy migrations and old managed-root markers | Excluded; only an additive v1-to-v2 plugin-schema upgrade, preserving enrolment data |
 
 Reference recovery assertions retained cover staged rename failure, rename

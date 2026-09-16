@@ -3,6 +3,7 @@
 # Test doubles intentionally expose the executor's protocol-shaped methods.
 # pylint: disable=missing-class-docstring,missing-function-docstring
 # pylint: disable=redefined-outer-name,too-few-public-methods,protected-access
+# pylint: disable=import-outside-toplevel,wrong-import-order
 
 from __future__ import annotations
 
@@ -16,8 +17,10 @@ from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomN
 from hermes_wisdom_plugin import install_execution
 from hermes_wisdom_plugin.install_execution import InstallExecutor
 from hermes_wisdom_plugin.install_receipts import InstallReceipts
+from hermes_wisdom_plugin.install_review import InstallReviewer
 from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.store import WisdomStore
+from test_install_review import Client as ReviewClient, Host as ReviewHost
 
 
 OWNER = {
@@ -75,7 +78,8 @@ class Receipts:
 
 
 class Store:
-    def __init__(self):
+    def __init__(self, root):
+        self.root = root
         self.operations = {}
         self.records = {}
         self.counter = 0
@@ -140,6 +144,14 @@ class Store:
         self.metadata[key] = dict(value)
 
 
+def test_apply_rejects_pending_setup_even_if_database_lease_is_free(executor):
+    value, store, _client, _receipts, _current = executor
+    store.journal("wisdom_setup", "skill-1", "running", {"owner": OWNER})
+
+    with pytest.raises(PackagePolicyError, match="setup operation"):
+        value.apply("receipt-1")
+
+
 class Client:
     def __init__(self):
         self.record_error = None
@@ -189,7 +201,7 @@ class Reviewer:
 
 @pytest.fixture
 def executor(tmp_path):
-    store = Store()
+    store = Store(tmp_path / "state")
     client = Client()
     receipts = Receipts()
     current = {"value": dict(OWNER)}
@@ -215,6 +227,15 @@ def test_apply_commits_exact_tree_and_preserves_server_mode(executor):
     assert store.records["skill-1"]["owner"] == OWNER
     assert receipts.completed["receipt-1"] == result
     assert client.record_calls[0]["installation_id"] == "install-1"
+
+
+def test_install_respects_nonexpiring_setup_starter_lock(executor):
+    from hermes_wisdom_plugin.setup_lock import managed_operation_guard
+
+    value, store, _client, _receipts, _current = executor
+    with managed_operation_guard(Path(store.root), "skill-1"):
+        with pytest.raises(PackagePolicyError, match="starting or running"):
+            value.apply("receipt-1")
 
 
 def test_retry_after_rename_wins_verifies_target_and_finishes(executor, monkeypatch):
@@ -489,6 +510,160 @@ def test_real_store_and_receipt_complete_one_owner_bound_install(tmp_path):
     assert store.operation(receipts.store.get_metadata(
         "install_receipt:" + plan["receipt"]
     )["operation_id"])["phase"] == "gateway_recorded"
+
+
+class InvocationClient(ReviewClient):
+    """Real-review transport with the install acknowledgement endpoint."""
+
+    def __init__(self):
+        super().__init__()
+        self.record_calls = []
+
+    def record_install(self, **values):
+        self.record_calls.append(values)
+        return SimpleNamespace(effective_update_mode="REQUIRED")
+
+
+@pytest.fixture
+def invocation_executor(tmp_path):
+    owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
+    authority = {"current": True, "owner_hook": None}
+
+    def current_owner():
+        hook = authority["owner_hook"]
+        if hook is not None:
+            hook()
+        return dict(owner)
+
+    store = WisdomStore(tmp_path / "state")
+    host = ReviewHost(tmp_path / "profile")
+    client = InvocationClient()
+    receipts = InstallReceipts(store, current_owner)
+    reviewer = InstallReviewer(client, store, receipts, host, current_owner)
+    plan = reviewer.plan("skill-1@v2", update_mode="AUTO_WITH_NOTICE")
+    value = InstallExecutor(client, store, receipts, reviewer, host, current_owner)
+    target = (
+        host.skills_root
+        / "_wisdom"
+        / install_execution.org_directory_name(owner["organization_id"])
+        / "managed-skill"
+    )
+    return value, store, client, receipts, plan, target, authority
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("review callback failed")])
+def test_invocation_authority_fails_closed_before_install_effects(
+    invocation_executor, failure
+):
+    value, store, client, _receipts, plan, target, _authority = invocation_executor
+
+    def may_apply():
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    expected = RuntimeError if isinstance(failure, Exception) else WisdomAuthError
+    with pytest.raises(expected):
+        value.apply(plan["receipt"], may_apply=may_apply)
+
+    assert store.pending_operations() == []
+    assert store.installations() == []
+    assert client.record_calls == []
+    assert not target.exists()
+
+
+def test_invocation_revocation_during_owner_reread_prevents_install(
+    invocation_executor,
+):
+    value, store, client, _receipts, plan, target, authority = invocation_executor
+
+    def revoke():
+        authority["current"] = False
+
+    authority["owner_hook"] = revoke
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.apply(plan["receipt"], may_apply=lambda: authority["current"])
+
+    assert store.pending_operations() == []
+    assert store.installations() == []
+    assert client.record_calls == []
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("boundary", ["source", "preparation"])
+def test_invocation_revocation_during_verification_reads_prevents_install(
+    invocation_executor, boundary
+):
+    value, store, client, _receipts, plan, target, authority = invocation_executor
+    if boundary == "source":
+        original = client.content
+
+        def revoke_after_content(*args, **kwargs):
+            result = original(*args, **kwargs)
+            authority["current"] = False
+            return result
+
+        client.content = revoke_after_content
+    else:
+        original = value.host.scan
+
+        def revoke_after_scan(path):
+            result = original(path)
+            authority["current"] = False
+            return result
+
+        value.host.scan = revoke_after_scan
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.apply(plan["receipt"], may_apply=lambda: authority["current"])
+
+    assert store.pending_operations() == []
+    assert store.installations() == []
+    assert client.record_calls == []
+    assert not target.exists()
+
+
+def test_late_invocation_revocation_keeps_recoverable_filesystem_effect(
+    invocation_executor,
+):
+    value, store, client, receipts, plan, target, _authority = invocation_executor
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.apply(plan["receipt"], may_apply=lambda: not target.exists())
+
+    operation = store.pending_operations()[0]
+    assert operation["kind"] == "install"
+    assert operation["phase"] == "staged"
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed\n"
+    assert store.installations() == []
+    assert client.record_calls == []
+    inode = target.stat().st_ino
+
+    result = value.apply(plan["receipt"], may_apply=lambda: True)
+
+    assert result["installed"] is True
+    assert target.stat().st_ino == inode
+    assert receipts.outcome(plan["receipt"]) == result
+    assert store.pending_operations() == []
+    assert len(client.record_calls) == 1
+
+
+def test_current_invocation_completes_exact_receipt_install(invocation_executor):
+    value, store, client, receipts, plan, target, _authority = invocation_executor
+    checks = []
+
+    result = value.apply(
+        plan["receipt"], may_apply=lambda: checks.append(target.exists()) or True
+    )
+
+    assert result["installed"] is True
+    assert result["version"] == plan["version"]
+    assert result["content_hash"] == plan["content_hash"]
+    assert result["effective_update_mode"] == "REQUIRED"
+    assert checks and False in checks and True in checks
+    assert receipts.outcome(plan["receipt"]) == result
+    assert store.installation("skill-1")["target_path"] == str(target)
+    assert len(client.record_calls) == 1
 
 
 def test_real_retry_repairs_unbound_install_journal_start(tmp_path, monkeypatch):
