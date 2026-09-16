@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1288,6 +1289,81 @@ def test_lifecycle_rejects_non_owning_or_subagent_payload(tmp_path: Path):
         assert not called.is_set()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (PermissionError("account=private-user token=private-token"), "capture_rejected"),
+        (RuntimeError("account=private-user token=private-token"), "context_unavailable"),
+    ],
+)
+def test_lifecycle_logs_bounded_private_admission_failure(
+    tmp_path: Path, caplog, failure, reason
+):
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", Service, FakeLlm(), lambda *_args, **_kwargs: None,
+        session_context=lambda: (_ for _ in ()).throw(failure),
+    )
+    if isinstance(failure, PermissionError):
+        runtime.capture.consume_lifecycle = Mock(side_effect=failure)
+    else:
+        runtime.capture.consume_lifecycle = Mock(return_value=invocation(SlackAdapter()))
+
+    with caplog.at_level(logging.WARNING, logger="hermes_wisdom_plugin.native_runtime"):
+        runtime.lifecycle_hook(
+            model="private-model", session_id="private-session", task_id="private-task",
+            turn_id="private-turn", platform="slack", sender_id="private-user",
+            parent_session_id="",
+        )
+
+    assert caplog.messages == [
+        f"Collective Wisdom lifecycle admission rejected (reason={reason})"
+    ]
+    assert "private" not in caplog.text
+    assert type(failure).__name__ not in caplog.text
+
+
+def test_lifecycle_context_mismatch_logs_field_names_only(tmp_path: Path, caplog):
+    captured = invocation(SlackAdapter())
+    captured = replace(
+        captured, message_id="expected-message", host_session_id="expected-session",
+        task_id="expected-task", turn_id="expected-turn",
+    )
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", Service, FakeLlm(), lambda *_args, **_kwargs: None,
+        session_context=lambda: {
+            "platform": captured.platform, "profile": captured.profile,
+            "chat_id": captured.chat_id, "user_id": "private-user",
+            "thread_id": captured.thread_id, "scope_id": captured.scope_id,
+            "message_id": captured.message_id, "session_key": captured.session_key,
+            "session_id": "private-session",
+            "credential": "private-token",
+        },
+    )
+    runtime.capture.consume_lifecycle = Mock(return_value=captured)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_wisdom_plugin.native_runtime"):
+        runtime.lifecycle_hook(model="private-model")
+
+    assert caplog.messages == [
+        "Collective Wisdom lifecycle admission rejected "
+        "(reason=context_mismatch; fields=user_id,session_id)"
+    ]
+    assert "private" not in caplog.text
+    assert "credential" not in caplog.text
+
+
+def test_lifecycle_expected_no_capture_is_silent(tmp_path: Path, caplog):
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", Service, FakeLlm(), lambda *_args, **_kwargs: None,
+    )
+    runtime.capture.consume_lifecycle = Mock(return_value=None)
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_wisdom_plugin.native_runtime"):
+        runtime.lifecycle_hook(model="private-model", parent_session_id="parent-session")
+
+    assert caplog.messages == []
 
 
 def test_lifecycle_rejects_host_session_context_route_mismatch(tmp_path: Path):
