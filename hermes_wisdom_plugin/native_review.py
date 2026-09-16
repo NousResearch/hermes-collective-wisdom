@@ -556,8 +556,9 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         """Bind advice navigation, never approval, to this private owner route."""
         assessment_view(job)  # Validate the immutable advisory payload before binding controls.
         reference = job["reference"]
-        if reference.get("kind") != "skill" or job.get("state") != "ready":
-            raise ValueError("Only ready shared advice has recipient controls.")
+        if (reference.get("kind") != "skill" or job.get("state") != "ready"
+                or job["advice"].get("relevance") != "recommend"):
+            raise ValueError("Only ready shared recommendations have recipient controls.")
         owner = service.native_owner()
         version = facts.get("version") or {}
         if (facts.get("skill", {}).get("id") != reference["skill_id"]
@@ -890,6 +891,19 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         effect_current = may_apply or (lambda: True)
         record = self.load(record_id)
+        navigation = (record.get("result") or {}).get("navigation_successor")
+        if record["state"] == "superseded" and isinstance(navigation, dict):
+            if action != navigation["action"]:
+                raise PermissionError("Collective Wisdom review is no longer pending.")
+            self._validate(record, service, invocation, navigation=True)
+            successor = self.load(navigation["id"])
+            self._validate(successor, service, invocation)
+            if (successor["state"] != "pending"
+                    or successor["state_revision"] != navigation["state_revision"]
+                    or not self._authority_current(service, record, effect_current)
+                    or not self._authority_current(service, successor, effect_current)):
+                raise PermissionError("Collective Wisdom navigation is no longer current.")
+            return successor
         self._validate(
             record, service, invocation,
             recovery=(
@@ -979,10 +993,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             self._validate_route(record, invocation)
             if service.native_owner() != record["plan"]["owner"] or not effect_current():
                 raise PermissionError("Packaging owner changed.")
-            self.bind_delivery(successor["id"], invocation, invocation.message_id)
-            if self.load(record_id)["state"] == "pending":
-                self._set_state(record, "superseded")
-            return self.load(successor["id"])
+            return self._link_navigation(record, successor, invocation, action)
         if action in {"recommendation.settings", "sharing.settings"}:
             expected_operation = (
                 "recommendation" if action.startswith("recommendation.") else "publish"
@@ -992,9 +1003,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             settings = self.request_settings(service, invocation)
             if not self._authority_current(service, record, effect_current):
                 raise PermissionError("Recommendation owner changed.")
-            self.bind_delivery(settings["id"], invocation, invocation.message_id)
-            self._set_state(record, "superseded")
-            return self.load(settings["id"])
+            return self._link_navigation(record, settings, invocation, action)
         if action in {"recommendation.details", "recommendation.back"}:
             if record["operation"] != "recommendation" or record["state"] != "pending":
                 raise PermissionError("Recommendation is no longer current.")
@@ -1037,6 +1046,38 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         if action.startswith("settings."):
             return self._settings_action(service, record, invocation, action)
         raise ValueError("Collective Wisdom control was not recognized.")
+
+    def _link_navigation(
+        self, record: dict[str, Any], successor: dict[str, Any],
+        invocation: NativeInvocation, action: str,
+    ) -> dict[str, Any]:
+        """Retire old approvals but retain a durable, exact projection-only replay."""
+        successor = self.bind_delivery(successor["id"], invocation, invocation.message_id)
+        latest = self.load(record["id"])
+        # Another failed packaging attempt supersedes the same operation on insertion.
+        inserted_replacement = (
+            successor["operation"] == record["operation"]
+            and latest["state"] == "superseded"
+            and latest["state_revision"] == record["state_revision"] + 1
+        )
+        if not inserted_replacement and (
+            latest["state"] != record["state"]
+            or latest["state_revision"] != record["state_revision"]
+        ):
+            raise PermissionError("Collective Wisdom navigation changed.")
+        with self.store.transaction() as db:
+            changed = db.execute(
+                "UPDATE wisdom_consent SET state='superseded',result_json=?,"
+                "state_revision=state_revision+1,updated_at=? "
+                "WHERE id=? AND state=? AND state_revision=?",
+                (_json({"navigation_successor": {
+                    "id": successor["id"], "action": action,
+                    "state_revision": successor["state_revision"],
+                }}), self.clock(), record["id"], latest["state"], latest["state_revision"]),
+            )
+        if changed.rowcount != 1:
+            raise PermissionError("Collective Wisdom navigation changed.")
+        return successor
 
     def _inspect_publication(self, record: dict[str, Any], page_action: str) -> dict[str, Any]:
         try:
@@ -2061,13 +2102,14 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PermissionError("Collective Wisdom operation state changed.")
 
     def _validate(self, record: dict[str, Any], service: Any,
-                  invocation: NativeInvocation, *, recovery: bool = False) -> None:
+                  invocation: NativeInvocation, *, recovery: bool = False,
+                  navigation: bool = False) -> None:
         self._validate_route(record, invocation)
         if record["delivery_state"] not in {"confirmed", "edit_failed"}:
             raise PermissionError("Collective Wisdom review delivery is not confirmed.")
         if record.get("message_id") != invocation.message_id:
             raise PermissionError("Collective Wisdom control belongs to another message.")
-        if record["state"] == "superseded" or (
+        if (record["state"] == "superseded" and not navigation) or (
             record["state"] == "deferred" and not recovery
         ):
             raise PermissionError("Collective Wisdom review is no longer pending.")
@@ -2075,6 +2117,8 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             recovery and record["state"] == "needs_review"
         )
         if not expiry_exempt and self.clock() > record["expires_at"]:
+            if navigation:
+                raise PermissionError("Collective Wisdom navigation expired.")
             self._set_state(record, "expired")
             record["state"] = "expired"
             record["state_revision"] = int(record["state_revision"]) + 1

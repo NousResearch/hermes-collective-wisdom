@@ -526,8 +526,9 @@ def test_candidate_policy_read_rechecks_admission_before_binding(
 
 
 @pytest.mark.parametrize("late_failure", ["admission", "lease"])
+@pytest.mark.parametrize("relevance", ["recommend", "digest"])
 def test_ready_assessment_uses_real_slack_sender_receipt_and_durable_outbox(
-    tmp_path: Path, late_failure: str,
+    tmp_path: Path, late_failure: str, relevance: str,
 ):
     async def scenario():  # pylint: disable=too-many-locals
         now = 1_000.0
@@ -599,8 +600,10 @@ def test_ready_assessment_uses_real_slack_sender_receipt_and_durable_outbox(
         )
         job = queue.claim("org", route.session_key, assessment_only=True)[0]
         assert queue.save_advice("org", assessment_id, job["lease_token"], {
-            "assessment_id": assessment_id, "relevance": "recommend",
-            "title": "Managed workflow", "explanation": "Useful in recurring reviews.",
+            "assessment_id": assessment_id, "relevance": relevance,
+            "title": "Managed workflow",
+            "explanation": "Useful in recurring reviews." if relevance == "recommend" else
+            "Redundant with the installed workflow; no supported practical benefit.",
             "provenance": {"kind": "agent_assessed", "provider": "p", "model": "m"},
         })
 
@@ -621,16 +624,25 @@ def test_ready_assessment_uses_real_slack_sender_receipt_and_durable_outbox(
         assert row["state"] == "delivered"
         assert len(app.client.posts) == 1
         assert "Agent-assessed advice" in app.client.posts[0]["text"]
-        assert "Would you like to install this skill?" in app.client.posts[0]["text"]
-        details = _slack_action(app.client.posts[0]["blocks"], "View Details")
-        body = callback_body()
-        body["message"]["ts"] = body["container"]["message_ts"] = "assessment-1"
-        async def ack():
-            return None
-        await app.handler_for(details["action_id"])(ack, body, details)
-        assert not app.client.ephemeral
-        assert "Exact version: v1" in app.client.edits[-1]["text"]
-        assert app.client.edits[-1]["ts"] == "assessment-1"
+        if relevance == "digest":
+            posted = app.client.posts[0]
+            assert "no supported practical benefit" in posted["text"]
+            assert "could be useful to you" not in posted["text"]
+            assert "Would you like to install" not in posted["text"]
+            assert not any(block["type"] == "actions" for block in posted["blocks"])
+            with store.transaction() as database:
+                assert database.execute("SELECT COUNT(*) FROM wisdom_consent").fetchone()[0] == 0
+        else:
+            assert "Would you like to install this skill?" in app.client.posts[0]["text"]
+            details = _slack_action(app.client.posts[0]["blocks"], "View Details")
+            body = callback_body()
+            body["message"]["ts"] = body["container"]["message_ts"] = "assessment-1"
+            async def ack():
+                return None
+            await app.handler_for(details["action_id"])(ack, body, details)
+            assert not app.client.ephemeral
+            assert "Exact version: v1" in app.client.edits[-1]["text"]
+            assert app.client.edits[-1]["ts"] == "assessment-1"
         with store.transaction() as database:
             receipt = database.execute(
                 "SELECT receipt_json FROM wisdom_shared_delivery_receipt WHERE assessment_id=?",

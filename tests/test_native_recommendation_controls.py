@@ -53,6 +53,19 @@ class RecommendationService(Service):
         return {"deferred": True}
 
 
+def test_digest_cannot_request_recipient_controls(tmp_path):
+    store = WisdomStore(tmp_path)
+    service = RecommendationService(store)
+    job = shared_job()
+    job["advice"]["relevance"] = "digest"
+    with pytest.raises(ValueError):
+        NativeReviewController(store).request_recommendation(
+            service, native_invocation(), job, shared_facts(),
+        )
+    with store.transaction() as database:
+        assert database.execute("SELECT COUNT(*) FROM wisdom_consent").fetchone()[0] == 0
+
+
 def test_multiple_delivered_recommendations_keep_independent_controls(tmp_path):
     store = WisdomStore(tmp_path)
     service = RecommendationService(store)
