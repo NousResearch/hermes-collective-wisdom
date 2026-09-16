@@ -744,6 +744,51 @@ def test_native_human_turn_produces_assesses_and_delivers_due_feed_once(
     assert len(app.client.posts) == 1
 
 
+def test_cached_native_turn_assesses_with_empty_session_context_and_active_runtime(
+    tmp_path, monkeypatch
+):
+    service, owner = _service(tmp_path)
+    queue, identities = _queue(service, owner)
+    llm = RecordingLlm()
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", SimpleNamespace(
+        _RUNTIME_MAIN_CONTEXT=SimpleNamespace(get=lambda: {
+            "session_id": "session-1", "provider": "active-provider",
+            "model": "active-model",
+        })
+    ))
+    route = {
+        "platform": "slack", "profile": "default", "chat_id": "D1",
+        "user_id": "account-1", "thread_id": "", "scope_id": "W1",
+        "message_id": "request-1", "session_key": "slack:W1:D1:account-1",
+        "session_id": "",
+    }
+    native = NativeSurfaceRuntime(
+        tmp_path / "native", "default", lambda: service, llm,
+        lambda *_args, **_kwargs: None, session_context=lambda: dict(route),
+    )
+    invocation = NativeInvocation(
+        platform="slack", profile="default", chat_type="dm", chat_id="D1",
+        actor_id="account-1", actor_name="Shannon", thread_id="", scope_id="W1",
+        message_id="request-1", session_key="slack:W1:D1:account-1", adapter=object(),
+        host_session_id="session-1", task_id="task-1", turn_id="turn-1",
+    )
+    native._tool_invocations[("task-1", "session-1")] = (float("inf"), invocation)
+    bridge = AssessmentBridge(
+        lambda: service, llm, get_delivery_mode=lambda: "agent", profile_name="default",
+    )
+    bridge._produce_due = Mock()
+
+    bridge.run(
+        native_runtime=native, platform="slack", parent_session_id="",
+        session_id="session-1", task_id="task-1", turn_id="turn-1",
+        sender_id="account-1", model="active-model", conversation_history=[],
+    )
+
+    row = next(item for item in queue.assessments("org-1") if item["id"] == identities[0])
+    assert len(llm.calls) == 1
+    assert row["state"] == "ready" and row["attempts"] == 1
+
+
 def test_local_pre_llm_facts_do_not_produce_without_human_origin_proof(tmp_path):
     service, _owner_value = _service(tmp_path)
     service._consumption = Mock(

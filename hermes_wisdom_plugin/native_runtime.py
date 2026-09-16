@@ -198,6 +198,42 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if not self._closed:
             self.capture.hook(**kwargs)
 
+    @staticmethod
+    def _host_context_matches(
+        invocation: NativeInvocation, host_context: Any,
+    ) -> bool:
+        """Match the whole host route, with a cached-turn session-id compatibility seam.
+
+        Stock Gateway cached turns leave only ``HERMES_SESSION_ID`` empty.  In that
+        case the context-local active main runtime is the host-owned durable-session
+        proof.  A present session id remains authoritative and may never be replaced.
+        """
+
+        if not isinstance(host_context, dict):
+            return False
+        expected = {
+            "platform": invocation.platform, "profile": invocation.profile,
+            "chat_id": invocation.chat_id, "user_id": invocation.actor_id,
+            "thread_id": invocation.thread_id, "scope_id": invocation.scope_id,
+            "message_id": invocation.message_id, "session_key": invocation.session_key,
+        }
+        if any(
+            str(host_context.get(name) or "") != expected_value
+            for name, expected_value in expected.items()
+        ):
+            return False
+        context_session_id = str(host_context.get("session_id") or "")
+        if context_session_id:
+            return context_session_id == invocation.host_session_id
+        from .mediation import _active_main_runtime  # pylint: disable=import-outside-toplevel
+        active = _active_main_runtime()
+        return bool(
+            isinstance(active, dict)
+            and str(active.get("session_id") or "") == invocation.host_session_id
+            and str(active.get("provider") or "")
+            and str(active.get("model") or "")
+        )
+
     def lifecycle_hook(  # pylint: disable=too-many-return-statements
         self, **kwargs: Any
     ) -> None:
@@ -229,6 +265,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if self.session_context is not None:
             try:
                 host_context = self.session_context()
+                context_matches = self._host_context_matches(invocation, host_context)
                 expected_context = {
                     "platform": invocation.platform,
                     "profile": invocation.profile,
@@ -251,7 +288,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     "(reason=context_unavailable)"
                 )
                 return None
-            if mismatched_fields:
+            if not context_matches:
                 logger.warning(
                     "Collective Wisdom lifecycle admission rejected "
                     "(reason=context_mismatch; fields=%s)",
@@ -316,18 +353,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             except Exception:  # pylint: disable=broad-exception-caught
                 valid = False
             else:
-                expected = {
-                    "platform": invocation.platform, "profile": invocation.profile,
-                    "chat_id": invocation.chat_id, "user_id": invocation.actor_id,
-                    "thread_id": invocation.thread_id, "scope_id": invocation.scope_id,
-                    "message_id": invocation.message_id,
-                    "session_key": invocation.session_key,
-                    "session_id": invocation.host_session_id,
-                }
-                valid = isinstance(host_context, dict) and all(
-                    str(host_context.get(name) or "") == expected_value
-                    for name, expected_value in expected.items()
-                )
+                valid = self._host_context_matches(invocation, host_context)
         if not valid:
             with self._lock:
                 self._tool_invocations.pop(key, None)
