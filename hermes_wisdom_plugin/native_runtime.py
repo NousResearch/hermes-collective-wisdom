@@ -951,7 +951,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         job, token, initial_facts, latest, view = prepared
         record = None
         try:
-            if job["reference"]["kind"] == "skill" and job["state"] == "ready":
+            if (job["reference"]["kind"] == "skill" and job["state"] == "ready"
+                    and job["advice"].get("relevance") == "recommend"):
                 record = await asyncio.to_thread(
                     self.reviews.request_recommendation,
                     checker.service, invocation, job, initial_facts,
