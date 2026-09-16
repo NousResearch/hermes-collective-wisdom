@@ -13,7 +13,7 @@ from hermes_wisdom_plugin.local_security import prepared_security_check
 @pytest.mark.parametrize(
     ("content", "key"),
     [
-        ("-----BEGIN PRIVATE KEY-----", "private_keys"),
+        ("-----BEGIN " + "PRIVATE KEY" + "-----", "private_keys"),
         ("ghp_" + "a" * 36, "live_credentials"),
         ("password=" + "a" * 24, "secret_assignments"),
     ],

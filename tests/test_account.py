@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import secrets
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -192,7 +193,7 @@ def test_scope_removal_blocks_client_before_network_io() -> None:
 def test_host_failures_deny_and_do_not_leak_details() -> None:
     """Host exceptions and bearers are absent from adapter errors and reprs."""
 
-    secret = "credential-super-secret"
+    secret = secrets.token_urlsafe(24)
 
     def fail() -> _HostAccountSnapshot:
         raise RuntimeError(f"host failed with {secret}")

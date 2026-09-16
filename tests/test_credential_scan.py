@@ -42,7 +42,7 @@ def test_credential_detector_finds_key_shapes_without_echoing_values(
 @pytest.mark.parametrize(
     ("content", "kind"),
     [
-        ("-----BEGIN PRIVATE KEY-----", "private_key"),
+        ("-----BEGIN " + "PRIVATE KEY" + "-----", "private_key"),
         ("password=" + "a" * 24, "assignment"),
     ],
 )
