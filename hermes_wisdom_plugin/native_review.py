@@ -605,6 +605,21 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 claimed = True
         return self.load(identity), claimed
 
+    def _candidate_action_record(
+        self, organization_id: str, profile: str, assessment_id: str,
+    ) -> dict[str, Any] | None:
+        """Load an existing candidate claim without creating one."""
+
+        with self.store.transaction() as db:
+            row = db.execute(
+                "SELECT id FROM wisdom_consent WHERE organization_id=? AND profile=? "
+                "AND operation='publish' "
+                "AND json_extract(plan_json,'$.candidate_assessment_id')=? "
+                "AND state NOT IN ('failed','superseded') ORDER BY created_at DESC LIMIT 1",
+                (organization_id, profile, assessment_id),
+            ).fetchone()
+        return self.load(str(row["id"])) if row is not None else None
+
     def _replace_candidate_action(
         self, record_id: str, operation: str, plan: dict[str, Any], *,
         result: dict[str, Any] | None = None,
@@ -622,7 +637,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PermissionError("Collective Wisdom candidate review changed.")
         return self.load(record_id)
 
-    def request_candidate_action(  # pylint: disable=too-many-arguments,too-many-locals
+    def request_candidate_action(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
         self, service: Any, invocation: NativeInvocation, event_id: str, *,
         assessment_id: str, open_in_portal: bool,
         may_apply: Callable[[], bool],
@@ -633,58 +648,86 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         assessment_id = _assessment_text(assessment_id, 128)
         if may_apply() is not True:
             raise PermissionError("Collective Wisdom candidate review is no longer current.")
-        existing, claimed = self._claim_candidate_action(
-            service, invocation, event_id, assessment_id=assessment_id,
-            action="portal" if open_in_portal else "share",
-        )
-        if not claimed:
+        organization_id = self._org(owner)
+        lock_key = f"candidate-action:{organization_id}:{invocation.profile}:{assessment_id}"
+        lock = self.store.acquire_operation_lock(lock_key)
+        if lock is None:
+            existing = self._candidate_action_record(
+                organization_id, invocation.profile, assessment_id
+            )
+            if existing is None:
+                raise PackagePolicyError(
+                    "Collective Wisdom candidate action is already in progress"
+                )
             self._validate_route(existing, invocation)
             if service.native_owner() != owner or may_apply() is not True:
                 raise PermissionError("Collective Wisdom candidate owner changed.")
-            if existing["plan"].get("candidate_action_state") == "preparing":
-                return existing
-            if (
-                existing["plan"].get("candidate_action") == "portal"
-                and not _safe_url((existing.get("result") or {}).get("portal_url"))
-            ):
-                return self._complete_candidate_portal(
-                    service, existing, assessment_id, may_apply=may_apply
-                )
-            return existing
-        if may_apply() is not True:
-            raise PermissionError("Collective Wisdom candidate review is no longer current.")
-        from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
+            return {
+                **existing,
+                "plan": {**existing["plan"], "candidate_action_state": "preparing"},
+            }
         try:
-            draft_id = service.native_candidate_prepare(event_id)
-        except SharePackagingError:
-            return self._replace_candidate_action(existing["id"], "packaging_failed", {
-                "owner": owner, "event_id": event_id, "allowed": False,
-                "error_code": "share_packaging_failed",
+            existing, claimed = self._claim_candidate_action(
+                service, invocation, event_id, assessment_id=assessment_id,
+                action="portal" if open_in_portal else "share",
+            )
+            self._validate_route(existing, invocation)
+            if service.native_owner() != owner or may_apply() is not True:
+                raise PermissionError("Collective Wisdom candidate owner changed.")
+            preparing = existing["plan"].get("candidate_action_state") == "preparing"
+            if not claimed and not preparing:
+                if (
+                    existing["plan"].get("candidate_action") == "portal"
+                    and not _safe_url((existing.get("result") or {}).get("portal_url"))
+                ):
+                    operation = self.store.publication_for_candidate_assessment(assessment_id)
+                    outcome = None
+                    if operation is None:
+                        outcome = service.publication_submit_private(
+                            existing["plan"]["receipt"], may_apply=may_apply,
+                            candidate_assessment_id=assessment_id,
+                        )
+                    return self._complete_candidate_portal(
+                        service, existing, assessment_id,
+                        may_apply=may_apply, outcome=outcome,
+                    )
+                return existing
+            if may_apply() is not True:
+                raise PermissionError("Collective Wisdom candidate review is no longer current.")
+            from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
+            try:
+                draft_id = service.native_candidate_prepare(event_id)
+            except SharePackagingError:
+                return self._replace_candidate_action(existing["id"], "packaging_failed", {
+                    "owner": owner, "event_id": event_id, "allowed": False,
+                    "error_code": "share_packaging_failed",
+                    "candidate_assessment_id": assessment_id,
+                })
+            if service.native_owner() != owner or may_apply() is not True:
+                raise PermissionError("Collective Wisdom candidate owner changed.")
+            plan = service.publication_review(draft_id, may_apply=may_apply)
+            if plan.get("draft_id") != draft_id or not plan.get("receipt"):
+                raise PackagePolicyError("native publication review is invalid")
+            if service.native_owner() != owner or may_apply() is not True:
+                raise PermissionError("Collective Wisdom candidate owner changed.")
+            plan = self._prepare_review_deferral(service, {
+                **plan, "owner": owner, "allowed": True,
                 "candidate_assessment_id": assessment_id,
+                "candidate_event_id": event_id,
+                "candidate_action": "portal" if open_in_portal else "share",
             })
-        if service.native_owner() != owner or may_apply() is not True:
-            raise PermissionError("Collective Wisdom candidate owner changed.")
-        plan = service.publication_review(draft_id, may_apply=may_apply)
-        if plan.get("draft_id") != draft_id or not plan.get("receipt"):
-            raise PackagePolicyError("native publication review is invalid")
-        if service.native_owner() != owner or may_apply() is not True:
-            raise PermissionError("Collective Wisdom candidate owner changed.")
-        plan = self._prepare_review_deferral(service, {
-            **plan, "owner": owner, "allowed": True,
-            "candidate_assessment_id": assessment_id,
-            "candidate_event_id": event_id,
-            "candidate_action": "portal" if open_in_portal else "share",
-        })
-        record = self._replace_candidate_action(existing["id"], "publish", plan)
-        if open_in_portal:
-            outcome = service.publication_submit_private(
-                plan["receipt"], may_apply=may_apply,
-                candidate_assessment_id=assessment_id,
-            )
-            record = self._complete_candidate_portal(
-                service, record, assessment_id, may_apply=may_apply, outcome=outcome
-            )
-        return record
+            record = self._replace_candidate_action(existing["id"], "publish", plan)
+            if open_in_portal:
+                outcome = service.publication_submit_private(
+                    plan["receipt"], may_apply=may_apply,
+                    candidate_assessment_id=assessment_id,
+                )
+                record = self._complete_candidate_portal(
+                    service, record, assessment_id, may_apply=may_apply, outcome=outcome
+                )
+            return record
+        finally:
+            self.store.release_operation_lock(lock_key, lock)
 
     def _complete_candidate_portal(  # pylint: disable=too-many-arguments
         self, service: Any, record: dict[str, Any], assessment_id: str, *,
