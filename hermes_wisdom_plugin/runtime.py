@@ -475,10 +475,16 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Prepare a local candidate for native publication review without upload."""
         inspected = self.native_candidate_inspect(event_id)
         skill_name = str((inspected.get("facts") or {}).get("name") or "")
-        prepared = self.suggest(skill_name, allow_model_review=False)
+        from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
+        from .package import PackagePolicyError  # pylint: disable=import-outside-toplevel
+
+        try:
+            prepared = self.suggest(skill_name, allow_model_review=False)
+        except (OSError, PackagePolicyError, WisdomValidationError):
+            raise SharePackagingError() from None
         draft_id = str(prepared.get("draft_id") or prepared.get("local_draft_id") or "")
         if not draft_id:
-            raise WisdomError("Collective Wisdom candidate could not be prepared")
+            raise SharePackagingError()
         return draft_id
 
     def notification_settings(

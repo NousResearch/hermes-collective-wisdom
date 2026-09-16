@@ -14,6 +14,13 @@ class WisdomError(RuntimeError):
         self.code = code
 
 
+class SharePackagingError(WisdomError):
+    """A local candidate could not be packaged; no upload was attempted."""
+
+    def __init__(self):
+        super().__init__("Share Packaging failed", code="share_packaging_failed")
+
+
 class WisdomAuthError(WisdomError):
     """Authentication or the required Wisdom entitlement is unavailable."""
 
