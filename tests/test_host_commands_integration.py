@@ -136,6 +136,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
         path = self._record("GET")
         if path == "/v1/sync/capabilities":
             self._reply(200, {"features": ["wisdom"]})
+        elif path == "/v1/sync/org/refs":
+            self._reply(200, {"refs": []})
         elif path == "/v1/sync/wisdom/skills":
             self._reply(200, {"skills": [SKILL], "next_cursor": None})
         elif path == "/v1/sync/wisdom/skills/skill-1":
@@ -1208,6 +1210,7 @@ try:
         ("POST", "/v1/sync/wisdom/drafts"),
         ("GET", "/v1/sync/wisdom/drafts/draft-remote-1"),
         ("POST", "/v1/sync/wisdom/drafts/draft-remote-1/approve"),
+        ("GET", "/v1/sync/org/refs"),
         ("POST", "/v1/sync/wisdom/drafts/draft-remote-1/publish"),
     ]
     assert all(item["authorized"] for item in publication_calls)

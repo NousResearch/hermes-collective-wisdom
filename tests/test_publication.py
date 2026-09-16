@@ -16,7 +16,7 @@ import pytest
 from test_contribution_review import reviewer
 
 from hermes_wisdom_plugin import publication as publication_module
-from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomError
 from hermes_wisdom_plugin.publication import PublicationController
 
 
@@ -32,6 +32,11 @@ class RecordingPublicationClient:
             drafts={},
             fail_after_effect=set(),
             uploaded_objects=None,
+            head=None,
+            heads=[],
+            publish_results=[],
+            publish_bases=[],
+            publication_projection=None,
         )
 
     def agent_led_policy(self):
@@ -72,7 +77,10 @@ class RecordingPublicationClient:
         return list(self.state.drafts.values())
 
     def draft(self, draft_id):
-        return SimpleNamespace(draft=self.state.drafts[draft_id], effective_policy={})
+        return SimpleNamespace(
+            draft=self.state.drafts[draft_id], effective_policy={},
+            publication=self.state.publication_projection,
+        )
 
     def approve(self, draft_id, **hashes):
         self.state.calls["approve"] += 1
@@ -86,10 +94,34 @@ class RecordingPublicationClient:
         draft.updatedAt = "server-revision-2"
         return draft
 
-    def publish(self, draft_id, *, content_hash):
+    def organization_head(self):
+        self.state.calls["head"] += 1
+        if self.state.heads:
+            value = self.state.heads.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            self.state.head = value
+        return self.state.head
+
+    def publish(self, draft_id, *, content_hash, base_commit):
         self.state.calls["publish"] += 1
+        self.state.publish_bases.append(base_commit)
         draft = self.state.drafts[draft_id]
         assert content_hash == draft.contentHash
+        if self.state.publish_results:
+            result = self.state.publish_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            if result.get("state") == "pending_approve_conflict":
+                self.state.publication_projection = SimpleNamespace(
+                    state="base_conflict",
+                    reason=result.get("reason"),
+                    retryable_with_fresh_base=result.get("retryable_with_fresh_base"),
+                    proposal_id=result.get("proposal_id"),
+                )
+                return result
+            return result
+        self.state.publication_projection = None
         draft.state = (
             "published" if self.state.mode == "open" else "pending_moderation"
         )
@@ -133,7 +165,7 @@ def test_one_explicit_hash_bound_confirmation_uses_server_policy(tmp_path: Path,
     assert review["publication_mode"] == mode
     assert review["files"] == prepared["files"]
     assert result["publication_state"] == expected
-    assert client.state.calls == Counter(upload=1, submit=1, approve=1, publish=1)
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
     assert "publication_mode" not in result["submitted_request"]
     assert controller.status(result["operation_id"])["state"] == "done"
 
@@ -353,6 +385,212 @@ def test_publish_ack_loss_reconciles_after_restart_without_republishing(tmp_path
     assert client.state.calls["publish"] == 1
 
 
+def test_confirmed_base_conflicts_retry_same_draft_with_fresh_head_bounded(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+    client.state.heads = [
+        None, "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+    ]
+    conflict = {
+        "state": "pending_approve_conflict", "reason": "base_mismatch",
+        "retryable_with_fresh_base": True, "proposal_id": 11,
+    }
+    client.state.publish_results = [conflict, conflict]
+
+    result = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+
+    assert result["publication_state"] == "published"
+    assert client.state.publish_bases == [None, "sha256:" + "a" * 64, "sha256:" + "b" * 64]
+    assert client.state.calls["submit"] == client.state.calls["approve"] == 1
+
+
+def test_repeated_conflict_stays_durable_and_each_reopen_has_bounded_budget(tmp_path: Path):
+    controller, prepared, client, binding = publication(tmp_path)
+    conflict = {
+        "state": "pending_approve_conflict", "reason": "base_mismatch",
+        "retryable_with_fresh_base": True, "proposal_id": 11,
+    }
+    client.state.heads = ["sha256:" + character * 64 for character in "abcdef"]
+    client.state.publish_results = [conflict] * 6
+    result = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+
+    assert result["phase"] == "base_conflict"
+    assert result["retry_attempts"] == 3
+    reopened = PublicationController(
+        controller.store, controller.reviewer, client, lambda: dict(binding)
+    ).reopen(result["operation_id"])
+    assert reopened["phase"] == "base_conflict"
+    assert client.state.calls["publish"] == 6
+    assert client.state.calls["submit"] == client.state.calls["approve"] == 1
+
+
+def test_base_conflict_reopen_persists_authoritative_get_403_without_retry(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+    conflict = {
+        "state": "pending_approve_conflict", "reason": "base_mismatch",
+        "retryable_with_fresh_base": True, "proposal_id": 11,
+    }
+    client.state.heads = ["sha256:" + character * 64 for character in "abc"]
+    client.state.publish_results = [conflict] * 3
+    pending = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    publish_calls = client.state.calls["publish"]
+    client.draft = lambda _draft_id: (_ for _ in ()).throw(
+        WisdomAuthError("publication forbidden", status=403)
+    )
+
+    with pytest.raises(WisdomAuthError, match="forbidden"):
+        controller.reopen(pending["operation_id"])
+
+    operation = controller.store.operation(pending["operation_id"])
+    assert operation["phase"] == "publication_failed"
+    assert operation["payload"]["failure_reason"] == "WisdomAuthError"
+    assert client.state.calls["publish"] == publish_calls
+
+
+def test_approval_403_is_persisted_and_never_repeats_approval(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+
+    def reject_approval(_draft_id, **_hashes):
+        client.state.calls["approve"] += 1
+        raise WisdomAuthError("approval forbidden", status=403)
+
+    client.approve = reject_approval
+    with pytest.raises(WisdomAuthError, match="forbidden"):
+        controller.submit(controller.review(prepared["draft_id"])["receipt"])
+
+    operation = controller.store.pending_operations()[0]
+    assert operation["phase"] == "publication_failed"
+    reopened = controller.reopen(operation["id"])
+    assert reopened["phase"] == "publication_failed"
+    assert client.state.calls["approve"] == 1
+    assert client.state.calls["publish"] == 0
+
+
+def test_non_base_conflict_and_head_failure_are_not_blindly_retried(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+    client.state.publish_results = [WisdomConflict("other", status=409, code="other")]
+    with pytest.raises(WisdomConflict, match="other"):
+        controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    assert client.state.calls["publish"] == 1
+    operation = controller.store.pending_operations()[0]
+    assert operation["phase"] == "publication_failed"
+
+    controller, prepared, client, _ = publication(tmp_path / "head")
+    client.state.heads = [WisdomError("offline")]
+    with pytest.raises(WisdomError, match="offline"):
+        controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    operation = controller.store.pending_operations()[0]
+    assert operation["phase"] == "approved"
+    assert client.state.calls["publish"] == 0
+
+
+def test_unstructured_legacy_conflict_requires_authoritative_projection(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+    client.state.publish_results = [{
+        "state": "pending_approve_conflict", "proposal_id": 11,
+    }]
+
+    result = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+
+    assert result["phase"] == "server_pending"
+    assert client.state.calls["publish"] == 1
+
+
+def test_conflict_retry_rechecks_currentness_and_policy_before_next_effect(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path)
+    conflict = {
+        "state": "pending_approve_conflict", "reason": "base_mismatch",
+        "retryable_with_fresh_base": True, "proposal_id": 11,
+    }
+    client.state.publish_results = [conflict]
+    active = [True]
+    original_draft = client.draft
+
+    def revoke_on_reconcile(draft_id):
+        detail = original_draft(draft_id)
+        if client.state.calls["publish"]:
+            active[0] = False
+        return detail
+
+    client.draft = revoke_on_reconcile
+    result = controller.submit(
+        controller.review(prepared["draft_id"])["receipt"],
+        may_apply=lambda: active[0],
+    )
+    assert result["phase"] == "base_conflict"
+    assert client.state.calls["publish"] == 1
+
+    controller, prepared, client, _ = publication(tmp_path / "policy")
+    original_draft = client.draft
+
+    def change_policy_on_reconcile(draft_id):
+        detail = original_draft(draft_id)
+        if client.state.calls["publish"]:
+            client.state.policy_version += 1
+        return detail
+
+    client.draft = change_policy_on_reconcile
+    client.state.publish_results = [conflict]
+    stalled = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    assert stalled["phase"] == "policy_review_required"
+    assert client.state.calls["publish"] == 1
+
+
+def test_lost_publish_ack_retries_only_after_authoritative_conflict_evidence(tmp_path: Path):
+    controller, prepared, client, binding = publication(tmp_path)
+    original_publish = client.publish
+    client.publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("lost"))
+    uncertain = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    client.publish = original_publish
+    draft = client.state.drafts["draft-1"]
+    draft.state = "owner_approved"
+    original_draft = client.draft
+
+    def conflict_projection(draft_id):
+        detail = original_draft(draft_id)
+        detail.publication = SimpleNamespace(
+            state="base_conflict", reason="base_mismatch",
+            retryable_with_fresh_base=True, proposal_id=11,
+        )
+        return detail
+
+    client.draft = conflict_projection
+    result = PublicationController(
+        controller.store, controller.reviewer, client, lambda: dict(binding)
+    ).reopen(uncertain["operation_id"])
+
+    assert result["publication_state"] == "published"
+    assert client.state.calls["submit"] == client.state.calls["approve"] == 1
+
+
+def test_reopen_recovers_legacy_server_pending_only_from_new_projection(tmp_path: Path):
+    controller, prepared, client, binding = publication(tmp_path)
+    client.state.publish_results = [{"state": "unexpected_pending"}]
+    stranded = controller.submit(controller.review(prepared["draft_id"])["receipt"])
+    assert stranded["phase"] == "server_pending"
+    original_draft = client.draft
+
+    without_evidence = PublicationController(
+        controller.store, controller.reviewer, client, lambda: dict(binding)
+    ).reopen(stranded["operation_id"])
+    assert without_evidence["phase"] == "server_pending"
+    assert client.state.calls["publish"] == 1
+
+    def conflict_projection(draft_id):
+        detail = original_draft(draft_id)
+        detail.publication = SimpleNamespace(
+            state="base_conflict", reason="base_mismatch",
+            retryable_with_fresh_base=True, proposal_id=17,
+        )
+        return detail
+
+    client.draft = conflict_projection
+    recovered = PublicationController(
+        controller.store, controller.reviewer, client, lambda: dict(binding)
+    ).reopen(stranded["operation_id"])
+    assert recovered["publication_state"] == "published"
+    assert client.state.calls["submit"] == client.state.calls["approve"] == 1
+
+
 def test_db_failure_after_remote_submit_recovers_by_exact_listing(tmp_path: Path, monkeypatch):
     controller, prepared, client, _ = publication(tmp_path)
     review = controller.review(prepared["draft_id"])
@@ -404,8 +642,9 @@ def test_policy_change_stalls_new_effect_until_fresh_operation_review(tmp_path: 
     fresh = controller.review(uncertain["operation_id"])
     recovered = controller.submit(fresh["receipt"])
 
-    assert recovered["publication_state"] == "published"
-    assert client.state.calls["publish"] == 1
+    assert recovered["phase"] == "publication_unknown"
+    assert recovered["state"] == "uncertain"
+    assert client.state.calls["publish"] == 0
 
 
 def test_final_projection_is_atomic_and_repaired_after_database_failure(tmp_path: Path):

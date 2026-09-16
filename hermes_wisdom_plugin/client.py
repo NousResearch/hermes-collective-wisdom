@@ -1,5 +1,5 @@
 """Bounded, schema-validated Gateway client for Wisdom discovery."""
-# pylint: disable=line-too-long,missing-class-docstring,missing-function-docstring,unidiomatic-typecheck,too-many-public-methods
+# pylint: disable=line-too-long,missing-class-docstring,missing-function-docstring,unidiomatic-typecheck,too-many-public-methods,too-many-lines
 
 from __future__ import annotations
 
@@ -280,11 +280,21 @@ class Draft(WireModel):
         return self
 
 
+class PublicationProjection(WireModel):
+    """Additive authoritative publication recovery evidence."""
+
+    state: str = Field(min_length=1, max_length=64)
+    reason: str | None = Field(default=None, max_length=128)
+    retryable_with_fresh_base: bool | None = None
+    proposal_id: int | None = Field(default=None, ge=1)
+
+
 class DraftDetail(WireModel):
     """Owner draft plus the Gateway's effective policy projection."""
 
     draft: Draft
     effective_policy: dict[str, Any]
+    publication: PublicationProjection | None = None
 
 
 class DraftResponse(WireModel):
@@ -297,6 +307,19 @@ class DraftList(WireModel):
     """Bounded owner-private draft listing used for reconciliation."""
 
     drafts: list[Draft] = Field(max_length=10_000)
+
+
+class OrgRef(WireModel):
+    """One exact ref returned by the organization Sync namespace."""
+
+    name: str = Field(min_length=1, max_length=1024)
+    hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+
+
+class OrgRefList(WireModel):
+    """Bounded organization ref listing used to resolve publication HEAD."""
+
+    refs: list[OrgRef] = Field(max_length=10_000)
 
 
 class WisdomClient:
@@ -741,14 +764,40 @@ class WisdomClient:
             publish=True,
         ).draft
 
-    def publish(self, draft_id: str, *, content_hash: str) -> dict[str, Any]:
+    def organization_head(self) -> str | None:
+        """Read the exact active organization's authoritative publication HEAD."""
+
+        result = self._request(
+            "org/refs", model=OrgRefList, sync_root=True, publish=True
+        )
+        expected = f"refs/org/{self.expected_organization_id}/HEAD"
+        expected_prefix = f"refs/org/{self.expected_organization_id}/"
+        if any(not ref.name.startswith(expected_prefix) for ref in result.refs):
+            raise WisdomError(
+                "Organization refs do not match the active organization"
+            )
+        heads = [ref.hash for ref in result.refs if ref.name == expected]
+        if len(heads) > 1:
+            raise WisdomError(
+                "Organization refs do not match the active organization"
+            )
+        return heads[0] if heads else None
+
+    def publish(
+        self, draft_id: str, *, content_hash: str, base_commit: str | None
+    ) -> dict[str, Any]:
         """Ask the Gateway to route publication under current server policy."""
+
+        if base_commit is not None and not re.fullmatch(
+            r"sha256:[a-f0-9]{64}", base_commit
+        ):
+            raise WisdomValidationError("base_commit must be an exact sha256 address or null")
 
         return self._request(
             f"drafts/{_quoted_identifier(draft_id, 'draft_id')}/publish",
             model=None,
             method="POST",
-            json_body={"content_hash": content_hash, "base_commit": None},
+            json_body={"content_hash": content_hash, "base_commit": base_commit},
             publish=True,
         )
 
