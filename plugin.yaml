@@ -1,4 +1,4 @@
-manifest_version: 2
+manifest_version: 1
 kind: standalone
 name: hermes-collective-wisdom
 version: 0.1.0.dev0
