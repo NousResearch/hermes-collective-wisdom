@@ -4,6 +4,7 @@ The state machine is adapted from Hermes Agent 0924f7946b publication review,
 submit and recovery paths. The Gateway remains the sole publication-policy
 authority; this client only binds a displayed policy version against staleness.
 """
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -15,7 +16,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contract import author_description_hash, parse_manifest_bytes, sha256_address
-from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
+from .errors import (
+    WisdomAuthError, WisdomConflict, WisdomError, WisdomNotFound, WisdomValidationError,
+)
 from .package import (
     read_validated_package_files,
     source_fingerprint,
@@ -27,6 +30,7 @@ from .wire import ObjectSet, build_commit, build_tree_from_snapshot, wire_addres
 REVIEW_TTL = timedelta(minutes=30)
 _TERMINAL = {"published", "pending_moderation", "changes_requested", "declined", "invalidated"}
 _PUBLISHABLE = {"ready", "owner_approved", "publishing"}
+_MAX_BASE_CONFLICT_RETRIES = 3
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
 OwnerProvider = Callable[[], dict[str, str]]
 
@@ -560,6 +564,106 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         )
         return self._uncertain_result(operation_id, phase, detail)
 
+    def _persist_base_conflict(
+        self,
+        operation_id: str,
+        payload: dict[str, Any],
+        *,
+        lock_key: str,
+        lock_owner: str,
+        proposal_id: Any = None,
+    ) -> dict[str, Any]:
+        """Persist only server-confirmed stale-base evidence as retryable."""
+
+        updated = dict(payload)
+        updated["failure_reason"] = "base_mismatch"
+        if isinstance(proposal_id, int) and not isinstance(proposal_id, bool):
+            updated["conflicted_proposal_id"] = proposal_id
+        self.store.assert_operation_lock(lock_key, lock_owner)
+        self.store.replace_operation_payload(operation_id, updated)
+        self.store.advance_claimed(
+            operation_id, "base_conflict", entity_id=lock_key, owner=lock_owner
+        )
+        return updated
+
+    @staticmethod
+    def _publish_conflict(result: Any) -> tuple[bool, Any]:
+        """Recognize only structured, server-confirmed stale-base evidence."""
+
+        if not isinstance(result, dict) or result.get("state") != "pending_approve_conflict":
+            return False, None
+        if not (
+            result.get("reason") == "base_mismatch"
+            and result.get("retryable_with_fresh_base") is True
+        ):
+            return False, None
+        return True, result.get("proposal_id")
+
+    def _persist_publication_failure(
+        self,
+        operation_id: str,
+        payload: dict[str, Any],
+        error: WisdomError,
+        *,
+        lock_key: str,
+        lock_owner: str,
+    ) -> None:
+        """Record a definite rejection without misclassifying it as a lost ACK."""
+
+        updated = dict(payload)
+        updated["failure_reason"] = str(error.code or type(error).__name__)
+        updated["failure_detail"] = str(error)
+        self.store.assert_operation_lock(lock_key, lock_owner)
+        self.store.replace_operation_payload(operation_id, updated)
+        self.store.advance_claimed(
+            operation_id, "publication_failed", entity_id=lock_key, owner=lock_owner
+        )
+
+    @staticmethod
+    def _is_definite_rejection(error: WisdomError) -> bool:
+        """Separate typed rejections from errors that may follow a remote effect."""
+
+        return bool(
+            isinstance(error, WisdomAuthError)
+            or isinstance(error, WisdomConflict) and error.status == 409
+            or isinstance(error, WisdomValidationError) and error.status == 422
+        )
+
+    @staticmethod
+    def _projection_conflict(detail: Any) -> tuple[bool, Any]:
+        projection = _value(detail, "publication")
+        return (
+            bool(
+                projection is not None
+                and _value(projection, "state") == "base_conflict"
+                and _value(projection, "reason") == "base_mismatch"
+                and _value(projection, "retryable_with_fresh_base") is True
+            ),
+            _value(projection, "proposal_id"),
+        )
+
+    def _fresh_head(
+        self,
+        operation_id: str,
+        phase: str,
+        *,
+        lock_key: str,
+        lock_owner: str,
+        may_apply: Callable[[], bool] | None,
+    ) -> tuple[bool, str | None | dict[str, Any]]:
+        """Read HEAD with invocation and lease fences around the remote effect."""
+
+        if not self._is_current(may_apply):
+            return False, self._stopped_result(operation_id, phase)
+        self.store.assert_operation_lock(lock_key, lock_owner)
+        if not self._is_current(may_apply):
+            return False, self._stopped_result(operation_id, phase)
+        head = self.client.organization_head()
+        self.store.assert_operation_lock(lock_key, lock_owner)
+        if not self._is_current(may_apply):
+            return False, self._stopped_result(operation_id, phase)
+        return True, head
+
     def _finish(
         self,
         operation_id: str,
@@ -623,7 +727,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
 
     # Keeping durable phases in one dispatcher makes each remote effect's prior
     # persisted phase and recovery branch reviewable in execution order.
-    def _drive(  # pylint: disable=R0911,R0912,R0914,R0915
+    def _drive(  # pylint: disable=R0911,R0912,R0913,R0914,R0915
         self,
         operation_id: str,
         *,
@@ -631,10 +735,12 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         lock_owner: str,
         payload_override: dict[str, Any] | None = None,
         may_apply: Callable[[], bool] | None = None,
+        conflict_budget: int = 0,
     ) -> dict[str, Any]:
         operation = self._operation(operation_id)
         payload = payload_override or operation["payload"]
         phase = operation["phase"]
+        unresolved_publication = False
         if operation["state"] == "done":
             return self._finish_projection(operation_id, payload)
         if not self._is_current(may_apply):
@@ -651,7 +757,18 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             if not self._is_current(may_apply):
                 return self._stopped_result(operation_id, phase)
             try:
-                remote = self.client.draft(remote_id).draft
+                remote_detail = self.client.draft(remote_id)
+                remote = remote_detail.draft
+            except (WisdomAuthError, WisdomConflict, WisdomValidationError) as exc:
+                if self._is_definite_rejection(exc):
+                    self._persist_publication_failure(
+                        operation_id, payload, exc,
+                        lock_key=lock_key, lock_owner=lock_owner,
+                    )
+                    raise
+                return self._uncertain_result(
+                    operation_id, phase, "Gateway status is unavailable; no effect was retried."
+                )
             # Preserve the phase on any ordinary status transport/schema failure.
             except Exception:  # pylint: disable=broad-exception-caught
                 return self._uncertain_result(
@@ -680,6 +797,29 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                     operation_id, payload, remote_state,
                     lock_key=lock_key, lock_owner=lock_owner,
                 )
+            confirmed_conflict, proposal_id = self._projection_conflict(remote_detail)
+            if phase == "server_pending" and not confirmed_conflict:
+                return self._uncertain_result(
+                    operation_id,
+                    phase,
+                    "Gateway status has no confirmed base-conflict recovery evidence; "
+                    "nothing was retried.",
+                )
+            if phase == "base_conflict" and not confirmed_conflict:
+                return self._uncertain_result(
+                    operation_id,
+                    phase,
+                    "The latest Gateway status no longer confirms a retryable base conflict; "
+                    "nothing was retried.",
+                )
+            if confirmed_conflict:
+                payload = self._persist_base_conflict(
+                    operation_id, payload, lock_key=lock_key, lock_owner=lock_owner,
+                    proposal_id=proposal_id,
+                )
+                phase = "base_conflict"
+            elif phase == "publication_unknown":
+                unresolved_publication = True
             if remote_state not in _PUBLISHABLE:
                 return self._uncertain(
                     operation_id, "server_pending", f"Gateway draft is {remote_state}",
@@ -713,6 +853,14 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                     "before any new remote effect."
                 ),
             }
+
+        if unresolved_publication:
+            return self._uncertain_result(
+                operation_id,
+                phase,
+                "Publication outcome remains unknown; authoritative status showed no "
+                "terminal result or confirmed base conflict, so nothing was retried.",
+            )
 
         if phase == "intent":
             if not self._is_current(may_apply):
@@ -776,7 +924,10 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 operation_id, "draft_submission_unknown", "Remote draft identity is unknown",
                 lock_key=lock_key, lock_owner=lock_owner,
             )
-        if phase not in {"draft_submitted", "approval_unknown", "approved", "publication_unknown"}:
+        if phase not in {
+            "draft_submitted", "approval_unknown", "approved", "publication_unknown",
+            "base_conflict",
+        }:
             return self._uncertain_result(
                 operation_id, phase, "Publication is waiting for explicit recovery."
             )
@@ -802,6 +953,16 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 self.store.assert_operation_lock(lock_key, lock_owner)
                 if not self._draft_matches(approved, payload):
                     raise WisdomValidationError("Gateway approved a different publication draft")
+            except (WisdomAuthError, WisdomConflict, WisdomValidationError) as exc:
+                if self._is_definite_rejection(exc):
+                    self._persist_publication_failure(
+                        operation_id, payload, exc,
+                        lock_key=lock_key, lock_owner=lock_owner,
+                    )
+                    raise
+                return self._uncertain_result(
+                    operation_id, "approval_unknown", "Owner approval outcome is unknown"
+                )
             # Approval may have committed before any ordinary failure surfaced.
             except Exception:  # pylint: disable=broad-exception-caught
                 return self._uncertain_result(
@@ -815,39 +976,159 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 return self._stopped_result(operation_id, phase)
         if not self._is_current(may_apply):
             return self._stopped_result(operation_id, phase)
-        self.store.advance_claimed(
-            operation_id, "publication_unknown", entity_id=lock_key, owner=lock_owner
-        )
-        if not self._is_current(may_apply):
-            return self._stopped_result(operation_id, "publication_unknown")
-        try:
-            self.store.assert_operation_lock(lock_key, lock_owner)
+        attempts = conflict_budget or _MAX_BASE_CONFLICT_RETRIES
+        for attempt in range(attempts):
+            if attempt:
+                if not self._is_current(may_apply):
+                    return self._stopped_result(operation_id, "base_conflict")
+                self.store.assert_operation_lock(lock_key, lock_owner)
+                retry_detail = self.client.draft(remote_id)
+                self.store.assert_operation_lock(lock_key, lock_owner)
+                if not self._is_current(may_apply):
+                    return self._stopped_result(operation_id, "base_conflict")
+                retry_remote = retry_detail.draft
+                if not self._draft_matches(retry_remote, payload):
+                    raise WisdomValidationError(
+                        "Authoritative publication draft no longer matches intent"
+                    )
+                retry_state = str(_value(retry_remote, "state"))
+                if retry_state in _TERMINAL:
+                    return self._finish(
+                        operation_id, payload, retry_state,
+                        lock_key=lock_key, lock_owner=lock_owner,
+                    )
+                retry_confirmed, retry_proposal = self._projection_conflict(retry_detail)
+                if not retry_confirmed:
+                    return self._uncertain_result(
+                        operation_id,
+                        "base_conflict",
+                        "The latest Gateway status does not confirm a retryable base conflict; "
+                        "nothing was retried.",
+                    )
+                payload = self._persist_base_conflict(
+                    operation_id, payload, lock_key=lock_key, lock_owner=lock_owner,
+                    proposal_id=retry_proposal,
+                )
+                retry_policy = self._policy(payload["owner"], may_apply)
+                retry_policy_value = {
+                    "publication_mode": _value(retry_policy, "publication_mode"),
+                    "version": _value(retry_policy, "version"),
+                }
+                if payload["policy"] != retry_policy_value:
+                    payload = dict(payload)
+                    payload["resume_phase"] = "base_conflict"
+                    self.store.assert_operation_lock(lock_key, lock_owner)
+                    self.store.replace_operation_payload(operation_id, payload)
+                    self.store.advance_claimed(
+                        operation_id, "policy_review_required",
+                        entity_id=lock_key, owner=lock_owner,
+                    )
+                    return {
+                        "operation_id": operation_id,
+                        "state": "pending",
+                        "phase": "policy_review_required",
+                        "remote_draft_id": remote_id,
+                        "retry_safe": False,
+                        "detail": (
+                            "The team publication policy changed during conflict recovery. "
+                            "Review this operation again before another remote effect."
+                        ),
+                    }
+            head_ok, head = self._fresh_head(
+                operation_id, phase, lock_key=lock_key, lock_owner=lock_owner,
+                may_apply=may_apply,
+            )
+            if not head_ok:
+                return head
+            self.store.advance_claimed(
+                operation_id, "publication_unknown", entity_id=lock_key, owner=lock_owner
+            )
             if not self._is_current(may_apply):
                 return self._stopped_result(operation_id, "publication_unknown")
-            published = self.client.publish(
-                remote_id, content_hash=payload["hashes"]["content"]
-            )
-            self.store.assert_operation_lock(lock_key, lock_owner)
-        # Publication may have committed before any ordinary failure surfaced.
-        except Exception:  # pylint: disable=broad-exception-caught
-            return self._uncertain_result(
+            try:
+                self.store.assert_operation_lock(lock_key, lock_owner)
+                if not self._is_current(may_apply):
+                    return self._stopped_result(operation_id, "publication_unknown")
+                published = self.client.publish(
+                    remote_id,
+                    content_hash=payload["hashes"]["content"],
+                    base_commit=head,
+                )
+                self.store.assert_operation_lock(lock_key, lock_owner)
+            except WisdomConflict as exc:
+                if exc.code is None and "lease was lost" in str(exc):
+                    return self._uncertain_result(
+                        operation_id,
+                        "publication_unknown",
+                        "Publication acknowledgement was lost after the operation lease changed; "
+                        "status must reconcile it.",
+                    )
+                if exc.code != "base_mismatch":
+                    self._persist_publication_failure(
+                        operation_id, payload, exc,
+                        lock_key=lock_key, lock_owner=lock_owner,
+                    )
+                    raise
+                payload = self._persist_base_conflict(
+                    operation_id, payload, lock_key=lock_key, lock_owner=lock_owner
+                )
+                if attempt + 1 < attempts:
+                    phase = "base_conflict"
+                    continue
+                return self._base_conflict_result(operation_id, payload, attempts)
+            except (WisdomAuthError, WisdomValidationError) as exc:
+                self._persist_publication_failure(
+                    operation_id, payload, exc,
+                    lock_key=lock_key, lock_owner=lock_owner,
+                )
+                raise
+            # Publication may have committed before any ordinary failure surfaced.
+            except Exception:  # pylint: disable=broad-exception-caught
+                return self._uncertain_result(
+                    operation_id,
+                    "publication_unknown",
+                    "Publication acknowledgement was lost; status will reconcile "
+                    "without resubmitting.",
+                )
+            publication_state = str((published or {}).get("state") or "")
+            confirmed, proposal_id = self._publish_conflict(published)
+            if confirmed:
+                payload = self._persist_base_conflict(
+                    operation_id, payload, lock_key=lock_key, lock_owner=lock_owner,
+                    proposal_id=proposal_id,
+                )
+                if attempt + 1 < attempts:
+                    phase = "base_conflict"
+                    continue
+                return self._base_conflict_result(operation_id, payload, attempts)
+            if publication_state in {"published", "pending_moderation"}:
+                return self._finish(
+                    operation_id, payload, publication_state,
+                    lock_key=lock_key, lock_owner=lock_owner,
+                )
+            return self._uncertain(
                 operation_id,
-                "publication_unknown",
-                "Publication acknowledgement was lost; status will reconcile without resubmitting.",
+                "server_pending",
+                f"Gateway publication is {publication_state or 'unknown'}; do not blindly retry.",
+                lock_key=lock_key,
+                lock_owner=lock_owner,
             )
-        publication_state = str((published or {}).get("state") or "")
-        if publication_state in {"published", "pending_moderation"}:
-            return self._finish(
-                operation_id, payload, publication_state,
-                lock_key=lock_key, lock_owner=lock_owner,
-            )
-        return self._uncertain(
-            operation_id,
-            "server_pending",
-            f"Gateway publication is {publication_state or 'unknown'}; do not blindly retry.",
-            lock_key=lock_key,
-            lock_owner=lock_owner,
-        )
+        return self._base_conflict_result(operation_id, payload, attempts)
+
+    @staticmethod
+    def _base_conflict_result(
+        operation_id: str, payload: dict[str, Any], attempts: int,
+    ) -> dict[str, Any]:
+        return {
+            "operation_id": operation_id,
+            "state": "pending",
+            "phase": "base_conflict",
+            "reason": "base_mismatch",
+            "retryable_with_fresh_base": True,
+            "proposal_id": payload.get("conflicted_proposal_id"),
+            "retry_attempts": attempts,
+            "detail": "Organization HEAD changed; explicitly reopen to retry with a fresh base.",
+        }
 
     def _finish_projection(self, operation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         publication_state = payload.get("publication_state") or payload.get("remote_state")
@@ -876,12 +1157,16 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         self._require_current(may_apply)
         if operation["state"] == "done":
             return self._finish_projection(operation_id, operation["payload"])
+        phase = operation["phase"]
+        conflict = phase == "base_conflict"
         return {
             "operation_id": operation_id,
-            "state": "uncertain" if "unknown" in operation["phase"] else "pending",
-            "phase": operation["phase"],
+            "state": "uncertain" if "unknown" in phase else "pending",
+            "phase": phase,
             "remote_draft_id": operation["payload"].get("remote_draft_id"),
-            "retry_safe": operation["phase"] in {"intent", "objects_uploaded"},
+            "reason": "base_mismatch" if conflict else None,
+            "retryable_with_fresh_base": conflict,
+            "retry_safe": phase in {"intent", "objects_uploaded"},
         }
 
     def reopen(
@@ -916,6 +1201,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             return self._drive(
                 operation_id, lock_key=lock_key, lock_owner=lock,
                 may_apply=may_apply,
+                conflict_budget=_MAX_BASE_CONFLICT_RETRIES,
             )
         finally:
             self.store.release_operation_lock(lock_key, lock)

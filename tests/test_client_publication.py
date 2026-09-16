@@ -3,7 +3,10 @@
 
 from test_client import Response, Session
 
+import pytest
+
 from hermes_wisdom_plugin.client import WisdomClient, WisdomGatewayCredentials
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomError, WisdomValidationError
 from hermes_wisdom_plugin.wire import ObjectSet
 
 
@@ -93,7 +96,10 @@ def test_publication_calls_use_pinned_paths_shapes_and_publish_scope():
         manifest_hash="sha256:" + "4" * 64,
     )
     session.response = Response(200, {"state": "published", "proposal_id": 1})
-    value.publish("draft-1", content_hash="sha256:" + "2" * 64)
+    value.publish(
+        "draft-1", content_hash="sha256:" + "2" * 64,
+        base_commit="sha256:" + "9" * 64,
+    )
     session.response = Response(200, {"state": "declined"})
     value.decline("draft-1")
 
@@ -108,6 +114,95 @@ def test_publication_calls_use_pinned_paths_shapes_and_publish_scope():
         "https://gateway.example/v1/sync/wisdom/drafts/draft-1/decline",
     ]
     assert "publication_mode" not in session.calls[-2][2]["json"]
+    assert session.calls[-2][2]["json"]["base_commit"] == "sha256:" + "9" * 64
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"refs": []}, None),
+        ({"refs": [{
+            "name": "refs/org/org-1/HEAD", "hash": "sha256:" + "a" * 64,
+        }]}, "sha256:" + "a" * 64),
+    ],
+)
+def test_authoritative_org_head_uses_publish_scope_and_exact_ref(body, expected):
+    calls = []
+    session = Session(Response(200, body))
+    value = WisdomClient(
+        credentials(calls, "read"), "org-1", session=session,
+        publish_credential_provider=credentials(calls, "publish"),
+    )
+
+    assert value.organization_head() == expected
+    assert calls == ["publish"]
+    assert session.calls[0][1] == "https://gateway.example/v1/sync/org/refs"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        {},
+        {"refs": None},
+        {"refs": [{"name": "refs/org/org-1/HEAD", "hash": "bad"}]},
+        {"refs": [{
+            "name": "refs/org/other/HEAD", "hash": "sha256:" + "a" * 64,
+        }]},
+        {"refs": [
+            {"name": "refs/org/org-1/HEAD", "hash": "sha256:" + "a" * 64},
+            {"name": "refs/org/org-1/HEAD", "hash": "sha256:" + "b" * 64},
+        ]},
+    ],
+)
+def test_authoritative_org_head_fails_closed_on_malformed_or_foreign_refs(body):
+    session = Session(Response(200, body))
+    value = WisdomClient(
+        credentials([], "read"), "org-1", session=session,
+        publish_credential_provider=credentials([], "publish"),
+    )
+
+    with pytest.raises(WisdomError):
+        value.organization_head()
+
+
+def test_authoritative_org_head_failed_read_is_not_treated_as_empty():
+    value = WisdomClient(
+        credentials([], "read"), "org-1",
+        session=Session(Response(503, {"error": "unavailable"})),
+        publish_credential_provider=credentials([], "publish"),
+    )
+
+    with pytest.raises(WisdomError, match="failed"):
+        value.organization_head()
+
+
+def test_authoritative_org_head_legacy_admin_only_403_fails_closed():
+    value = WisdomClient(
+        credentials([], "read"), "org-1",
+        session=Session(Response(403, {"error": "forbidden"})),
+        publish_credential_provider=credentials([], "publish"),
+    )
+
+    with pytest.raises(WisdomAuthError, match="unavailable") as denied:
+        value.organization_head()
+    assert denied.value.status == 403
+
+
+def test_publish_requires_explicit_valid_base_commit_argument():
+    value = WisdomClient(
+        credentials([], "read"), "org-1", session=Session(Response(200, {})),
+        publish_credential_provider=credentials([], "publish"),
+    )
+
+    with pytest.raises(TypeError):
+        value.publish(  # pylint: disable=missing-kwoa
+            "draft-1", content_hash="sha256:" + "2" * 64
+        )
+    with pytest.raises(WisdomValidationError):
+        value.publish(
+            "draft-1", content_hash="sha256:" + "2" * 64, base_commit="not-a-sha",
+        )
 
 
 def test_private_object_upload_uses_owner_scoped_raw_multipart_and_is_idempotent_shape():

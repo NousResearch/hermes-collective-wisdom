@@ -605,5 +605,7 @@ def test_real_usage_qualification_to_private_edit_and_exact_single_publication(
         body for kind, body in client.state.uploaded_objects.values() if kind == "blob"
     }
     assert result["publication_state"] == "pending_moderation"
-    assert client.state.calls == {"upload": 1, "submit": 1, "approve": 1, "publish": 1}
+    assert client.state.calls == {
+        "upload": 1, "submit": 1, "approve": 1, "head": 1, "publish": 1,
+    }
     assert uploaded_blobs == expected_blobs
