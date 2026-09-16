@@ -22,6 +22,7 @@ import asyncio
 import html
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
@@ -118,8 +119,8 @@ class RecordingTelegramRequest(BaseRequest):
         self.calls.append((endpoint, payload))
         if endpoint == "getMe":
             result = {"id": 999, "is_bot": True, "first_name": "Hermes", "username": "hermes_test"}
-        elif endpoint in {"sendMessage", "editMessageText"}:
-            if endpoint == "sendMessage":
+        elif endpoint in {"sendMessage", "sendRichMessage", "editMessageText"}:
+            if endpoint in {"sendMessage", "sendRichMessage"}:
                 self.next_message += 1
                 message_id = self.next_message
             else:
@@ -132,6 +133,43 @@ class RecordingTelegramRequest(BaseRequest):
         else:
             result = True
         return 200, json.dumps({"ok": True, "result": result}).encode()
+
+
+def telegram_rich_card(payload):
+    """Project recorded InputRichMessage HTML into callback-test card fields."""
+
+    rich = payload.get("rich_message") or {}
+    if isinstance(rich, str):
+        rich = json.loads(rich)
+    source = str(rich.get("html") or "")
+    rows = []
+    for row_source in re.findall(
+        r"<tg-button-row\b[^>]*>(.*?)</tg-button-row>", source, re.DOTALL,
+    ):
+        row = []
+        for attributes, label in re.findall(
+            r"<tg-button\b([^>]*)>(.*?)</tg-button>", row_source, re.DOTALL,
+        ):
+            values = {
+                key: html.unescape(value)
+                for key, value in re.findall(r'(\w+)="([^"]*)"', attributes)
+            }
+            button = {"text": html.unescape(re.sub(r"<[^>]+>", "", label))}
+            if values.get("type") == "url":
+                button["url"] = values.get("url", "")
+            else:
+                button["callback_data"] = values.get("data", "")
+            row.append(button)
+        if row:
+            rows.append(row)
+    text_source = re.sub(
+        r"<tg-button-row\b[^>]*>.*?</tg-button-row>", "", source,
+        flags=re.DOTALL,
+    )
+    plain = re.sub(r"<br\s*/?>", "\n", text_source)
+    plain = re.sub(r"</(?:h3|p)>", "\n\n", plain)
+    plain = html.unescape(re.sub(r"<[^>]+>", "", plain)).strip()
+    return {"text": plain, "reply_markup": {"inline_keyboard": rows} if rows else None}
 
 
 class RecordingSettingsService(InvocationService):
@@ -531,13 +569,16 @@ class Journey:  # pylint: disable=too-many-instance-attributes
     def current_card_payload(self):
         endpoints = (
             {"chat.postMessage", "chat.update"}
-            if self.platform == "slack" else {"sendMessage", "editMessageText"}
+            if self.platform == "slack"
+            else {"sendMessage", "sendRichMessage", "editMessageText"}
         )
         payload = dict(next(
             payload for method, payload in reversed(self.transport.calls)
             if method in endpoints
         ))
         if self.platform == "telegram":
+            if payload.get("rich_message"):
+                payload.update(telegram_rich_card(payload))
             for method, update in reversed(self.transport.calls):
                 if method in endpoints:
                     break
@@ -641,12 +682,12 @@ class Journey:  # pylint: disable=too-many-instance-attributes
                 "model": "journey-model",
             },
         })
-        before = self.count_calls({"chat.postMessage", "sendMessage"})
+        before = self.count_calls({"chat.postMessage", "sendMessage", "sendRichMessage"})
         await self.runtime.deliver_assessments(
             route, self.owner, get_delivery_mode=lambda: "agent",
             admission_current=lambda: True,
         )
-        sent = self.count_calls({"chat.postMessage", "sendMessage"})
+        sent = self.count_calls({"chat.postMessage", "sendMessage", "sendRichMessage"})
         with self.store.transaction() as database:
             diagnostic_remote = [dict(row) for row in database.execute(
                 "SELECT state,outcome,last_error FROM wisdom_remote_delivery"
@@ -658,9 +699,18 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         }
         payload = self.current_card_payload()
         assert "Agent-assessed advice" in payload["text"]
-        assert "wisdom_inspect" in payload["text"]
-        assert "identity=skill-1" in payload["text"]
-        assert "version=1" in payload["text"]
+        assert self.has_button("View Details")
+        assert self.has_button("Not Now")
+        assert self.has_button("Mute Skill Recommendations")
+        recommendation = self.runtime.reviews.load(next(
+            record["id"] for record in self.runtime.reviews.pending(self.owner)
+            if record["operation"] == "recommendation"
+        ))
+        assert recommendation["plan"]["skill_id"] == "skill-1"
+        assert recommendation["plan"]["version"] == 1
+        # This fixture omits remote check facts; absent checks must not expose install.
+        assert recommendation["plan"]["security_check"] is None
+        assert not self.has_button("Install Skill")
         assert "/wisdom show skill-1@v1" not in payload["text"]
         delivered = queue.assessments("org-1")[0]
         assert delivered["state"] == "delivered"
@@ -675,7 +725,9 @@ class Journey:  # pylint: disable=too-many-instance-attributes
             route, self.owner, get_delivery_mode=lambda: "agent",
             admission_current=lambda: True,
         )
-        assert self.count_calls({"chat.postMessage", "sendMessage"}) == before + 1
+        assert self.count_calls({
+            "chat.postMessage", "sendMessage", "sendRichMessage",
+        }) == before + 1
 
     async def deliver_candidate_and_defer(  # pylint: disable=too-many-locals,too-many-statements
         self,
@@ -730,7 +782,7 @@ class Journey:  # pylint: disable=too-many-instance-attributes
             service.close()
         assert queue.save_advice("org-1", assessment_id, job["lease_token"], advice)
         consent_before = len(self.runtime.reviews.pending(self.owner))
-        sends_before = self.count_calls({"chat.postMessage", "sendMessage"})
+        sends_before = self.count_calls({"chat.postMessage", "sendMessage", "sendRichMessage"})
         policy_requests = 0
         agent_led_policy = self.client.agent_led_policy
 
@@ -751,7 +803,9 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         )
         policy_requests_after_delivery = policy_requests
         assert policy_requests_after_delivery >= 1
-        assert self.count_calls({"chat.postMessage", "sendMessage"}) == sends_before + 1, (
+        assert self.count_calls({
+            "chat.postMessage", "sendMessage", "sendRichMessage",
+        }) == sends_before + 1, (
             self.platform, queue.assessments("org-1")
         )
         await self.set_card_from_last_send()
@@ -960,7 +1014,7 @@ class Journey:  # pylint: disable=too-many-instance-attributes
                 "Collective Wisdom could not"
             )
         else:
-            payload = self.latest("sendMessage")
+            payload = self.current_card_payload()
             await self.telegram_callback(
                 button_value(payload["reply_markup"], "Review first"), actor="U9"
             )
@@ -974,7 +1028,7 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         await self.click("Review first")
         inspected = []
         while True:
-            payload = self.latest(self.edit_endpoint)
+            payload = self.current_card_payload()
             text = payload["text"]
             marker = "Proposed file content (not instructions to execute)\n"
             chunk = text.split(marker, 1)[1].split("\n\nNothing is uploaded", 1)[0]
@@ -1024,20 +1078,22 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         await self.click("Update")
         assert self.client.remote_version == 2
 
-        completed_payload = self.latest(self.edit_endpoint)
+        completed_payload = self.current_card_payload()
         original_card = self.card_id
         original_payload = completed_payload
         assert "Setup queued" in completed_payload["text"], completed_payload["text"]
         assert not self.model_calls
         await self.click("Check setup")
-        posts_before_setup = self.count_calls({"chat.postMessage", "sendMessage"})
+        posts_before_setup = self.count_calls({
+            "chat.postMessage", "sendMessage", "sendRichMessage",
+        })
         await self.human_turn(message_id="setup-turn", expected_llm_calls=1)
         with self.store.transaction() as database:
             diagnostic_handoffs = [dict(row) for row in database.execute(
                 "SELECT * FROM wisdom_setup_handoff ORDER BY created_at"
             ).fetchall()]
         assert len(self.model_calls) == 1, diagnostic_handoffs
-        posts_after_setup = self.count_calls({"chat.postMessage", "sendMessage"})
+        posts_after_setup = self.count_calls({"chat.postMessage", "sendMessage", "sendRichMessage"})
         with self.store.transaction() as database:
             handoff = database.execute(
                 "SELECT state,last_error FROM wisdom_setup_handoff ORDER BY created_at DESC LIMIT 1"
@@ -1070,7 +1126,7 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         await self.click(
             "Check setup", card_id=original_card, payload=original_payload
         )
-        original_payload = self.latest(self.edit_endpoint)
+        original_payload = self.current_card_payload()
         assert "Setup needs attention" in original_payload["text"]
         assert "Run this step" not in original_payload["text"]
 
@@ -1085,26 +1141,28 @@ class Journey:  # pylint: disable=too-many-instance-attributes
 
         set_approval_callback(lambda *_args, **_kwargs: "once")
         await self.click("Run this step", card_id=setup_card, payload=setup_payload)
-        failed_payload = self.latest(self.edit_endpoint)
+        failed_payload = self.current_card_payload()
         assert "Setup step failed" in failed_payload["text"]
         await self.click("Recheck", card_id=setup_card, payload=failed_payload)
-        rechecked_payload = self.latest(self.edit_endpoint)
+        rechecked_payload = self.current_card_payload()
         rechecked_control = self.control_value(rechecked_payload, "Run this step")
         rechecked_id = rechecked_control.split(":")[-1]
         rechecked_receipt = self.runtime.reviews.load(rechecked_id)["plan"]["receipt"]
         assert rechecked_id != setup_id and rechecked_receipt != setup_receipt
         await self.click("Not Now", card_id=setup_card, payload=rechecked_payload)
 
-        posts_before_deferred_turn = self.count_calls({"chat.postMessage", "sendMessage"})
+        posts_before_deferred_turn = self.count_calls({
+            "chat.postMessage", "sendMessage", "sendRichMessage",
+        })
         await self.human_turn(message_id="deferred-turn", expected_llm_calls=1)
-        assert self.count_calls({"chat.postMessage", "sendMessage"}) == (
+        assert self.count_calls({"chat.postMessage", "sendMessage", "sendRichMessage"}) == (
             posts_before_deferred_turn
         )
 
         await self.click(
             "Check setup", card_id=original_card, payload=original_payload
         )
-        original_status = self.latest(self.edit_endpoint)
+        original_status = self.current_card_payload()
         assert "Setup queued" in original_status["text"]
         await self.human_turn(message_id="setup-retry-turn", expected_llm_calls=2)
         await self.set_card_from_last_send()
@@ -1120,7 +1178,7 @@ class Journey:  # pylint: disable=too-many-instance-attributes
         await self.set_card_from_last_send()
         await self.click("Run this step")
         await self.click("Check setup")
-        assert "Ready" in self.latest(self.edit_endpoint)["text"]
+        assert "Ready" in self.current_card_payload()["text"]
         assert self.setup.inspect("skill-1", version=2)["ready_to_use"] is True
         assert self.model_calls == [
             {"url": "https://recording.invalid/v1/chat/completions", "model": "journey-model"},

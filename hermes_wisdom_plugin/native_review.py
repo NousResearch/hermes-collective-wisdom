@@ -49,6 +49,7 @@ class NativeAction:
     action: str | None = None
     primary: bool = False
     url: str | None = None
+    destructive: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,15 +609,160 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             plan = {
                 "kind": kind, "skill_id": skill_id,
                 "slug": str(skill.get("slug") or target),
+                "created_by_user_id": str(skill.get("created_by_user_id") or ""),
                 "data": service.show(skill_id) if kind == "show" else service.versions(skill_id),
                 "portal_url": _safe_url(detail.get("portal_url")),
                 "page": 0,
             }
         else:
             raise ValueError("Collective Wisdom catalog command was not recognized.")
+        plan = self._catalog_controls(plan, owner, service=service)
         return self._insert_review(
             service, invocation, "catalog", {**plan, "owner": owner, "allowed": True}
         )
+
+    def _catalog_controls(  # pylint: disable=too-many-locals
+        self, plan: dict[str, Any], owner: dict[str, str], *, service: Any = None,
+    ) -> dict[str, Any]:
+        """Attach private profile-owned control state to catalog facts."""
+
+        kind = str(plan.get("kind") or "browse")
+
+        def decorate(  # pylint: disable=too-many-locals
+            row: dict[str, Any], *, authoritative_skill_id: str = "",
+            creator_user_id: str = "", resolve_detail: bool = False,
+        ) -> dict[str, Any]:
+            selected = dict(row)
+            raw_version = selected.get("version", selected.get("latest_version"))
+            version = (
+                int(raw_version)
+                if isinstance(raw_version, int) and not isinstance(raw_version, bool)
+                else None
+            )
+            skill_id = str(authoritative_skill_id or selected.get("id") or "")
+            creator = str(selected.get("created_by_user_id") or creator_user_id or "")
+            content_hash = str(selected.get("content_hash") or "")
+            if (
+                resolve_detail and not content_hash and skill_id and service is not None
+                and creator == owner.get("account_id")
+            ):
+                try:
+                    detail = service.show(skill_id)
+                    detail_skill = detail.get("skill") or {}
+                    latest = ((detail.get("latest_version_detail") or {}).get("version") or {})
+                    detail_creator = str(detail_skill.get("created_by_user_id") or "")
+                    if (
+                        str(detail_skill.get("id") or skill_id) == skill_id
+                        and latest.get("version") == version
+                        and detail_creator == creator
+                    ):
+                        content_hash = str(latest.get("content_hash") or "")
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # Exact origin facts are optional; fail open to Install.
+                    content_hash = ""
+            action = self.store.catalog_install_action(
+                owner, skill_id=skill_id, version=version,
+                creator_user_id=creator, content_hash=content_hash,
+            )
+            installed = self.store.installation(skill_id, owner)
+            selected["_install_action"] = action
+            if installed is not None and installed.get("state") == "active":
+                installed_version = int(installed["version"])
+                selected["_local_state_label"] = (
+                    f"Installed: current v{installed_version}"
+                    if version is not None and version <= installed_version
+                    else f"Installed: v{installed_version} · update available"
+                )
+            elif action == "none":
+                selected["_local_state_label"] = "Published from this profile"
+            return selected
+
+        if kind == "browse":
+            rows = _catalog_rows(plan.get("data"))
+            page = max(0, int(plan.get("page") or 0))
+            visible = range(page * 5, min(len(rows), page * 5 + 5))
+            return {
+                **plan,
+                "data": [
+                    decorate(row, resolve_detail=index in visible)
+                    for index, row in enumerate(rows)
+                ],
+            }
+        if kind == "versions":
+            skill_id = str(plan.get("skill_id") or "")
+            creator = str(plan.get("created_by_user_id") or "")
+            return {
+                **plan,
+                "data": [
+                    decorate(
+                        row, authoritative_skill_id=skill_id, creator_user_id=creator,
+                    )
+                    for row in _catalog_rows(plan.get("data"))
+                ],
+            }
+        if kind == "show":
+            detail = dict(plan.get("data") or {})
+            skill = dict(detail.get("skill") or {})
+            versions = _catalog_rows(detail.get("versions"))
+            latest = max(
+                (int(row["version"]) for row in versions
+                 if isinstance(row.get("version"), int)
+                 and not isinstance(row.get("version"), bool)),
+                default=None,
+            )
+            version_detail = dict(detail.get("latest_version_detail") or {})
+            version = dict(version_detail.get("version") or {})
+            skill_id = str(plan.get("skill_id") or skill.get("id") or "")
+            facts = {
+                **version,
+                "slug": str(skill.get("slug") or plan.get("slug") or ""),
+                "version": version.get("version", latest),
+            }
+            return {
+                **plan,
+                "data": {
+                    **detail,
+                    "skill": skill,
+                    "versions": versions,
+                    "latest_version_detail": {
+                        **version_detail,
+                        "version": decorate(
+                            facts, authoritative_skill_id=skill_id,
+                            creator_user_id=str(skill.get("created_by_user_id") or ""),
+                        ),
+                    },
+                },
+            }
+        return plan
+
+    def _refresh_catalog(
+        self, service: Any, plan: dict[str, Any], *, page: int | None = None,
+    ) -> dict[str, Any]:
+        """Re-read authoritative catalog and local control state before every callback."""
+
+        owner = plan["owner"]
+        kind = str(plan.get("kind") or "browse")
+        selected_page = int(plan.get("page") or 0) if page is None else page
+        if kind == "browse":
+            refreshed = {
+                **plan, "data": service.search_skills(plan.get("query") or None),
+                "page": selected_page,
+            }
+        elif kind == "show":
+            refreshed = {
+                **plan, "data": service.show(str(plan.get("skill_id") or "")),
+                "page": selected_page,
+            }
+        else:
+            skill_id = str(plan.get("skill_id") or "")
+            shown = service.show(skill_id)
+            skill = shown.get("skill") or {}
+            refreshed = {
+                **plan, "data": service.versions(skill_id), "page": selected_page,
+                "portal_url": _safe_url(shown.get("portal_url")),
+                "created_by_user_id": str(skill.get("created_by_user_id") or ""),
+            }
+        return self._catalog_controls(refreshed, owner, service=service)
 
     def request_publication(
         self, service: Any, invocation: NativeInvocation, draft_id: str,
@@ -774,7 +920,9 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             })
         return result
 
-    def delivery_projection(self, record_id: str) -> tuple[dict[str, Any], int, int]:
+    def delivery_projection(
+        self, record_id: str, *, initial: bool = False,
+    ) -> tuple[dict[str, Any], int, int]:
         """Claim one delivery attempt and return the exact state snapshot it projects."""
         with self.store.transaction() as db:
             row = db.execute(
@@ -786,9 +934,13 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             revision = int(row["delivery_revision"])
             attempt = int(row["delivery_attempt"]) + 1
             changed = db.execute(
-                "UPDATE wisdom_consent SET delivery_attempt=?,updated_at=? "
-                "WHERE id=? AND delivery_revision=? AND delivery_attempt=?",
-                (attempt, self.clock(), record_id, revision, attempt - 1),
+                "UPDATE wisdom_consent SET delivery_attempt=?,delivery_state=?,updated_at=? "
+                "WHERE id=? AND delivery_revision=? AND delivery_attempt=?"
+                + (" AND delivery_state='unsent' AND delivery_attempt=0" if initial else ""),
+                (
+                    attempt, row["delivery_state"], self.clock(),
+                    record_id, revision, attempt - 1,
+                ),
             )
             if changed.rowcount != 1:
                 raise PermissionError("Collective Wisdom delivery state changed.")
@@ -1293,12 +1445,11 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PermissionError("Install policy selection is no longer pending.")
         return self.load(record["id"])
 
-    def _catalog_action(  # pylint: disable=too-many-locals
+    def _catalog_action(  # pylint: disable=too-many-locals,too-many-branches
         self, service: Any, record: dict[str, Any], action: str,
     ) -> dict[str, Any]:
         if record["operation"] != "catalog" or record["state"] != "pending":
             raise PermissionError("Catalog navigation is no longer current.")
-        plan = record["plan"]
         parts = action.split(".")
         if len(parts) != 3:
             raise ValueError("Catalog control was not recognized.")
@@ -1307,57 +1458,74 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             index = int(raw_index)
         except ValueError as exc:
             raise ValueError("Catalog control was not recognized.") from exc
+        if index < 0:
+            raise ValueError("Catalog control was not recognized.")
+        plan = self._refresh_catalog(
+            service, record["plan"], page=index if verb == "page" else None,
+        )
         if verb == "page":
-            replacement = {**plan, "page": index}
+            return self._replace_catalog(record, plan)
+
+        data = plan.get("data") or []
+        if plan.get("kind") == "show" and verb in {"versions", "install"}:
+            detail = data if isinstance(data, dict) else {}
+            skill = detail.get("skill") or {}
+            skill_id = str(plan.get("skill_id") or skill.get("id") or "")
+            version_detail = detail.get("latest_version_detail") or {}
+            row = version_detail.get("version") or {}
         else:
-            data = plan.get("data") or []
-            if plan.get("kind") == "show" and verb in {"versions", "install"}:
-                detail = data if isinstance(data, dict) else {}
-                skill = detail.get("skill") or {}
-                skill_id = str(plan.get("skill_id") or skill.get("id") or "")
-                versions = detail.get("versions") or []
-                latest = max(
-                    (int(row["version"]) for row in versions if isinstance(row, dict)
-                     and isinstance(row.get("version"), int)
-                     and not isinstance(row.get("version"), bool)),
-                    default=None,
-                )
-                row = {"slug": skill.get("slug"), "version": latest}
-            else:
-                rows = data if isinstance(data, list) else data.get("skills", [])
-                if index < 0 or index >= len(rows) or not isinstance(rows[index], dict):
-                    raise ValueError("Catalog item was not found.")
-                row = rows[index]
-                skill_id = str(row.get("id") or plan.get("skill_id") or "")
-            owner = plan["owner"]
-            if verb == "show":
-                replacement = {
-                    "kind": "show", "skill_id": skill_id,
-                    "data": service.show(skill_id), "owner": owner, "allowed": True,
-                }
-            elif verb == "versions":
-                shown = service.show(skill_id)
-                replacement = {
-                    "kind": "versions", "skill_id": skill_id,
-                    "slug": row.get("slug") or skill_id,
-                    "data": service.versions(skill_id), "page": 0,
-                    "portal_url": _safe_url(shown.get("portal_url")),
-                    "owner": owner, "allowed": True,
-                }
-            elif verb == "install":
-                version = row.get("version")
-                reference = (
-                    f"{skill_id}@v{version}"
-                    if isinstance(version, int) and not isinstance(version, bool)
-                    and version > 0 else skill_id
-                )
-                return self._replace_catalog(
-                    record,
-                    {"reference": reference, "owner": owner, "allowed": True},
-                    operation="install_modes",
-                )
-            else:
-                raise ValueError("Catalog control was not recognized.")
+            rows = data if isinstance(data, list) else data.get("skills", [])
+            if index >= len(rows) or not isinstance(rows[index], dict):
+                raise ValueError("Catalog item was not found.")
+            row = rows[index]
+            skill_id = str(
+                plan.get("skill_id") if plan.get("kind") == "versions"
+                else row.get("id") or plan.get("skill_id") or ""
+            )
+        owner = plan["owner"]
+        if verb == "show":
+            replacement = self._catalog_controls({
+                "kind": "show", "skill_id": skill_id,
+                "data": service.show(skill_id), "owner": owner, "allowed": True,
+            }, owner, service=service)
+        elif verb == "versions":
+            shown = service.show(skill_id)
+            skill = shown.get("skill") or {}
+            replacement = self._catalog_controls({
+                "kind": "versions", "skill_id": skill_id,
+                "slug": row.get("slug") or skill.get("slug") or skill_id,
+                "created_by_user_id": str(skill.get("created_by_user_id") or ""),
+                "data": service.versions(skill_id), "page": 0,
+                "portal_url": _safe_url(shown.get("portal_url")),
+                "owner": owner, "allowed": True,
+            }, owner, service=service)
+        elif verb == "install":
+            install_action = str(row.get("_install_action") or "install")
+            if install_action == "none":
+                return self._replace_catalog(record, plan)
+            if install_action == "update":
+                update = service.update_plan(skill_id)
+                if (
+                    update.get("operation") != "update"
+                    or update.get("skill_id") != skill_id
+                    or update.get("owner") != owner
+                ):
+                    raise PackagePolicyError("native update review is invalid")
+                update = self._prepare_review_deferral(service, update)
+                return self._replace_catalog(record, update, operation="update")
+            version = row.get("version", row.get("latest_version"))
+            reference = (
+                f"{skill_id}@v{version}"
+                if isinstance(version, int) and not isinstance(version, bool)
+                and version > 0 else skill_id
+            )
+            return self._replace_catalog(
+                record,
+                {"reference": reference, "owner": owner, "allowed": True},
+                operation="install_modes",
+            )
+        else:
+            raise ValueError("Catalog control was not recognized.")
         return self._replace_catalog(record, replacement)
 
     def _replace_catalog(
@@ -2494,12 +2662,16 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
                 "\n".join((
                     f"v{row.get('latest_version') or '?'} · "
                     f"{row.get('author_description') or 'No description'}",
+                    str(row.get("_local_state_label") or ""),
                     _catalog_review_text(row),
                 )),
-                [
-                    NativeAction("View", f"catalog.show.{start + offset}"),
-                    NativeAction("Install", f"catalog.install.{start + offset}", True),
-                ],
+                [NativeAction("View", f"catalog.show.{start + offset}"), *(
+                    [NativeAction(
+                        "Review update" if row.get("_install_action") == "update" else "Install",
+                        f"catalog.install.{start + offset}", True,
+                    )]
+                    if row.get("_install_action", "install") != "none" else []
+                )],
             ) for offset, row in enumerate(visible)],
             actions,
             notice="" if visible else "No matching shared skills.",
@@ -2528,6 +2700,7 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
         summary = "\n".join((
             description,
             f"Latest: v{latest or '?'} · scan: {scan}",
+            str(version.get("_local_state_label") or ""),
             "Requirements: " + _requirements_text(version.get("system_spec") or {}),
             "", _catalog_review_text(version),
         ))
@@ -2535,8 +2708,12 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
         portal_url = _safe_url(detail.get("portal_url") or plan.get("portal_url"))
         if portal_url:
             actions.append(NativeAction("View in Portal", url=portal_url))
-        if latest is not None:
-            actions.append(NativeAction("Install", "catalog.install.0", True))
+        install_action = version.get("_install_action", "install")
+        if latest is not None and install_action != "none":
+            actions.append(NativeAction(
+                "Review update" if install_action == "update" else "Install",
+                "catalog.install.0", True,
+            ))
         return NativeView(
             str(skill.get("slug") or plan.get("skill_id") or "Skill"), summary,
             actions=actions,
@@ -2559,6 +2736,7 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
             "\n".join((
                 str(row.get("created_at") or row.get("published_at")
                     or "Immutable published version"),
+                str(row.get("_local_state_label") or ""),
                 _catalog_review_text(row),
             )),
             [
@@ -2574,7 +2752,13 @@ def _catalog_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
                     and _safe_url(plan.get("portal_url"))
                     else []
                 ),
-                NativeAction("Install", f"catalog.install.{start + offset}", True),
+                *(
+                    [NativeAction(
+                        "Review update" if row.get("_install_action") == "update" else "Install",
+                        f"catalog.install.{start + offset}", True,
+                    )]
+                    if row.get("_install_action", "install") != "none" else []
+                ),
             ],
         ) for offset, row in enumerate(visible)],
         actions,
@@ -2653,7 +2837,9 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
         if publication_state not in _PUBLICATION_TERMINAL:
             actions.append(NativeAction("Check status", "publication.status"))
         if publication_state == "pending_moderation":
-            actions.append(NativeAction("Decline", "publication.decline"))
+            actions.append(NativeAction(
+                "Decline", "publication.decline", destructive=True,
+            ))
         portal_url = _safe_url(result.get("portal_url"))
         if portal_url:
             actions.append(NativeAction("View details", url=portal_url))
@@ -2969,5 +3155,10 @@ def _approval_is_lossless(record: dict[str, Any], view: NativeView) -> bool:
             slack_section_text(value) for value in expected_sections if value
         ] == escaped_expected
     if platform_name == "telegram":
-        return telegram_view_text(view) == view.to_text()
+        from .native_telegram import (  # pylint: disable=import-outside-toplevel,cyclic-import
+            plain_html_is_lossless, rich_html_is_lossless,
+        )
+        return plain_html_is_lossless(view) and rich_html_is_lossless(
+            view, str(record.get("id") or ""),
+        )
     return False

@@ -40,6 +40,27 @@ Dashboard galleries are introduced by this adaptation.
 
 Recording-SDK checks are not deployed Slack/Telegram acceptance.
 
+### Telegram rich-surface parity
+
+`tests/test_native_telegram_rich.py` records Bot API calls and covers escaped hostile
+text, bounded well-formed rich HTML, embedded and fallback button styling, rich send
+and same-message edit, definite-format fallback, unknown-ack non-resend, and durable
+duplicate-attempt fencing. Approval completeness is checked against both rich HTML
+and the actual escaped fallback: a rich card fitting its larger budget cannot
+permit approval if fallback would truncate the review. Legacy fallback preserves
+literal newlines rather than sending rich-only `<br/>` tags.
+`tests/test_catalog_controls.py` uses a temporary plugin store to cover
+current/newer managed versions, exact local-publication provenance,
+slug/hash/profile mismatch, and browse/detail/version controls.
+
+The pinned-host Telegram journey uses the real PTB dispatcher with its request
+transport replaced. It accepts `sendRichMessage` and rich `editMessageText`, projects
+their embedded buttons back into the journey harness, and traverses settings,
+catalog, inspection, install/update, setup, recommendation, candidate deferral, and
+publication without a connector or live service. Run it with the immutable pinned
+host checkout documented below. A live Telegram client/server pass remains required
+to accept Bot API 10.1 rendering and button appearance.
+
 ### Required behavioral evidence
 
 - Recommendation delivery: reject background invocations before assessment,

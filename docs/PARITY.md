@@ -256,6 +256,22 @@ callback route/card ownership remain shared controller behavior. Active-runtime
 serialization is keyed by physical route/message; delivery CAS records the network
 outcome but does not claim distributed ordering across processes.
 
+Telegram now uses Bot API rich-message HTML for both initial cards and same-message
+edits when the connected PTB bot exposes `do_api_request`. The renderer escapes all
+dynamic text, bounds complete markup, embeds URL/callback controls, and carries
+`primary`/`danger` styles supported by PTB 22.8/Bot API 10.1. A plain bounded card
+with inline keyboard is used only when rich transport is unavailable or Telegram
+definitively rejects the rich format. Timeout and unknown acknowledgement failures
+are not resent. Durable initial-delivery claims also fence duplicate attempts.
+
+Catalog browse, detail, and versions derive `Install`/`Review update`/no control
+from the exact profile-owned managed-install version. A redundant install is also
+suppressed for exact bytes published from that profile when completed publication
+owner, organization, authenticated creator, content hash, local draft, and present
+source link to the catalog version. Slug-only, creator-only, unowned, deleted-source,
+other-profile, and other-organization matches do not suppress a control; this private
+state remains in the plugin data store and is not rendered to groups.
+
 Pinned-host tests use real plugin discovery, gateway command admission, ordinary
 human lifecycle hooks, scoped model routing, Slack Bolt/PTB callback dispatch, the
 shared controller/store/filesystem, and recording transports. Registered

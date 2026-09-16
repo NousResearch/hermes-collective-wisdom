@@ -2234,6 +2234,62 @@ class WisdomStore:
         _decode_install_row(value)
         return value
 
+    def catalog_install_action(
+        self,
+        owner: dict[str, str],
+        *,
+        skill_id: str,
+        version: int | None,
+        creator_user_id: str = "",
+        content_hash: str = "",
+    ) -> str:
+        """Return install/update/none from exact profile-owned provenance."""
+
+        installed = self.installation(skill_id, owner)
+        if installed is not None and installed.get("state") == "active" and version is not None:
+            installed_version = int(installed["version"])
+            if version <= installed_version:
+                return "none"
+            return "update"
+
+        if not content_hash or creator_user_id != owner.get("account_id"):
+            return "install"
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT entity_id,phase,payload_json FROM operation_journal "
+                "WHERE kind='publication' AND state='done' AND phase='published' "
+                "ORDER BY updated_at DESC LIMIT 100"
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            request = payload.get("request") or {}
+            published_hash = str((payload.get("hashes") or {}).get("content") or "")
+            local_draft_id = str(payload.get("local_draft_id") or "")
+            if (
+                payload.get("owner") != owner
+                or payload.get("publication_state") != "published"
+                or request.get("content_hash") != published_hash
+                or published_hash != content_hash
+                or not local_draft_id
+            ):
+                continue
+            draft = self.draft(local_draft_id)
+            if (
+                draft is None
+                or draft.get("owner") != owner
+                or draft.get("skill_id") != row["entity_id"]
+                or draft.get("content_hash") != published_hash
+                or draft.get("state") != "published"
+            ):
+                continue
+            source = self.local_skill(str(draft["skill_id"]))
+            if source is None or source.get("deleted_at") is not None:
+                continue
+            source_path = Path(str(source.get("canonical_path") or ""))
+            if source_path.is_dir() and (source_path / "SKILL.md").is_file():
+                return "none"
+        return "install"
+
     def deactivate_install(self, skill_id: str) -> None:
         with self.transaction() as db:
             db.execute(
