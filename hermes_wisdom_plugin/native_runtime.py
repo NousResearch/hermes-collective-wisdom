@@ -16,6 +16,7 @@ import re
 import shlex
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -52,18 +53,12 @@ _SETUP_SYSTEM = (
 
 
 def candidate_deferred_view(job: dict[str, Any]) -> NativeView:
-    """Project a terminal advisory deferral without approval or repeat controls."""
+    """Preserve advisory content while removing every post-deferral control."""
 
     original = assessment_view(job)
-    return NativeView(
-        title=original.title,
-        summary="Candidate deferred",
-        items=original.items,
-        notice=(
-            "This candidate will stay suppressed for the organization-policy period. "
-            "Nothing was installed, approved, published, or shared."
-        ),
-        dismissed=True,
+    return replace(
+        original, dismissed=True, actions=[], navigation_actions=[],
+        items=[replace(item, actions=[]) for item in original.items],
     )
 
 
@@ -93,18 +88,9 @@ async def _edit_slack_projection(
 
 
 async def _edit_telegram_projection(query: Any, view: NativeView, record_id: str) -> None:
-    """Edit a review, or remove only its Telegram controls."""
-    if view.dismissed:
-        from telegram.error import BadRequest  # pylint: disable=import-outside-toplevel,import-error
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except BadRequest as exc:
-            # A confirmed control removal is idempotent in the real SDK.
-            if "message is not modified" not in str(exc).lower():
-                raise
-        return
-    from .native_telegram import keyboard, text  # pylint: disable=import-outside-toplevel
-    await query.edit_message_text(text=text(view), reply_markup=keyboard(view, record_id))
+    """Edit the original rich/plain card, including control-free dismissals."""
+    from .native_telegram import edit  # pylint: disable=import-outside-toplevel
+    await edit(query, view, record_id)
 
 
 class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
@@ -1007,8 +993,28 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
     async def _deliver_new(self, invocation: NativeInvocation,
                            record: dict[str, Any]) -> str | None:
+        current = await asyncio.to_thread(self.reviews.load, record["id"])
+        if current.get("delivery_state") == "delivery_uncertain":
+            return (
+                "Collective Wisdom could not confirm whether the review card was sent. "
+                "Run /wisdom update again to reopen it; no action was approved."
+            )
+        if (
+            current.get("delivery_state") == "unsent"
+            and int(current.get("delivery_attempt") or 0) > 0
+        ):
+            await asyncio.to_thread(
+                self.reviews.delivery_uncertain, record["id"],
+                "A prior native send attempt was not durably bound.",
+            )
+            return (
+                "Collective Wisdom could not confirm whether the review card was sent. "
+                "Run /wisdom update again to reopen it; no action was approved."
+            )
+        if current.get("delivery_state") != "unsent":
+            return None
         projected, revision, attempt = await asyncio.to_thread(
-            self.reviews.delivery_projection, record["id"]
+            self.reviews.delivery_projection, record["id"], initial=True
         )
         view = self.reviews.view(projected)
         try:
@@ -1022,20 +1028,42 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 "Collective Wisdom could not confirm whether the review card was sent. "
                 "Run /wisdom update again to reopen it; no action was approved."
             )
-        await asyncio.to_thread(
-            self.reviews.bind_delivery, record["id"], invocation, message_id,
-            expected_revision=revision, attempt=attempt,
-        )
+        try:
+            await asyncio.to_thread(
+                self.reviews.bind_delivery, record["id"], invocation, message_id,
+                expected_revision=revision, attempt=attempt,
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # The acknowledged send must never be retried blindly.
+            await asyncio.to_thread(
+                self.reviews.delivery_uncertain, record["id"], str(exc),
+                expected_revision=revision, attempt=attempt,
+            )
+            return (
+                "Collective Wisdom could not confirm whether the review card was sent. "
+                "Run /wisdom update again to reopen it; no action was approved."
+            )
         return None
 
     async def _send(self, invocation: NativeInvocation, view: NativeView,
                     record_id: str) -> str:
         response = await self._post_native(invocation, view, record_id)
-        message_id = (
-            str(response.get("ts") or "")
-            if invocation.platform == "slack"
-            else str(getattr(response, "message_id", "") or "")
-        )
+        if invocation.platform == "slack":
+            message_id = str(response.get("ts") or "")
+        else:
+            payload = response
+            if isinstance(response, dict) and "ok" in response:
+                payload = response.get("result") if response.get("ok") is True else None
+            raw_message_id = (
+                payload.get("message_id")
+                if isinstance(payload, dict)
+                else getattr(payload, "message_id", None)
+            )
+            message_id = (
+                str(raw_message_id)
+                if isinstance(raw_message_id, int) and not isinstance(raw_message_id, bool)
+                and raw_message_id > 0 else ""
+            )
         if not message_id:
             raise RuntimeError("native SDK returned no message acknowledgement")
         return message_id
@@ -1054,14 +1082,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             if invocation.thread_id:
                 payload["thread_ts"] = invocation.thread_id
             return await native.client.chat_postMessage(**payload)
-        from .native_telegram import keyboard, text  # pylint: disable=import-outside-toplevel
-        return await invocation.adapter._bot.send_message(  # pylint: disable=protected-access
-            chat_id=invocation.chat_id, text=text(view),
-            reply_markup=keyboard(view, record_id),
-            **(
-                {"message_thread_id": int(invocation.thread_id)}
-                if invocation.thread_id else {}
-            ),
+        from .native_telegram import send  # pylint: disable=import-outside-toplevel
+        return await send(
+            invocation.adapter._bot, view, record_id,  # pylint: disable=protected-access
+            chat_id=invocation.chat_id, thread_id=invocation.thread_id,
         )
 
     async def _slack_callback(  # pylint: disable=too-many-locals
