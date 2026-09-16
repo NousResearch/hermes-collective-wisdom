@@ -494,7 +494,7 @@ def test_native_load_is_isolated_and_records_sdist_module_path(tmp_path: Path) -
     assert "module_file" in command[4]
     assert "PluginManager" in command[4]
     assert "hermes_wisdom" in command[4]
-    compile(command[4], "<host-artifact-discovery>", "exec")
+    ast.parse(command[4], filename="<host-artifact-discovery>")
     assert command[-2:] == ["/agent/source", str(tmp_path)]
 
 

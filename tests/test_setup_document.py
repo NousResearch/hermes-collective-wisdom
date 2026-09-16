@@ -59,7 +59,7 @@ def test_parse_setup_document_accepts_only_complete_canonical_wire_bytes():
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("verification_step", "printf sk-abcdefghijklmnopqrstuvwxyz"),
+        ("verification_step", "printf sk-" + "a" * 32),
         ("setup_instructions", ["first\nsecond"]),
         ("verification_step", "first\u202esecond"),
     ],

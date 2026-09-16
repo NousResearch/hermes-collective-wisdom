@@ -5,6 +5,7 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -139,7 +140,6 @@ def _apply_bridge_drift(drift, bridge, store, current):
 
 
 def test_snapshot_refuses_file_replaced_with_fifo_before_open(tmp_path, monkeypatch):
-    import os
     from hermes_wisdom_plugin import qualification
 
     skill = _skill(tmp_path)
@@ -335,10 +335,8 @@ def test_snapshot_tree_uses_exact_file_bytes(tmp_path):
     assert before != after and tree != next_tree
 
 
-@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="FIFO unavailable")
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO unavailable")
 def test_snapshot_tree_rejects_symlinks_and_special_files_without_following(tmp_path):
-    import os
-
     skill = _skill(tmp_path)
     outside = tmp_path / "outside"
     outside.write_text("secret", encoding="utf-8")
@@ -364,8 +362,8 @@ def test_unsafe_or_symlinked_skill_is_not_recorded_as_partial_evidence(tmp_path)
         timezone_info=(timezone.utc, "UTC"),
     ) is None
     os_path = skill / "pipe"
-    if hasattr(__import__("os"), "mkfifo"):
-        __import__("os").mkfifo(os_path)
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(os_path)
         assert record_successful_use("learned-skill", **_kwargs(skill, store)) is None
     with store.transaction() as db:
         assert db.execute("SELECT COUNT(*) FROM usage_day").fetchone()[0] == 0
