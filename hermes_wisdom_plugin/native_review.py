@@ -355,6 +355,102 @@ def _complete_checks_passed(
     return True
 
 
+def _assessment_text(value: object, limit: int) -> str:
+    """Return bounded native advice text without terminal/bidi controls."""
+
+    text = str(value or "").strip()
+    if not text or len(text) > limit or any(
+        (ord(character) < 32 and character not in "\n\t")
+        or 127 <= ord(character) < 160
+        or character in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+        for character in text
+    ):
+        raise ValueError("assessment advice is not presentation safe")
+    return text
+
+
+def assessment_view(job: dict[str, Any]) -> NativeView:
+    """Project immutable ready advice without creating approval controls."""
+
+    advice = job.get("advice")
+    reference = job.get("reference")
+    if not isinstance(reference, dict):
+        raise ValueError("ready assessment reference is missing")
+    kind = reference.get("kind")
+    fallback = advice is None and job.get("state") == "fallback"
+    if fallback:
+        identity = _assessment_text(
+            reference.get("local_skill_id" if kind == "candidate" else "skill_id"), 256,
+        )
+        advice = {
+            "relevance": "digest",
+            "title": identity,
+            "explanation": (
+                "Hermes could not finish the local qualification review. Review it "
+                "manually; nothing has been shared."
+                if kind == "candidate" else
+                "Hermes could not assess this skill's relevance. Review its exact "
+                "published details manually; nothing has been changed."
+            ),
+            "provenance": {"kind": (
+                "local_qualification" if kind == "candidate" else "agent_assessed"
+            )},
+        }
+    if not isinstance(advice, dict):
+        raise ValueError("ready assessment advice is missing")
+    title = _assessment_text(advice.get("title"), 120)
+    explanation = _assessment_text(advice.get("explanation"), 600)
+    if str(advice.get("relevance") or "") not in {"recommend", "digest"}:
+        raise ValueError("assessment advice relevance is invalid")
+    provenance = advice.get("provenance")
+    provenance_kind = str(
+        provenance.get("kind") if isinstance(provenance, dict) else ""
+    )
+    if kind == "candidate":
+        if provenance_kind != "local_qualification":
+            raise ValueError("candidate advice provenance is invalid")
+        _assessment_text(reference.get("local_skill_id"), 256)
+        event_id = _assessment_text(reference.get("event_id"), 128)
+        summary = "Local qualification review unavailable" if fallback else ""
+        preamble = (
+            "" if fallback else
+            "Hermes thinks the following skill would be useful to the rest of your team:"
+        )
+        handoff = (
+            "Ask Hermes to inspect this exact local candidate with wisdom_inspect "
+            f"(kind=candidate, identity={event_id})"
+        )
+    elif kind == "skill":
+        if provenance_kind != "agent_assessed":
+            raise ValueError("shared advice provenance is invalid")
+        identity = _assessment_text(reference.get("skill_id"), 256)
+        version = reference.get("version")
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValueError("shared advice version is invalid")
+        summary = "Agent assessment unavailable" if fallback else "Agent-assessed advice"
+        preamble = ""
+        handoff = (
+            "Ask Hermes to inspect the exact published version with wisdom_inspect "
+            f"(kind=skill, identity={identity}, version={version}); /wisdom show "
+            f"{shlex.quote(identity)} shows the current catalog version"
+        )
+    else:
+        raise ValueError("assessment reference is unsupported")
+    return NativeView(
+        title="Hermes Collective Wisdom",
+        summary=summary,
+        items=[NativeItem(title=title, detail=explanation, preamble=preamble)],
+        notice=(
+            f"{handoff}. This is advisory only; nothing was installed, approved, "
+            "or shared."
+        ),
+        actions=(
+            [NativeAction(label="Maybe Later", action="candidate_defer")]
+            if kind == "candidate" and not fallback else []
+        ),
+    )
+
+
 class NativeReviewController:  # pylint: disable=too-many-public-methods
     """Consent authority in dedicated SQLite tables; no metadata index."""
 
@@ -434,6 +530,54 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         if not isinstance(deferral, dict):
             return {**plan, "review_deferral_unavailable": True}
         return {**plan, "review_deferral": deferral}
+
+    def request_candidate(
+        self, service: Any, invocation: NativeInvocation, event_id: str,
+    ) -> dict[str, Any]:
+        """Prepare locally, retaining a typed recoverable failure without publication consent."""
+        from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
+
+        owner = service.native_owner()
+        try:
+            draft_id = service.native_candidate_prepare(event_id)
+        except SharePackagingError:
+            return self._insert_review(service, invocation, "packaging_failed", {
+                "owner": owner, "event_id": event_id, "allowed": False,
+                "error_code": "share_packaging_failed",
+            })
+        if service.native_owner() != owner:
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        return self.request_publication(service, invocation, draft_id)
+
+    def request_recommendation(
+        self, service: Any, invocation: NativeInvocation, job: dict[str, Any],
+        facts: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind advice navigation, never approval, to this private owner route."""
+        assessment_view(job)  # Validate the immutable advisory payload before binding controls.
+        reference = job["reference"]
+        if reference.get("kind") != "skill" or job.get("state") != "ready":
+            raise ValueError("Only ready shared advice has recipient controls.")
+        owner = service.native_owner()
+        version = facts.get("version") or {}
+        if (facts.get("skill", {}).get("id") != reference["skill_id"]
+                or version.get("version") != reference["version"]):
+            raise ValueError("Recommendation version does not match its source.")
+        plan = self._prepare_review_deferral(service, {
+            "owner": owner, "operation": "install", "skill_id": reference["skill_id"],
+            "version": reference["version"], "job": job, "facts": facts,
+            "security_check": version.get("security_check"),
+            "professionalism_check": version.get("professionalism_check"),
+            "allowed": True,
+        })
+        organization = service.store.organization_display_name(owner["organization_id"])
+        name = (organization or {}).get("display_name")
+        if ((organization or {}).get("resolved") and isinstance(name, str)
+                and name.strip() and not any(
+                    unicodedata.category(char).startswith("C") for char in name
+                )):
+            plan["organization_display_name"] = name.strip()[:160]
+        return self._insert_review(service, invocation, "recommendation", plan)
 
     def request_install_modes(
         self, service: Any, invocation: NativeInvocation, reference: str,
@@ -551,14 +695,15 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         identity = secrets.token_urlsafe(12)
         with self.store.transaction() as db:
             self._record_session_db(db, org, invocation, now)
-            db.execute(
-                "UPDATE wisdom_consent SET state='superseded',"
-                "state_revision=state_revision+1,updated_at=? "
-                "WHERE organization_id=? AND owner_session=? AND actor_id=? AND platform=? "
-                "AND operation=? AND state IN ('pending','deferred','expired')",
-                (now, org, invocation.session_key, invocation.actor_id,
-                 invocation.platform, operation),
-            )
+            if operation != "recommendation":
+                db.execute(
+                    "UPDATE wisdom_consent SET state='superseded',"
+                    "state_revision=state_revision+1,updated_at=? "
+                    "WHERE organization_id=? AND owner_session=? AND actor_id=? AND platform=? "
+                    "AND operation=? AND state IN ('pending','deferred','expired')",
+                    (now, org, invocation.session_key, invocation.actor_id,
+                     invocation.platform, operation),
+                )
             db.execute(
                 _CONSENT_INSERT,
                 (identity, org, invocation.session_key, invocation.actor_id,
@@ -825,6 +970,45 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             return self.load(record_id)
         if action == "recheck" and record["operation"] == "setup":
             return self._recheck_setup(service, record)
+        if action == "packaging.retry":
+            if record["operation"] != "packaging_failed" or record["state"] != "pending":
+                raise PermissionError("Packaging retry is no longer current.")
+            if not self._authority_current(service, record, effect_current):
+                raise PermissionError("Packaging owner changed.")
+            successor = self.request_candidate(service, invocation, record["plan"]["event_id"])
+            self._validate_route(record, invocation)
+            if service.native_owner() != record["plan"]["owner"] or not effect_current():
+                raise PermissionError("Packaging owner changed.")
+            self.bind_delivery(successor["id"], invocation, invocation.message_id)
+            if self.load(record_id)["state"] == "pending":
+                self._set_state(record, "superseded")
+            return self.load(successor["id"])
+        if action in {"recommendation.settings", "sharing.settings"}:
+            expected_operation = (
+                "recommendation" if action.startswith("recommendation.") else "publish"
+            )
+            if record["operation"] != expected_operation or record["state"] != "pending":
+                raise PermissionError("Recommendation is no longer current.")
+            settings = self.request_settings(service, invocation)
+            if not self._authority_current(service, record, effect_current):
+                raise PermissionError("Recommendation owner changed.")
+            self.bind_delivery(settings["id"], invocation, invocation.message_id)
+            self._set_state(record, "superseded")
+            return self.load(settings["id"])
+        if action in {"recommendation.details", "recommendation.back"}:
+            if record["operation"] != "recommendation" or record["state"] != "pending":
+                raise PermissionError("Recommendation is no longer current.")
+            return self._replace_catalog(record, {
+                **record["plan"], "details_expanded": action.endswith(".details"),
+            }, operation="recommendation")
+        if action == "recommendation.install":
+            if (record["operation"] != "recommendation" or record["state"] != "pending"
+                    or not _recommendation_installable(record["plan"])):
+                raise PermissionError("Recommendation is no longer current.")
+            return self._replace_catalog(record, {
+                "reference": f"{record['plan']['skill_id']}@v{record['plan']['version']}",
+                "owner": record["plan"]["owner"], "allowed": True,
+            }, operation="install_modes")
         if action == "confirm":
             return self._confirm(service, record, effect_current=effect_current)
         if action.startswith("install.mode."):
@@ -1142,8 +1326,8 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             changed = db.execute(
                 "UPDATE wisdom_consent SET operation=?,plan_json=?,"
                 "state_revision=state_revision+1,updated_at=? "
-                "WHERE id=? AND operation='catalog' AND state='pending' AND state_revision=?",
-                (operation, _json(plan), self.clock(), record["id"],
+                "WHERE id=? AND operation=? AND state='pending' AND state_revision=?",
+                (operation, _json(plan), self.clock(), record["id"], record["operation"],
                  record["state_revision"]),
             )
         if changed.rowcount != 1:
@@ -1290,6 +1474,8 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         self, service: Any, record: dict[str, Any], *,
         effect_current: Callable[[], bool],
     ) -> dict[str, Any]:
+        if record["operation"] not in {"install", "update", "publish", "setup"}:
+            raise PermissionError("Advice and navigation never authorize an operation.")
         if record["state"] == "completed":
             return record
         if record["state"] != "pending":
@@ -2047,6 +2233,19 @@ def project_view(  # pylint: disable=too-many-return-statements
         return _catalog_view(record)
     if record["operation"] == "settings":
         return _settings_view(record)
+    if record["operation"] == "recommendation":
+        return _recommendation_view(record)
+    if record["operation"] == "packaging_failed":
+        return NativeView(
+            "Hermes Collective Wisdom", "Share Packaging failed",
+            [NativeItem("Local preparation could not finish", (
+                "Nothing was uploaded or shared. Check the local skill's files and package "
+                "requirements, then retry preparation. A successful retry still requires "
+                "review of the exact package before sharing."
+            ))],
+            [NativeAction("Retry Packaging", "packaging.retry")]
+            if record["state"] == "pending" else [],
+        )
     expanded = (
         bool(record.get("checks_expanded"))
         if checks_expanded is None else checks_expanded
@@ -2055,6 +2254,44 @@ def project_view(  # pylint: disable=too-many-return-statements
         record,
         checks_expanded=expanded,
         assessment_expanded=assessment_expanded,
+    )
+
+
+def _recommendation_installable(plan: dict[str, Any]) -> bool:
+    return bool(
+        plan.get("allowed") is True
+        and (plan.get("security_check") or {}).get("status") in {"pass", "advisory"}
+    )
+
+
+def _recommendation_view(record: dict[str, Any]) -> NativeView:
+    plan = record["plan"]
+    original = assessment_view(plan["job"])
+    actions = [NativeAction("View Details", "recommendation.details")]
+    if isinstance(plan.get("review_deferral"), dict):
+        actions.append(NativeAction("Not Now", "defer"))
+    actions.append(NativeAction("Mute Skill Recommendations", "recommendation.settings"))
+    if _recommendation_installable(plan):
+        actions.append(NativeAction("Install Skill", "recommendation.install", True))
+    name = plan.get("organization_display_name")
+    organization = f"your organization ({name})" if name else "your organization"
+    detail = original.items[0].detail
+    if _has_checks(plan):
+        detail += "\n\n" + _review_text(plan, False)
+    if plan.get("details_expanded"):
+        detail += f"\n\nExact version: v{plan['version']}"
+        detail += "\nContent hash: " + str(
+            plan["facts"]["version"].get("content_hash") or "unavailable"
+        )
+        detail += "\n\n" + _review_text(plan, True)
+        actions = [NativeAction("Looks good.", "recommendation.back")]
+    return replace(
+        original, items=[replace(original.items[0], detail=detail, preamble=(
+            f"Hermes has detected a newly shared skill in {organization}, "
+            "that could be useful to you!"
+        ))], actions=actions,
+        notice=("Reviewing does not install or approve this skill." if plan.get("details_expanded")
+                else "Would you like to install this skill?"),
     )
 
 
@@ -2126,6 +2363,8 @@ def _settings_view(record: dict[str, Any]) -> NativeView:
             NativeItem("Delivery mode", f"Current: {mode}\n{mode_detail}"),
             NativeItem(
                 "Recommendation mute",
+                "This applies to all Collective Wisdom recommendations for your account in this "
+                "organization, not just this skill or category. Opening settings changes nothing.\n"
                 f"Gateway status: {gateway}\n"
                 f"Current Gateway state: {_mute_gateway_text(plan.get('gateway_mute'))}\n"
                 f"Local sync: {sync_state}\n"
@@ -2416,6 +2655,7 @@ def _publication_view(record: dict[str, Any]) -> NativeView:
             actions.append(NativeAction("View More Details", "inspect"))
         if isinstance(plan.get("review_deferral"), dict):
             actions.append(NativeAction("Maybe Later", "defer"))
+        actions.append(NativeAction("Snooze Collective Wisdom", "sharing.settings"))
         actions.append(NativeAction("Share My Skill", "confirm", True))
     view = NativeView(
         "Hermes Collective Wisdom",

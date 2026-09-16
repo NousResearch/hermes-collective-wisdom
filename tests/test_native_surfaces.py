@@ -571,6 +571,7 @@ def test_ready_assessment_uses_real_slack_sender_receipt_and_durable_outbox(
         )
         service = SimpleNamespace(store=store, client=client, config={})
         service._installation_owner = Mock(return_value=dict(OWNER))
+        service.native_owner = Mock(return_value=dict(OWNER))
         def inspect(skill_id, *, version):
             return {
             "kind": "skill", "skill_id": skill_id, "version": version,
@@ -620,8 +621,16 @@ def test_ready_assessment_uses_real_slack_sender_receipt_and_durable_outbox(
         assert row["state"] == "delivered"
         assert len(app.client.posts) == 1
         assert "Agent-assessed advice" in app.client.posts[0]["text"]
-        assert "wisdom_inspect" in app.client.posts[0]["text"]
-        assert "identity=skill-1" in app.client.posts[0]["text"]
+        assert "Would you like to install this skill?" in app.client.posts[0]["text"]
+        details = _slack_action(app.client.posts[0]["blocks"], "View Details")
+        body = callback_body()
+        body["message"]["ts"] = body["container"]["message_ts"] = "assessment-1"
+        async def ack():
+            return None
+        await app.handler_for(details["action_id"])(ack, body, details)
+        assert not app.client.ephemeral
+        assert "Exact version: v1" in app.client.edits[-1]["text"]
+        assert app.client.edits[-1]["ts"] == "assessment-1"
         with store.transaction() as database:
             receipt = database.execute(
                 "SELECT receipt_json FROM wisdom_shared_delivery_receipt WHERE assessment_id=?",
@@ -683,7 +692,9 @@ def test_ready_assessment_uses_real_slack_sender_receipt_and_durable_outbox(
         assert denied["state"] == "ready" and denied["delivered_at"] is None
         assert len(app.client.posts) == sends
         with store.transaction() as database:
-            assert database.execute("SELECT COUNT(*) FROM wisdom_consent").fetchone()[0] == 0
+            assert database.execute(
+                "SELECT COUNT(*) FROM wisdom_consent WHERE operation != 'recommendation'"
+            ).fetchone()[0] == 0
         app.client.chat_postMessage = async_receipted_slack_post(app.client)
         await runtime.deliver_assessments(
             route, OWNER, get_delivery_mode=lambda: "agent",

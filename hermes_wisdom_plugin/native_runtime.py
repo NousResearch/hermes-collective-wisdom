@@ -21,10 +21,9 @@ from typing import Any, Callable
 
 from .native_context import InvocationCapture, NativeInvocation
 from .native_review import (
-    NativeAction,
-    NativeItem,
     NativeReviewController,
     NativeView,
+    assessment_view,
     parse_callback,
 )
 from .store import WisdomStore
@@ -50,102 +49,6 @@ _SETUP_SYSTEM = (
     "Return command=null with an explanation when a safe, specific command cannot be proposed. "
     "Verification must actually test the declared outcome, not just print success."
 )
-
-
-def _assessment_text(value: object, limit: int) -> str:
-    """Return bounded native advice text without terminal/bidi controls."""
-
-    text = str(value or "").strip()
-    if not text or len(text) > limit or any(
-        (ord(character) < 32 and character not in "\n\t")
-        or 127 <= ord(character) < 160
-        or character in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
-        for character in text
-    ):
-        raise ValueError("assessment advice is not presentation safe")
-    return text
-
-
-def assessment_view(job: dict[str, Any]) -> NativeView:
-    """Project immutable ready advice without creating approval controls."""
-
-    advice = job.get("advice")
-    reference = job.get("reference")
-    if not isinstance(reference, dict):
-        raise ValueError("ready assessment reference is missing")
-    kind = reference.get("kind")
-    fallback = advice is None and job.get("state") == "fallback"
-    if fallback:
-        identity = _assessment_text(
-            reference.get("local_skill_id" if kind == "candidate" else "skill_id"), 256,
-        )
-        advice = {
-            "relevance": "digest",
-            "title": identity,
-            "explanation": (
-                "Hermes could not finish the local qualification review. Review it "
-                "manually; nothing has been shared."
-                if kind == "candidate" else
-                "Hermes could not assess this skill's relevance. Review its exact "
-                "published details manually; nothing has been changed."
-            ),
-            "provenance": {"kind": (
-                "local_qualification" if kind == "candidate" else "agent_assessed"
-            )},
-        }
-    if not isinstance(advice, dict):
-        raise ValueError("ready assessment advice is missing")
-    title = _assessment_text(advice.get("title"), 120)
-    explanation = _assessment_text(advice.get("explanation"), 600)
-    if str(advice.get("relevance") or "") not in {"recommend", "digest"}:
-        raise ValueError("assessment advice relevance is invalid")
-    provenance = advice.get("provenance")
-    provenance_kind = str(
-        provenance.get("kind") if isinstance(provenance, dict) else ""
-    )
-    if kind == "candidate":
-        if provenance_kind != "local_qualification":
-            raise ValueError("candidate advice provenance is invalid")
-        _assessment_text(reference.get("local_skill_id"), 256)
-        event_id = _assessment_text(reference.get("event_id"), 128)
-        summary = "Local qualification review unavailable" if fallback else ""
-        preamble = (
-            "" if fallback else
-            "Hermes thinks the following skill would be useful to the rest of your team:"
-        )
-        handoff = (
-            "Ask Hermes to inspect this exact local candidate with wisdom_inspect "
-            f"(kind=candidate, identity={event_id})"
-        )
-    elif kind == "skill":
-        if provenance_kind != "agent_assessed":
-            raise ValueError("shared advice provenance is invalid")
-        identity = _assessment_text(reference.get("skill_id"), 256)
-        version = reference.get("version")
-        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-            raise ValueError("shared advice version is invalid")
-        summary = "Agent assessment unavailable" if fallback else "Agent-assessed advice"
-        preamble = ""
-        handoff = (
-            "Ask Hermes to inspect the exact published version with wisdom_inspect "
-            f"(kind=skill, identity={identity}, version={version}); /wisdom show "
-            f"{shlex.quote(identity)} shows the current catalog version"
-        )
-    else:
-        raise ValueError("assessment reference is unsupported")
-    return NativeView(
-        title="Hermes Collective Wisdom",
-        summary=summary,
-        items=[NativeItem(title=title, detail=explanation, preamble=preamble)],
-        notice=(
-            f"{handoff}. This is advisory only; nothing was installed, approved, "
-            "or shared."
-        ),
-        actions=(
-            [NativeAction(label="Maybe Later", action="candidate_defer")]
-            if kind == "candidate" and not fallback else []
-        ),
-    )
 
 
 def candidate_deferred_view(job: dict[str, Any]) -> NativeView:
@@ -949,9 +852,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         self._assert_active_adapter(invocation)
         service = self.service_factory()
         try:
-            draft_id = await asyncio.to_thread(service.native_candidate_prepare, event_id)
             record = await asyncio.to_thread(
-                self.reviews.request_publication, service, invocation, draft_id
+                self.reviews.request_candidate, service, invocation, event_id
             )
             return await self._deliver_new(invocation, record)
         finally:
@@ -1047,7 +949,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if prepared is None:
             return
         job, token, initial_facts, latest, view = prepared
+        record = None
         try:
+            if job["reference"]["kind"] == "skill" and job["state"] == "ready":
+                record = await asyncio.to_thread(
+                    self.reviews.request_recommendation,
+                    checker.service, invocation, job, initial_facts,
+                )
+                view = self.reviews.view(record)
             final_facts = await asyncio.to_thread(current, latest)
             user_id = await asyncio.to_thread(outbox.identity, org)
             ready = bool(
@@ -1067,7 +976,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             await asyncio.to_thread(queue.cancel_delivery, org, job["id"], token)
             return
         try:
-            response = await self._post_native(invocation, view, job["id"])
+            response = await self._post_native(
+                invocation, view, record["id"] if record is not None else job["id"],
+            )
             from .delivery import (  # pylint: disable=import-outside-toplevel
                 slack_receipt, telegram_receipt,
             )
@@ -1084,10 +995,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         except Exception:  # the provider call may have succeeded; never blindly retry
             await asyncio.to_thread(queue.uncertain_delivery, org, job["id"], token)
             return
-        await asyncio.to_thread(
+        settled = await asyncio.to_thread(
             queue.complete_delivery, org, job["id"], token, receipt=receipt,
             introduced=False,
         )
+        if settled and record is not None:
+            await asyncio.to_thread(
+                self.reviews.bind_delivery, record["id"], invocation, receipt.message_id,
+            )
 
     async def _deliver_new(self, invocation: NativeInvocation,
                            record: dict[str, Any]) -> str | None:

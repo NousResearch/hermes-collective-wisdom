@@ -175,6 +175,7 @@ def test_contributor_and_published_views_use_pr5_copy_and_controls():
     assert _actions(pending.actions) == [
         ("Show checks", "checks.show", False),
         ("Maybe Later", "defer", False),
+        ("Snooze Collective Wisdom", "sharing.settings", False),
         ("Share My Skill", "confirm", True),
     ]
 

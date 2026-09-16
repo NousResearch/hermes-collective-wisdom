@@ -87,6 +87,7 @@ def _service(tmp_path, *, publisher="account-2"):
     service.publisher = publisher
     service.version_override = None
     service._installation_owner = Mock(return_value=owner)
+    service.native_owner = Mock(return_value=owner)
     service.check_owner = Mock(return_value={})
     def inspect(skill_id, *, version):
         actual_version = service.version_override or version
