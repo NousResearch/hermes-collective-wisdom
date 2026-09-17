@@ -461,12 +461,14 @@ try:
     assert applied["version"] == 2
     assert applied["content_hash"] == CONTENT_HASH
     assert set(applied["local_scan"]) == {
+        "available",
         "allowed",
         "verdict",
         "summary",
         "findings",
     }
     assert applied["local_scan"]["allowed"] is True
+    assert applied["local_scan"]["available"] is True
     target = Path(applied["path"]).resolve()
     target.relative_to(SKILLS_ROOT.resolve())
     assert target == SKILLS_ROOT / "_wisdom" / "team-1" / "clear-summary"

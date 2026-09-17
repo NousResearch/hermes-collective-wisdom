@@ -111,7 +111,20 @@ class InstallationHost:
 
         scan = self.scan(overlay)
         allowed = scan.get("allowed")
-        return PackageSecurityDecision(allowed=allowed if isinstance(allowed, bool) else None)
+        if allowed is not None and not isinstance(allowed, bool):
+            raise PackagePolicyError("Hermes host skill scan returned an invalid result")
+        findings = scan.get("findings")
+        if not isinstance(findings, list) or any(
+            not isinstance(item, dict) for item in findings
+        ):
+            raise PackagePolicyError("Hermes host skill scan returned an invalid result")
+        return PackageSecurityDecision(
+            allowed=allowed,
+            available=True,
+            verdict=str(scan["verdict"]),
+            summary=str(scan["summary"]),
+            findings=tuple(dict(item) for item in findings),
+        )
 
     @staticmethod
     def _module(name: str) -> Any:
@@ -330,6 +343,7 @@ class InstallationHost:
             if not isinstance(reason, str):
                 raise TypeError("invalid host policy summary")
             decision = {
+                "available": True,
                 "allowed": allowed,
                 "verdict": verdict,
                 "summary": reason,

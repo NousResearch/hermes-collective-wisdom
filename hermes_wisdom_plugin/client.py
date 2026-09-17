@@ -29,11 +29,18 @@ from .errors import (
     WisdomNotFound,
     WisdomValidationError,
 )
-from .package import PackagePolicyError, verify_content_files
+from .package import (
+    MAX_METADATA_BYTES, MAX_TREE_BYTES, PackagePolicyError, verify_content_files,
+)
 from .wire import wire_address
 
 
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_CONTENT_RESPONSE_BYTES = (
+    4 * ((MAX_TREE_BYTES + 2) // 3)
+    + 6 * MAX_METADATA_BYTES
+    + 1024 * 1024
+)
 _READ_CHUNK_BYTES = 64 * 1024
 _MAX_IDENTIFIER_BYTES = 512
 _MAX_CURSOR_BYTES = 4096
@@ -110,7 +117,7 @@ class VersionContentFile(WireModel):
     path: str = Field(min_length=1, max_length=1024)
     mode: Literal["file", "exec"]
     hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
-    content_base64: str = Field(max_length=349_528)
+    content_base64: str = Field(max_length=4 * ((MAX_TREE_BYTES + 2) // 3))
 
 
 class VersionContent(WireModel):
@@ -118,7 +125,7 @@ class VersionContent(WireModel):
 
     commit: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     content_hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
-    files: list[VersionContentFile] = Field(max_length=32)
+    files: list[VersionContentFile]
 
 
 class InstallationRecord(WireModel):
@@ -441,7 +448,10 @@ class WisdomClient:
     def _url(credentials: WisdomGatewayCredentials, path: str) -> str:
         return f"{credentials.base_url}/v1/sync/wisdom/{path.lstrip('/')}"
 
-    def _read_response_body(self, response: requests.Response) -> Any:
+    def _read_response_body(
+        self, response: requests.Response, *, max_bytes: int | None = None
+    ) -> Any:
+        limit = self.max_response_bytes if max_bytes is None else max_bytes
         content_length = response.headers.get("Content-Length")
         if content_length is not None:
             try:
@@ -454,7 +464,7 @@ class WisdomClient:
                 raise WisdomError(
                     "Collective Wisdom Gateway returned invalid response headers"
                 )
-            if declared_length > self.max_response_bytes:
+            if declared_length > limit:
                 raise WisdomError("Collective Wisdom Gateway response exceeded size limit")
 
         body = bytearray()
@@ -462,7 +472,7 @@ class WisdomClient:
             if not chunk:
                 continue
             body.extend(chunk)
-            if len(body) > self.max_response_bytes:
+            if len(body) > limit:
                 raise WisdomError("Collective Wisdom Gateway response exceeded size limit")
         if not body:
             return None
@@ -523,6 +533,7 @@ class WisdomClient:
         install: bool = False,
         publish: bool = False,
         files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+        response_limit: int | None = None,
     ) -> Any:
         if self._closed:
             raise WisdomError("Collective Wisdom client is closed")
@@ -551,7 +562,7 @@ class WisdomClient:
                 **request_options,
             )
             try:
-                body = self._read_response_body(response)
+                body = self._read_response_body(response, max_bytes=response_limit)
             finally:
                 response.close()
         except requests.Timeout as exc:
@@ -880,6 +891,7 @@ class WisdomClient:
                 "takedown_generation": str(takedown_generation),
             },
             install=True,
+            response_limit=MAX_CONTENT_RESPONSE_BYTES,
         )
         return self._decode_version_content(response)
 

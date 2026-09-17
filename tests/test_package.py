@@ -1,4 +1,4 @@
-"""Instruction-only package preparation and verification tests."""
+"""Native Hermes package preparation and verification tests."""
 
 import json
 import os
@@ -282,25 +282,41 @@ def test_allowlisted_inert_text_references_are_accepted(tmp_path: Path, extensio
     assert f"assets/guide{extension}" in {item.path for item in package.files}
 
 
-def test_markdown_link_to_active_script_is_rejected(tmp_path: Path):
-    """Instructions cannot reference omitted active scripts."""
+def test_native_skill_round_trips_scripts_resources_and_modes(tmp_path: Path):
+    """Native package files keep exact bytes and normalized executable intent."""
 
     skill = make_skill(tmp_path)
     skill_md = skill / "SKILL.md"
-    skill_md.write_text(
-        skill_md.read_text(encoding="utf-8")
-        + "\nRun [scripts/run.sh](scripts/run.sh) to continue.\n",
-        encoding="utf-8",
-    )
+    skill_md.write_text(skill_md.read_text() + "\nRun scripts/run.sh.\n", encoding="utf-8")
+    fixtures = {
+        ".gitignore": b"*.pyc\n",
+        "references/config.yaml": b"enabled: true\n",
+        "scripts/run.sh": b"#!/bin/sh\nprintf sentinel\n",
+        "templates/report.docx": b"PK\x03\x04opaque-template",
+        "assets/logo.png": b"\x89PNG\r\n\x1a\nopaque",
+        "pyproject.toml": b"[project]\nname='fixture'\n",
+    }
+    for relative, body in fixtures.items():
+        target = skill / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    (skill / "scripts/run.sh").chmod(0o755)
 
-    with pytest.raises(PackagePolicyError, match="active scripts/templates"):
-        prepare_package(
-            skill,
-            overlay_root=tmp_path / "overlays",
-            author_description="A valid description.",
-            owner="owner",
-            installation_id="installation-123456",
-        )
+    package = prepare_package(
+        skill,
+        overlay_root=tmp_path / "overlays",
+        author_description="A valid description.",
+        owner="owner",
+        installation_id="installation-123456",
+    )
+    raw = package_module.read_validated_package_files(package.overlay)
+    by_path = {path: (mode, body) for path, mode, body in raw}
+    for relative, body in fixtures.items():
+        assert by_path[relative][1] == body
+    assert by_path["scripts/run.sh"][0] == "exec"
+    assert by_path["assets/logo.png"][0] == "file"
+    assert (package.overlay / "scripts/run.sh").stat().st_mode & 0o111
+    assert (package.overlay / "assets/logo.png").stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.parametrize(
@@ -313,55 +329,60 @@ def test_markdown_link_to_active_script_is_rejected(tmp_path: Path):
         ("refs/run.sh", "echo nope"),
         ("refs/template.j2", "{{ active }}"),
         ("refs/config.yaml", "active: true"),
-        ("refs/.github/workflows/note.md", "inert-looking text"),
-        ("assets/hooks/readme.txt", "inert-looking text"),
         ("assets/page.html", "<script>active</script>"),
         ("assets/logo.svg", "<svg></svg>"),
         ("assets/archive.zip", "not really an archive"),
         ("refs/README", "unknown extension"),
     ],
 )
-def test_unsupported_content_is_rejected_not_silently_omitted(
+def test_ordinary_native_supporting_files_are_not_silently_omitted(
     tmp_path: Path, relative: str, content: str
 ):
-    """Unsupported content blocks the package rather than disappearing."""
+    """Ordinary source, config, dependency, and template files are complete."""
 
     skill = make_skill(tmp_path)
     target = skill / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    with pytest.raises(PackagePolicyError):
+    package = prepare_package(
+        skill,
+        overlay_root=tmp_path / "overlays",
+        author_description="A valid description.",
+        owner="owner",
+        installation_id="installation-123456",
+    )
+    assert (package.overlay / relative).read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("relative", ["refs/.github/workflows/note.md", "assets/hooks/run"])
+def test_active_vcs_and_hook_metadata_remains_blocked(tmp_path: Path, relative: str):
+    """Native support does not admit VCS automation metadata or hook directories."""
+    skill = make_skill(tmp_path)
+    target = skill / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("unsafe metadata", encoding="utf-8")
+    with pytest.raises(PackagePolicyError, match="active package directory"):
         prepare_package(
-            skill,
-            overlay_root=tmp_path / "overlays",
-            author_description="A valid description.",
-            owner="owner",
+            skill, overlay_root=tmp_path / "overlays",
+            author_description="A valid description.", owner="owner",
             installation_id="installation-123456",
         )
 
 
-def test_download_rejects_hostile_paths_modes_and_binary():
-    """Downloaded packages reject traversal, execution, and binary content."""
+def test_download_rejects_hostile_paths_but_accepts_native_modes_and_binary():
+    """Downloads reject traversal while preserving native opaque resources."""
 
     manifest = b'{"schema_version":1}'
     base = [("SKILL.md", "file", b"# test"), ("skill.manifest.json", "file", manifest)]
     with pytest.raises(PackagePolicyError):
         verify_content_files(base + [("../escape", "file", b"x")])
-    with pytest.raises(PackagePolicyError):
-        verify_content_files([
-            (name, "exec" if name == "SKILL.md" else mode, body)
-            for name, mode, body in base
-        ])
-    with pytest.raises(PackagePolicyError):
-        verify_content_files(base + [("assets/image.bin", "file", b"\xff\xfe")])
-    with pytest.raises(PackagePolicyError, match="NUL"):
-        verify_content_files(
-            base + [("refs/padded.txt", "file", b"a" * 1024 + b"\x00")]
-        )
-    with pytest.raises(PackagePolicyError, match="shebang"):
-        verify_content_files(
-            base + [("refs/run.txt", "file", b"#!/bin/sh\necho unsafe")]
-        )
+    records, _ = verify_content_files(base + [
+        ("scripts/run", "exec", b"#!/bin/sh\necho safe-to-package\n"),
+        ("assets/image.png", "file", b"\x89PNG\x00\xff"),
+    ])
+    assert [(item.path, item.mode) for item in records[-2:]] == [
+        ("scripts/run", "exec"), ("assets/image.png", "file")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -384,7 +405,7 @@ def test_download_rejects_hostile_paths_modes_and_binary():
         "refs/com1.notes.txt",
         "refs/bad:name.txt",
         "refs/cafe\u0301.txt",
-        "refs/a/b/c/d.txt",
+
     ],
 )
 def test_download_rejects_nonportable_or_noncanonical_paths(path: str):
@@ -398,23 +419,9 @@ def test_download_rejects_nonportable_or_noncanonical_paths(path: str):
         verify_content_files(base + [(path, "file", b"reference")])
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "refs/run.sh",
-        "assets/template.jinja",
-        "refs/config.toml",
-        "assets/page.html",
-        "assets/logo.svg",
-        "assets/image.png",
-        "refs/archive.tar",
-        "refs/unknown",
-        "refs/SKILL.md",
-        "assets/skill.manifest.json",
-    ],
-)
-def test_download_rejects_every_file_outside_the_text_allowlist(path: str):
-    """Downloaded files are limited to inert allowlisted text."""
+@pytest.mark.parametrize("path", ["refs/SKILL.md", "assets/skill.manifest.json"])
+def test_download_rejects_misplaced_required_root_files(path: str):
+    """Root identity files cannot be shadowed in supporting directories."""
 
     base = [
         ("SKILL.md", "file", b"# test"),
@@ -422,6 +429,63 @@ def test_download_rejects_every_file_outside_the_text_allowlist(path: str):
     ]
     with pytest.raises(PackagePolicyError):
         verify_content_files(base + [(path, "file", b"apparently harmless")])
+
+
+def test_download_rejects_compiled_executable_but_not_opaque_resource():
+    """General native binaries are unsupported regardless of declared file mode."""
+    base = [
+        ("SKILL.md", "file", b"# test"),
+        ("skill.manifest.json", "file", b'{"schema_version":1}'),
+    ]
+    with pytest.raises(PackagePolicyError, match="compiled executable"):
+        verify_content_files(base + [("scripts/tool", "exec", b"\x7fELFpayload")])
+    with pytest.raises(PackagePolicyError, match="compiled executable"):
+        verify_content_files(
+            base + [("assets/tool-reference.bin", "file", b"\x7fELFpayload")]
+        )
+    records, _ = verify_content_files(base + [("assets/image.png", "file", b"\x89PNG")])
+    assert records[-1].mode == "file"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("refs/value", None, b"x"),
+        ("refs/value", "file", "not-bytes"),
+        (None, "file", b"x"),
+        ("refs/value", "file"),
+    ],
+)
+def test_download_malformed_entries_raise_typed_policy_errors(entry):
+    """Malformed wire records fail with the package policy error contract."""
+    base = [
+        ("SKILL.md", "file", b"# test"),
+        ("skill.manifest.json", "file", b'{"schema_version":1}'),
+    ]
+    with pytest.raises(PackagePolicyError):
+        verify_content_files(base + [entry])
+
+
+def test_source_metadata_budget_stops_before_reading_entire_empty_tree(
+    tmp_path: Path, monkeypatch
+):
+    """Metadata admission stops a huge empty tree before payload reads fan out."""
+    skill = make_skill(tmp_path)
+    for number in range(100):
+        (skill / "refs" / f"empty-{number}.txt").touch()
+    reads = 0
+    original = package_module._read_regular_file  # pylint: disable=protected-access
+
+    def counted(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(package_module, "MAX_METADATA_BYTES", 600)
+    monkeypatch.setattr(package_module, "_read_regular_file", counted)
+    with pytest.raises(PackagePolicyError, match="metadata"):
+        package_module.source_fingerprint(skill)
+    assert reads < 10
 
 
 def test_download_rejects_install_target_collisions():
@@ -441,44 +505,33 @@ def test_download_rejects_install_target_collisions():
         )
 
 
-def test_download_enforces_file_count_per_file_and_total_caps(monkeypatch):
-    """Downloaded file count and byte limits are independently enforced."""
+def test_download_uses_aggregate_payload_and_metadata_caps(monkeypatch):
+    """Many files and one large file are accepted within independent budgets."""
 
     base = [
         ("SKILL.md", "file", b"# test"),
         ("skill.manifest.json", "file", b'{"schema_version":1}'),
     ]
-    too_many = base + [
-        (f"refs/{number}.txt", "file", b"x")
-        for number in range(package_module.MAX_FILES - len(base) + 1)
-    ]
-    with pytest.raises(PackagePolicyError, match="exceeds 32 files"):
-        verify_content_files(too_many)
+    many = base + [(f"references/{number}.txt", "file", b"") for number in range(80)]
+    records, _ = verify_content_files(many)
+    assert len(records) == 82
 
-    with pytest.raises(PackagePolicyError, match="file exceeds"):
-        verify_content_files(
-            base
-            + [
-                (
-                    "refs/large.txt",
-                    "file",
-                    b"x" * (package_module.MAX_FILE_BYTES + 1),
-                )
-            ]
-        )
+    large = b"x" * (512 * 1024)
+    records, _ = verify_content_files(base + [("references/large.txt", "file", large)])
+    assert records[-1].path == "references/large.txt"
 
     monkeypatch.setattr(package_module, "MAX_TREE_BYTES", 32)
     with pytest.raises(PackagePolicyError, match="total bytes"):
         verify_content_files(base + [("refs/total.txt", "file", b"x" * 16)])
 
 
-def test_local_preparation_enforces_file_size_cap(tmp_path: Path, monkeypatch):
-    """Local source files cannot exceed the per-object bound."""
+def test_local_preparation_enforces_aggregate_size_cap(tmp_path: Path, monkeypatch):
+    """Local source trees cannot exceed the aggregate payload bound."""
 
     skill = make_skill(tmp_path)
-    monkeypatch.setattr(package_module, "MAX_FILE_BYTES", 64)
+    monkeypatch.setattr(package_module, "MAX_TREE_BYTES", 64)
     (skill / "refs" / "large.txt").write_bytes(b"x" * 65)
-    with pytest.raises(PackagePolicyError, match="file exceeds"):
+    with pytest.raises(PackagePolicyError, match="total bytes"):
         prepare_package(
             skill,
             overlay_root=tmp_path / "overlays",
@@ -537,38 +590,35 @@ def test_local_preparation_rejects_special_files(tmp_path: Path):
         )
 
 
-def test_referenced_script_requires_explicit_instruction_only_fork(tmp_path: Path):
-    """Active script references require an explicit safe fork."""
+def test_mode_only_change_changes_source_fingerprint(tmp_path: Path):
+    """Changing executable intent invalidates exact-package review identity."""
 
     skill = make_skill(tmp_path)
-    (skill / "SKILL.md").write_text("Run scripts/deploy.sh now.", encoding="utf-8")
-    with pytest.raises(PackagePolicyError, match="instruction-only fork"):
-        prepare_package(
-            skill,
-            overlay_root=tmp_path / "overlays",
-            author_description="A valid description.",
-            owner="owner",
-            installation_id="installation-123456",
-        )
+    script = skill / "run"
+    script.write_bytes(b"#!/bin/sh\nexit 0\n")
+    script.chmod(0o600)
+    before = package_module.source_fingerprint(skill)
+    script.chmod(0o700)
+    assert package_module.source_fingerprint(skill) != before
 
 
-@pytest.mark.parametrize("allowed", [False, None])
-def test_preparation_requires_positive_host_security_verdict(
+@pytest.mark.parametrize("allowed", [False])
+def test_preparation_preserves_blocked_host_security_as_reviewable_warning(
     tmp_path: Path, allowed: bool | None
 ):
-    """Blocked and unavailable host guards both fail preparation."""
+    """A scanner denial is evidence and does not prevent a local draft snapshot."""
 
     skill = make_skill(tmp_path)
     original = (skill / "SKILL.md").read_bytes()
-    with pytest.raises(PackagePolicyError, match="security guard"):
-        prepare_package(
-            skill,
-            host=_Host(allowed=allowed),
-            overlay_root=tmp_path / "overlays",
-            author_description="A valid description.",
-            owner="owner",
-            installation_id="installation-123456",
-        )
+    package = prepare_package(
+        skill,
+        host=_Host(allowed=allowed),
+        overlay_root=tmp_path / "overlays",
+        author_description="A valid description.",
+        owner="owner",
+        installation_id="installation-123456",
+    )
+    assert package.overlay.is_dir()
     assert (skill / "SKILL.md").read_bytes() == original
 
 

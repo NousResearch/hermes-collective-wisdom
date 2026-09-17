@@ -198,8 +198,11 @@ class Service(InvocationService):
     def versions(self, skill_id):
         return self.show(skill_id)["versions"]
 
-    def publication_review(self, draft_id, *, may_apply=None):
+    def publication_review(
+        self, draft_id, *, may_apply=None, accept_warnings=False
+    ):
         del may_apply
+        assert accept_warnings is False
         assert draft_id == "local-draft"
         return {
             "draft_id": draft_id, "editorial_name": "SDK publication",

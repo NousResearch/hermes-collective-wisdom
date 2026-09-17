@@ -81,12 +81,16 @@ An empty catalog is normal if nobody in your organization has published a skill 
 - **CLI / TUI chat:** read tools and terminal handoffs are available. Rich review
   and proactive presentation depend on host capabilities; development-only TUI
   behavior is not a promise of stock-host support.
-- **Desktop:** enable the package's Desktop half separately in the app's plugin
-  settings. The Wisdom page offers guidance and copyable terminal commands—not
-  embedded execution or approval. For remote connections, run commands on the
-  intended remote host.
+- **Desktop:** enable the package's Desktop half in **Capabilities → Plugins**
+  (also available through **⌘K → Plugins**), then open **Collective Wisdom**.
+  Catalog, Installed, Activity & Settings, and Contributions call the existing
+  workflows on the selected host/profile. Review exact versions, checks, and
+  files before confirming an install, update, removal, or submission.
 
-Full embedded Desktop and Dashboard workflows are not available yet.
+The Desktop page also offers explicit enrollment after disclosure. It does not
+run setup scripts, edit draft files, or automatically retry uncertain operations.
+Those advanced workflows remain available through the existing native controls.
+Dashboard UI and full six-surface parity remain deferred.
 
 ## Common tasks
 
@@ -110,11 +114,15 @@ hermes wisdom install --apply-receipt <receipt> --json
 Approval is bound to the reviewed version and files. A changed or expired plan
 needs another review. Installing files is separate from
 [approving skill setup](docs/WORKFLOWS.md#installed-skill-setup-terminal).
+If the Hermes scanner reports reviewable warnings, the interactive terminal
+shows the findings and offers explicit acknowledgement before final approval.
+Scripted reviews use `--accept-warnings` after authorized review; this is distinct
+from compatibility `--accept-partial`. An unavailable scan cannot be accepted.
 
 ### Prepare a skill to share
 
 ```bash
-hermes wisdom suggest <local-skill-name> --json
+hermes wisdom suggest <local-skill-name>
 ```
 
 This prepares a local draft without uploading, publishing, or changing the
@@ -122,11 +130,25 @@ original skill. Review the description, files, generated compatibility manifest,
 and security findings. See the [sharing workflow](docs/WORKFLOWS.md#private-contribution-preparation-terminal)
 for editing and the separate publication review/submission steps.
 
-**Current package limits:** instruction-only packages, at most 32 files and
-512 KiB total, with a 256 KiB per-file limit. Supported files are root `SKILL.md`
-and `skill.manifest.json`, plus allowlisted text under `refs/` and `assets/`.
-Scripts, templates, `.gitignore`, and `references/` are not currently accepted.
-Unsupported content causes an error; it is never silently dropped.
+On an interactive terminal, choose to inspect files and warnings, edit the draft,
+continue to sharing review, or keep it for later. Sharing requires a separate
+final confirmation. `--json` selects noninteractive machine output instead; it
+never approves an action or opens a menu.
+
+Native Hermes skill packages may contain ordinary source/configuration files,
+`references/`, `refs/`, `scripts/`, `templates/`, `assets/`, and an inert
+`.gitignore`. Text, executable script intent, and common opaque resources retain
+their exact bytes. Packages have a 10 MiB aggregate payload limit and a separate
+bounded path/tree metadata budget; there is no independent 32-file or tiny
+per-file limit. Symlinks, hard links, special files, traversal/collisions,
+credentials/private keys, unsafe modes, and compiled executable payloads remain
+blocked. Package scripts are never executed during preparation or review.
+
+**Service compatibility:** a Gateway enforcing the older instruction-only,
+smaller-package contract still rejects these expanded packages. Updating this
+plugin alone does not update Gateway or Portal limits. Keep the complete local
+draft until the service supports it; the plugin never drops files to make a
+submission fit. Local preparation is not proof of successful publication.
 
 Optional model review requires `--allow-model-review`, which permits sending the
 draft to your configured model provider. Without it, that assessment is reported
@@ -179,8 +201,13 @@ rather than blindly repeating the action.
 - **No admitted private session:** verify enrollment with `hermes wisdom status
   --json`, then use a supported main-agent/private session. There is no separate
   user-facing admission switch.
-- **Installer scan blocks the package:** inspect the findings rather than
-  disabling the scan to complete installation.
+- **Scanner warnings:** inspect the original verdict and findings, then explicitly
+  acknowledge the exact review with `--accept-warnings` if appropriate. New
+  findings invalidate that acknowledgement. Credential/private-key findings and
+  unavailable scans remain hard stops; never disable the scanner.
+- **Gateway rejects a native package:** the deployed service may still have the
+  older instruction-only limits. Keep the local draft and retry after the service
+  contract is upgraded; do not remove supporting files to force acceptance.
 
 ## Development and further reading
 
@@ -191,6 +218,8 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m pylint hermes_wisdom_plugin tests scripts/test_wisdom_offline_acceptance.py
 .venv/bin/python -m pytest
+npm ci --ignore-scripts
+npm test
 .venv/bin/python -m build
 ```
 

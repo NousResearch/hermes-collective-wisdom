@@ -232,18 +232,36 @@ unavailable contributions on expiry/profile change. If a lifecycle/visibility
 hook is missing, add a small generic extension with a neutral example; do not
 patch a Wisdom condition into host navigation or core routes.
 
-### Selected Desktop handoff boundary — Option 1
+### Desktop management host boundary
 
-The native-context dashboard backend has been withdrawn from this package.
-`api_context: "native"` and `hermes_cli.plugin_api_context` are unpublished host
-changes, not stock SDK contracts. The external Desktop page uses the public
-Desktop SDK for navigation, components and clipboard only. It performs no private
-HTTP reads, receipt application or background activity. All protected workflows
-remain explicit native commands on the intended host/profile.
+The external page calls `ctx.rest` in `/api/plugins/hermes-collective-wisdom`.
+Git installation includes `dashboard/manifest.json` and `plugin_api.py`; the latter
+loads its adjacent Python package under a synthetic namespace, independent of
+the host working directory or a stale pip installation. The host owns HTTP
+authentication. No `api_context: "native"`, private manager lookup, or invented
+Hermes conversation identity is used.
 
-Dashboard SDK work is deferred. Do not restart a host bridge, add a daemon, guess
-state/config paths or treat renderer identity as authorization. Earlier proposed
-host additions in this document are historical, not current implementation tasks.
+The installed host does not automatically scope plugin routes by `?profile=`.
+The plugin adapter therefore uses the existing host `_config_profile_scope`
+context manager and checks the selected profile's enable/disable configuration.
+This is a **version-tested host-internal helper**, not a promised public SDK API.
+It scopes config, credentials and plugin data together without mutating process
+environment variables. Missing support fails route loading rather than silently
+using another profile. `tests/test_desktop_host_mount.py` verifies actual stock
+host discovery, authentication, A/B/A reads, cross-profile mutation denial and
+disable enforcement. Run it against the host revision intended for deployment.
+On the tested stock host, API discovery/import occurs at backend startup and
+requires the plugin enabled in that backend's launch profile. Enabling only the
+Desktop renderer or only a subsequently selected profile cannot mount an absent
+backend. After a new backend installation, enable it in the host launch profile
+and restart that backend through supported controls; selected profiles still
+need their own Agent-plugin enablement and account authority. The plugin does
+not bypass that host import gate.
+
+The renderer's connection/profile values segregate caches, not authority. Fresh
+account/enrollment reads and shared workflow receipts govern effects. Dashboard
+UI and advanced editing/setup/recovery controls remain deferred. Earlier proposed
+host additions above are historical, not current implementation tasks.
 
 ## Deliberately Not Building
 

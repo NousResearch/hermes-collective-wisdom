@@ -8,10 +8,11 @@ This is an external Hermes plugin, not a Codex plugin or an Agent fork. Keep
 Wisdom-specific code here. Generic host extensions require separate, small
 Hermes Agent PRs. Do not copy the original 80k-line PR wholesale.
 
-Current delivery is stock-Agent-compatible native workflows plus an external
-Desktop SDK handoff page. No Hermes Agent source changes, HTTP context bridge,
-new daemon or separate authentication system. Dashboard/full embedded parity
-are deferred. Offline tests do not replace installed Desktop or service acceptance.
+Current delivery is stock-Agent-compatible native workflows plus external
+Desktop management pages using the existing authenticated plugin REST namespace.
+No Hermes Agent source changes, native-session HTTP bridge, new daemon or separate
+authentication system. Dashboard/full six-surface parity are deferred.
+Offline tests do not replace installed Desktop or service acceptance.
 Work only on the requested slice; planning documents do not authorize the roadmap.
 Use `shannonsands/<feature>` for new branches.
 

@@ -2,7 +2,7 @@
 
 # The frozen six-dependency interface and explicit recovery phases are intentionally
 # kept together so every filesystem transition remains auditable.
-# pylint: disable=too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-lines
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 
 from __future__ import annotations
@@ -117,19 +117,34 @@ class InstallExecutor:
         finally:
             self.store.release_operation_lock(skill_id, lock)
 
-    def uninstall(self, skill_id: str) -> dict:
+    def uninstall(
+        self,
+        skill_id: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
         """Exclude setup starters while beginning recoverable removal."""
+        self._require_current(may_apply)
         with managed_operation_guard(Path(self.store.root), skill_id):
-            return self._uninstall(skill_id)
+            return self._uninstall(skill_id, may_apply=may_apply)
 
-    def _uninstall(self, skill_id: str) -> dict:
+    def _uninstall(
+        self,
+        skill_id: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
         """Remove one owner-managed skill into recoverable hidden storage."""
+        self._require_current(may_apply)
         owner = self._owner()
+        self._require_current(may_apply)
         lock = self.store.acquire_operation_lock(skill_id)
         if not lock:
             raise PackagePolicyError("another managed operation is already active for this skill")
         try:
+            self._require_current(may_apply)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             conflicting = self._pending("install", skill_id)
             if conflicting or self._pending("update", skill_id):
                 raise PackagePolicyError("another managed operation is pending for this skill")
@@ -143,8 +158,12 @@ class InstallExecutor:
                     payload["trash_path"] = str(
                         self._trash_path(str(pending["id"]), payload["slug"])
                     )
+                    self._require_current(may_apply)
                     self.store.replace_operation_payload(str(pending["id"]), payload)
-                return self._resume_uninstall(str(pending["id"]), payload, lock)
+                    self._require_current(may_apply)
+                return self._resume_uninstall(
+                    str(pending["id"]), payload, lock, may_apply=may_apply
+                )
             installation = self.store.installation(skill_id)
             if not installation:
                 raise PackagePolicyError("managed installation not found")
@@ -157,6 +176,7 @@ class InstallExecutor:
                         return result
                 raise PackagePolicyError("managed installation is already inactive")
             target = self._validated_record_target(installation, owner)
+            self._require_current(may_apply)
             payload = {
                 "owner": owner,
                 "receipt": None,
@@ -168,10 +188,15 @@ class InstallExecutor:
                 "baseline": dict(installation.get("baseline") or {}),
             }
             operation_id = self.store.journal("uninstall", skill_id, "staged", payload)
+            self._require_current(may_apply)
             trash = self._trash_path(operation_id, payload["slug"])
             payload["trash_path"] = str(trash)
+            self._require_current(may_apply)
             self.store.replace_operation_payload(operation_id, payload)
-            return self._resume_uninstall(operation_id, payload, lock)
+            self._require_current(may_apply)
+            return self._resume_uninstall(
+                operation_id, payload, lock, may_apply=may_apply
+            )
         finally:
             self.store.release_operation_lock(skill_id, lock)
 
@@ -301,7 +326,11 @@ class InstallExecutor:
             scan = self.host.scan(staging)
             self._require_current(may_apply)
             try:
-                _require_scan(scan, verified.plan.get("local_scan"), accept_partial)
+                _require_scan(
+                    scan,
+                    verified.plan.get("local_scan"),
+                    _accepted_scan_warning(verified.plan),
+                )
             except PackagePolicyError:
                 shutil.rmtree(staging, ignore_errors=True)
                 self.store.advance(operation_id, "scan_rejected", done=True)
@@ -354,7 +383,7 @@ class InstallExecutor:
             _require_scan(
                 scan,
                 verified.plan.get("local_scan"),
-                bool(payload.get("accepted_partial")),
+                _accepted_scan_warning(verified.plan),
             )
             self._assert_owner(owner)
             self._require_current(may_apply)
@@ -479,35 +508,56 @@ class InstallExecutor:
         elif bound != operation_id:
             raise WisdomConflict("Install receipt is already bound to another operation")
 
-    def _resume_uninstall(self, operation_id: str, payload: dict, lock: str) -> dict:
+    def _resume_uninstall(
+        self,
+        operation_id: str,
+        payload: dict,
+        lock: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
+        self._require_current(may_apply)
         operation = self.store.operation(operation_id)
         if not operation:
             raise PackagePolicyError("uninstall recovery journal is missing")
         owner = self._owner()
+        self._require_current(may_apply)
         self._require_payload_owner(payload, owner)
         self.store.assert_operation_lock(payload["skill_id"], lock)
         phase = str(operation["phase"])
         target = Path(payload["target_path"])
         trash = Path(payload["trash_path"])
         self._validate_uninstall_paths(target, trash, owner, operation_id, payload["slug"])
+        self._require_current(may_apply)
         if phase == "staged":
             trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._require_current(may_apply)
             if target.exists() and not trash.exists():
                 _same_filesystem(target, trash.parent)
+                self._require_current(may_apply)
                 self._assert_owner(owner)
+                self._require_current(may_apply)
                 self.store.assert_operation_lock(payload["skill_id"], lock)
+                self._require_current(may_apply)
                 _durable_replace(target, trash)
+                self._require_current(may_apply)
+            self._require_current(may_apply)
             self.store.advance(operation_id, "files_committed")
             phase = "files_committed"
         if phase == "files_committed":
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
+            self._require_current(may_apply)
             self.store.deactivate_install(payload["skill_id"])
+            self._require_current(may_apply)
             self.store.advance(operation_id, "local_ledger_committed")
             phase = "local_ledger_committed"
         if phase == "local_ledger_committed":
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
+            self._require_current(may_apply)
             try:
                 server = self.client.deactivate_install(
                     owner["installation_id"], payload["skill_id"]
@@ -536,6 +586,7 @@ class InstallExecutor:
                 {"owner": owner, "result": result},
             )
             self.store.advance(operation_id, "gateway_recorded", done=True)
+            self._require_current(may_apply)
             return result
         raise PackagePolicyError(f"unsupported uninstall recovery phase: {phase}")
 
@@ -809,7 +860,7 @@ def _write_staging(staging: Path, files: tuple | list) -> None:
             path = PurePosixPath(raw_path)
             if path.is_absolute() or ".." in path.parts or not path.parts:
                 raise PackagePolicyError("verified package contains an unsafe path")
-            if mode != "file" or not isinstance(body, bytes):
+            if mode not in {"file", "exec"} or not isinstance(body, bytes):
                 raise PackagePolicyError("verified package contains an unsupported entry")
             destination = staging.joinpath(*path.parts)
             _within(destination, staging, "package file")
@@ -819,7 +870,7 @@ def _write_staging(staging: Path, files: tuple | list) -> None:
             with destination.open("xb") as stream:
                 stream.write(body)
                 stream.flush()
-                os.fchmod(stream.fileno(), 0o600)
+                os.fchmod(stream.fileno(), 0o700 if mode == "exec" else 0o600)
                 os.fsync(stream.fileno())
         for directory in sorted(
             (path for path in staging.rglob("*") if path.is_dir()),
@@ -851,9 +902,11 @@ def _tree_hashes(root: Path) -> dict[str, str] | None:
         ):
             return None
         if path.is_file():
-            actual[path.relative_to(root).as_posix()] = "sha256:" + hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
+            mode = "exec" if path.stat().st_mode & 0o111 else "file"
+            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            actual[path.relative_to(root).as_posix()] = (
+                f"exec:{digest}" if mode == "exec" else digest
+            )
     return actual
 
 
@@ -862,14 +915,49 @@ def _is_junction(path: Path) -> bool:
     return bool(checker(path))
 
 
-def _require_scan(current: object, reviewed: object, accepted_partial: bool) -> None:
-    if not isinstance(current, dict) or current != reviewed:
+def _accepted_scan_warning(plan: object, *, operation: str = "install") -> bool:
+    if not isinstance(plan, dict):
+        return False
+    policy = plan.get("policy")
+    acceptance = policy.get("warning_acceptance") if isinstance(policy, dict) else None
+    return bool(
+        isinstance(acceptance, dict)
+        and acceptance.get("accepted") is True
+        and acceptance.get("operation") == operation
+        and acceptance.get("content_hash") == plan.get("content_hash")
+    )
+
+
+def _require_scan(current: object, reviewed: object, accepted_warning: bool) -> None:
+    if not isinstance(current, dict) or not isinstance(reviewed, dict):
         raise PackagePolicyError("host scan changed after review; create a new review")
     allowed = current.get("allowed")
-    if allowed is False or allowed not in {True, None}:
+    if allowed is not True and allowed is not False and allowed is not None:
         raise PackagePolicyError("host scan blocked installation")
-    if allowed is None and not accepted_partial:
-        raise PackagePolicyError("reviewed scan warning requires explicit --accept-partial")
+    reviewed_allowed = reviewed.get("allowed")
+    if (
+        reviewed_allowed is not True
+        and reviewed_allowed is not False
+        and reviewed_allowed is not None
+    ):
+        raise PackagePolicyError("host scan changed after review; create a new review")
+    available = current.get("available", allowed is not None)
+    reviewed_available = reviewed.get("available", reviewed_allowed is not None)
+    if (
+        not isinstance(available, bool)
+        or not isinstance(reviewed_available, bool)
+        or not available
+        or not reviewed_available
+    ):
+        raise PackagePolicyError("host scan is unavailable; retry review")
+    if current != reviewed:
+        raise PackagePolicyError("host scan changed after review; create a new review")
+    if allowed is True:
+        return
+    if not accepted_warning:
+        raise PackagePolicyError(
+            "reviewed scan warning requires explicit warning acknowledgement"
+        )
 
 
 def _require_verified_match(payload: dict, verified: object) -> None:
@@ -881,6 +969,10 @@ def _require_verified_match(payload: dict, verified: object) -> None:
         "version",
         "content_hash",
         "takedown_generation",
+        "update_mode",
+        "local_scan",
+        "security_check",
+        "policy",
     )
     if any(plan.get(key) != payload.get(key) for key in immutable):
         raise WisdomValidationError("install authorization changed; create a new review")

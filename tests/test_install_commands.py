@@ -18,9 +18,34 @@ class Service:
     def __init__(self):
         self.calls = []
 
-    def install_plan(self, reference, *, update_mode=None):
-        self.calls.append(("plan", reference, update_mode))
-        return {"receipt": "wip_" + "a" * 32, "version": 2}
+    def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
+        self.calls.append(("plan", reference, update_mode, accept_warnings))
+        return {
+            "receipt": "wip_" + "a" * 32,
+            "skill_id": "skill-1", "slug": "example", "version": 2,
+            "owner": {"organization_id": "team-7", "account_id": "member-42"},
+            "files": [{
+                "path": "scripts/setup.sh", "mode": "exec", "size": 20,
+                "hash": "sha256:file",
+            }],
+            "compatibility": {
+                "outcome": "compatible_after_setup", "satisfied": ["macOS"],
+                "setup_actions": ["Install uv"], "limitations": ["No Windows"],
+                "blocked": [],
+            },
+            "server_checks": {"security_check": {"status": "pass"}},
+            "local_scan": {
+                "allowed": False,
+                "findings": [{
+                    "severity": "warning", "category": "instructions",
+                    "pattern_id": "shell-network", "file": "scripts/setup.sh",
+                    "line": 2, "description": "Uses the network.",
+                    "match": "RAW_SECRET",
+                }],
+            },
+            "policy": {"warning_acceptance": {"accepted": accept_warnings}},
+            "allowed": accept_warnings,
+        }
 
     def install_apply(self, receipt, *, accept_partial=False):
         self.calls.append(("apply", receipt, accept_partial))
@@ -45,8 +70,23 @@ def _args(*args):
 def test_plan_and_json_never_apply(flags, capsys):
     service = Service()
     assert run_cli(_args("install", "skill@v2", *flags), service) == 0
-    assert service.calls == [("plan", "skill@v2", None)]
+    assert service.calls == [("plan", "skill@v2", None, False)]
+    output = capsys.readouterr().out
+    if "--json" in flags:
+        assert json.loads(output)["version"] == 2
+    else:
+        assert "Installation" in output and "Version: 2" in output
+
+
+def test_json_install_never_prompts_on_tty(capsys, monkeypatch):
+    service = Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+
+    assert run_cli(_args("install", "skill@v2", "--json"), service) == 0
+
     assert json.loads(capsys.readouterr().out)["version"] == 2
+    assert service.calls == [("plan", "skill@v2", None, False)]
 
 
 def test_explicit_receipt_preserves_partial_acceptance(capsys):
@@ -71,10 +111,50 @@ def test_interactive_install_confirms_once(monkeypatch, answer, code, applied):
     service = Service()
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
     prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or answer)
+    responses = iter(("yes", answer))
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or next(responses))
     assert run_cli(_args("install", "skill"), service) == code
-    assert len(prompts) == 1
-    assert (len(service.calls) == 2) is applied
+    assert len(prompts) == 2
+    assert service.calls[:2] == [
+        ("plan", "skill", None, False), ("plan", "skill", None, True)
+    ]
+    assert (len(service.calls) == 3) is applied
+
+
+def test_interactive_install_displays_safe_warning_and_exact_review_before_apply(
+    capsys, monkeypatch
+):
+    service = Service()
+    answers = iter(("yes", "yes"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_args("install", "skill"), service) == 0
+
+    output = capsys.readouterr().out
+    for expected in (
+        "Organization: team-7", "Version: 2", "scripts/setup.sh [executable]",
+        "Install uv", "No Windows", "shell-network", "Uses the network.",
+        "Warning acknowledgement: accepted",
+    ):
+        assert expected in output
+    assert "RAW_SECRET" not in output
+    assert service.calls[-1][0] == "apply"
+
+
+def test_piped_human_install_renders_plan_without_acknowledging_or_applying(
+    capsys, monkeypatch
+):
+    service = Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+
+    assert run_cli(_args("install", "skill"), service) == 6
+
+    output = capsys.readouterr()
+    assert "scripts/setup.sh" in output.out
+    assert "noninteractive install" in output.err
+    assert service.calls == [("plan", "skill", None, False)]
 
 
 def test_noninteractive_install_and_uninstall_refuse_implicit_approval(monkeypatch):
@@ -82,7 +162,7 @@ def test_noninteractive_install_and_uninstall_refuse_implicit_approval(monkeypat
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
     assert run_cli(_args("install", "skill"), service) == 6
     assert run_cli(_args("uninstall", "skill"), service) == 6
-    assert service.calls == [("plan", "skill", None)]
+    assert service.calls == [("plan", "skill", None, False)]
 
 
 def test_installed_and_confirmed_uninstall(capsys):

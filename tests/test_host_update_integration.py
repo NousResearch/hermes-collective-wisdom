@@ -129,8 +129,10 @@ update_reviewer = UpdateReviewer(client, state, update_receipts, host, lambda: d
 updater = UpdateExecutor(client, state, update_receipts, update_reviewer, host, lambda: dict(owner))
 
 class Service:
-    def install_plan(self, reference, *, update_mode=None):
-        return install_reviewer.plan(reference, update_mode=update_mode)
+    def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
+        return install_reviewer.plan(
+            reference, update_mode=update_mode, accept_warnings=accept_warnings
+        )
     def install_apply(self, receipt, *, accept_partial=False):
         return installer.apply(receipt, accept_partial=accept_partial)
     def installed_setup_inspect(self, skill_id, *, version=None):

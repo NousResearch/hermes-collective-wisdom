@@ -38,8 +38,10 @@ jobs:
       - name: Test
         run: python -m pytest
 
-      - name: Test Desktop SDK handoffs
-        run: node --experimental-vm-modules --test tests/desktop/plugin.test.mjs
+      - name: Test Desktop management workflows
+        run: |
+          npm ci --ignore-scripts
+          npm test
 
       - name: Build distributions
         run: python -m build

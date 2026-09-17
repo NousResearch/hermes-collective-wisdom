@@ -33,14 +33,15 @@ Allowed implementation states are `Planned`, `In progress`, `Implemented`, and `
 
 ## Current Delivery Scope — Option 1
 
-The approved initial delivery is stock-Agent-compatible native workflows and an
-external Desktop SDK handoff page. No host source changes, native-context HTTP
-bridge, new daemon or separate authentication system. Private review and approval
-stay in native workflows; copying a command does not execute or approve it.
-Dashboard SDK work and full embedded UI parity are deferred and do not block this
-initial delivery. The M0-M12 records below retain the full target inventory, not
-all acceptance requirements for this reduced scope. Prior modified-host results
-do not establish stock compatibility. See [TESTING.md](TESTING.md) for evidence.
+The approved delivery is stock-Agent-compatible native workflows and external
+Desktop management pages. The former command-copy guide is superseded by Catalog,
+Installed, Activity & Settings, and Contributions using shared backend workflows.
+No host source changes, native-session HTTP bridge, new daemon or separate auth.
+Exact review and approval remain mandatory in every surface. Dashboard UI and full
+six-surface parity are deferred. The M0-M12 records below retain the broader target
+inventory, not all acceptance requirements for this bounded slice. See
+[Desktop verification](TESTING.md#desktop-management) for implementation, automated
+and live evidence separately; it does not claim draft-editor/setup/recovery parity.
 
 ## Historical Full-Parity Release Boundaries
 
@@ -123,6 +124,13 @@ Destination / scope: local CLI/TUI update policy, deferral, mute, offline synchr
 ## M5 - Contribution And Publication (8 SP)
 
 Destination / scope: local preparation and release direct/moderated submission with durable publication state.
+
+The plugin-side package lifecycle now supports native Hermes skill resources and
+mode-bound exact review with a 10 MiB aggregate payload budget. Human warning
+acceptance is scoped to exact scanner evidence and operation; preparation remains
+local-only. Gateway/Portal compatibility beyond the older instruction-only
+contract is a separate dependency; this plugin change does not establish live
+publication or installation acceptance.
 
 | ID | Feature | SP | Depends | Source | Acceptance | Impl | Auto | Live |
 | --- | --- | ---: | --- | --- | --- | --- | --- | --- |

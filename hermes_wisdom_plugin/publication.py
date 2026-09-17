@@ -20,6 +20,7 @@ from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomNotFound, WisdomValidationError,
 )
 from .package import (
+    MAX_TREE_BYTES,
     read_validated_package_files,
     source_fingerprint,
     verify_content_files,
@@ -90,12 +91,18 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             return False
 
     @staticmethod
-    def _receipt_revision(draft: dict[str, Any], policy: Any) -> str:
+    def _receipt_revision(
+        draft: dict[str, Any], policy: Any,
+        scan_fingerprint: str,
+        warning_acceptance: dict[str, Any] | None = None,
+    ) -> str:
         return json.dumps(
             {
                 "local_updated_at": draft["updated_at"],
                 "publication_mode": _value(policy, "publication_mode"),
                 "policy_version": _value(policy, "version"),
+                "scan_fingerprint": scan_fingerprint,
+                "warning_acceptance": warning_acceptance,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -111,8 +118,57 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             raise WisdomAuthError("Collective Wisdom publication policy owner changed")
         return policy
 
+    @staticmethod
+    def _scan_fingerprint(prepared: dict[str, Any]) -> str:
+        return sha256_address(
+            json.dumps(
+                prepared.get("local_scan"), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=True,
+            ).encode()
+        )
+
+    def _require_scan_fingerprint(
+        self, prepared: dict[str, Any], expected: object
+    ) -> str:
+        fingerprint = self._scan_fingerprint(prepared)
+        if not isinstance(expected, str) or fingerprint != expected:
+            raise WisdomConflict("The scanner findings changed; review them again")
+        return fingerprint
+
+    def _security_acceptance(
+        self, prepared: dict[str, Any], *, accept_warnings: bool,
+        expected: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Require exact, operation-scoped consent for advisory scanner findings."""
+
+        security = prepared.get("security_check") or {}
+        if security.get("upload_allowed") is True:
+            if expected is not None:
+                raise WisdomConflict("The scanner findings changed; review them again")
+            return None
+        if security.get("local_status") != "warning_required":
+            raise WisdomConflict(
+                str(security.get("summary") or "Local security checks must complete before sharing")
+            )
+        acceptance = {
+            "accepted": True,
+            "operation": "publication",
+            "content_hash": prepared["hashes"]["content"],
+            "scan_fingerprint": self._scan_fingerprint(prepared),
+        }
+        if expected is not None:
+            if acceptance != expected:
+                raise WisdomConflict("The scanner findings changed; review them again")
+            return acceptance
+        if not accept_warnings:
+            raise WisdomConflict(
+                "security scanner warnings require explicit acknowledgement before sharing review"
+            )
+        return acceptance
+
     def review(
-        self, draft_id: str, *, may_apply: Callable[[], bool] | None = None,
+        self, draft_id: str, *, accept_warnings: bool = False,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Show all exact local facts and create no publication side effect."""
 
@@ -128,25 +184,29 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         draft = self.store.draft(draft_id)
         if draft is None or draft.get("owner") != owner or draft.get("state") != "prepared":
             raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
-        security = prepared.get("security_check") or {}
-        if security.get("upload_allowed") is not True:
-            raise WisdomConflict(
-                str(security.get("summary") or "Local security checks must complete before sharing")
-            )
+        warning_acceptance = self._security_acceptance(
+            prepared, accept_warnings=accept_warnings
+        )
+        scan_fingerprint = self._scan_fingerprint(prepared)
         policy = self._policy(owner, may_apply)
         self._require_current(may_apply)
         receipt = self.store.save_receipt(
             draft_id=draft_id,
-            server_revision=self._receipt_revision(draft, policy),
+            server_revision=self._receipt_revision(
+                draft, policy, scan_fingerprint, warning_acceptance
+            ),
             content_hash=prepared["hashes"]["content"],
             description_hash=prepared["hashes"]["author_description"],
             manifest_hash=prepared["hashes"]["package_manifest"],
         )
+        prepared = self._with_local_slug(prepared)
         return {
             **prepared,
             "receipt": receipt,
             "publication_mode": _value(policy, "publication_mode"),
             "policy_version": _value(policy, "version"),
+            "scan_fingerprint": scan_fingerprint,
+            "warning_acceptance": warning_acceptance,
             "authorization_expires_at": (
                 datetime.now(timezone.utc) + REVIEW_TTL
             ).isoformat(),
@@ -155,6 +215,17 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 "owner confirmation; the Gateway alone chooses direct or moderated handling."
             ),
         }
+
+    def _with_local_slug(self, review: dict[str, Any]) -> dict[str, Any]:
+        """Carry the source directory slug as a non-opaque display fallback."""
+
+        if isinstance(review.get("slug"), str) and review["slug"].strip():
+            return review
+        skill_id = review.get("skill_id")
+        local = self.store.local_skill(str(skill_id)) if skill_id else None
+        canonical_path = (local or {}).get("canonical_path")
+        slug = Path(str(canonical_path)).name.strip() if canonical_path else ""
+        return {**review, **({"slug": slug} if slug else {})}
 
     def _review_stalled_operation(
         self, operation: dict[str, Any], owner: dict[str, str], *,
@@ -181,6 +252,11 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             )
         if str(_value(remote, "state")) not in _PUBLISHABLE:
             raise WisdomConflict("Authoritative publication state must be reconciled first")
+        saved_review = payload.get("review")
+        saved_review = saved_review if isinstance(saved_review, dict) else {}
+        self._require_scan_fingerprint(
+            saved_review, payload.get("scan_fingerprint")
+        )
         policy = self._policy(owner, may_apply)
         if self.store.draft(payload["local_draft_id"]) is None:
             raise WisdomNotFound("Prepared publication draft not found")
@@ -192,8 +268,9 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             description_hash=payload["hashes"]["author_description"],
             manifest_hash=payload["hashes"]["package_manifest"],
         )
+        saved_review = self._with_local_slug(payload.get("review") or {})
         return {
-            **(payload.get("review") or {}),
+            **saved_review,
             "state": "policy_review_required",
             "draft_id": payload["local_draft_id"],
             "operation_id": operation["id"],
@@ -217,6 +294,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 "remote_revision": _value(remote, "updatedAt"),
                 "publication_mode": _value(policy, "publication_mode"),
                 "policy_version": _value(policy, "version"),
+                "scan_fingerprint": operation["payload"].get("scan_fingerprint"),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -246,6 +324,10 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             "package_manifest": receipt["manifest_hash"],
         }
         policy = self._policy(owner, may_apply)
+        try:
+            receipt_revision = json.loads(str(receipt["server_revision"]))
+        except (TypeError, ValueError) as exc:
+            raise WisdomConflict("Publication review receipt is invalid") from exc
         if draft.get("state") != "prepared":
             operation = self._verified_existing_operation(
                 receipt, draft, expected, policy, may_apply=may_apply
@@ -255,11 +337,13 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         prepared = self.reviewer.reopen(
             str(draft["id"]), may_apply=may_apply
         )
-        security = prepared.get("security_check") or {}
-        if security.get("upload_allowed") is not True:
-            raise WisdomConflict(
-                str(security.get("summary") or "Current local security checks block sharing")
-            )
+        self._require_scan_fingerprint(
+            prepared, receipt_revision.get("scan_fingerprint")
+        )
+        warning_acceptance = receipt_revision.get("warning_acceptance")
+        self._security_acceptance(
+            prepared, accept_warnings=False, expected=warning_acceptance
+        )
         skill = self.store.local_skill(str(draft["skill_id"]))
         if skill is None:
             raise WisdomNotFound("Local publication source not found")
@@ -271,8 +355,15 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             raise WisdomConflict(
                 "The package changed after review. Review it again before submitting"
             )
-        if receipt["server_revision"] != self._receipt_revision(draft, policy):
+        if receipt["server_revision"] != self._receipt_revision(
+            draft, policy, receipt_revision["scan_fingerprint"], warning_acceptance
+        ):
             raise WisdomConflict("The package or team publication policy changed; review it again")
+        prepared = {
+            **prepared,
+            "scan_fingerprint": receipt_revision["scan_fingerprint"],
+            "warning_acceptance": warning_acceptance,
+        }
         return draft, prepared, owner, policy, None
 
     def _verified_existing_operation(
@@ -291,6 +382,20 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             raise WisdomConflict(
                 "This contribution already advanced; reopen its publication status"
             )
+        try:
+            receipt_revision = json.loads(str(receipt["server_revision"]))
+        except (TypeError, ValueError) as exc:
+            raise WisdomConflict("Publication review receipt is invalid") from exc
+        payload = operation["payload"]
+        saved_review = payload.get("review")
+        saved_review = saved_review if isinstance(saved_review, dict) else {}
+        scan_fingerprint = payload.get("scan_fingerprint")
+        if (
+            not isinstance(scan_fingerprint, str)
+            or receipt_revision.get("scan_fingerprint") != scan_fingerprint
+            or self._scan_fingerprint(saved_review) != scan_fingerprint
+        ):
+            raise WisdomConflict("The scanner findings changed; review them again")
         remote_id = operation["payload"].get("remote_draft_id")
         if not remote_id:
             raise WisdomConflict("Publication draft identity is unavailable")
@@ -313,7 +418,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         raw: list[tuple[str, str, bytes]], owner: dict[str, str]
     ) -> tuple[ObjectSet, str]:
         objects = ObjectSet()
-        tree = build_tree_from_snapshot(raw, objects, max_object_bytes=262_144)
+        tree = build_tree_from_snapshot(raw, objects, max_object_bytes=MAX_TREE_BYTES)
         commit = build_commit(
             tree,
             [],
@@ -376,13 +481,15 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 "version": _value(policy, "version"),
             },
             "hashes": prepared["hashes"],
+            "scan_fingerprint": self._scan_fingerprint(prepared),
             "objects": encoded_objects,
             "request": request,
             "review": {
                 key: prepared.get(key)
                 for key in (
                     "files", "security_check", "professionalism_check", "source_hash",
-                    "description", "system_specification",
+                    "description", "system_specification", "local_scan",
+                    "scan_fingerprint", "warning_acceptance",
                 )
             },
         }
@@ -413,6 +520,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             receipt_id, may_apply=may_apply
         )
         reviewed_hashes = dict(prepared.get("hashes") or {})
+        expected_scan_fingerprint = prepared.get("scan_fingerprint")
+        warning_acceptance = prepared.get("warning_acceptance")
         entity_id = str(draft["skill_id"])
         lock_key = "publication:" + entity_id
         self._require_current(may_apply)
@@ -442,14 +551,13 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 self._require_current(may_apply)
                 if current_owner != owner:
                     raise WisdomAuthError("Collective Wisdom publication owner changed")
-                security = prepared.get("security_check") or {}
-                if security.get("upload_allowed") is not True:
-                    raise WisdomConflict(
-                        str(
-                            security.get("summary")
-                            or "Current local security checks block sharing"
-                        )
-                    )
+                self._security_acceptance(
+                    prepared, accept_warnings=False, expected=warning_acceptance
+                )
+                self._require_scan_fingerprint(
+                    prepared, expected_scan_fingerprint
+                )
+                prepared = {**prepared, "warning_acceptance": warning_acceptance}
                 skill = self.store.local_skill(str(draft["skill_id"]))
                 if skill is None or source_fingerprint(
                     Path(str(skill["canonical_path"]))
@@ -488,6 +596,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         if existing is not None:
             raise WisdomConflict("This private draft already exists; reopen its current review")
         reviewed_hashes = dict(prepared.get("hashes") or {})
+        expected_scan_fingerprint = prepared.get("scan_fingerprint")
+        warning_acceptance = prepared.get("warning_acceptance")
         entity_id = str(draft["skill_id"])
         lock_key = "publication:" + entity_id
         self._require_current(may_apply)
@@ -500,11 +610,13 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             self._require_current(may_apply)
             if current_owner != owner:
                 raise WisdomAuthError("Collective Wisdom publication owner changed")
-            security = prepared.get("security_check") or {}
-            if security.get("upload_allowed") is not True:
-                raise WisdomConflict(
-                    str(security.get("summary") or "Current local security checks block sharing")
-                )
+            self._security_acceptance(
+                prepared, accept_warnings=False, expected=warning_acceptance
+            )
+            self._require_scan_fingerprint(
+                prepared, expected_scan_fingerprint
+            )
+            prepared = {**prepared, "warning_acceptance": warning_acceptance}
             skill = self.store.local_skill(str(draft["skill_id"]))
             if skill is None or source_fingerprint(
                 Path(str(skill["canonical_path"]))

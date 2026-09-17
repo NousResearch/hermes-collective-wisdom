@@ -36,6 +36,12 @@ status/reopen and trusted Portal links edit the original card. Native update `No
 explicit command reopen are implemented locally; this is not cadence suppression.
 `--accept-partial` acknowledges setup/compatibility limitations; it never
 authorizes setup commands. Installed files are not proof of verified readiness.
+`--accept-warnings` is a separate, exact-review acknowledgement for unchanged
+host scanner findings. It is bound to the owner, operation, package content and
+modes, and scanner evidence. New findings or bytes require another review;
+automatic updates never supply this acknowledgement. Scanner unavailability,
+credentials/private keys, integrity/path failures, and authoritative server
+policy remain hard stops.
 An update clears readiness across versions even when setup guidance bytes are
 identical; version-two setup/verification must be reviewed separately. The
 recorded update policy does not start a background update worker; mutation occurs only
@@ -135,6 +141,28 @@ for local/pinned-host evidence and release limits.
 
 Preparation may include a frozen, editable “Publisher usage (client-reported)”
 section before hashing. Upload/retry never adds or refreshes those claims.
+
+Terminal `suggest` defaults to a concise local-draft summary. On a TTY it offers
+file/warning review, private draft editing, continuation to sharing review,
+or keeping the draft. The sharing review displays destination, visibility, server
+moderation mode, and warning acknowledgement before an exact final confirmation.
+Non-TTY use never prompts or approves; it prints resume commands. `--json` is the
+stable machine surface and never opens menus. Complete editable bytes remain an
+explicit `prepared inspect ... --json` export rather than ordinary human output.
+
+`hermes wisdom prepared edit <draft-id>` edits a disposable copy of the draft's
+`SKILL.md` using your configured `VISUAL` or `EDITOR`. A successful edit is saved
+against the inspected draft hashes; other files and the original skill are left
+unchanged. Editing never invokes the packaged scripts. Use `prepared review` to
+recheck the saved draft, and `publication review` for a fresh sharing receipt.
+
+Native package preparation preserves ordinary skill files and executable script
+intent under a 10 MiB aggregate payload budget plus a separate path/tree metadata
+budget. Opaque resources are not opened, extracted, executed, or silently passed
+to model review. Gateways enforcing the older instruction-only limits reject
+these expanded packages independently of local preparation. Keep the complete
+draft until Gateway/Portal compatibility is available; do not drop files or treat
+local acceptance as successful service publication.
 
 ## Queued recommendation assessments
 

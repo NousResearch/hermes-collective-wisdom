@@ -16,9 +16,12 @@ import uuid
 from contextlib import contextmanager
 
 from .errors import WisdomAuthError, WisdomConflict, WisdomValidationError
+from .package import MAX_METADATA_BYTES
 
 REVIEW_SECONDS = 24 * 60 * 60
-_MAX_PLAN_BYTES = 512 * 1024
+# Inventory paths may consume the complete metadata budget and JSON escaping can
+# expand each non-ASCII code point. Receipts carry hashes/facts, never file bodies.
+_MAX_PLAN_BYTES = 6 * MAX_METADATA_BYTES + 2 * 1024 * 1024
 _RECEIPT = re.compile(r"wip_[0-9a-f]{32}", re.ASCII)
 
 
