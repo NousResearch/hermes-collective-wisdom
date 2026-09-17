@@ -120,21 +120,26 @@ before labels, and expose details/assessments with Show/Hide controls. Do not em
 an extra success message or assessment wall when an existing card can be updated.
 Not Now records deferral, not rejection; manual browse/review remains available.
 
-## Desktop Handoffs and Deferred UI Backend
+## Desktop Management Adapter
 
-The initial Desktop surface is an external SDK page at `desktop/plugin.js`,
-reachable through sidebar and palette contributions. It uses SDK components,
-read-only display context and explicit clipboard actions; it does not call a
-Wisdom HTTP API, execute commands or store authoritative workflow state.
+`desktop/plugin.js` uses the external SDK's navigation, components, React Query,
+and `ctx.rest`. `dashboard/plugin_api.py` mounts beneath the existing authenticated
+plugin namespace; it is not a Dashboard UI or a new server. The adapter constructs
+the existing `InvocationService` afresh in the selected host profile scope.
 
-Commands are static shell-safe examples. Profile display is advisory and never
-interpolated into commands. Native execution must occur on the intended host and
-profile, where owner checks and fresh full review/approval remain mandatory.
-Clipboard failure is visible; copying never means execution or consent.
+Opaque page handles bind fresh account/enrollment ownership and expire after
+15 minutes. Profile, connection, unmount and disposal invalidate renderer state;
+the server rechecks ownership and the plugin enable gate after slow reads and
+before effects. Handles are not Hermes session identities or action consent.
+Install/update/publication reuse the existing exact receipts and executors;
+removal reviews bind an owner-local installation snapshot. No arbitrary command
+endpoint, model-authorized action, or setup execution is exposed.
 
-The proposed shared native-context HTTP backend is withdrawn. Full embedded
-private editing/actions and Dashboard SDK work are deferred. No Agent source
-changes, private host-manager lookup or separate service is part of this scope.
+The earlier native-context HTTP bridge remains withdrawn. The current adapter
+does not discover a private plugin manager, forge admitted conversations, or add
+authentication infrastructure. Host compatibility is explicit in
+[HOST-API.md](HOST-API.md#desktop-management-host-boundary). Draft editing, setup
+execution, advanced recovery UI and Dashboard UI remain outside this slice.
 
 ## Release Boundary
 

@@ -49,6 +49,9 @@ def test_built_distributions_contain_native_and_python_surfaces(tmp_path: Path) 
         assert len(roots) == 1, "Source distribution must have one package root"
         sdist_root = roots.pop()
         assert f"{sdist_root}/plugin.yaml" in sdist_paths
+        assert f"{sdist_root}/dashboard/manifest.json" in sdist_paths
+        assert f"{sdist_root}/dashboard/plugin_api.py" in sdist_paths
+        assert f"{sdist_root}/desktop/plugin.js" in sdist_paths
         assert f"{sdist_root}/__init__.py" in sdist_paths
         assert f"{sdist_root}/hermes_wisdom_plugin/__init__.py" in sdist_paths
 

@@ -2,11 +2,13 @@
 
 ## Agreed Boundaries
 
-The selected initial delivery is stock-Agent-compatible native workflows and an
-external Desktop SDK handoff page. No Agent changes or shared native-context HTTP
-backend. Dashboard SDK work is lower priority; full embedded/six-surface parity is
-deferred. Keep one workflow implementation. Older milestone and bridge records
-below are historical and do not authorize host changes or block this initial scope.
+The selected delivery is stock-Agent-compatible native workflows and external
+Desktop management pages calling the existing plugin REST namespace. This replaces
+the initial command-copy guide: passthrough means invoking shared workflows and
+rendering their results, not asking users to run CLI commands themselves.
+No Agent changes or shared native-session HTTP bridge. Dashboard SDK work and full
+six-surface parity remain deferred. Keep one workflow implementation. Older milestone
+and bridge records below are historical and do not authorize host changes.
 No legacy profiles need migration; only the developers used the reverted core
 feature. A fresh demo reset is a separately authorized operational step.
 

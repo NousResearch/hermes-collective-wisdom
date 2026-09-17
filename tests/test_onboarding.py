@@ -114,6 +114,67 @@ def test_install_entitlement_failure_happens_before_gateway_network(tmp_path):
     assert store.get_metadata("terminal_setup") is None
 
 
+def test_revocation_during_authorization_stops_before_reservation_or_network(tmp_path):
+    account, store, client, onboarding = runtime(tmp_path)
+    current = {"value": True}
+    original_credentials = account.credentials
+
+    def credentials(scope="wisdom:read"):
+        result = original_credentials(scope)
+        if scope == "wisdom:install":
+            current["value"] = False
+        return result
+
+    account.credentials = credentials
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        onboarding.setup(True, may_apply=lambda: current["value"])
+
+    assert client.calls == []
+    assert store.get_metadata("terminal_setup") is None
+
+
+def test_revocation_during_capability_io_stops_before_identity_registration(tmp_path):
+    _account, store, client, onboarding = runtime(tmp_path)
+    current = {"value": True}
+    original_capability = client.capability
+
+    def capability():
+        result = original_capability()
+        current["value"] = False
+        return result
+
+    client.capability = capability
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        onboarding.setup(True, may_apply=lambda: current["value"])
+
+    assert [call[0] for call in client.calls] == ["capability"]
+    assert store.get_metadata("terminal_setup")["state"] == "registering"
+    assert store.existing_installation_identity() is None
+
+
+def test_revocation_during_identity_conflict_prevents_rotation_and_retry(tmp_path):
+    _account, store, client, onboarding = runtime(tmp_path)
+    current = {"value": True}
+
+    def conflict_and_revoke(_installation_id):
+        current["value"] = False
+        raise WisdomConflict("conflict", code="identity_conflict")
+
+    client.register_effects = [conflict_and_revoke]
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        onboarding.setup(True, may_apply=lambda: current["value"])
+
+    register_calls = [call for call in client.calls if call[0] == "register"]
+    assert len(register_calls) == 1
+    record = store.get_metadata("terminal_setup")
+    assert record["installation_id"] == register_calls[0][1]
+    assert record.get("conflict_rotated") is None
+    assert store.existing_installation_identity() is None
+
+
 def test_setup_reserves_before_network_and_records_no_credentials(tmp_path):
     account, store, _client, onboarding = runtime(tmp_path)
 

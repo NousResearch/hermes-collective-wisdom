@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .errors import WisdomAuthError, WisdomConflict, WisdomValidationError
 
@@ -41,6 +41,11 @@ def _model_dict(value: object, label: str) -> dict[str, Any]:
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _require_current(may_apply: Callable[[], bool] | None) -> None:
+    if may_apply is not None and may_apply() is not True:
+        raise WisdomAuthError("Collective Wisdom review is no longer current")
 
 
 class Onboarding:
@@ -222,8 +227,11 @@ class Onboarding:
             )
         return rotated
 
-    def setup(  # pylint: disable=too-many-locals
-        self, accept_disclosure: bool
+    def setup(  # pylint: disable=too-many-locals,too-many-statements
+        self,
+        accept_disclosure: bool,
+        *,
+        may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Explicitly consent, discover capability, and register this installation."""
         if accept_disclosure is not True:
@@ -232,6 +240,7 @@ class Onboarding:
                 code="disclosure_required",
             )
 
+        _require_current(may_apply)
         lock_owner = self.store.acquire_operation_lock(
             _LOCK_KEY, ttl_seconds=_SETUP_LOCK_TTL_SECONDS
         )
@@ -241,12 +250,17 @@ class Onboarding:
                 code="setup_in_progress",
             )
         try:
+            _require_current(may_apply)
             owner = self._authorize_setup()
+            _require_current(may_apply)
             previous = self._record()
-            if previous and self.status()["configured"] is True:
+            status = self.status() if previous else None
+            _require_current(may_apply)
+            if previous and status and status["configured"] is True:
                 operation_id = _text(previous.get("operation_id"))
                 operation = self.store.operation(operation_id) if operation_id else None
                 if operation and operation.get("state") == "pending":
+                    _require_current(may_apply)
                     with self.store.transaction() as db:
                         db.execute(
                             "UPDATE operation_journal SET phase='active',state='done',updated_at=? "
@@ -254,11 +268,15 @@ class Onboarding:
                             (_now(), operation_id, _OPERATION_KIND),
                         )
                 result = self.status()
+                _require_current(may_apply)
                 result["disclosure"] = WISDOM_DISCLOSURE
                 return result
 
+            _require_current(may_apply)
             record, operation_id = self._reserve(owner, previous)
+            _require_current(may_apply)
             capability = _model_dict(self.client.capability(), "capability response")
+            _require_current(may_apply)
             features = capability.get("features")
             if not isinstance(features, list) or not all(
                 isinstance(feature, str) for feature in features
@@ -269,19 +287,23 @@ class Onboarding:
             with self.store.transaction() as db:
                 self._assert_current_attempt(db, lock_owner, record)
 
+            _require_current(may_apply)
             try:
                 registered = _model_dict(
                     self.client.register_identity(record["installation_id"]),
                     "installation identity response",
                 )
             except WisdomConflict as exc:
+                _require_current(may_apply)
                 if exc.code != "identity_conflict" or record.get("conflict_rotated") is True:
                     raise
                 record = self._rotate_after_conflict(record, operation_id, lock_owner)
+                _require_current(may_apply)
                 registered = _model_dict(
                     self.client.register_identity(record["installation_id"]),
                     "installation identity response",
                 )
+            _require_current(may_apply)
 
             if (
                 registered.get("installation_id") != record["installation_id"]
@@ -292,6 +314,7 @@ class Onboarding:
                 )
 
             fresh_owner = self._authorize_setup()
+            _require_current(may_apply)
             if fresh_owner != owner:
                 raise WisdomAuthError("Collective Wisdom account changed during setup")
 
@@ -301,6 +324,7 @@ class Onboarding:
                 "capabilities": {"features": features},
                 "activated_at": _now(),
             }
+            _require_current(may_apply)
             with self.store.transaction() as db:
                 self._assert_current_attempt(db, lock_owner, record)
                 self.store.activate_installation_identity(
@@ -313,6 +337,7 @@ class Onboarding:
                     (_now(), operation_id, _OPERATION_KIND),
                 )
             result = self.status()
+            _require_current(may_apply)
             result["disclosure"] = WISDOM_DISCLOSURE
             return result
         finally:

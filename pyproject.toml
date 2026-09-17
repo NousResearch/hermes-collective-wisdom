@@ -20,6 +20,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "build==1.6.1",
+  "fastapi==0.133.1",
+  "httpx==0.28.1",
   "pylint==4.0.8",
   "pytest==9.1.1",
 ]

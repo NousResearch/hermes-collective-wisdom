@@ -1,7 +1,7 @@
 # Release Implementation Sequence: Extract, Adapt, and Verify
 
-The approved initial scope is native workflows on unmodified Agent plus an
-external Desktop SDK handoff page. Dashboard and full embedded parity are deferred.
+The approved initial scope is native workflows on unmodified Agent plus
+external Desktop management pages. Dashboard and full six-surface parity are deferred.
 No Agent changes or replacement backend are allowed. The historical full-parity
 sequence below is reference, not the current release gate. M0 is complete. The original planning
 baseline assigned 63 points to M1-M8 and 31 points to M9-M12; investigation and
@@ -257,7 +257,7 @@ a runtime contract pin just because a repository's main moved.
 - Live acceptance uses real commands, lifecycle facts and callbacks on all four
   surfaces. Reset/restart/publish actions require specific authorization; no
   incidental demo or production changes are part of source extraction.
-- Option 1 requires installed Desktop SDK handoff acceptance and service-backed
+- Option 1 requires installed Desktop SDK management-page acceptance and service-backed
   native workflow evidence on explicitly agreed targets. Dashboard and rich
   embedded parity are deferred; no host source changes are authorized. Local
   scripts/mocks do not establish live acceptance. Record immutable revisions and

@@ -199,13 +199,23 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         return self.account.credentials(scope="wisdom:publish")
 
-    def setup(self, *, accept_disclosure: bool):
+    def setup(
+        self,
+        *,
+        accept_disclosure: bool,
+        may_apply: Callable[[], bool] | None = None,
+    ):
         """Create state only after explicit terminal acceptance and scope checks."""
         if not accept_disclosure:
             raise WisdomValidationError("Collective Wisdom requires disclosure acceptance")
+        _require_current(may_apply)
         self._install_credentials()
-        result = self._open().setup(accept_disclosure=True)
+        _require_current(may_apply)
+        result = self._open().setup(
+            accept_disclosure=True, may_apply=may_apply
+        )
         self.check_owner()
+        _require_current(may_apply)
         return result
 
     def status(self, *, include_operations=False):
@@ -314,15 +324,26 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             self._installation_owner,
         )
 
-    def suggest(self, skill_name, *, allow_model_review=False):
+    def suggest(
+        self,
+        skill_name,
+        *,
+        allow_model_review=False,
+        may_apply: Callable[[], bool] | None = None,
+    ):
         """Prepare one exact owner-private local draft without submission authority."""
 
+        _require_current(may_apply)
         owner = self._installation_owner()
+        _require_current(may_apply)
         self._onboarding.store.bind_qualification_owner(owner)
         result = self._contribution_reviewer().prepare(
-            skill_name, allow_model_review=bool(allow_model_review)
+            skill_name,
+            allow_model_review=bool(allow_model_review),
+            may_apply=may_apply,
         )
         self.check_owner()
+        _require_current(may_apply)
         if owner != self._installation_owner():
             raise WisdomAuthError("Collective Wisdom contribution owner changed")
         return result
@@ -1093,15 +1114,25 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Inspect private installation state only through the terminal entry."""
         return self._installation_services()[1].installed()
 
-    def uninstall(self, skill_id):
-        """Perform the removal already confirmed by the terminal controller."""
-        return self._installation_services()[1].uninstall(skill_id)
+    def uninstall(
+        self, skill_id, *, may_apply: Callable[[], bool] | None = None
+    ):
+        """Perform one removal while its calling review remains current."""
+        result = self._installation_services()[1].uninstall(
+            skill_id, may_apply=may_apply
+        )
+        self.check_owner()
+        _require_current(may_apply)
+        return result
 
     def require_setup(self):
         """Deny discovery before creating state or issuing a request."""
         self.check_owner()
         if not (self.root / "wisdom.db").is_file():
-            raise WisdomValidationError("Run hermes wisdom setup in your terminal first")
+            raise WisdomValidationError(
+                "Run hermes wisdom setup in your terminal first",
+                code="setup_required",
+            )
         self._open().require_setup()
 
     def _discovery(self):

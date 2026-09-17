@@ -117,19 +117,34 @@ class InstallExecutor:
         finally:
             self.store.release_operation_lock(skill_id, lock)
 
-    def uninstall(self, skill_id: str) -> dict:
+    def uninstall(
+        self,
+        skill_id: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
         """Exclude setup starters while beginning recoverable removal."""
+        self._require_current(may_apply)
         with managed_operation_guard(Path(self.store.root), skill_id):
-            return self._uninstall(skill_id)
+            return self._uninstall(skill_id, may_apply=may_apply)
 
-    def _uninstall(self, skill_id: str) -> dict:
+    def _uninstall(
+        self,
+        skill_id: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
         """Remove one owner-managed skill into recoverable hidden storage."""
+        self._require_current(may_apply)
         owner = self._owner()
+        self._require_current(may_apply)
         lock = self.store.acquire_operation_lock(skill_id)
         if not lock:
             raise PackagePolicyError("another managed operation is already active for this skill")
         try:
+            self._require_current(may_apply)
             self._assert_owner(owner)
+            self._require_current(may_apply)
             conflicting = self._pending("install", skill_id)
             if conflicting or self._pending("update", skill_id):
                 raise PackagePolicyError("another managed operation is pending for this skill")
@@ -143,8 +158,12 @@ class InstallExecutor:
                     payload["trash_path"] = str(
                         self._trash_path(str(pending["id"]), payload["slug"])
                     )
+                    self._require_current(may_apply)
                     self.store.replace_operation_payload(str(pending["id"]), payload)
-                return self._resume_uninstall(str(pending["id"]), payload, lock)
+                    self._require_current(may_apply)
+                return self._resume_uninstall(
+                    str(pending["id"]), payload, lock, may_apply=may_apply
+                )
             installation = self.store.installation(skill_id)
             if not installation:
                 raise PackagePolicyError("managed installation not found")
@@ -157,6 +176,7 @@ class InstallExecutor:
                         return result
                 raise PackagePolicyError("managed installation is already inactive")
             target = self._validated_record_target(installation, owner)
+            self._require_current(may_apply)
             payload = {
                 "owner": owner,
                 "receipt": None,
@@ -168,10 +188,15 @@ class InstallExecutor:
                 "baseline": dict(installation.get("baseline") or {}),
             }
             operation_id = self.store.journal("uninstall", skill_id, "staged", payload)
+            self._require_current(may_apply)
             trash = self._trash_path(operation_id, payload["slug"])
             payload["trash_path"] = str(trash)
+            self._require_current(may_apply)
             self.store.replace_operation_payload(operation_id, payload)
-            return self._resume_uninstall(operation_id, payload, lock)
+            self._require_current(may_apply)
+            return self._resume_uninstall(
+                operation_id, payload, lock, may_apply=may_apply
+            )
         finally:
             self.store.release_operation_lock(skill_id, lock)
 
@@ -479,35 +504,56 @@ class InstallExecutor:
         elif bound != operation_id:
             raise WisdomConflict("Install receipt is already bound to another operation")
 
-    def _resume_uninstall(self, operation_id: str, payload: dict, lock: str) -> dict:
+    def _resume_uninstall(
+        self,
+        operation_id: str,
+        payload: dict,
+        lock: str,
+        *,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict:
+        self._require_current(may_apply)
         operation = self.store.operation(operation_id)
         if not operation:
             raise PackagePolicyError("uninstall recovery journal is missing")
         owner = self._owner()
+        self._require_current(may_apply)
         self._require_payload_owner(payload, owner)
         self.store.assert_operation_lock(payload["skill_id"], lock)
         phase = str(operation["phase"])
         target = Path(payload["target_path"])
         trash = Path(payload["trash_path"])
         self._validate_uninstall_paths(target, trash, owner, operation_id, payload["slug"])
+        self._require_current(may_apply)
         if phase == "staged":
             trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._require_current(may_apply)
             if target.exists() and not trash.exists():
                 _same_filesystem(target, trash.parent)
+                self._require_current(may_apply)
                 self._assert_owner(owner)
+                self._require_current(may_apply)
                 self.store.assert_operation_lock(payload["skill_id"], lock)
+                self._require_current(may_apply)
                 _durable_replace(target, trash)
+                self._require_current(may_apply)
+            self._require_current(may_apply)
             self.store.advance(operation_id, "files_committed")
             phase = "files_committed"
         if phase == "files_committed":
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
+            self._require_current(may_apply)
             self.store.deactivate_install(payload["skill_id"])
+            self._require_current(may_apply)
             self.store.advance(operation_id, "local_ledger_committed")
             phase = "local_ledger_committed"
         if phase == "local_ledger_committed":
             self._assert_owner(owner)
+            self._require_current(may_apply)
             self.store.assert_operation_lock(payload["skill_id"], lock)
+            self._require_current(may_apply)
             try:
                 server = self.client.deactivate_install(
                     owner["installation_id"], payload["skill_id"]
@@ -536,6 +582,7 @@ class InstallExecutor:
                 {"owner": owner, "result": result},
             )
             self.store.advance(operation_id, "gateway_recorded", done=True)
+            self._require_current(may_apply)
             return result
         raise PackagePolicyError(f"unsupported uninstall recovery phase: {phase}")
 
