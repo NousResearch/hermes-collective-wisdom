@@ -171,6 +171,75 @@ def test_one_explicit_hash_bound_confirmation_uses_server_policy(tmp_path: Path,
     assert controller.status(result["operation_id"])["state"] == "done"
 
 
+def test_scanner_warning_requires_exact_publication_acceptance_and_rejects_change(tmp_path: Path):
+    """Publisher warning acceptance is receipt-bound and never rewrites scan evidence."""
+    prepared_reviewer, _source, binding = reviewer(tmp_path, allowed=False)
+    prepared = prepared_reviewer.prepare("reviewed-skill")
+    client = RecordingPublicationClient(binding)
+    controller = PublicationController(
+        prepared_reviewer.store, prepared_reviewer, client, lambda: dict(binding)
+    )
+
+    with pytest.raises(WisdomConflict, match="warning"):
+        controller.review(prepared["draft_id"])
+    assert client.state.calls == Counter()
+
+    review = controller.review(prepared["draft_id"], accept_warnings=True)
+    assert review["warning_acceptance"]["accepted"] is True
+    assert review["local_scan"]["guard"]["allowed"] is False
+    assert client.state.calls == Counter()
+
+    prepared_reviewer.host.scan = lambda _overlay: {
+        "guard": {"allowed": False, "findings": [{"kind": "new-warning"}]}
+    }
+    with pytest.raises(WisdomConflict, match="changed"):
+        controller.submit(review["receipt"])
+    assert client.state.calls == Counter()
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("findings", [{"kind": "new-advisory", "file": "SKILL.md"}]),
+        ("verdict", "allow-with-advisory"),
+        ("summary", "clean with a new advisory"),
+        ("available", False),
+    ],
+)
+def test_clean_publication_receipt_rejects_changed_scan_evidence_before_transport(
+    tmp_path: Path, field, replacement
+):
+    controller, prepared, client, _ = publication(tmp_path)
+    review = controller.review(prepared["draft_id"])
+    original_scan = controller.reviewer.host.scan
+
+    def changed_scan(overlay):
+        scan = original_scan(overlay)
+        scan["guard"][field] = replacement
+        return scan
+
+    controller.reviewer.host.scan = changed_scan
+
+    with pytest.raises(WisdomConflict, match="scanner findings changed"):
+        controller.submit(review["receipt"])
+    assert client.state.calls == Counter()
+
+
+def test_stalled_publication_receipt_binds_saved_clean_scan_fingerprint(tmp_path: Path):
+    controller, prepared, client, _ = publication(tmp_path, mode="moderated")
+    initial = controller.review(prepared["draft_id"])
+    stalled = controller.submit_private_draft(initial["receipt"])
+    fresh = controller.review(stalled["operation_id"])
+    operation = controller.store.operation(stalled["operation_id"])
+    payload = dict(operation["payload"])
+    payload["scan_fingerprint"] = "sha256:" + "0" * 64
+    controller.store.replace_operation_payload(stalled["operation_id"], payload)
+
+    with pytest.raises(WisdomConflict, match="scanner findings changed"):
+        controller.submit(fresh["receipt"])
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+
 def test_private_draft_stops_before_owner_approval_and_requires_fresh_confirmation(tmp_path: Path):
     controller, prepared, client, _ = publication(tmp_path, mode="moderated")
 
@@ -371,7 +440,7 @@ def test_submit_rechecks_source_and_current_upload_guard(tmp_path: Path):
     controller, prepared, client, _ = publication(tmp_path / "guard")
     review = controller.review(prepared["draft_id"])
     controller.reviewer.host.allowed = False
-    with pytest.raises(WisdomConflict, match="security"):
+    with pytest.raises(WisdomConflict, match="scanner findings changed"):
         controller.submit(review["receipt"])
     assert client.state.calls["upload"] == 0
 

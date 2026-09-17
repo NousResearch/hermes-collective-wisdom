@@ -416,6 +416,13 @@ def test_update_methods_share_one_owner_bound_reviewer_and_executor(tmp_path, mo
         "preserve_modified": True,
         "accept_sensitive": True,
         "accept_partial": False,
+        "accept_warnings": False,
+    })
+    assert service.update_plan("skill", accept_warnings=True) == ("plan", "skill", {
+        "preserve_modified": False,
+        "accept_sensitive": False,
+        "accept_partial": False,
+        "accept_warnings": True,
     })
     assert service.update_apply("receipt") == ("apply", "receipt")
 

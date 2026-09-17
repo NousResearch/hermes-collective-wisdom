@@ -335,6 +335,19 @@ def test_snapshot_tree_uses_exact_file_bytes(tmp_path):
     assert before != after and tree != next_tree
 
 
+def test_snapshot_tree_fingerprint_includes_executable_intent(tmp_path):
+    skill = _skill(tmp_path)
+    script = skill / "run.sh"
+    script.write_bytes(b"#!/bin/sh\nexit 0\n")
+    script.chmod(0o600)
+    plain_hash, plain_tree = snapshot_tree(skill)
+    script.chmod(0o700)
+    executable_hash, executable_tree = snapshot_tree(skill)
+    assert plain_hash != executable_hash
+    assert plain_tree["run.sh"].startswith("sha256:")
+    assert executable_tree["run.sh"].startswith("exec:sha256:")
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO unavailable")
 def test_snapshot_tree_rejects_symlinks_and_special_files_without_following(tmp_path):
     skill = _skill(tmp_path)

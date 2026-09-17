@@ -48,13 +48,20 @@ def _hash(body):
 class Host:
     def __init__(self, root):
         self.skills_root = root
+        self.scan_result = {
+            "available": True,
+            "allowed": True,
+            "verdict": "allow",
+            "summary": "clean",
+            "findings": [],
+        }
 
     def validate_target(self, path):
         assert Path(path).is_relative_to(self.skills_root)
 
     def scan(self, path):
         assert Path(path).is_relative_to(self.skills_root)
-        return {"allowed": True, "verdict": "allow", "summary": "clean", "findings": []}
+        return dict(self.scan_result)
 
 
 class Reviewer:
@@ -125,7 +132,10 @@ def executor(tmp_path):
         },
         "preservation": {"action": "none", "destination": None},
         "compatibility": {"outcome": "compatible"},
-        "local_scan": {"allowed": True}, "allowed": True,
+        "local_scan": {
+            "available": True, "allowed": True, "verdict": "allow",
+            "summary": "clean", "findings": [],
+        }, "allowed": True,
         "permitted_actions": ["confirm_update", "recheck"],
     })
     client = Client()
@@ -162,6 +172,94 @@ def test_clean_update_commits_exact_bytes_and_retains_recovery_tree(executor):
     assert result["preserved_copy"] is None
     assert store.installation("skill-1")["version"] == 2
     assert receipts.outcome(plan["receipt"]) == result
+    assert len(client.record_calls) == 1
+
+
+def test_update_rejects_new_affirmative_scan_verdict_at_activation(executor):
+    value, store, client, _receipts, plan, target, _owner = executor
+    calls = 0
+
+    def changed_at_final_boundary(_path):
+        nonlocal calls
+        calls += 1
+        scan = dict(value.host.scan_result)
+        if calls > 1:
+            scan["verdict"] = "allow-with-advisory"
+        return scan
+
+    value.host.scan = changed_at_final_boundary
+
+    with pytest.raises(PackagePolicyError, match="scan changed"):
+        value.apply(plan["receipt"])
+
+    assert target.joinpath("SKILL.md").read_bytes() == V1
+    assert store.installation("skill-1")["version"] == 1
+    assert client.record_calls == []
+
+
+def test_update_recovery_rejects_changed_affirmative_scan_before_swap(
+    executor, monkeypatch
+):
+    from hermes_wisdom_plugin import update_execution
+
+    value, store, client, _receipts, plan, target, _owner = executor
+    original_same_filesystem = update_execution._same_filesystem
+    failed = False
+
+    def interrupt_once(source, destination_parent):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("preservation interrupted")
+        return original_same_filesystem(source, destination_parent)
+
+    monkeypatch.setattr(update_execution, "_same_filesystem", interrupt_once)
+    with pytest.raises(OSError, match="preservation interrupted"):
+        value.apply(plan["receipt"])
+    assert store.pending_operations()[0]["phase"] == "staged"
+
+    value.host.scan_result["findings"] = [
+        {"kind": "new-warning", "file": "SKILL.md"}
+    ]
+    with pytest.raises(PackagePolicyError, match="scan changed"):
+        value.apply(plan["receipt"])
+
+    assert target.joinpath("SKILL.md").read_bytes() == V1
+    assert store.installation("skill-1")["version"] == 1
+    assert client.record_calls == []
+
+
+def test_manual_update_executes_exact_accepted_warning_receipt(executor):
+    value, store, client, receipts, plan, target, _owner = executor
+    scan = {
+        "available": True,
+        "allowed": False,
+        "verdict": "suspicious",
+        "summary": "manual review required",
+        "findings": [{"kind": "suspicious", "file": "SKILL.md"}],
+    }
+    payload = {
+        key: json.loads(json.dumps(item))
+        for key, item in plan.items()
+        if key not in {"receipt", "operation", "owner", "created_at", "expires_at"}
+    }
+    payload["local_scan"] = scan
+    payload["policy"] = {
+        "warning_acceptance": {
+            "accepted": True,
+            "operation": "update",
+            "content_hash": payload["content_hash"],
+            "scan_fingerprint": "sha256:fixture",
+        }
+    }
+    accepted = receipts.create(payload)
+    value.host.scan = lambda _path: json.loads(json.dumps(scan))
+
+    result = value.apply(accepted["receipt"])
+
+    assert result["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+    assert store.installation("skill-1")["version"] == 2
     assert len(client.record_calls) == 1
 
 

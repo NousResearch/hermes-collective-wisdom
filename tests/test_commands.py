@@ -1,6 +1,6 @@
 """CLI/slash tests adapted from the source Wisdom parser and gateway controller."""
 
-# pylint: disable=missing-function-docstring
+# pylint: disable=missing-function-docstring,too-many-lines
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _parser():
     return parser
 
 
-class _Service:  # pylint: disable=too-many-public-methods
+class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
     def __init__(self):
         self.calls = []
         self.rows = [
@@ -132,6 +132,35 @@ class _Service:  # pylint: disable=too-many-public-methods
         return {
             "state": "prepared",
             "skill_name": skill_name,
+            "draft_id": "local:draft-1",
+            "files": [
+                {
+                    "path": "SKILL.md", "mode": "file", "size": 12,
+                    "hash": "sha256:skill", "content_utf8": "# Safe skill\n",
+                },
+                {"path": "assets/bad\x1b[2J.png", "mode": "file", "size": 4},
+            ],
+            "hashes": {
+                "content": "sha256:content",
+                "author_description": "sha256:description",
+                "package_manifest": "sha256:manifest",
+            },
+            "description": "A carefully reviewed local skill.",
+            "local_scan": {
+                "guard": {
+                    "allowed": False,
+                    "findings": [{
+                        "severity": "warning", "category": "instructions",
+                        "pattern_id": "shell-download", "file": "SKILL.md",
+                        "line": 7, "description": "Downloads content before use.",
+                        "match": "SECRET_RAW_MATCH",
+                    }],
+                }
+            },
+            "security_check": {
+                "local_status": "warning_required",
+                "summary": "Review local scanner findings.",
+            },
             "professionalism_check": {
                 "status": "pass" if allow_model_review else "unavailable"
             },
@@ -144,7 +173,19 @@ class _Service:  # pylint: disable=too-many-public-methods
 
     def prepared_inspect(self, draft_id):
         self.calls.append(("prepared_inspect", draft_id))
-        return {"draft_id": draft_id, "files": [], "hashes": {}}
+        return {
+            "draft_id": draft_id,
+            "author_description": "Owner copy.",
+            "files": [
+                {"path": "SKILL.md", "content_utf8": "# Before\n"},
+                {"path": "assets/logo.bin", "content_base64": "AAE="},
+            ],
+            "expected_hashes": {
+                "content": "sha256:old-content",
+                "author_description": "sha256:old-description",
+                "package_manifest": "sha256:old-manifest",
+            },
+        }
 
     def prepared_save(self, draft_id, *, author_description, files, expected_hashes):
         self.calls.append((
@@ -154,13 +195,31 @@ class _Service:  # pylint: disable=too-many-public-methods
 
     def prepared_review(self, draft_id, *, allow_model_review=False):
         self.calls.append(("prepared_review", draft_id, allow_model_review))
-        return {"draft_id": draft_id, "professionalism_check": {
-            "status": "pass" if allow_model_review else "unavailable"
-        }}
+        result = self.suggest("reviewed-skill", allow_model_review=allow_model_review)
+        self.calls.pop()
+        result["draft_id"] = draft_id
+        return result
 
-    def publication_review(self, draft_id):
-        self.calls.append(("publication_review", draft_id))
-        return {"draft_id": draft_id, "receipt": "wpub_review"}
+    def publication_review(self, draft_id, *, accept_warnings=False):
+        self.calls.append(("publication_review", draft_id, accept_warnings))
+        result = self.suggest("reviewed-skill")
+        self.calls.pop()
+        return {
+            **result,
+            "draft_id": draft_id,
+            "receipt": "wpub_review",
+            "publication_mode": "moderated",
+            "warning_acceptance": {"accepted": accept_warnings},
+        }
+
+    def binding(self):
+        return {
+            "profile_name": "default",
+            "profile_home": "/private/profile",
+            "account_id": "member-42",
+            "organization_id": "team-7",
+            "base_url": "https://gateway.invalid",
+        }
 
     def publication_submit(self, receipt):
         self.calls.append(("publication_submit", receipt))
@@ -180,7 +239,24 @@ class _Service:  # pylint: disable=too-many-public-methods
 
     def update_plan(self, skill_id, **values):
         self.calls.append(("update_plan", skill_id, values))
-        return {"skill_id": skill_id, "receipt": "wip_update", **values}
+        accepted = values.get("accept_warnings") is True
+        return {
+            "skill_id": skill_id, "slug": "incident-handoff",
+            "from_version": 1, "version": 2, "receipt": "wip_update",
+            "owner": {"organization_id": "team-7", "account_id": "member-42"},
+            "files": [{
+                "path": "SKILL.md", "mode": "file", "size": 12,
+                "hash": "sha256:update",
+            }],
+            "local_scan": {"allowed": False, "findings": [{
+                "severity": "warning", "category": "instructions",
+                "pattern_id": "update-warning", "file": "SKILL.md", "line": 3,
+                "description": "Review changed instructions.", "match": "RAW_UPDATE",
+            }]},
+            "policy": {"warning_acceptance": {"accepted": accepted}},
+            "allowed": accepted,
+            **values,
+        }
 
     def update_apply(self, receipt):
         self.calls.append(("update_apply", receipt))
@@ -330,6 +406,219 @@ def test_cli_suggest_requires_explicit_model_disclosure_authorization(capsys):
     assert ("suggest", "local-skill", True) in service.calls
 
 
+def test_human_suggest_nontty_keeps_draft_and_prints_resume_without_prompt(
+    capsys, monkeypatch
+):
+    service = _Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "Draft prepared" in output
+    assert "local:draft-1" in output
+    assert "hermes wisdom publication review local:draft-1" in output
+    assert "\x1b" not in output
+    assert not any(call[0].startswith("publication_") for call in service.calls)
+
+
+def test_json_suggest_never_prompts_even_on_tty(capsys, monkeypatch):
+    service = _Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+
+    assert run_cli(
+        _parser().parse_args(["suggest", "local-skill", "--json"]), service
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["draft_id"] == "local:draft-1"
+    assert not any(call[0].startswith("publication_") for call in service.calls)
+
+
+def test_interactive_suggest_warning_requires_exact_ack_and_confirmation(
+    capsys, monkeypatch
+):
+    service = _Service()
+    answers = iter(("3", "yes", "yes"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "Organization: team-7" in output
+    assert "Owner account: member-42" in output
+    assert "moderated" in output
+    assert "shell-download" in output
+    assert "Downloads content before use." in output
+    assert "SECRET_RAW_MATCH" not in output
+    assert ("publication_review", "local:draft-1", True) in service.calls
+    assert ("publication_submit", "wpub_review") in service.calls
+
+
+def test_interactive_suggest_cancel_has_no_publication_effect(capsys, monkeypatch):
+    service = _Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "4")
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
+    assert "Draft kept" in capsys.readouterr().out
+    assert not any(call[0].startswith("publication_") for call in service.calls)
+
+
+def test_human_dict_output_is_command_specific_not_json(capsys):
+    service = _Service()
+    assert run_cli(_parser().parse_args(["check", "skill-1"]), service) == 0
+    output = capsys.readouterr().out
+    assert output.startswith("Update check")
+    assert not output.lstrip().startswith("{")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["list"], "incident-0"),
+        (["browse", "incident"], "Description 0"),
+        (["show", "skill-1"], "Summarize an incident"),
+        (["versions", "skill-1"], "Version 7"),
+        (["installed"], "example"),
+    ],
+)
+def test_human_read_commands_render_substantive_rows(argv, expected, capsys):
+    service = _Service()
+    setattr(service, "list_installations", lambda: [
+        {"skill_id": "example", "version": 2}
+    ])
+
+    assert run_cli(_parser().parse_args(argv), service) == 0
+
+    output = capsys.readouterr().out
+    assert expected in output
+    assert output.count("\n") > 1
+    assert not output.lstrip().startswith(("{", "["))
+
+
+def test_suggest_warning_without_safe_evidence_cannot_be_acknowledged(capsys, monkeypatch):
+    service = _Service()
+    original = service.suggest
+
+    def no_evidence(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["local_scan"] = {"guard": {"allowed": False, "findings": []}}
+        return result
+
+    service.suggest = no_evidence
+    service.prepared_review = lambda *_args, **_kwargs: no_evidence("review")
+    answers = iter(("3",))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "warning details are unavailable" in output.lower()
+    assert not any(call[0] == "publication_review" for call in service.calls)
+
+
+def test_suggest_review_menu_previews_text_and_keeps_binary_inert(capsys, monkeypatch):
+    service = _Service()
+    result = service.suggest("fixture")
+    result["files"][1]["content_base64"] = "AAE="
+    service.suggest = lambda *_args, **_kwargs: result
+    answers = iter(("1", "1", "2", "", "4"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "# Safe skill" in output
+    assert "Binary/opaque file" in output
+    assert "active preview is disabled" in output
+    assert "SECRET_RAW_MATCH" not in output
+
+
+def test_suggest_changed_findings_require_new_ack_before_final_consent(
+    capsys, monkeypatch
+):
+    service = _Service()
+    original_review = service.publication_review
+
+    def changed_review(*args, **kwargs):
+        result = original_review(*args, **kwargs)
+        result["local_scan"]["guard"]["findings"][0].update({
+            "pattern_id": "changed-warning",
+            "description": "A newly observed safe detail.",
+        })
+        return result
+
+    service.publication_review = changed_review
+    answers = iter(("3", "yes", "no"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "changed-warning" in output
+    assert "updated warnings were not accepted" in output
+    assert not any(call[0] == "publication_submit" for call in service.calls)
+
+
+def test_prepared_edit_uses_editor_copy_and_saves_complete_snapshot(
+    tmp_path, capsys, monkeypatch
+):
+    service = _Service()
+    editor = tmp_path / "fixture-editor"
+    editor.write_text(
+        "#!/bin/sh\nprintf '# After\\n' > \"$1\"\n", encoding="utf-8"
+    )
+    editor.chmod(0o700)
+    monkeypatch.setenv("EDITOR", str(editor))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+    assert run_cli(
+        _parser().parse_args(["prepared", "edit", "local:draft-1"]), service
+    ) == 0
+
+    save = next(call for call in service.calls if call[0] == "prepared_save")
+    assert save[1] == "local:draft-1"
+    assert save[3][0] == {"path": "SKILL.md", "content_utf8": "# After\n"}
+    assert save[3][1] == {"path": "assets/logo.bin", "content_base64": "AAE="}
+    assert save[4]["content"] == "sha256:old-content"
+    assert "Draft saved locally" in capsys.readouterr().out
+
+
+def test_prepared_edit_json_never_starts_editor_or_prompts(capsys, monkeypatch):
+    service = _Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: pytest.fail("must not edit"))
+
+    assert run_cli(
+        _parser().parse_args(["prepared", "edit", "local:draft-1", "--json"]), service
+    ) == 6
+    assert json.loads(capsys.readouterr().out)["category"] == 6
+
+
+def test_prepared_edit_rejects_editor_symlink_replacement(tmp_path, capsys, monkeypatch):
+    service = _Service()
+    editor = tmp_path / "fixture-editor"
+    editor.write_text(
+        "#!/bin/sh\nrm \"$1\"\nln -s /etc/hosts \"$1\"\n", encoding="utf-8"
+    )
+    editor.chmod(0o700)
+    monkeypatch.setenv("EDITOR", str(editor))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+    assert run_cli(
+        _parser().parse_args(["prepared", "edit", "local:draft-1"]), service
+    ) == 6
+
+    assert "unsafe" in capsys.readouterr().err
+    assert not any(call[0] == "prepared_save" for call in service.calls)
+
+
 def test_cli_prepared_inspect_save_and_review_use_explicit_payload(tmp_path, capsys):
     parser = _parser()
     service = _Service()
@@ -440,6 +729,7 @@ def test_cli_check_and_update_dispatch_exact_receipt_bound_actions(capsys):
         "preserve_modified": True,
         "accept_sensitive": True,
         "accept_partial": True,
+        "accept_warnings": False,
     }) in service.calls
     assert run_cli(parser.parse_args([
         "update", "--apply-receipt", "wip_update", "--json"
@@ -457,6 +747,44 @@ def test_update_apply_cannot_smuggle_new_plan_acknowledgements(capsys):
     assert result == 6
     assert not service.calls
     assert "cannot change" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_interactive_update_replans_warning_then_requires_final_confirmation(
+    capsys, monkeypatch
+):
+    service = _Service()
+    answers = iter(("yes", "yes"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["update", "skill-1"]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "update-warning" in output
+    assert "Review changed instructions." in output
+    assert "RAW_UPDATE" not in output
+    plans = [call for call in service.calls if call[0] == "update_plan"]
+    assert plans[0][2]["accept_warnings"] is False
+    assert plans[1][2]["accept_warnings"] is True
+    assert service.calls[-1] == ("update_apply", "wip_update")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["setup", "--json"],
+        ["uninstall", "skill-1", "--json"],
+    ],
+)
+def test_json_mutations_never_prompt_on_tty_without_explicit_switch(
+    argv, capsys, monkeypatch
+):
+    service = _Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+
+    assert run_cli(_parser().parse_args(argv), service) == 6
+    assert json.loads(capsys.readouterr().out)["category"] == 6
 
 
 @pytest.mark.parametrize(
@@ -504,6 +832,24 @@ def test_installed_setup_cli_dispatches_exact_review_and_recovery(capsys):
         assert expected in service.calls
 
 
+def test_human_installed_setup_plan_shows_exact_inert_command_and_next_action(capsys):
+    service = _Service()
+    command = "printf 'exact '  \n"
+
+    assert run_cli(_parser().parse_args([
+        "installed-setup", "plan", "skill-1", "--version", "1",
+        "--phase", "setup", "--index", "0", "--command", command,
+    ]), service) == 0
+
+    output = capsys.readouterr().out
+    assert "Command (escaped literal; not executed by review)" in output
+    assert "printf 'exact '  \\n" in output
+    assert "hermes wisdom installed-setup apply wip_setup" in output
+    assert service.calls == [
+        ("installed_setup_plan", "skill-1", 1, "setup", 0, command)
+    ]
+
+
 def test_cli_json_is_sorted_and_help_has_machine_shape(capsys):
     service = _Service()
     service.status = lambda **_kwargs: {"z": 1, "a": 2}
@@ -520,13 +866,14 @@ def test_cli_sanitizes_human_scalar_output_without_changing_json_data(
     capsys, monkeypatch
 ):
     service = _Service()
-    raw = "résumé 🦝\x1b[2J"
+    raw = "résumé 🦝\x1b[2J\u202espoof"
     monkeypatch.setattr(service, "status", lambda **_kwargs: raw)
 
     assert run_cli(_parser().parse_args(["status"]), service) == 0
     human_output = capsys.readouterr().out
     assert "résumé 🦝" in human_output
     assert "\x1b" not in human_output
+    assert "\u202e" not in human_output
 
     assert run_cli(_parser().parse_args(["status", "--json"]), service) == 0
     assert json.loads(capsys.readouterr().out) == raw
@@ -582,7 +929,8 @@ def test_publication_terminal_commands_are_explicit_and_inspectable(capsys):
     parser = _parser()
     service = _Service()
     cases = [
-        (["publication", "review", "local:draft", "--json"], ("publication_review", "local:draft")),
+        (["publication", "review", "local:draft", "--json"],
+         ("publication_review", "local:draft", False)),
         (["publication", "submit", "wpub_review", "--json"], ("publication_submit", "wpub_review")),
         (["publication", "status", "op-1", "--json"], ("publication_status", "op-1")),
         (["publication", "reopen", "op-1", "--json"], ("publication_reopen", "op-1")),

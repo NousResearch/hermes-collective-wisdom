@@ -6,6 +6,7 @@ shannonsands/hermes-agent#5 (d68368b7), under this repository's MIT license.
 
 from __future__ import annotations
 
+import base64
 import shutil
 import tempfile
 import uuid
@@ -29,7 +30,7 @@ from .errors import (
 )
 from .local_security import prepared_security_check
 from .package import (
-    MAX_FILES,
+
     PackagePolicyError,
     PreparedPackage,
     load_manifest,
@@ -38,7 +39,7 @@ from .package import (
     source_fingerprint,
     verify_content_files,
 )
-from .professionalism import review_package
+from .professionalism import review_package, unavailable_review
 from .publisher_evidence import evidence_block, publication_description
 
 
@@ -208,16 +209,20 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         return safe[0]
 
     @staticmethod
-    def _files(overlay: Path) -> tuple[list[dict[str, str]], str]:
+    def _files(overlay: Path) -> tuple[list[dict[str, Any]], str]:
         raw = read_validated_package_files(overlay)
-        entries = [
-            {
+        entries = []
+        for relative, mode, body in raw:
+            entry = {
                 "path": relative,
-                "mode": "file",
-                "content_utf8": body.decode("utf-8"),
+                "mode": mode,
+                "content_base64": base64.b64encode(body).decode("ascii"),
             }
-            for relative, _mode, body in raw
-        ]
+            try:
+                entry["content_utf8"] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+            entries.append(entry)
         records, content_hash = verify_content_files(raw)
         hashes = {record.path: record.hash for record in records}
         return [{**entry, "hash": hashes[entry["path"]]} for entry in entries], content_hash
@@ -350,7 +355,15 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "draft_id": result["draft_id"],
             "author_description": result["drafted_description"],
             "files": [
-                {"path": item["path"], "content_utf8": item["content_utf8"]}
+                ({
+                    "path": item["path"],
+                    **({"mode": "exec"} if item["mode"] == "exec" else {}),
+                    "content_utf8": item["content_utf8"],
+                } if "content_utf8" in item else {
+                    "path": item["path"],
+                    **({"mode": "exec"} if item["mode"] == "exec" else {}),
+                    "content_base64": item["content_base64"],
+                })
                 for item in result["files"]
             ],
             "expected_hashes": result["hashes"],
@@ -361,7 +374,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         draft_id: str,
         *,
         author_description: str,
-        files: list[dict[str, str]],
+        files: list[dict[str, Any]],
         expected_hashes: dict[str, str],
         may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
@@ -397,24 +410,41 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             or sha256_address(manifest_bytes) != hashes["package_manifest"]
         ):
             raise WisdomConflict("prepared draft changed; inspect it again before saving")
-        if not isinstance(files, list) or len(files) > MAX_FILES:
-            raise PackagePolicyError(f"package exceeds {MAX_FILES} files")
-        requested: dict[str, bytes] = {}
+        if not isinstance(files, list):
+            raise PackagePolicyError("prepared files must be a list")
+        requested: dict[str, tuple[str, bytes]] = {}
         for item in files:
             if not isinstance(item, dict):
                 raise PackagePolicyError(
                     "every edited file requires a path and UTF-8 content"
                 )
             path = item.get("path")
+            mode = item.get("mode", "file")
+            encoded = item.get("content_base64")
             content = item.get("content_utf8")
-            if not isinstance(path, str) or not isinstance(content, str):
+            if not isinstance(path, str) or mode not in {"file", "exec"}:
                 raise PackagePolicyError(
-                    "every edited file requires a path and UTF-8 content"
+                    "every edited file requires a path, mode, and exact content"
+                )
+            if isinstance(encoded, str):
+                try:
+                    body = base64.b64decode(encoded, validate=True)
+                except (TypeError, ValueError) as exc:
+                    raise PackagePolicyError("edited file contains invalid base64") from exc
+                if isinstance(content, str) and content.encode("utf-8") != body:
+                    raise PackagePolicyError("edited text and exact bytes disagree")
+            elif isinstance(content, str):
+                body = content.encode("utf-8")
+            else:
+                raise PackagePolicyError(
+                    "every edited file requires exact base64 or UTF-8 content"
                 )
             if path in requested:
                 raise PackagePolicyError(f"duplicate edited file: {path}")
-            requested[path] = content.encode("utf-8")
-        verify_content_files([(path, "file", body) for path, body in requested.items()])
+            requested[path] = (mode, body)
+        verify_content_files(
+            [(path, mode, body) for path, (mode, body) in requested.items()]
+        )
 
         edit_root = self.store.root / "contribution-edits" / uuid.uuid4().hex
         retained = False
@@ -423,11 +453,11 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             inputs.mkdir(parents=True, exist_ok=True, mode=0o700)
             with tempfile.TemporaryDirectory(prefix="edit-", dir=inputs) as raw_stage:
                 stage = Path(raw_stage)
-                for path, body in requested.items():
+                for path, (mode, body) in requested.items():
                     destination = stage.joinpath(*PurePosixPath(path).parts)
                     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     destination.write_bytes(body)
-                    destination.chmod(0o600)
+                    destination.chmod(0o700 if mode == "exec" else 0o600)
                 package = prepare_package(
                     stage,
                     host=self.host,
@@ -468,7 +498,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         self,
         draft: dict[str, Any],
         *,
-        files: list[dict[str, str]],
+        files: list[dict[str, Any]],
         allow_model_review: bool,
         expected_owner: dict[str, str],
         may_apply: Callable[[], bool] | None = None,
@@ -487,8 +517,18 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 return result
         package = [
             {"path": item["path"], "content_utf8": item["content_utf8"]}
-            for item in files
+            for item in files if "content_utf8" in item
         ]
+        if any("content_utf8" not in item for item in files):
+            result = unavailable_review(
+                content_hash=values["content_hash"],
+                description_hash=values["author_description_hash"],
+            )
+            result["availability_reason"] = "opaque_package_content"
+            result["summary"] = (
+                "Professionalism check unavailable: package contains opaque resources."
+            )
+            return result
         if not allow_model_review:
             return review_package(
                 package=package,

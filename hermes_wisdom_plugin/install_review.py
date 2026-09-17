@@ -8,6 +8,8 @@ separate executor; this module only prepares an immutable owner-bound review.
 from __future__ import annotations
 
 import copy
+import base64
+import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,7 @@ from .contract import (
 )
 from .errors import WisdomAuthError, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
+from .local_security import prepared_security_check
 
 
 _OWNER_FIELDS = (
@@ -45,6 +48,7 @@ _REVIEW_FIELDS = (
     "compatibility",
     "server_checks",
     "local_scan",
+    "security_check",
     "policy",
     "permitted_actions",
     "hashes",
@@ -258,13 +262,20 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
                 result = self.host.scan(staging)
         except OSError as exc:
             raise PackagePolicyError("Wisdom review staging is unavailable") from exc
-        if not isinstance(result, dict) or set(result) != {
+        if not isinstance(result, dict) or not {
             "allowed",
             "verdict",
             "summary",
             "findings",
+        }.issubset(result) or set(result) - {
+            "allowed", "verdict", "summary", "findings", "available"
         }:
             raise PackagePolicyError("Hermes host skill scan returned an invalid result")
+        available = result.get("available", result.get("allowed") is not None)
+        if not isinstance(available, bool):
+            raise PackagePolicyError("Hermes host skill scan returned an invalid result")
+        if not available:
+            raise PackagePolicyError("Hermes host skill scan is unavailable; retry review")
         allowed = result.get("allowed")
         if allowed is not None and not isinstance(allowed, bool):
             raise PackagePolicyError("Hermes host skill scan returned an invalid result")
@@ -281,7 +292,7 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         except (UnicodeError, ValueError, ValidationError) as exc:
             raise WisdomValidationError("version package manifest is invalid") from exc
 
-    def _prepare(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    def _prepare(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments
         self,
         skill_id: str,
         selected_version: int | None,
@@ -289,6 +300,8 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         owner: dict[str, Any],
         *,
         check_existing: bool,
+        accept_warnings: bool = False,
+        warning_operation: str = "install",
     ) -> tuple[dict[str, Any], list[tuple[str, str, bytes]], dict[str, str]]:
         self._reject_existing(skill_id, owner, check_existing=check_existing)
         detail = self._request(owner, lambda: self.client.skill(skill_id))
@@ -382,9 +395,43 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         }
         local_scan = self._stage_and_scan(files)
         scan_allowed = local_scan["allowed"]
+        security_check = prepared_security_check(
+            [
+                {
+                    "path": path,
+                    "content_base64": base64.b64encode(body).decode("ascii"),
+                    **(
+                        {"content_utf8": body.decode("utf-8")}
+                        if _is_utf8(body) else {}
+                    ),
+                }
+                for path, _mode, body in files
+            ],
+            "",
+            {"guard": local_scan},
+            include_gateway_pending=False,
+        )
+        if security_check["local_status"] == "blocked":
+            raise PackagePolicyError(
+                "package contains credential or private-key material"
+            )
+        if local_scan.get("available", scan_allowed is not None) is not True:
+            raise PackagePolicyError(
+                "host scanner is unavailable; save no approval and retry review"
+            )
+        warning_acceptance = {
+            "accepted": bool(scan_allowed is not True and accept_warnings),
+            "operation": warning_operation,
+            "content_hash": content_hash,
+            "scan_fingerprint": sha256_address(
+                json.dumps(
+                    local_scan, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                ).encode()
+            ),
+        }
         allowed = (
             compatibility["outcome"] != "blocked_pending_action"
-            and scan_allowed is not False
+            and (scan_allowed is True or warning_acceptance["accepted"])
         )
         sizes = {path: len(body) for path, _mode, body in files}
         inventory = [
@@ -419,10 +466,12 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             "compatibility": compatibility,
             "server_checks": server_checks,
             "local_scan": local_scan,
+            "security_check": security_check,
             "policy": {
                 "requested_update_mode": update_mode,
                 "requires_explicit_confirmation": True,
-                "scan_requires_confirmation": scan_allowed is None,
+                "scan_requires_confirmation": scan_allowed is not True,
+                "warning_acceptance": warning_acceptance,
                 "compatibility_requires_confirmation": compatibility["outcome"]
                 in {"partial", "compatible_after_setup"},
             },
@@ -432,18 +481,27 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             "hashes": {"content": content_hash, "manifest": manifest_hash},
             "allowed": allowed,
         }
-        baseline = {record.path: record.hash for record in records}
+        # Preserve the legacy digest shape for ordinary files while binding the
+        # previously-unrepresented executable intent for native package scripts.
+        baseline = {
+            record.path: (f"exec:{record.hash}" if record.mode == "exec" else record.hash)
+            for record in records
+        }
         self._check_owner(owner)
         return review, files, baseline
 
-    def plan(self, reference: str, update_mode: str | None = None) -> dict[str, Any]:
+    def plan(
+        self, reference: str, update_mode: str | None = None, *,
+        accept_warnings: bool = False,
+    ) -> dict[str, Any]:
         """Prepare exact install facts and persist an owner-bound review receipt."""
 
         mode = self._update_mode(update_mode)
         skill_id, version = self._resolve_reference(reference)
         owner = self._owner_snapshot()
         review, _files, _baseline = self._prepare(
-            skill_id, version, mode, owner, check_existing=True
+            skill_id, version, mode, owner, check_existing=True,
+            accept_warnings=accept_warnings,
         )
         self._check_owner(owner)
         try:
@@ -457,7 +515,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         self._check_owner(owner)
         return plan
 
-    def verify(self, plan: dict[str, Any]) -> VerifiedInstall:
+    def verify(  # pylint: disable=too-many-locals
+        self, plan: dict[str, Any]
+    ) -> VerifiedInstall:
         """Re-download and recheck every reviewed fact before local mutation."""
 
         if not isinstance(plan, dict) or plan.get("operation") != "install":
@@ -475,16 +535,30 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         version = self._positive_int(plan.get("version"), "version")
         self._generation(plan.get("takedown_generation"))
         mode = self._update_mode(plan.get("update_mode"))
-        current, files, baseline = self._prepare(
-            skill_id, version, mode, owner, check_existing=False
+        raw_policy = plan.get("policy")
+        policy: dict[str, Any] = raw_policy if isinstance(raw_policy, dict) else {}
+        acceptance = policy.get("warning_acceptance")
+        accepted_warnings = bool(
+            isinstance(acceptance, dict) and acceptance.get("accepted") is True
         )
+        current, files, baseline = self._prepare(
+            skill_id, version, mode, owner, check_existing=False,
+            accept_warnings=accepted_warnings,
+        )
+        if (
+            accepted_warnings
+            and current["policy"].get("warning_acceptance") != acceptance
+        ):
+            raise PackagePolicyError("Hermes host skill scan findings changed; review again")
         reviewed = {field: plan.get(field) for field in _REVIEW_FIELDS}
         if reviewed != current:
             raise WisdomValidationError(
                 "Install review changed; create a new review before installing"
             )
-        if current["local_scan"]["allowed"] is False:
-            raise PackagePolicyError("Hermes host skill policy blocks installation")
+        if current["local_scan"]["allowed"] is not True and not accepted_warnings:
+            raise PackagePolicyError(
+                "installation requires explicit warning acknowledgement during review"
+            )
         if current["compatibility"]["outcome"] == "blocked_pending_action":
             raise PackagePolicyError(
                 "blocked compatibility requirements prevent installation"
@@ -497,3 +571,11 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             files=[(path, mode_value, bytes(body)) for path, mode_value, body in files],
             baseline=baseline,
         )
+
+
+def _is_utf8(body: bytes) -> bool:
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
