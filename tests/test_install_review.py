@@ -95,6 +95,7 @@ class Host:
         self.skills_root = root / "skills"
         self.scan_allowed = scan_allowed
         self.blocked = blocked
+        self.findings = []
         self.scanned = []
         self.targets = []
 
@@ -117,10 +118,11 @@ class Host:
     def scan(self, directory):
         self.scanned.append(directory)
         return {
+            "available": True,
             "allowed": self.scan_allowed,
             "verdict": "safe" if self.scan_allowed is not False else "dangerous",
             "summary": "host policy",
-            "findings": [],
+            "findings": list(self.findings),
         }
 
 
@@ -209,19 +211,57 @@ def test_manifest_requirements_must_match_version_metadata(tmp_path: Path):
 
 
 @pytest.mark.parametrize("scan_allowed", [True, None, False])
-def test_scan_tristate_preserves_confirmation_and_blocking(tmp_path: Path, scan_allowed):
+def test_scan_tristate_requires_exact_warning_acceptance_and_unavailable_blocks(
+    tmp_path: Path, scan_allowed
+):
     host = Host(tmp_path, scan_allowed=scan_allowed)
     reviewer = _reviewer(tmp_path, host=host)
-    plan = reviewer.plan("skill-1")
+    plan = reviewer.plan("skill-1", accept_warnings=scan_allowed is not True)
     assert plan["local_scan"]["allowed"] is scan_allowed
-    assert plan["policy"]["scan_requires_confirmation"] is (scan_allowed is None)
-    assert plan["allowed"] is (scan_allowed is not False)
+    assert plan["policy"]["warning_acceptance"]["accepted"] is (scan_allowed is not True)
+    assert plan["allowed"] is True
     staged = host.scanned[0]
     assert staged.parent == host.skills_root / ".hub" / "collective-wisdom"
     assert not staged.exists()
-    if scan_allowed is False:
-        with pytest.raises(PackagePolicyError, match="blocks"):
-            reviewer.verify(plan)
+    assert reviewer.verify(plan).plan == plan
+
+
+def test_install_warning_cannot_be_accepted_after_review_or_reused_for_new_findings(
+    tmp_path: Path,
+):
+    host = Host(tmp_path, scan_allowed=False)
+    reviewer = _reviewer(tmp_path, host=host)
+    blocked = reviewer.plan("skill-1")
+    assert blocked["allowed"] is False
+    with pytest.raises(PackagePolicyError, match="explicit warning acknowledgement"):
+        reviewer.verify(blocked)
+
+    accepted = reviewer.plan("skill-1", accept_warnings=True)
+    host.findings.append({"kind": "new-warning"})
+    with pytest.raises(PackagePolicyError, match="findings changed"):
+        reviewer.verify(accepted)
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("assets/.env", b"\xffpassword=" + b"a" * 24),
+        ("assets/key.bin", b"\xff-----BEGIN PRIVATE KEY-----\nopaque"),
+        ("assets/blob.bin", b"\xffghp_" + b"a" * 36),
+    ],
+)
+def test_install_review_hard_blocks_credentials_in_opaque_bytes(
+    tmp_path: Path, path: str, body: bytes
+):
+    client = Client()
+    client.files.append((path, "file", body))
+    content = _content(client.files)
+    client.version_value.update(
+        content_hash=content.content_hash,
+        commit=content.commit,
+    )
+    with pytest.raises(PackagePolicyError, match="credential or private-key"):
+        _reviewer(tmp_path, client=client).plan("skill-1", accept_warnings=True)
 
 
 def test_org_scoped_target_and_existing_owner_rules(tmp_path: Path):

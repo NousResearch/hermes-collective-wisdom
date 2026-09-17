@@ -703,12 +703,15 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         return result
 
     def publication_review(
-        self, draft_id, *, may_apply: Callable[[], bool] | None = None,
+        self, draft_id, *, accept_warnings=False,
+        may_apply: Callable[[], bool] | None = None,
     ):
         """Review exact contribution bytes and current server policy without upload."""
 
         _require_current(may_apply)
-        result = self._publication_service().review(draft_id, may_apply=may_apply)
+        result = self._publication_service().review(
+            draft_id, accept_warnings=bool(accept_warnings), may_apply=may_apply
+        )
         self.check_owner()
         _require_current(may_apply)
         return result
@@ -864,9 +867,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         return result
 
-    def install_plan(self, reference, *, update_mode=None):
+    def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
         """Prepare an owner-bound terminal review without installing any files."""
-        return self._installation_services()[0].plan(reference, update_mode=update_mode)
+        return self._installation_services()[0].plan(
+            reference, update_mode=update_mode,
+            accept_warnings=bool(accept_warnings),
+        )
 
     def check_update(self, skill_id):
         """Read authoritative named-skill update state without starting work."""
@@ -882,6 +888,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         preserve_modified=False,
         accept_sensitive=False,
         accept_partial=False,
+        accept_warnings=False,
     ):
         """Create an exact update receipt with all exceptional actions bound."""
 
@@ -890,6 +897,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             preserve_modified=preserve_modified,
             accept_sensitive=accept_sensitive,
             accept_partial=accept_partial,
+            accept_warnings=accept_warnings,
         )
         self.check_owner()
         return result

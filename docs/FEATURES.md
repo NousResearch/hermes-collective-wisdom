@@ -125,6 +125,13 @@ Destination / scope: local CLI/TUI update policy, deferral, mute, offline synchr
 
 Destination / scope: local preparation and release direct/moderated submission with durable publication state.
 
+The plugin-side package lifecycle now supports native Hermes skill resources and
+mode-bound exact review with a 10 MiB aggregate payload budget. Human warning
+acceptance is scoped to exact scanner evidence and operation; preparation remains
+local-only. Gateway/Portal compatibility beyond the older instruction-only
+contract is a separate dependency; this plugin change does not establish live
+publication or installation acceptance.
+
 | ID | Feature | SP | Depends | Source | Acceptance | Impl | Auto | Live |
 | --- | --- | ---: | --- | --- | --- | --- | --- | --- |
 | CW-M5-001 | Local preparation and security scan | 2 | CW-M2-004, CW-M3-005 | `legacy:hermes_wisdom/local_security.py` | Candidate content is assembled locally and evaluated with the established baseline checks; known failures and manifest/hash mismatches block submission with file-level findings, and unknown or unavailable results never count as passing. | Implemented — terminal preparation and submit-time guard revalidation | [Passing — local, publication and pinned-host gates](TESTING.md#policy-routed-publication-gate) | Not run |

@@ -29,10 +29,9 @@ REQUIRED_REFINEMENTS = 3
 HIGH_USAGE_CONSECUTIVE_BUSINESS_DAYS = 7
 _EXCLUDED_ROOTS = {"_org", "_wisdom", ".archive", ".hub"}
 _ALLOWED_PROVENANCE = {"local", "agent_created"}
-MAX_SNAPSHOT_FILES = 256
-MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
-MAX_SNAPSHOT_TREE_BYTES = 8 * 1024 * 1024
-MAX_SNAPSHOT_DEPTH = 8
+MAX_SNAPSHOT_TREE_BYTES = 10 * 1024 * 1024
+MAX_SNAPSHOT_METADATA_BYTES = 2 * 1024 * 1024
+MAX_SNAPSHOT_DEPTH = 16
 SkillResolver = Callable[[str], Path | None]
 Authorizer = Callable[[], bool]
 ConfigReader = Callable[[str, Any], Any]
@@ -120,11 +119,14 @@ def _eligible_path(
     return resolved
 
 
-def _read_snapshot_file(path: Path, *, relative: str, expected: os.stat_result) -> bytes:
+def _read_snapshot_file(
+    path: Path, *, relative: str, expected: os.stat_result,
+    max_bytes: int = MAX_SNAPSHOT_TREE_BYTES,
+) -> bytes:
     if expected.st_nlink != 1:
         raise UnsafeSnapshotError(f"snapshot contains hard-linked content: {relative}")
-    if expected.st_size > MAX_SNAPSHOT_FILE_BYTES:
-        raise UnsafeSnapshotError(f"snapshot file exceeds the size limit: {relative}")
+    if expected.st_size > max_bytes:
+        raise UnsafeSnapshotError("snapshot tree exceeds the total size limit")
     flags = (
         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -138,7 +140,7 @@ def _read_snapshot_file(path: Path, *, relative: str, expected: os.stat_result) 
             if identity(opened) != identity(expected) or not stat.S_ISREG(opened.st_mode):
                 raise UnsafeSnapshotError("snapshot tree changed while reading")
             buffer = bytearray()
-            maximum = MAX_SNAPSHOT_FILE_BYTES + 1
+            maximum = max_bytes + 1
             while len(buffer) < maximum:
                 chunk = os.read(descriptor, min(64 * 1024, maximum - len(buffer)))
                 if not chunk:
@@ -167,35 +169,44 @@ def snapshot_tree(path: Path) -> tuple[str, dict[str, str]]:
         raise UnsafeSnapshotError("snapshot root must be a directory")
     tree: dict[str, str] = {}
     total = 0
+    metadata_bytes = 0
     pending = [(root, 0)]
     while pending:
         directory, depth = pending.pop()
         if depth > MAX_SNAPSHOT_DEPTH:
             raise UnsafeSnapshotError("snapshot tree exceeds the depth limit")
         try:
-            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+            entries = os.scandir(directory)
         except OSError as exc:
             raise UnsafeSnapshotError("snapshot tree changed while reading") from exc
-        for entry in entries:
-            relative = Path(entry.path).relative_to(root).as_posix()
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise UnsafeSnapshotError("snapshot tree changed while reading") from exc
-            if stat.S_ISLNK(info.st_mode):
-                raise UnsafeSnapshotError(f"snapshot contains a symlink: {relative}")
-            if stat.S_ISDIR(info.st_mode):
-                pending.append((Path(entry.path), depth + 1))
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                raise UnsafeSnapshotError(f"snapshot contains special content: {relative}")
-            if len(tree) >= MAX_SNAPSHOT_FILES:
-                raise UnsafeSnapshotError("snapshot tree exceeds the file limit")
-            body = _read_snapshot_file(Path(entry.path), relative=relative, expected=info)
-            total += len(body)
-            if total > MAX_SNAPSHOT_TREE_BYTES:
-                raise UnsafeSnapshotError("snapshot tree exceeds the total size limit")
-            tree[relative] = sha256_address(body)
+        with entries:
+            for entry in entries:
+                relative = Path(entry.path).relative_to(root).as_posix()
+                metadata_bytes += len(relative.encode("utf-8")) + 128
+                if metadata_bytes > MAX_SNAPSHOT_METADATA_BYTES:
+                    raise UnsafeSnapshotError("snapshot tree exceeds the metadata limit")
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise UnsafeSnapshotError("snapshot tree changed while reading") from exc
+                if stat.S_ISLNK(info.st_mode):
+                    raise UnsafeSnapshotError(f"snapshot contains a symlink: {relative}")
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append((Path(entry.path), depth + 1))
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise UnsafeSnapshotError(f"snapshot contains special content: {relative}")
+                body = _read_snapshot_file(
+                    Path(entry.path), relative=relative, expected=info,
+                    max_bytes=MAX_SNAPSHOT_TREE_BYTES - total,
+                )
+                total += len(body)
+                digest = sha256_address(body)
+                tree[relative] = (
+                    f"exec:{digest}"
+                    if info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    else digest
+                )
     manifest = "".join(f"{name} {address}\n" for name, address in sorted(tree.items()))
     return sha256_address(manifest.encode("utf-8")), tree
 

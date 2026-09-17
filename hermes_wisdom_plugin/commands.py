@@ -27,25 +27,33 @@ from .errors import (
     WisdomValidationError,
 )
 from .package import (
-    MAX_FILES,
-    MAX_SEGMENT_BYTES,
+    MAX_METADATA_BYTES,
     MAX_TREE_BYTES,
-    MAX_TREE_DEPTH,
     PackagePolicyError,
 )
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
+from .terminal_ui import (
+    edit_prepared as _edit_prepared,
+    has_reviewable_warnings as _has_reviewable_warnings,
+    render_action_review as _render_action_review,
+    render_file_preview as _render_file_preview,
+    render_findings as _render_findings,
+    render_inventory as _render_inventory,
+    render_read_command as _render_read_command,
+    review_identity as _review_identity,
+    safe_scan_details as _safe_scan_details,
+)
 
 
 PAGE_SIZE = 5
 _MAX_PAGE = 10_000
-# A valid package can contain control characters that JSON expands to six bytes.
-# The remaining terms bound maximum paths plus the fixed inspect envelope.
+# A complete advanced export may expand each UTF-8 byte to a six-byte JSON
+# escape. The remaining terms bound paths and the fixed inspect envelope.
 MAX_PREPARED_PAYLOAD_BYTES = (
     MAX_TREE_BYTES * 6
-    + MAX_FILES
-    * ((MAX_TREE_DEPTH + 1) * MAX_SEGMENT_BYTES + MAX_TREE_DEPTH + 256)
-    + 64 * 1024
+    + MAX_METADATA_BYTES
+    + 1024 * 1024
 )
 CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
 _SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
@@ -183,6 +191,8 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         "--allow-model-review", action="store_true",
         help="Authorize sending exact draft content to the configured model provider",
     )
+    edit = prepared_action("edit", "Edit a disposable UTF-8 copy in VISUAL or EDITOR")
+    edit.add_argument("draft_id")
     publication = commands.add_parser(
         "publication", help="Review, submit, and reconcile exact contribution publication"
     )
@@ -197,9 +207,14 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         )
         return action
 
-    publication_action(
+    publication_review = publication_action(
         "review", "Review exact bytes, checks, and current server policy"
-    ).add_argument("draft_id")
+    )
+    publication_review.add_argument("draft_id")
+    publication_review.add_argument(
+        "--accept-warnings", action="store_true",
+        help="Acknowledge exact current local scanner warnings for publication",
+    )
     publication_action(
         "submit", "Explicitly submit one exact publication review receipt"
     ).add_argument("receipt")
@@ -215,6 +230,10 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     install.add_argument("--apply-receipt", help="Apply an explicitly reviewed install receipt")
     install.add_argument("--accept-partial", action="store_true",
                          help="Acknowledge partial or setup-required compatibility")
+    install.add_argument(
+        "--accept-warnings", action="store_true",
+        help="Acknowledge exact current local scanner warnings during review",
+    )
     install.add_argument("--update-mode", choices=["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"])
     add("installed", "Inspect this enrolment's managed installations")
     add("check", "Check one managed skill for an authoritative update").add_argument(
@@ -235,6 +254,10 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     update.add_argument(
         "--accept-partial", action="store_true",
         help="Bind acceptance of partial or setup-required compatibility into the review",
+    )
+    update.add_argument(
+        "--accept-warnings", action="store_true",
+        help="Acknowledge exact current local scanner warnings during review",
     )
     installed_setup = commands.add_parser(
         "installed-setup", help="Inspect and separately approve installed-skill setup"
@@ -286,7 +309,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         if command == "setup":
             accepted = bool(args.accept_disclosure)
             if not accepted:
-                if not sys.stdin.isatty():
+                if as_json or not sys.stdin.isatty():
                     raise PackagePolicyError(
                         "noninteractive setup requires --accept-disclosure"
                     )
@@ -340,10 +363,16 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             result = service.suggest(
                 args.skill, allow_model_review=bool(args.allow_model_review)
             )
+            if not as_json:
+                _suggest_human(result, service)
+                return 0
         elif command == "review-week":
             result = service.review_week(dry_run=bool(args.dry_run))
         elif command == "prepared":
             result = _prepared_cli(args, service)
+            if args.prepared_action == "edit":
+                print("Draft saved locally.\n" + _human_render("prepared", result))
+                return 0
         elif command == "publication":
             result = _publication_cli(args, service)
         elif command == "install":
@@ -373,16 +402,19 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         else:
             getattr(args, "_wisdom_parser").print_help()
             return 2
-        _emit(result, as_json=as_json)
+        _emit(result, as_json=as_json, command=command)
         return 0
     except WisdomError as exc:
         _emit(
             {"ok": False, "error": str(exc), "category": exc.exit_code},
-            as_json=as_json,
+            as_json=as_json, error=True,
         )
         return exc.exit_code
     except PackagePolicyError as exc:
-        _emit({"ok": False, "error": str(exc), "category": 6}, as_json=as_json)
+        _emit(
+            {"ok": False, "error": str(exc), "category": 6},
+            as_json=as_json, error=True,
+        )
         return 6
     except (KeyboardInterrupt, EOFError):
         return 7
@@ -393,7 +425,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 "error": "Collective Wisdom is temporarily unavailable.",
                 "category": 8,
             },
-            as_json=as_json,
+            as_json=as_json, error=True,
         )
         return 8
 
@@ -472,7 +504,7 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
 def _uninstall_cli(args, service):
     """Preserve the reference terminal-only recoverable removal confirmation."""
     if not args.yes:
-        if not sys.stdin.isatty():
+        if args.json or not sys.stdin.isatty():
             raise PackagePolicyError("noninteractive uninstall requires --yes")
         answer = input("Move this managed skill to recoverable Wisdom trash? [y/N] ")
         if answer.strip().lower() not in {"y", "yes"}:
@@ -485,7 +517,9 @@ def _publication_cli(args, service):
 
     action = args.publication_action
     if action == "review":
-        return service.publication_review(args.draft_id)
+        return service.publication_review(
+            args.draft_id, accept_warnings=bool(args.accept_warnings)
+        )
     if action == "submit":
         return service.publication_submit(args.receipt)
     if action == "status":
@@ -506,6 +540,10 @@ def _prepared_cli(args, service):
         return service.prepared_review(
             args.draft_id, allow_model_review=bool(args.allow_model_review)
         )
+    if args.prepared_action == "edit":
+        if args.json or not sys.stdin.isatty():
+            raise PackagePolicyError("prepared edit requires an interactive terminal")
+        return _edit_prepared(service, args.draft_id)
     if args.prepared_action == "save":
         payload = _read_prepared_payload(Path(args.payload))
         return service.prepared_save(
@@ -592,32 +630,62 @@ def _read_prepared_payload(  # pylint: disable=too-many-branches
     return value
 
 
-def _install_cli(args, service):
+def _install_cli(args, service):  # pylint: disable=too-many-return-statements
     """Reference CLI plan/apply contract; a JSON review never implies approval."""
     if args.apply_receipt:
-        if args.reference or args.plan or args.update_mode is not None:
+        if args.reference or args.plan or args.update_mode is not None or args.accept_warnings:
             raise PackagePolicyError(
                 "--apply-receipt cannot change the reviewed reference or policy"
             )
         return service.install_apply(args.apply_receipt, accept_partial=args.accept_partial)
     if not args.reference:
         raise PackagePolicyError("install requires a reference or --apply-receipt")
-    plan = service.install_plan(args.reference, update_mode=args.update_mode)
+    plan = service.install_plan(
+        args.reference,
+        update_mode=args.update_mode,
+        accept_warnings=bool(args.accept_warnings),
+    )
     if args.plan or args.json:
         return plan
-    _emit(plan, as_json=False)
+    _emit(plan, as_json=False, command="install")
     if not sys.stdin.isatty():
         raise PackagePolicyError("noninteractive install requires --plan then --apply-receipt")
+    if _has_reviewable_warnings(plan) and not args.accept_warnings:
+        scan = plan.get("local_scan") if isinstance(plan, dict) else None
+        if not _safe_scan_details(scan):
+            raise PackagePolicyError(
+                "scanner warning details are unavailable; create a new review before installing"
+            )
+        answer = input(
+            "Acknowledge the displayed scanner warnings for this exact install? [y/N] "
+        )
+        if answer.strip().casefold() not in {"y", "yes"}:
+            return None
+        original_identity = _review_identity(plan)
+        plan = service.install_plan(
+            args.reference, update_mode=args.update_mode, accept_warnings=True
+        )
+        _emit(plan, as_json=False, command="install")
+        if _review_identity(plan) != original_identity:
+            answer = input(
+                "The reviewed package or findings changed. Acknowledge this updated review? [y/N] "
+            )
+            if answer.strip().casefold() not in {"y", "yes"}:
+                return None
+    if isinstance(plan, dict) and plan.get("allowed") is False:
+        print("Installation remains blocked; create a new plan with the listed acknowledgements.")
+        return None
     answer = input("Apply this exact reviewed install plan? [y/N] ")
     if answer.strip().lower() not in {"y", "yes"}:
         return None
     return service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
 
 
-def _update_cli(args, service):
+def _update_cli(args, service):  # pylint: disable=too-many-return-statements
     """Keep all acknowledgements in the reviewed plan, never apply-time flags."""
     acknowledgements = (
         args.preserve_modified or args.accept_sensitive or args.accept_partial
+        or args.accept_warnings
     )
     if args.apply_receipt:
         if args.skill_id or args.plan or acknowledgements:
@@ -632,14 +700,44 @@ def _update_cli(args, service):
         preserve_modified=args.preserve_modified,
         accept_sensitive=args.accept_sensitive,
         accept_partial=args.accept_partial,
+        accept_warnings=bool(args.accept_warnings),
     )
     if args.plan or args.json:
         return plan
-    _emit(plan, as_json=False)
+    _emit(plan, as_json=False, command="update")
     if not sys.stdin.isatty():
         raise PackagePolicyError(
             "noninteractive update requires --plan then --apply-receipt"
         )
+    if _has_reviewable_warnings(plan) and not args.accept_warnings:
+        scan = plan.get("local_scan") if isinstance(plan, dict) else None
+        if not _safe_scan_details(scan):
+            raise PackagePolicyError(
+                "scanner warning details are unavailable; create a new review before updating"
+            )
+        answer = input(
+            "Acknowledge the displayed scanner warnings for this exact update? [y/N] "
+        )
+        if answer.strip().casefold() not in {"y", "yes"}:
+            return None
+        original_identity = _review_identity(plan)
+        plan = service.update_plan(
+            args.skill_id,
+            preserve_modified=args.preserve_modified,
+            accept_sensitive=args.accept_sensitive,
+            accept_partial=args.accept_partial,
+            accept_warnings=True,
+        )
+        _emit(plan, as_json=False, command="update")
+        if _review_identity(plan) != original_identity:
+            answer = input(
+                "The reviewed package or findings changed. Acknowledge this updated review? [y/N] "
+            )
+            if answer.strip().casefold() not in {"y", "yes"}:
+                return None
+    if isinstance(plan, dict) and plan.get("allowed") is False:
+        print("Update remains blocked; create a new plan with the listed acknowledgements.")
+        return None
     answer = input("Apply this exact reviewed update plan? [y/N] ")
     if answer.strip().lower() not in {"y", "yes"}:
         return None
@@ -680,15 +778,195 @@ def _terminal_handoff(command):
             f"Run `{instructions[command]}`. Nothing has been changed.")
 
 
-def _emit(value: Any, *, as_json: bool) -> None:
+def _suggest_summary(prepared: object) -> str:
+    data = prepared if isinstance(prepared, dict) else {}
+    draft_id = _text(data.get("draft_id") or data.get("local_draft_id") or "unavailable")
+    files = data.get("files") if isinstance(data.get("files"), list) else []
+    security = data.get("security_check")
+    security = security if isinstance(security, dict) else {}
+    warning = _text(security.get("summary") or "No local scanner summary available")
+    return "\n".join((
+        "Draft prepared locally",
+        "",
+        f"Draft: {draft_id}",
+        f"Files: {len(files)}",
+        f"Warnings: {warning}",
+        "Nothing has been uploaded. The original skill is unchanged.",
+    ))
+
+
+def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
+    # pylint: disable=too-many-return-statements,too-many-statements
+    prepared: object, service: object
+) -> None:
+    """Run a local review, warning acknowledgement, then distinct final consent."""
+
+    data = prepared if isinstance(prepared, dict) else {}
+    draft_id = str(data.get("draft_id") or data.get("local_draft_id") or "")
+    if not draft_id:
+        raise PackagePolicyError("prepared draft identity is unavailable")
+    print(_suggest_summary(data))
+    if not sys.stdin.isatty():
+        safe_id = shlex.quote(_without_controls(draft_id))
+        print(
+            "\nResume local review: hermes wisdom prepared review " + safe_id
+            + "\nResume sharing review: hermes wisdom publication review " + safe_id
+        )
+        return
+    while True:
+        print(
+            "\n1. Review files and warnings\n"
+            "2. Edit draft\n"
+            "3. Continue to sharing review\n"
+            "4. Keep draft and exit"
+        )
+        choice = input("Choose 1-4: ").strip()
+        if choice == "1":
+            _review_draft_files(data)
+            continue
+        if choice == "2":
+            saved = _edit_prepared(service, draft_id)
+            print("\nDraft saved locally. No package code was executed.")
+            data = service.prepared_review(draft_id, allow_model_review=False)
+            print(_human_render("prepared", saved))
+            continue
+        if choice == "4":
+            print(
+                "\nDraft kept. Resume with: hermes wisdom prepared review "
+                + shlex.quote(_without_controls(draft_id))
+            )
+            return
+        if choice != "3":
+            print("Choose 1, 2, 3, or 4.")
+            continue
+
+        displayed = service.prepared_review(draft_id, allow_model_review=False)
+        if not isinstance(displayed, dict):
+            raise PackagePolicyError("prepared draft review is unavailable")
+        print(
+            "\nExact local package review\n"
+            + _render_action_review("publication", displayed)
+        )
+        warnings = _has_reviewable_warnings(displayed)
+        details = _safe_scan_details(displayed.get("local_scan"))
+        if warnings and not details:
+            print(
+                "Draft kept: scanner warning details are unavailable; "
+                "acknowledgement is blocked."
+            )
+            return
+        accepted = False
+        if warnings:
+            answer = input(
+                "Acknowledge the displayed scanner warnings for this exact package? [y/N] "
+            )
+            if answer.strip().casefold() not in {"y", "yes"}:
+                print("Draft kept; warnings were not accepted.")
+                return
+            accepted = True
+        review = service.publication_review(draft_id, accept_warnings=accepted)
+        if not isinstance(review, dict):
+            raise PackagePolicyError("publication review is unavailable")
+        if _review_identity(review) != _review_identity(displayed):
+            print("\nThe package or scanner findings changed during review.")
+            print(_render_action_review("publication", review))
+            if _has_reviewable_warnings(review):
+                if not _safe_scan_details(review.get("local_scan")):
+                    print("Draft kept: updated warning details are unavailable.")
+                    return
+                answer = input("Acknowledge the updated scanner warnings? [y/N] ")
+                if answer.strip().casefold() not in {"y", "yes"}:
+                    print("Draft kept; updated warnings were not accepted.")
+                    return
+        owner = service.binding() if callable(getattr(service, "binding", None)) else {}
+        exact_review = {**review, "owner": owner if isinstance(owner, dict) else {}}
+        print("\n" + _render_action_review("publication", exact_review))
+        if input("Share this exact reviewed package? [y/N] ").strip().casefold() not in {
+            "y", "yes",
+        }:
+            print("Draft kept; final sharing consent was not given.")
+            return
+        receipt = review.get("receipt")
+        if not isinstance(receipt, str) or not receipt:
+            raise PackagePolicyError("publication review receipt is unavailable")
+        result = service.publication_submit(receipt)
+        print(_human_render("publication", result))
+        return
+
+
+def _review_draft_files(data: dict[str, Any]) -> None:
+    """Show complete safe findings and an explicit, inert file preview menu."""
+
+    print("\n" + _render_inventory(data))
+    print(_render_findings(data))
+    files = data.get("files") if isinstance(data.get("files"), list) else []
+    while files:
+        answer = input("Inspect file number (Enter to return): ").strip()
+        if not answer:
+            return
+        try:
+            index = int(answer) - 1
+        except ValueError:
+            print("Choose a listed file number or press Enter.")
+            continue
+        if not 0 <= index < len(files):
+            print("Choose a listed file number or press Enter.")
+            continue
+        print("\n" + _render_file_preview(files[index]))
+
+
+def _human_render(  # pylint: disable=too-many-return-statements
+    command: str | None, value: Any
+) -> str:
+    """Render bounded human summaries without exposing complete package bytes."""
+
+    if command == "status":
+        return _render_status(value)
+    data = value if isinstance(value, dict) else {}
+    if isinstance(data.get("error"), str):
+        return "Error: " + _text(data["error"])
+    if command == "check":
+        return "\n".join((
+            "Update check",
+            f"Skill: {_text(data.get('skill_id') or 'unknown')}",
+            f"State: {_text(data.get('state') or 'unknown')}",
+        ))
+    if command == "prepared":
+        files = data.get("files") if isinstance(data.get("files"), list) else []
+        draft = _text(data.get("draft_id") or "unknown")
+        lines = [
+            "Prepared draft",
+            f"Draft: {draft}",
+            f"Files: {len(files)}",
+        ]
+        description = data.get("description") or data.get("drafted_description")
+        if isinstance(description, str) and description:
+            lines.append("Description: " + _text(description, limit=1024))
+        lines.extend((
+            _render_inventory(data),
+            _render_findings(data),
+            f"Edit: hermes wisdom prepared edit {shlex.quote(_without_controls(draft))}",
+            f"Full export: hermes wisdom prepared inspect {draft} --json",
+        ))
+        return "\n".join(lines)
+    if command in {"publication", "install", "update", "installed-setup"}:
+        return _render_action_review(command, value)
+    return _render_read_command(command, value)
+
+
+def _emit(
+    value: Any, *, as_json: bool, command: str | None = None, error: bool = False
+) -> None:
+    stream = sys.stderr if error and not as_json else sys.stdout
     if as_json:
         print(
-            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, default=str)
+            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, default=str),
+            file=stream,
         )
     elif isinstance(value, (dict, list)):
-        print(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+        print(_human_render(command, value), file=stream)
     else:
-        print(_without_controls(value))
+        print(_without_controls(value), file=stream)
 
 
 def _slash_help() -> str:
@@ -1022,7 +1300,7 @@ def _positive_version(value: object) -> int | None:
 
 def _without_controls(value: object) -> str:
     return "".join(
-        " " if unicodedata.category(character) == "Cc" else character
+        " " if unicodedata.category(character) in {"Cc", "Cf"} else character
         for character in str(value)
     )
 

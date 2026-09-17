@@ -16,11 +16,13 @@ from typing import Any, Callable
 
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .install_execution import (
+    _accepted_scan_warning,
     _durable_replace,
     _field,
     _fsync_directory,
     _reject_symlink_chain,
     _require_tree,
+    _require_scan,
     _same_filesystem,
     _tree_hashes,
     _within,
@@ -235,6 +237,11 @@ class UpdateExecutor:
         self._require_current(may_apply)
         _write_staging(staging, verified.files)
         _require_tree(staging, verified.baseline)
+        _require_scan(
+            self.host.scan(staging),
+            plan.get("local_scan"),
+            _accepted_scan_warning(plan, operation="update"),
+        )
         self._assert_owner(owner)
         self.store.assert_operation_lock(payload["skill_id"], lease)
         self.store.advance(operation_id, "staged")
@@ -278,6 +285,12 @@ class UpdateExecutor:
             self.store.advance(operation_id, "staged")
             phase = "staged"
         if phase == "staged":
+            self._require_current(may_apply)
+            _require_scan(
+                self.host.scan(staging),
+                payload.get("local_scan"),
+                _accepted_scan_warning(payload, operation="update"),
+            )
             self._require_current(may_apply)
             recovery.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if target.exists() and not recovery.exists():

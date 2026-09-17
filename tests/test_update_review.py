@@ -117,7 +117,7 @@ def _tree(root: Path, files):
         path.write_bytes(body)
 
 
-def _reviewer(tmp_path, *, client=None):
+def _reviewer(tmp_path, *, client=None, host=None):
     owner = _owner(profile_home=str(tmp_path / "profile"))
     target = (tmp_path / "profile" / "skills" / "_wisdom"
               / org_directory_name(owner["organization_id"]) / "managed-skill")
@@ -131,7 +131,7 @@ def _reviewer(tmp_path, *, client=None):
         "update_mode": "MANUAL", "state": "active", "owner": owner,
     }
     store = Store(record)
-    host = Host(tmp_path / "profile")
+    host = host or Host(tmp_path / "profile")
     value = UpdateReviewer(
         client or Client(), store, Receipts(lambda: dict(owner)), host,
         lambda: dict(owner),
@@ -244,6 +244,37 @@ def test_sensitive_and_partial_actions_are_bound_into_review_not_apply_flags(tmp
     )
     assert accepted["policy"]["accepted_partial"] is True
     assert accepted["allowed"] is True
+
+
+@pytest.mark.parametrize("scan_allowed", [False, None])
+def test_manual_update_can_bind_fresh_warning_acceptance(tmp_path, scan_allowed):
+    host = Host(tmp_path / "profile", scan_allowed=scan_allowed)
+    host.findings = [{"kind": "suspicious", "file": "SKILL.md"}]
+    reviewer, _store, _target = _reviewer(tmp_path, host=host)
+
+    blocked = reviewer.plan("skill-1")
+    assert blocked["allowed"] is False
+    accepted = reviewer.plan("skill-1", accept_warnings=True)
+
+    warning = accepted["policy"]["warning_acceptance"]
+    assert accepted["allowed"] is True
+    assert warning["accepted"] is True
+    assert warning["operation"] == "update"
+    assert reviewer.verify(accepted).plan == accepted
+
+
+@pytest.mark.parametrize("mode", ["AUTO_WITH_NOTICE", "REQUIRED"])
+def test_automatic_update_cannot_accept_host_warnings(tmp_path, mode):
+    client = Client()
+    client.remote["update_mode"] = mode
+    host = Host(tmp_path / "profile", scan_allowed=False)
+    host.findings = [{"kind": "suspicious", "file": "SKILL.md"}]
+    reviewer, _store, _target = _reviewer(tmp_path, client=client, host=host)
+
+    with pytest.raises(PackagePolicyError, match="requires manual review"):
+        reviewer.plan_automatic("skill-1")
+    with pytest.raises(WisdomValidationError, match="cannot accept manual"):
+        reviewer.plan("skill-1", automatic=True, accept_warnings=True)
 
 
 def test_verify_rechecks_owner_authority_local_snapshot_and_exact_target_bytes(tmp_path):

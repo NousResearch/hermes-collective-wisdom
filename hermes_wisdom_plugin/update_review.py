@@ -25,7 +25,7 @@ _UPDATE_MODES = frozenset({"MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"})
 _INCOMING_FIELDS = (
     "slug", "version", "content_hash", "manifest_hash", "takedown_generation",
     "update_mode", "manifest", "files", "compatibility", "server_checks",
-    "local_scan", "hashes",
+    "local_scan", "security_check", "hashes",
 )
 
 
@@ -215,13 +215,14 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "takedown_generation": checked["takedown_generation"],
         }
 
-    def plan(  # pylint: disable=too-many-locals
+    def plan(  # pylint: disable=too-many-locals,too-many-arguments
         self,
         skill_id: str,
         *,
         preserve_modified: bool = False,
         accept_sensitive: bool = False,
         accept_partial: bool = False,
+        accept_warnings: bool = False,
         automatic: bool = False,
     ) -> dict[str, Any]:
         """Create an exact review; acknowledgements become immutable receipt facts."""
@@ -238,7 +239,9 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             raise PackagePolicyError("managed installation is already current")
         if automatic and authority["update_mode"] not in {"AUTO_WITH_NOTICE", "REQUIRED"}:
             raise PackagePolicyError("manual update policy requires explicit review")
-        if automatic and any((accept_sensitive, accept_partial, preserve_modified)):
+        if automatic and any((
+            accept_sensitive, accept_partial, preserve_modified, accept_warnings,
+        )):
             raise WisdomValidationError("automatic policy cannot accept manual acknowledgements")
         incoming, _files, baseline = self.install_reviewer._prepare(  # pylint: disable=protected-access
             skill_id,
@@ -246,6 +249,8 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             authority["update_mode"],
             owner,
             check_existing=False,
+            accept_warnings=accept_warnings,
+            warning_operation="update",
         )
         target = Path(installation["target_path"])
         local_snapshot = _tree_hashes(target)
@@ -254,9 +259,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         modified = local_snapshot != installation.get("baseline")
         sensitive = self._sensitive(target, incoming["manifest"])
         outcome = incoming["compatibility"]["outcome"]
-        partial = outcome in {"partial", "compatible_after_setup"} or incoming[
-            "local_scan"
-        ]["allowed"] is None
+        partial = outcome in {"partial", "compatible_after_setup"}
         preserve_edited = preserve_modified or (
             automatic and authority["update_mode"] == "REQUIRED" and modified
         )
@@ -305,6 +308,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
                 "manual_only": not automatic,
                 "accepted_sensitive": bool(accept_sensitive),
                 "accepted_partial": bool(accept_partial),
+                "accepted_warnings": bool(accept_warnings),
                 "accepted_modified_preservation": bool(preserve_edited),
             },
             "authorization": {
@@ -421,6 +425,12 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             str(expected_authority["update_mode"]),
             owner,
             check_existing=False,
+            accept_warnings=bool(
+                isinstance(plan.get("policy"), dict)
+                and isinstance(plan["policy"].get("warning_acceptance"), dict)
+                and plan["policy"]["warning_acceptance"].get("accepted") is True
+            ),
+            warning_operation="update",
         )
         if any(plan.get(field) != incoming.get(field) for field in _INCOMING_FIELDS):
             raise WisdomValidationError(

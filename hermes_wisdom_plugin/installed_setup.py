@@ -13,8 +13,7 @@ from typing import Any
 from .compatibility import evaluate
 from .contract import parse_manifest_bytes
 from .package import (
-    MAX_FILE_BYTES,
-    MAX_FILES,
+    MAX_METADATA_BYTES,
     MAX_TREE_BYTES,
     PackagePolicyError,
     _validate_package_path,
@@ -37,8 +36,8 @@ def _installed_files(  # pylint: disable=too-many-locals,too-many-branches,too-m
     if not target.is_dir():
         raise PackagePolicyError("managed setup target is missing")
     baseline = installation.get("baseline")
-    if not isinstance(baseline, dict) or len(baseline) > MAX_FILES:
-        raise PackagePolicyError("managed setup package exceeds file limits")
+    if not isinstance(baseline, dict):
+        raise PackagePolicyError("managed setup package baseline is invalid")
     directories: set[str] = set()
     for name, digest in baseline.items():
         if not isinstance(name, str) or not isinstance(digest, str):
@@ -49,62 +48,78 @@ def _installed_files(  # pylint: disable=too-many-locals,too-many-branches,too-m
         )
     files: list[tuple[str, str, bytes]] = []
     total = 0
+    metadata_total = 0
     pending = [target]
     while pending:
         try:
-            entries = list(os.scandir(pending.pop()))
+            entries = os.scandir(pending.pop())
         except OSError as exc:
             raise PackagePolicyError("managed setup package is unavailable") from exc
-        for entry in entries:
-            path = Path(entry.path)
-            name = path.relative_to(target).as_posix()
-            try:
-                metadata = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise PackagePolicyError("managed setup package changed during inspection") from exc
-            if stat.S_ISDIR(metadata.st_mode) and (
-                name in directories or name == PurePosixPath(SETUP_PATH).parent.as_posix()
-            ):
-                pending.append(path)
-                continue
-            if (
-                name not in baseline
-                or not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_nlink != 1
-                or metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            ):
-                raise PackagePolicyError(
-                    "managed setup package contains an unexpected or unsafe entry"
+        with entries:
+            for entry in entries:
+                path = Path(entry.path)
+                name = path.relative_to(target).as_posix()
+                metadata_total += len(name.encode("utf-8")) + 128
+                if metadata_total > MAX_METADATA_BYTES:
+                    raise PackagePolicyError("managed setup package exceeds metadata limits")
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise PackagePolicyError(
+                        "managed setup package changed during inspection"
+                    ) from exc
+                if stat.S_ISDIR(metadata.st_mode) and (
+                    name in directories or name == PurePosixPath(SETUP_PATH).parent.as_posix()
+                ):
+                    pending.append(path)
+                    continue
+                if (
+                    name not in baseline
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                ):
+                    raise PackagePolicyError(
+                        "managed setup package contains an unexpected or unsafe entry"
+                    )
+                remaining = MAX_TREE_BYTES - total
+                if metadata.st_size > remaining:
+                    raise PackagePolicyError("managed setup package exceeds size limits")
+                flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                try:
+                    descriptor = os.open(path, flags)
+                    with os.fdopen(descriptor, "rb") as stream:
+                        opened = os.fstat(stream.fileno())
+                        if (
+                            not os.path.samestat(metadata, opened)
+                            or not stat.S_ISREG(opened.st_mode)
+                            or opened.st_nlink != 1
+                        ):
+                            raise PackagePolicyError(
+                                "managed setup package changed during inspection"
+                            )
+                        body = stream.read(remaining + 1)
+                except OSError as exc:
+                    raise PackagePolicyError(
+                        "managed setup package changed during inspection"
+                    ) from exc
+                total += len(body)
+                if total > MAX_TREE_BYTES:
+                    raise PackagePolicyError("managed setup package exceeds size limits")
+                mode = (
+                    "exec" if metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    else "file"
                 )
-            if len(files) >= MAX_FILES or metadata.st_size > MAX_FILE_BYTES:
-                raise PackagePolicyError("managed setup package exceeds file limits")
-            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            try:
-                descriptor = os.open(path, flags)
-                with os.fdopen(descriptor, "rb") as stream:
-                    opened = os.fstat(stream.fileno())
-                    if (
-                        not os.path.samestat(metadata, opened)
-                        or not stat.S_ISREG(opened.st_mode)
-                        or opened.st_nlink != 1
-                    ):
-                        raise PackagePolicyError(
-                            "managed setup package changed during inspection"
-                        )
-                    body = stream.read(MAX_FILE_BYTES + 1)
-            except OSError as exc:
-                raise PackagePolicyError(
-                    "managed setup package changed during inspection"
-                ) from exc
-            total += len(body)
-            if len(body) > MAX_FILE_BYTES or total > MAX_TREE_BYTES:
-                raise PackagePolicyError("managed setup package exceeds size limits")
-            files.append((name, "file", body))
+                files.append((name, mode, body))
     records, content_hash = verify_content_files(files)
     if (
         content_hash != installation.get("content_hash")
-        or {record.path: record.hash for record in records} != baseline
+        or {
+            record.path: (
+                f"exec:{record.hash}" if record.mode == "exec" else record.hash
+            )
+            for record in records
+        } != baseline
     ):
         raise PackagePolicyError(
             "installed package changed; review its current bytes before setup"

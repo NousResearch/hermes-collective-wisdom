@@ -24,6 +24,7 @@ CHECK_LABELS = {
 }
 PASS_TEXT = "✅ Safe for work (no inappropriate content detected)"
 ADVISORY_TEXT = "Needs a look before sharing at work (possible inappropriate content)"
+MAX_MODEL_REVIEW_BYTES = 128 * 1024
 
 
 class _ClassifierCheck(BaseModel):
@@ -120,6 +121,21 @@ def review_package(
 ) -> dict[str, Any]:
     """Run the fixed classifier through the supplied host route or return unavailable."""
 
+    serialized = json.dumps(
+        {
+            "untrusted_instruction_package": package,
+            "untrusted_owner_description": author_description,
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    if len(serialized.encode("utf-8")) > MAX_MODEL_REVIEW_BYTES:
+        result = unavailable_review(
+            content_hash=content_hash, description_hash=description_hash
+        )
+        result["availability_reason"] = "package_exceeds_model_review_limit"
+        result["summary"] = "Professionalism check unavailable: package exceeds model review limit."
+        return result
     if llm is None:
         return unavailable_review(
             content_hash=content_hash, description_hash=description_hash
@@ -141,14 +157,7 @@ def review_package(
             ),
             input=[{
                 "type": "text",
-                "text": json.dumps(
-                    {
-                        "untrusted_instruction_package": package,
-                        "untrusted_owner_description": author_description,
-                    },
-                    sort_keys=True,
-                    ensure_ascii=True,
-                ),
+                "text": serialized,
             }],
             temperature=0,
             max_tokens=900,

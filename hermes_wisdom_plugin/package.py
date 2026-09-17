@@ -1,4 +1,4 @@
-"""Instruction-only package preparation and exact-byte verification."""
+"""Native Hermes skill package preparation and exact-byte verification."""
 
 from __future__ import annotations
 
@@ -32,14 +32,14 @@ from .contract import (
 from .wire import ObjectSet, build_commit, build_tree
 
 
-MAX_FILES = 32
-MAX_FILE_BYTES = 256 * 1024
-MAX_TREE_BYTES = 512 * 1024
-MAX_TREE_DEPTH = 3
+MAX_TREE_BYTES = 10 * 1024 * 1024
+# Paths and canonical tree entries are bounded separately so empty files cannot
+# turn validation/serialization into unbounded work. This is deliberately not a
+# product file-count limit.
+MAX_METADATA_BYTES = 2 * 1024 * 1024
+MAX_TREE_DEPTH = 16
 MAX_SEGMENT_BYTES = 255
-ALLOWED_ROOT_FILES = frozenset({"SKILL.md", "skill.manifest.json"})
-ALLOWED_SUPPORT_DIRS = frozenset({"refs", "assets"})
-ALLOWED_SUPPORT_EXTENSIONS = frozenset({".txt", ".md", ".rst", ".adoc", ".asciidoc"})
+REQUIRED_ROOT_FILES = frozenset({"SKILL.md", "skill.manifest.json"})
 WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
     | {f"com{number}" for number in range(1, 10)}
@@ -58,33 +58,13 @@ BLOCKED_PATH_SEGMENTS = frozenset({
     "__pycache__",
     "hooks",
     "node_modules",
-    "scripts",
-    "templates",
     "venv",
 })
-FORBIDDEN_REFERENCE_RE = re.compile(
-    r"(?i)(?:^|[\s\[(`'\"])(?:scripts?|templates?)/[^\s)`'\"]+"
-)
-PACKAGE_MANAGER_FILES = frozenset({
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "requirements.txt",
-    "pyproject.toml",
-    "poetry.lock",
-    "Pipfile",
-    "Cargo.toml",
-    "Cargo.lock",
-    "go.mod",
-    "go.sum",
-    "Gemfile",
-    "Gemfile.lock",
-})
+_COMPILED_EXECUTABLE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe")
 
 
 class PackagePolicyError(ValueError):
-    """Package bytes or paths violate the instruction-only policy."""
+    """Package bytes, modes, or paths violate the native package policy."""
 
 
 @dataclass(frozen=True)
@@ -92,6 +72,10 @@ class PackageSecurityDecision:
     """Host-owned guard result for the exact prepared overlay."""
 
     allowed: bool | None
+    available: bool = True
+    verdict: str | None = None
+    summary: str | None = None
+    findings: tuple[dict[str, object], ...] = ()
 
 
 class PackageHostProvider(Protocol):
@@ -132,9 +116,15 @@ def _require_host_security(
         raise PackagePolicyError("host package security guard is unavailable") from exc
     if not isinstance(security, PackageSecurityDecision):
         raise PackagePolicyError("host package security guard returned an invalid result")
-    if security.allowed is not True:
-        state = "blocked" if security.allowed is False else "unavailable"
-        raise PackagePolicyError(f"host package security guard is {state}")
+    # A negative scanner verdict is retained and presented by the contribution
+    # workflow; it is not a structural packaging veto. Unavailable scanning still
+    # fails closed because there is no evidence for a human to review.
+    if not isinstance(security.available, bool):
+        raise PackagePolicyError("host package security guard returned an invalid result")
+    if security.allowed is not None and not isinstance(security.allowed, bool):
+        raise PackagePolicyError("host package security guard returned an invalid result")
+    if not security.available:
+        raise PackagePolicyError("host package security guard is unavailable")
 
 
 @dataclass(frozen=True)
@@ -372,32 +362,21 @@ def _validate_package_path(raw_path: str, *, source: str) -> tuple[PurePosixPath
 
 
 def _validate_allowed_file(pure: PurePosixPath, *, path: str) -> None:
-    if len(pure.parts) == 1:
-        if pure.name not in ALLOWED_ROOT_FILES:
-            raise PackagePolicyError(
-                f"unsupported root file {path}; create an explicit instruction-only fork"
-            )
-        return
-    if pure.parts[0] not in ALLOWED_SUPPORT_DIRS:
-        raise PackagePolicyError(f"unsupported package path: {path}")
-    if pure.name in ALLOWED_ROOT_FILES:
+    if len(pure.parts) > 1 and pure.name in REQUIRED_ROOT_FILES:
         raise PackagePolicyError(f"required root file is misplaced: {path}")
-    if pure.suffix.casefold() not in ALLOWED_SUPPORT_EXTENSIONS:
-        raise PackagePolicyError(
-            f"unsupported active or unknown file type {path}; "
-            "create an explicit instruction-only fork"
-        )
 
 
-def _validate_text_bytes(body: bytes, *, path: str) -> None:
-    if b"\x00" in body:
-        raise PackagePolicyError(f"NUL/binary content is not allowed: {path}")
-    try:
-        body.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise PackagePolicyError(f"binary content is not allowed: {path}") from exc
-    if body.startswith(b"#!"):
-        raise PackagePolicyError(f"executable shebang content is not allowed: {path}")
+def _validate_mode_and_bytes(mode: str, body: bytes, *, path: str) -> None:
+    if not isinstance(mode, str) or not isinstance(body, bytes):
+        raise PackagePolicyError(f"invalid package entry: {path}")
+    if mode not in {"file", "exec"}:
+        raise PackagePolicyError(f"unknown package mode: {path}")
+    if body.startswith(_COMPILED_EXECUTABLE_MAGIC):
+        raise PackagePolicyError(f"compiled executable content is not supported: {path}")
+
+
+def _normalized_mode(metadata: int) -> str:
+    return "exec" if metadata & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) else "file"
 
 
 def _safe_relative(path: Path, root: Path) -> str:
@@ -406,83 +385,103 @@ def _safe_relative(path: Path, root: Path) -> str:
     return rel
 
 
-def _validate_tree(  # pylint: disable=too-many-branches,too-many-statements,too-many-locals
-    root: Path, *, require_manifest: bool = True
-) -> list[Path]:
-    if not root.is_dir() or root.is_symlink():
+@dataclass(frozen=True)
+class _SnapshotEntry:
+    """One admitted regular file from a bounded no-follow tree walk."""
+
+    path: Path
+    relative: str
+    mode: str
+    body: bytes
+
+
+def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+    root: Path, *, require_manifest: bool
+) -> list[_SnapshotEntry]:
+    """Admit metadata and payload before sorting or further processing."""
+
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise PackagePolicyError("skill root must be a regular directory") from exc
+    if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
         raise PackagePolicyError("skill root must be a regular directory")
-    entries: list[Path] = []
+    entries: list[_SnapshotEntry] = []
     collision_keys: set[str] = set()
     total = 0
-    file_count = 0
+    metadata_total = 0
     skill_body: bytes | None = None
-    for path in sorted(root.rglob("*")):
-        rel = _safe_relative(path, root)
-        if path.is_symlink():
-            raise PackagePolicyError(f"symlinks are not supported: {rel}")
-        if not path.is_file() and not path.is_dir():
+    pending: list[tuple[Path, int]] = [(root, 0)]
+    while pending:
+        directory, depth = pending.pop()
+        if depth > MAX_TREE_DEPTH:
             raise PackagePolicyError(
-                f"special filesystem content is not supported: {rel}"
+                f"package path exceeds maximum tree depth {MAX_TREE_DEPTH}"
             )
-        pure, key = _validate_package_path(rel, source="package")
-        parts = pure.parts
-        if len(parts) == 1:
-            if path.is_file() and parts[0] not in ALLOWED_ROOT_FILES:
-                raise PackagePolicyError(
-                    f"unsupported root file {rel}; create an explicit instruction-only fork"
+        try:
+            iterator = os.scandir(directory)
+        except OSError as exc:
+            raise PackagePolicyError("package tree changed while reading") from exc
+        with iterator:
+            for item in iterator:
+                path = Path(item.path)
+                rel = path.relative_to(root).as_posix()
+                pure, key = _validate_package_path(rel, source="package")
+                metadata_total += len(rel.encode("utf-8")) + 128
+                if metadata_total > MAX_METADATA_BYTES:
+                    raise PackagePolicyError(
+                        f"package path metadata exceeds {MAX_METADATA_BYTES} bytes"
+                    )
+                if key in collision_keys:
+                    raise PackagePolicyError(f"install-target path collision: {rel}")
+                collision_keys.add(key)
+                try:
+                    metadata = item.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise PackagePolicyError("package tree changed while reading") from exc
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise PackagePolicyError(f"symlinks are not supported: {rel}")
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append((path, depth + 1))
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise PackagePolicyError(
+                        f"special filesystem content is not supported: {rel}"
+                    )
+                _validate_allowed_file(pure, path=rel)
+                if metadata.st_nlink != 1:
+                    raise PackagePolicyError(f"hard-linked content is not supported: {rel}")
+                if total + metadata.st_size > MAX_TREE_BYTES:
+                    raise PackagePolicyError(
+                        f"package exceeds {MAX_TREE_BYTES} total bytes"
+                    )
+                body = _read_regular_file(
+                    path, display_path=rel, max_bytes=MAX_TREE_BYTES - total
                 )
-            if path.is_dir() and parts[0] not in ALLOWED_SUPPORT_DIRS:
-                raise PackagePolicyError(
-                    f"unsupported directory {rel}; scripts/templates cannot be silently omitted"
-                )
-        elif parts[0] not in ALLOWED_SUPPORT_DIRS:
-            raise PackagePolicyError(f"unsupported package path: {rel}")
-        if key in collision_keys:
-            raise PackagePolicyError(f"install-target path collision: {rel}")
-        collision_keys.add(key)
-        if path.is_file():
-            _validate_allowed_file(pure, path=rel)
-            if path.stat().st_nlink != 1:
-                raise PackagePolicyError(f"hard-linked content is not supported: {rel}")
-            if path.name in PACKAGE_MANAGER_FILES:
-                raise PackagePolicyError(
-                    f"package-manager manifest is not allowed: {rel}"
-                )
-            body = _read_regular_file(
-                path, display_path=rel, max_bytes=MAX_FILE_BYTES
-            )
-            file_count += 1
-            if file_count > MAX_FILES:
-                raise PackagePolicyError(f"package exceeds {MAX_FILES} files")
-            size = len(body)
-            if size > MAX_FILE_BYTES:
-                raise PackagePolicyError(f"file exceeds {MAX_FILE_BYTES} bytes: {rel}")
-            total += size
-            if total > MAX_TREE_BYTES:
-                raise PackagePolicyError(
-                    f"package exceeds {MAX_TREE_BYTES} total bytes"
-                )
-            mode = path.lstat().st_mode
-            if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                raise PackagePolicyError(f"executable content is not allowed: {rel}")
-            _validate_text_bytes(body, path=rel)
-            if rel == "SKILL.md":
-                skill_body = body
-            entries.append(path)
-    if not (root / "SKILL.md").is_file():
+                total += len(body)
+                mode = _normalized_mode(metadata.st_mode)
+                _validate_mode_and_bytes(mode, body, path=rel)
+                if rel == "SKILL.md":
+                    skill_body = body
+                entries.append(_SnapshotEntry(path, rel, mode, body))
+    entries.sort(key=lambda entry: entry.relative)
+    if skill_body is None:
         raise PackagePolicyError("package requires exactly one root SKILL.md")
-    if require_manifest and not (root / "skill.manifest.json").is_file():
+    if require_manifest and not any(
+        entry.relative == "skill.manifest.json" for entry in entries
+    ):
         raise PackagePolicyError(
             "package requires exactly one root skill.manifest.json"
         )
-    if skill_body is None:
-        raise PackagePolicyError("package requires exactly one root SKILL.md")
-    skill_text = skill_body.decode("utf-8")
-    if FORBIDDEN_REFERENCE_RE.search(skill_text):
-        raise PackagePolicyError(
-            "SKILL.md references active scripts/templates; create an explicit instruction-only fork"
-        )
+    try:
+        skill_body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PackagePolicyError("SKILL.md must be valid UTF-8") from exc
     return entries
+
+
+def _validate_tree(root: Path, *, require_manifest: bool = True) -> list[Path]:
+    return [entry.path for entry in _bounded_snapshot(root, require_manifest=require_manifest)]
 
 
 def _read_regular_file(
@@ -533,43 +532,22 @@ def source_fingerprint(source: Path) -> str:
 
     if source.is_symlink() or not source.is_dir():
         raise PackagePolicyError("skill root must be a regular directory")
-    records: list[str] = []
-    for path in sorted(source.rglob("*")):
-        if path.is_symlink():
-            raise PackagePolicyError(
-                f"symlinks are not supported: {path.relative_to(source).as_posix()}"
-            )
-        if path.is_file():
-            relative = path.relative_to(source).as_posix()
-            records.append(
-                f"{relative} {sha256_address(_read_regular_file(path, display_path=relative))}\n"
-            )
-        elif not path.is_dir():
-            raise PackagePolicyError(
-                "special filesystem content is not supported: "
-                f"{path.relative_to(source).as_posix()}"
-            )
+    records = [
+        f"{entry.relative} {entry.mode} {sha256_address(entry.body)}\n"
+        for entry in _bounded_snapshot(source, require_manifest=False)
+    ]
     return sha256_address("".join(records).encode("utf-8"))
 
 
 def read_validated_package_files(root: Path) -> list[tuple[str, str, bytes]]:
     """Read one complete safe package without hiding unsafe overlay entries."""
 
-    paths = _validate_tree(root)
+    snapshot = _bounded_snapshot(root, require_manifest=True)
     files = [
-        (
-            _safe_relative(path, root),
-            "file",
-            _read_regular_file(
-                path,
-                display_path=_safe_relative(path, root),
-                max_bytes=MAX_FILE_BYTES,
-            ),
-        )
-        for path in paths
+        (entry.relative, entry.mode, entry.body) for entry in snapshot
     ]
-    after = [_safe_relative(path, root) for path in _validate_tree(root)]
-    if after != [path for path, _mode, _body in files]:
+    after = _bounded_snapshot(root, require_manifest=True)
+    if [(item.relative, item.mode, item.body) for item in after] != files:
         raise PackagePolicyError("prepared package changed while reading")
     return files
 
@@ -591,24 +569,22 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     if source.is_symlink():
         raise PackagePolicyError("skill root must be a regular directory")
     source = source.resolve()
-    source_hash = source_fingerprint(source)
+    source_snapshot = _bounded_snapshot(source, require_manifest=False)
+    source_hash = sha256_address("".join(
+        f"{entry.relative} {entry.mode} {sha256_address(entry.body)}\n"
+        for entry in source_snapshot
+    ).encode("utf-8"))
     target = overlay_root / source_hash.removeprefix("sha256:")
     if target.exists():
         raise PackagePolicyError("prepared overlay already exists; review the existing draft")
     target.mkdir(parents=True, mode=0o700)
     # Copy only validated allowlisted bytes. Validation happens first so an
     # unsupported referenced file never disappears silently from the package.
-    _validate_tree(source, require_manifest=False)
-    for path in sorted(source.rglob("*")):
-        rel = path.relative_to(source)
-        dest = target / rel
-        if path.is_dir():
-            dest.mkdir(parents=True, exist_ok=True)
-        elif path.is_file():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            relative = path.relative_to(source).as_posix()
-            dest.write_bytes(_read_regular_file(path, display_path=relative))
-            dest.chmod(0o600)
+    for entry in source_snapshot:
+        dest = target.joinpath(*PurePosixPath(entry.relative).parts)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(entry.body)
+        dest.chmod(0o700 if entry.mode == "exec" else 0o600)
     if source_fingerprint(source) != source_hash:
         raise PackagePolicyError("source changed while the review overlay was being prepared")
     if editorial_name is not None or editorial_description is not None:
@@ -647,14 +623,14 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     files = [
         ContentFile(
             path=_safe_relative(path, target),
-            mode="file",
+            mode=_normalized_mode(path.lstat().st_mode),
             hash=sha256_address(path.read_bytes()),
         )
         for path in paths
     ]
     content_hash = derive_content_hash(files)
     objects = ObjectSet()
-    tree = build_tree(target, objects, max_object_bytes=MAX_FILE_BYTES)
+    tree = build_tree(target, objects, max_object_bytes=MAX_TREE_BYTES)
     commit = build_commit(
         tree,
         [],
@@ -684,31 +660,34 @@ def verify_content_files(
     require_manifest: bool = True,
 ) -> tuple[list[ContentFile], str]:
     """Validate downloaded paths/modes/blobs and derive the content hash."""
-    if len(files) > MAX_FILES:
-        raise PackagePolicyError(f"download exceeds {MAX_FILES} files")
     records: list[ContentFile] = []
     keys: set[str] = set()
     total = 0
-    for raw_path, mode, body in files:
+    metadata_total = 0
+    for entry in files:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+            raise PackagePolicyError("download contains a malformed package entry")
+        raw_path, mode, body = entry
+        if not isinstance(raw_path, str):
+            raise PackagePolicyError("download contains an invalid package path")
+        if not isinstance(mode, str) or not isinstance(body, bytes):
+            raise PackagePolicyError(f"invalid package entry: {raw_path}")
         pure, key = _validate_package_path(raw_path, source="server")
         if key in keys:
             raise PackagePolicyError(f"install-target collision: {raw_path}")
         keys.add(key)
-        if mode != "file":
-            raise PackagePolicyError(f"executable/unknown mode rejected: {raw_path}")
-        _validate_allowed_file(pure, path=raw_path)
-        if pure.name in PACKAGE_MANAGER_FILES:
+        metadata_total += len(raw_path.encode("utf-8")) + 128
+        if metadata_total > MAX_METADATA_BYTES:
             raise PackagePolicyError(
-                f"package-manager manifest is not allowed: {raw_path}"
+                f"download path metadata exceeds {MAX_METADATA_BYTES} bytes"
             )
-        if len(body) > MAX_FILE_BYTES:
-            raise PackagePolicyError(f"file exceeds {MAX_FILE_BYTES} bytes: {raw_path}")
+        _validate_allowed_file(pure, path=raw_path)
         total += len(body)
         if total > MAX_TREE_BYTES:
             raise PackagePolicyError(f"download exceeds {MAX_TREE_BYTES} total bytes")
-        _validate_text_bytes(body, path=raw_path)
+        _validate_mode_and_bytes(mode, body, path=raw_path)
         records.append(
-            ContentFile(path=raw_path, mode="file", hash=sha256_address(body))
+            ContentFile(path=raw_path, mode=mode, hash=sha256_address(body))
         )
     required = {record.path for record in records}
     if "SKILL.md" not in required or (
@@ -716,6 +695,8 @@ def verify_content_files(
     ):
         raise PackagePolicyError("download is not a complete Wisdom package")
     skill_body = next(body for path, _, body in files if path == "SKILL.md")
-    if FORBIDDEN_REFERENCE_RE.search(skill_body.decode("utf-8")):
-        raise PackagePolicyError("SKILL.md references unsupported active content")
+    try:
+        skill_body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PackagePolicyError("SKILL.md must be valid UTF-8") from exc
     return records, derive_content_hash(records)

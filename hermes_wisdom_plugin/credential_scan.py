@@ -20,6 +20,13 @@ CREDENTIAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+BYTE_CREDENTIAL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = tuple(
+    (
+        kind,
+        re.compile(pattern.pattern.encode("ascii"), pattern.flags & ~re.UNICODE),
+    )
+    for kind, pattern in CREDENTIAL_PATTERNS
+)
 
 
 def scan_credentials(files: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -34,4 +41,20 @@ def scan_credentials(files: list[dict[str, str]]) -> list[dict[str, Any]]:
                         "file": item["path"],
                         "line": number,
                     })
+    return findings
+
+
+def scan_credential_bytes(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Scan opaque bytes for the ASCII credential forms the text scanner knows."""
+
+    findings: list[dict[str, Any]] = []
+    for item in files:
+        body = item.get("content_bytes")
+        path = item.get("path")
+        if not isinstance(body, bytes) or not isinstance(path, str):
+            continue
+        for number, line in enumerate(body.splitlines(), start=1):
+            for kind, pattern in BYTE_CREDENTIAL_PATTERNS:
+                if pattern.search(line):
+                    findings.append({"kind": kind, "file": path, "line": number})
     return findings

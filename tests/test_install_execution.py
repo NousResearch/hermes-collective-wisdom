@@ -3,7 +3,7 @@
 # Test doubles intentionally expose the executor's protocol-shaped methods.
 # pylint: disable=missing-class-docstring,missing-function-docstring
 # pylint: disable=redefined-outer-name,too-few-public-methods,protected-access
-# pylint: disable=import-outside-toplevel,wrong-import-order
+# pylint: disable=import-outside-toplevel,wrong-import-order,too-many-lines,duplicate-code
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from review_test_support import _content
 
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomNotFound
 from hermes_wisdom_plugin import install_execution
@@ -37,8 +38,14 @@ def _hash(body: bytes) -> str:
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
-FILES = (("SKILL.md", "file", b"# Installed\n"),)
-BASELINE = {"SKILL.md": _hash(FILES[0][2])}
+FILES = (
+    ("SKILL.md", "file", b"# Installed\n"),
+    ("scripts/sentinel.sh", "exec", b"#!/bin/sh\ntouch SHOULD_NOT_EXIST\n"),
+)
+BASELINE = {
+    path: (f"exec:{_hash(body)}" if mode == "exec" else _hash(body))
+    for path, mode, body in FILES
+}
 PLAN = {
     "receipt": "receipt-1",
     "skill_id": "skill-1",
@@ -49,6 +56,7 @@ PLAN = {
     "update_mode": "AUTO_WITH_NOTICE",
     "compatibility": {"outcome": "compatible"},
     "local_scan": {
+        "available": True,
         "allowed": True,
         "verdict": "allow",
         "summary": "clean",
@@ -185,13 +193,20 @@ class Client:
 class Host:
     def __init__(self, root):
         self.skills_root = root
+        self.scan_result = {
+            "available": True,
+            "allowed": True,
+            "verdict": "allow",
+            "summary": "clean",
+            "findings": [],
+        }
 
     def validate_target(self, path):
         assert Path(path).is_relative_to(self.skills_root)
 
     def scan(self, directory):
         assert Path(directory).is_relative_to(self.skills_root)
-        return {"allowed": True, "verdict": "allow", "summary": "clean", "findings": []}
+        return dict(self.scan_result)
 
 
 class Reviewer:
@@ -222,11 +237,63 @@ def test_apply_commits_exact_tree_and_preserves_server_mode(executor):
 
     target = Path(result["path"])
     assert (target / "SKILL.md").read_bytes() == FILES[0][2]
+    script = target / "scripts" / "sentinel.sh"
+    assert script.read_bytes() == FILES[1][2]
+    assert script.stat().st_mode & 0o777 == 0o700
+    assert not (target / "SHOULD_NOT_EXIST").exists()
     assert result["effective_update_mode"] == "REQUIRED"
     assert result["setup_required"] is False
     assert store.records["skill-1"]["owner"] == OWNER
     assert receipts.completed["receipt-1"] == result
     assert client.record_calls[0]["installation_id"] == "install-1"
+
+
+def test_apply_rejects_new_affirmative_scan_finding_at_activation(executor):
+    value, store, client, _receipts, _current = executor
+    calls = 0
+
+    def changed_at_final_boundary(_directory):
+        nonlocal calls
+        calls += 1
+        scan = dict(value.host.scan_result)
+        if calls > 1:
+            scan["findings"] = [{"kind": "new-warning", "file": "SKILL.md"}]
+        return scan
+
+    value.host.scan = changed_at_final_boundary
+
+    with pytest.raises(PackagePolicyError, match="scan changed"):
+        value.apply("receipt-1")
+
+    assert store.records == {}
+    assert client.record_calls == []
+
+
+def test_install_recovery_rejects_changed_affirmative_scan_before_promotion(
+    executor, monkeypatch
+):
+    value, store, client, _receipts, _current = executor
+    original_same_filesystem = install_execution._same_filesystem
+    failed = False
+
+    def interrupt_once(source, destination_parent):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("promotion interrupted")
+        return original_same_filesystem(source, destination_parent)
+
+    monkeypatch.setattr(install_execution, "_same_filesystem", interrupt_once)
+    with pytest.raises(OSError, match="promotion interrupted"):
+        value.apply("receipt-1")
+    assert store.pending_operations()[0]["phase"] == "staged"
+
+    value.host.scan_result["summary"] = "new affirmative summary"
+    with pytest.raises(PackagePolicyError, match="scan changed"):
+        value.apply("receipt-1")
+
+    assert store.records == {}
+    assert client.record_calls == []
 
 
 def test_install_respects_nonexpiring_setup_starter_lock(executor):
@@ -546,28 +613,71 @@ def test_unknown_scan_requires_acknowledgement_in_reviewed_plan(executor):
     value.host.scan = lambda *_args, **_kwargs: {
         "allowed": None, "verdict": "unknown", "summary": "scanner unavailable", "findings": []
     }
-    with pytest.raises(PackagePolicyError, match="changed after review"):
+    with pytest.raises(PackagePolicyError, match="scan is unavailable"):
         value.apply("receipt-1", accept_partial=True)
     assert store.records == {}
 
 
-def test_unknown_scan_with_review_ack_can_install(executor):
+@pytest.mark.parametrize("invalid_allowed", [1, 0, "true", [], {}])
+def test_scan_allowed_requires_strict_bool_or_none(invalid_allowed):
+    scan = {
+        "available": True,
+        "allowed": invalid_allowed,
+        "verdict": "invalid",
+        "summary": "invalid allowed type",
+        "findings": [],
+    }
+
+    with pytest.raises(PackagePolicyError, match="blocked|changed"):
+        install_execution._require_scan(scan, scan, accepted_warning=True)
+
+
+def test_unavailable_scan_cannot_be_approved():
+    scan = {
+        "available": False,
+        "allowed": None,
+        "verdict": "unavailable",
+        "summary": "scanner unavailable",
+        "findings": [],
+    }
+
+    with pytest.raises(PackagePolicyError, match="unavailable"):
+        install_execution._require_scan(scan, scan, accepted_warning=True)
+
+
+def test_ask_scan_with_exact_warning_ack_can_install(executor):
     value, _store, _client, _receipts, _current = executor
     value.host.scan = lambda *_args, **_kwargs: {
-        "allowed": None, "verdict": "unknown", "summary": "scanner unavailable", "findings": []
+        "available": True,
+        "allowed": None,
+        "verdict": "ask",
+        "summary": "review requested",
+        "findings": [],
     }
 
     original = PLAN["local_scan"]
     PLAN["local_scan"] = {
+        "available": True,
         "allowed": None,
-        "verdict": "unknown",
-        "summary": "scanner unavailable",
+        "verdict": "ask",
+        "summary": "review requested",
         "findings": [],
     }
+    original_policy = PLAN.get("policy")
+    PLAN["policy"] = {"warning_acceptance": {
+        "accepted": True,
+        "operation": "install",
+        "content_hash": PLAN["content_hash"],
+        "scan_fingerprint": "sha256:fixture",
+    }}
     try:
-        assert value.apply("receipt-1", accept_partial=True)["installed"] is True
+        assert value.apply("receipt-1")["installed"] is True
     finally:
         PLAN["local_scan"] = original
+        if original_policy is None:
+            PLAN.pop("policy", None)
+        else:
+            PLAN["policy"] = original_policy
 
 
 def test_real_store_and_receipt_complete_one_owner_bound_install(tmp_path):
@@ -756,6 +866,35 @@ def test_current_invocation_completes_exact_receipt_install(invocation_executor)
     assert receipts.outcome(plan["receipt"]) == result
     assert store.installation("skill-1")["target_path"] == str(target)
     assert len(client.record_calls) == 1
+
+
+def test_real_warning_review_receipt_and_executor_install_without_running_script(tmp_path):
+    owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
+    store = WisdomStore(tmp_path / "state")
+    host = ReviewHost(tmp_path / "profile", scan_allowed=False)
+    host.findings = [{"kind": "suspicious", "file": "scripts/sentinel.sh"}]
+    client = InvocationClient()
+    marker = tmp_path / "SHOULD_NOT_EXIST"
+    script = f"#!/bin/sh\ntouch {marker}\n".encode()
+    client.files.append(("scripts/sentinel.sh", "exec", script))
+    content = _content(client.files)
+    client.version_value.update(content_hash=content.content_hash, commit=content.commit)
+    receipts = InstallReceipts(store, lambda: dict(owner))
+    reviewer = InstallReviewer(client, store, receipts, host, lambda: dict(owner))
+
+    blocked = reviewer.plan("skill-1@v2")
+    assert blocked["allowed"] is False
+    accepted = reviewer.plan("skill-1@v2", accept_warnings=True)
+    assert accepted["policy"]["warning_acceptance"]["operation"] == "install"
+    executor = InstallExecutor(client, store, receipts, reviewer, host, lambda: dict(owner))
+    result = executor.apply(accepted["receipt"])
+
+    assert result["installed"] is True
+    assert not marker.exists()
+    installed_script = Path(result["path"]) / "scripts" / "sentinel.sh"
+    assert installed_script.read_bytes() == script
+    assert installed_script.stat().st_mode & 0o111
+    assert receipts.outcome(accepted["receipt"]) == result
 
 
 def test_real_retry_repairs_unbound_install_journal_start(tmp_path, monkeypatch):

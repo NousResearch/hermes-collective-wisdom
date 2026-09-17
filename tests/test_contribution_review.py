@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sqlite3
@@ -19,7 +20,6 @@ from hermes_wisdom_plugin.contribution_review import ContributionReviewer
 from hermes_wisdom_plugin.editorial import apply_editorial_metadata_to_overlay
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin.package import (
-    MAX_FILE_BYTES,
     MAX_TREE_BYTES,
     PackagePolicyError,
     PackageSecurityDecision,
@@ -53,7 +53,13 @@ class Host:
 
     def scan(self, overlay: Path) -> dict[str, object]:
         self.scans.append(overlay)
-        return {"guard": {"allowed": self.allowed, "findings": []}}
+        return {"guard": {
+            "available": self.allowed is not None,
+            "allowed": self.allowed,
+            "verdict": "allow" if self.allowed is True else "review",
+            "summary": "clean" if self.allowed is True else "manual review required",
+            "findings": [],
+        }}
 
     def check_package_security(self, overlay: Path) -> PackageSecurityDecision:
         return PackageSecurityDecision(allowed=self.scan(overlay)["guard"]["allowed"])
@@ -158,7 +164,13 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     assert result["local_draft_id"] == result["draft_id"]
     assert result["drafted_description"] == "Review incident notes."
     assert result["local_scan"] == {
-        "guard": {"allowed": True, "findings": []}
+        "guard": {
+            "available": True,
+            "allowed": True,
+            "verdict": "allow",
+            "summary": "clean",
+            "findings": [],
+        }
     }
     assert result["security_check"]["content_hash"] == result["hashes"]["content"]
     assert result["security_check"]["author_description_hash"] == (
@@ -180,6 +192,56 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     overlay = Path(result["overlay_path"])
     assert overlay.is_relative_to(tmp_path / "state" / "contribution-prepared")
     assert overlay != source
+
+
+def test_prepared_native_binary_and_exec_are_exact_without_text_coercion(tmp_path: Path):
+    """Draft storage uses bytes/modes and never decodes opaque resources as text."""
+    value, source, _binding = reviewer(tmp_path)
+    script = source / "scripts" / "sentinel.sh"
+    script.parent.mkdir()
+    script.write_bytes(b"#!/bin/sh\ntouch SHOULD_NOT_EXIST\n")
+    script.chmod(0o755)
+    asset = source / "assets" / "logo.png"
+    asset.parent.mkdir()
+    asset.write_bytes(b"\x89PNG\x00\xffopaque")
+
+    result = value.prepare("reviewed-skill")
+    files = {item["path"]: item for item in result["files"]}
+    assert files["scripts/sentinel.sh"]["mode"] == "exec"
+    assert base64.b64decode(files["scripts/sentinel.sh"]["content_base64"]) == script.read_bytes()
+    assert files["assets/logo.png"]["mode"] == "file"
+    assert "content_utf8" not in files["assets/logo.png"]
+    assert base64.b64decode(files["assets/logo.png"]["content_base64"]) == asset.read_bytes()
+    assert not (source / "SHOULD_NOT_EXIST").exists()
+
+
+def test_model_review_is_explicitly_unavailable_for_opaque_package_content(tmp_path: Path):
+    """A text-only model assessment cannot silently pass an unreviewed binary resource."""
+    llm = RecordingLlm()
+    value, source, _binding = reviewer(tmp_path, llm=llm)
+    asset = source / "assets" / "opaque.pdf"
+    asset.parent.mkdir()
+    asset.write_bytes(b"%PDF-1.7\x00\xff")
+
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+
+    assert result["professionalism_check"]["status"] == "unavailable"
+    assert result["professionalism_check"]["availability_reason"] == (
+        "opaque_package_content"
+    )
+    assert all(call.get("max_tokens") != 900 for call in llm.calls)
+
+
+def test_blocked_host_scan_prepares_warning_but_does_not_authorize_upload(tmp_path: Path):
+    """Scanner denial is retained as warning evidence in a local-only draft."""
+    value, _source, _binding = reviewer(tmp_path, allowed=False)
+    result = value.prepare("reviewed-skill")
+    assert result["state"] == "prepared"
+    assert result["local_scan"]["guard"]["allowed"] is False
+    assert result["security_check"]["local_status"] == "warning_required"
+    assert result["security_check"]["upload_allowed"] is False
+    assert result["security_check"]["warning_acceptance_required"] is True
+    assert result["network_submission"] is False
 
 
 def test_generated_author_copy_explains_teammate_usefulness_without_unsupported_claims(
@@ -607,13 +669,10 @@ def test_maximum_supported_escaped_inspect_output_can_be_saved(  # pylint: disab
         for name in ("SKILL.md", "skill.manifest.json")
     )
     remaining = MAX_TREE_BYTES - fixed_size
-    assert remaining > MAX_FILE_BYTES
+    assert remaining > 0
     refs = source / "refs"
     refs.mkdir()
-    (refs / "a.txt").write_text("\x01" * MAX_FILE_BYTES, encoding="utf-8")
-    (refs / "b.txt").write_text(
-        "\x01" * (remaining - MAX_FILE_BYTES), encoding="utf-8"
-    )
+    (refs / "a.txt").write_text("\x01" * remaining, encoding="utf-8")
     maximum = value.prepare("reviewed-skill")
 
     class PreparedService:
