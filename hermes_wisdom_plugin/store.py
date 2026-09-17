@@ -2027,9 +2027,12 @@ class WisdomStore:
         return None
 
     def publication_for_candidate_assessment(
-        self, assessment_id: str
+        self, assessment_id: str, *, owner: dict[str, str], operation_kind: str
     ) -> dict[str, Any] | None:
-        """Return the latest publication durably linked to one candidate card."""
+        """Return the latest owner-bound candidate publication of one exact kind."""
+
+        if operation_kind not in {"public", "private_draft"}:
+            raise ValueError("invalid candidate publication operation kind")
 
         with self.transaction() as db:
             rows = db.execute(
@@ -2039,7 +2042,15 @@ class WisdomStore:
         for row in rows:
             value = dict(row)
             payload = json.loads(value["payload_json"])
-            if payload.get("candidate_assessment_id") == assessment_id:
+            requested_action = payload.get("requested_action")
+            payload_kind = "private_draft" if requested_action == "private_draft" else (
+                "public" if requested_action is None else "other"
+            )
+            if (
+                payload.get("candidate_assessment_id") == assessment_id
+                and payload.get("owner") == owner
+                and payload_kind == operation_kind
+            ):
                 value["payload"] = payload
                 return value
         return None

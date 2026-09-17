@@ -486,12 +486,20 @@ def test_native_portal_callback_after_share_replays_share_without_upload(
 
 def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_path: Path):
     store = WisdomStore(tmp_path / "state")
+    operation_id = store.journal(
+        "publication", "local-skill", "draft_submission_unknown",
+        {
+            "candidate_assessment_id": "assessment-1",
+            "owner": dict(OWNER),
+            "requested_action": "private_draft",
+        },
+    )
     uncertain = {
-        "operation_id": "publication-operation", "state": "uncertain",
+        "operation_id": operation_id, "state": "uncertain",
         "phase": "draft_submission_unknown", "remote_draft_id": None,
     }
     recovered = {
-        "operation_id": "publication-operation", "state": "pending",
+        "operation_id": operation_id, "state": "pending",
         "phase": "policy_review_required", "publication_state": "ready",
         "remote_draft_id": "remote-draft",
         "portal_url": "https://portal.example/wisdom/review/remote-draft?org_id=org",
@@ -503,7 +511,7 @@ def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_p
         publication_review=Mock(side_effect=[
             publication_review("local-draft"),
             {**publication_review("local-draft"),
-             "operation_id": "publication-operation"},
+             "operation_id": operation_id},
         ]),
         publication_submit_private=Mock(return_value=uncertain),
         publication_reopen_private=Mock(return_value=recovered),
@@ -527,7 +535,7 @@ def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_p
         "candidate_assessment_id"
     ] == "assessment-1"
     service.publication_reopen_private.assert_called_once_with(
-        "publication-operation", may_apply=service.publication_reopen_private.call_args.kwargs[
+        operation_id, may_apply=service.publication_reopen_private.call_args.kwargs[
             "may_apply"
         ]
     )

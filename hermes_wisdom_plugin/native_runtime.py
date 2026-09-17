@@ -1369,7 +1369,6 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             # The queue validates its exact owner on this transaction. Do not
             # open another write transaction through preferences/native_owner.
             guard(transactional=True)
-            queue._check_bound_owner(db)  # pylint: disable=protected-access
             preferences.stage_suppression(
                 db, org=org, user=user, reference=reference, days=days
             )

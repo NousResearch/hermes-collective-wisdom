@@ -561,7 +561,6 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
             def stage(db, reference, days):
                 _require_current(may_apply)
-                queue._check_bound_owner(db)  # pylint: disable=protected-access
                 preferences.stage_suppression(
                     db, org=org, user=user, reference=reference, days=days
                 )

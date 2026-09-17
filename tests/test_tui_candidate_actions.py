@@ -260,7 +260,11 @@ def test_share_portal_upgrade_recovers_after_private_submit_before_projection(
     monkeypatch.setattr(
         service.store,
         "publication_for_candidate_assessment",
-        lambda target: operation if target == assessment_id and submitted else None,
+        lambda target, *, owner, operation_kind: (
+            operation
+            if target == assessment_id and owner == service.native_owner()
+            and operation_kind == "private_draft" and submitted else None
+        ),
     )
 
     with pytest.raises(RuntimeError, match="injected after private submission"):
@@ -321,7 +325,11 @@ def test_public_approval_recovers_after_submit_before_consent_completion(
     monkeypatch.setattr(
         service.store,
         "publication_for_candidate_assessment",
-        lambda target: operation if target == assessment_id and submissions else None,
+        lambda target, *, owner, operation_kind: (
+            operation
+            if target == assessment_id and owner == service.native_owner()
+            and operation_kind == "public" and submissions else None
+        ),
     )
 
     with pytest.raises(RuntimeError, match="injected after public submission"):
@@ -343,6 +351,63 @@ def test_public_approval_recovers_after_submit_before_consent_completion(
     )
     assert output == "This candidate action is no longer available. No action was taken."
     assert "publication-receipt" not in output
+
+
+def test_public_submit_projection_failure_rejects_portal_without_private_rewrite(tmp_path):
+    service, assessment_id = delivered(tmp_path)
+    service.candidate_slash_action(assessment_id, "share", may_apply=lambda: True)
+    operation_id = None
+
+    def submit_then_lose_projection(receipt, *, may_apply=None,
+                                    candidate_assessment_id=None):
+        nonlocal operation_id
+        assert may_apply is None or may_apply() is True
+        service.public_submissions(receipt)
+        operation_id = service.store.journal(
+            "publication", "local-skill", "gateway_recorded",
+            {
+                "candidate_assessment_id": candidate_assessment_id,
+                "owner": service.native_owner(),
+            },
+        )
+        service.store.advance(operation_id, "gateway_recorded", done=True)
+        raise RuntimeError("injected public consent projection failure")
+
+    service.publication_submit = submit_then_lose_projection
+    service.publication_reopen = Mock(side_effect=lambda recovered_id, **_kwargs: {
+        "operation_id": recovered_id,
+        "state": "pending",
+        "publication_state": "pending_moderation",
+    })
+    service.publication_reopen_private = Mock()
+
+    with pytest.raises(RuntimeError, match="projection failure"):
+        service.candidate_publication_approve(
+            "publication-receipt", may_apply=lambda: True
+        )
+
+    # Inspect the still-pending durable consent after the injected projection fault.
+    # pylint: disable-next=protected-access
+    before = NativeReviewController(service.store)._candidate_action_record(
+        service.native_owner()["organization_id"], "default", assessment_id
+    )
+    assert before is not None
+    assert before["plan"]["candidate_action"] == "share"
+
+    with pytest.raises(WisdomConflict, match="already submitted publicly"):
+        service.candidate_slash_action(
+            assessment_id, "portal", may_apply=lambda: True
+        )
+
+    after = NativeReviewController(service.store).load(before["id"])
+    assert after["plan"]["candidate_action"] == "share"
+    assert after["state"] == "completed"
+    assert "portal_url" not in (after.get("result") or {})
+    service.private_submissions.assert_not_called()
+    service.publication_reopen_private.assert_not_called()
+    service.publication_reopen.assert_called_once_with(
+        operation_id, may_apply=service.publication_reopen.call_args.kwargs["may_apply"]
+    )
 
 
 def test_later_uses_bound_policy_and_is_idempotent(tmp_path):

@@ -20,6 +20,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from .errors import WisdomConflict
 from .native_context import NativeInvocation
 from .package import PackagePolicyError
 from .portal_urls import portal_version_url as _version_url
@@ -671,6 +672,16 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             ):
                 raise PermissionError("Collective Wisdom candidate owner changed.")
             action = plan.get("candidate_action")
+            public_operation = self.store.publication_for_candidate_assessment(
+                assessment_id, owner=owner, operation_kind="public"
+            )
+            if public_operation is not None:
+                self.submit_candidate_publication(
+                    service, current, assessment_id, may_apply=owns_current_claim
+                )
+                raise WisdomConflict(
+                    "Candidate was already submitted publicly; Portal is unavailable"
+                )
             if action == "share":
                 current = self._replace_candidate_action(
                     current["id"], "publish", {**plan, "candidate_action": "portal"}
@@ -679,7 +690,9 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 raise PermissionError("Collective Wisdom candidate review changed.")
             if _safe_url((current.get("result") or {}).get("portal_url")):
                 return current
-            operation = self.store.publication_for_candidate_assessment(assessment_id)
+            operation = self.store.publication_for_candidate_assessment(
+                assessment_id, owner=owner, operation_kind="private_draft"
+            )
             outcome = None
             if operation is None:
                 outcome = service.publication_submit_private(
@@ -699,7 +712,12 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         """Submit or reconcile one candidate publication, then project its consent."""
 
-        operation = self.store.publication_for_candidate_assessment(assessment_id)
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="public"
+        )
         if operation is None:
             result = service.publication_submit(
                 record["plan"]["receipt"], may_apply=may_apply,
@@ -720,10 +738,52 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         """Reconcile a consumed candidate receipt before displaying another approval."""
 
-        if self.store.publication_for_candidate_assessment(assessment_id) is None:
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        if self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="public"
+        ) is None:
             return record
         return self.submit_candidate_publication(
             service, record, assessment_id, may_apply=may_apply
+        )
+
+    def _recover_existing_candidate_action(
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Resume only the operation kind selected by an existing candidate action."""
+
+        if (
+            record["plan"].get("candidate_action") != "portal"
+            or _safe_url((record.get("result") or {}).get("portal_url"))
+        ):
+            return record
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        public_operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="public"
+        )
+        if public_operation is not None:
+            self.submit_candidate_publication(
+                service, record, assessment_id, may_apply=may_apply
+            )
+            raise WisdomConflict(
+                "Candidate was already submitted publicly; Portal is unavailable"
+            )
+        private_operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="private_draft"
+        )
+        outcome = None
+        if private_operation is None:
+            outcome = service.publication_submit_private(
+                record["plan"]["receipt"], may_apply=may_apply,
+                candidate_assessment_id=assessment_id,
+            )
+        return self._complete_candidate_portal(
+            service, record, assessment_id, may_apply=may_apply, outcome=outcome
         )
 
     def request_candidate_action(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
@@ -772,22 +832,9 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 raise PermissionError("Collective Wisdom candidate owner changed.")
             preparing = existing["plan"].get("candidate_action_state") == "preparing"
             if not claimed and not preparing:
-                if (
-                    existing["plan"].get("candidate_action") == "portal"
-                    and not _safe_url((existing.get("result") or {}).get("portal_url"))
-                ):
-                    operation = self.store.publication_for_candidate_assessment(assessment_id)
-                    outcome = None
-                    if operation is None:
-                        outcome = service.publication_submit_private(
-                            existing["plan"]["receipt"], may_apply=may_apply,
-                            candidate_assessment_id=assessment_id,
-                        )
-                    return self._complete_candidate_portal(
-                        service, existing, assessment_id,
-                        may_apply=may_apply, outcome=outcome,
-                    )
-                return existing
+                return self._recover_existing_candidate_action(
+                    service, existing, assessment_id, may_apply=may_apply
+                )
             if may_apply() is not True:
                 raise PermissionError("Collective Wisdom candidate review is no longer current.")
             from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
@@ -831,13 +878,21 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         """Reconcile and project one candidate's durable private operation."""
 
+        previous = record["plan"]
+        owner = previous.get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
         operation_id = str((outcome or {}).get("operation_id") or "")
+        operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="private_draft"
+        )
         if not operation_id:
-            operation = self.store.publication_for_candidate_assessment(assessment_id)
             operation_id = str((operation or {}).get("id") or "")
         if not operation_id:
             raise PackagePolicyError("private Portal draft operation is unavailable")
         if not _safe_url((outcome or {}).get("portal_url")):
+            if operation is None or str(operation.get("id") or "") != operation_id:
+                raise PackagePolicyError("private Portal draft operation is unavailable")
             outcome = service.publication_reopen_private(
                 operation_id, may_apply=may_apply
             )
@@ -849,7 +904,6 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         plan = service.publication_review(operation_id, may_apply=may_apply)
         if not plan.get("receipt"):
             raise PackagePolicyError("private Portal draft review is invalid")
-        previous = record["plan"]
         plan = self._prepare_review_deferral(service, {
             **plan,
             "owner": previous["owner"],
