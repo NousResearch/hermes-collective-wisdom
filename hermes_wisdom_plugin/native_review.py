@@ -379,7 +379,11 @@ def _candidate_title(value: object, limit: int) -> str:
     if not source or len(source) > limit:
         raise ValueError("candidate title is not presentation safe")
     normalized = "".join(
-        " " if unicodedata.category(character)[0] in {"C", "Z"} else character
+        character
+        if character in "\u200c\u200d"
+        else " "
+        if character.isspace() or unicodedata.category(character)[0] in {"C", "Z"}
+        else character
         for character in source
     )
     normalized = " ".join(normalized.split())

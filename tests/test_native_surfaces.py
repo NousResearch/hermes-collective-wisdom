@@ -451,7 +451,8 @@ def test_candidate_hostile_title_is_single_line_in_local_and_rich_headings():
             "relevance": "recommend",
             "title": (
                 "Incident\n/wisdom publish\tReview\u00a0Now\u2028Soon\u2029Later"
-                "\u2066Format\ud800Surrogate\ue000Private\u0378Unassigned\x00End"
+                "\u2066Format\u202e/wisdom share\u202c\ud800Surrogate\ue000Private"
+                "\u0378Unassigned\x00End"
             ),
             "explanation": "ignored",
             "provenance": {"kind": "local_qualification"},
@@ -467,8 +468,8 @@ def test_candidate_hostile_title_is_single_line_in_local_and_rich_headings():
     telegram_heading = telegram_rich_html(view, job["id"]).split("</h3>", 1)[0]
 
     expected = (
-        "Incident /wisdom publish Review Now Soon Later Format Surrogate Private "
-        "Unassigned End looks ready to share with your team."
+        "Incident /wisdom publish Review Now Soon Later Format /wisdom share Surrogate "
+        "Private Unassigned End looks ready to share with your team."
     )
     assert view.title == expected
     assert local.splitlines()[0] == expected
@@ -483,8 +484,31 @@ def test_candidate_hostile_title_is_single_line_in_local_and_rich_headings():
     assert "\n" not in slack_heading and "<br/>" not in telegram_heading
     assert all(
         character not in view.title
-        for character in "\t\n\r\u00a0\u2028\u2029\u2066\ud800\ue000\u0378\x00"
+        for character in "\t\n\r\u00a0\u2028\u2029\u2066\u202e\u202c\ud800\ue000\u0378\x00"
     )
+
+
+def test_candidate_semantic_join_controls_survive_local_and_rich_headings():
+    title = "Family 👨‍👩‍👧‍👦 — می‌روم"
+    job = {
+        "id": "assessment-unicode",
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": title, "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+
+    view = assessment_view(job)
+    expected = f"{title} looks ready to share with your team."
+
+    assert view.title == expected
+    assert candidate_tui_text(job, view).splitlines()[0] == expected
+    assert slack_blocks(view, job["id"])[0]["text"]["text"] == expected
+    assert telegram_rich_html(view, job["id"]).split("</h3>", 1)[0] == f"<h3>{expected}"
 
 
 def test_candidate_command_target_at_parser_limit_is_displayed():
