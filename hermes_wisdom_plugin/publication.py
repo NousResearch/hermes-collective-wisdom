@@ -142,6 +142,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             description_hash=prepared["hashes"]["author_description"],
             manifest_hash=prepared["hashes"]["package_manifest"],
         )
+        prepared = self._with_local_slug(prepared)
         return {
             **prepared,
             "receipt": receipt,
@@ -155,6 +156,17 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 "owner confirmation; the Gateway alone chooses direct or moderated handling."
             ),
         }
+
+    def _with_local_slug(self, review: dict[str, Any]) -> dict[str, Any]:
+        """Carry the source directory slug as a non-opaque display fallback."""
+
+        if isinstance(review.get("slug"), str) and review["slug"].strip():
+            return review
+        skill_id = review.get("skill_id")
+        local = self.store.local_skill(str(skill_id)) if skill_id else None
+        canonical_path = (local or {}).get("canonical_path")
+        slug = Path(str(canonical_path)).name.strip() if canonical_path else ""
+        return {**review, **({"slug": slug} if slug else {})}
 
     def _review_stalled_operation(
         self, operation: dict[str, Any], owner: dict[str, str], *,
@@ -192,8 +204,9 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             description_hash=payload["hashes"]["author_description"],
             manifest_hash=payload["hashes"]["package_manifest"],
         )
+        saved_review = self._with_local_slug(payload.get("review") or {})
         return {
-            **(payload.get("review") or {}),
+            **saved_review,
             "state": "policy_review_required",
             "draft_id": payload["local_draft_id"],
             "operation_id": operation["id"],

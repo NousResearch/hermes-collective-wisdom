@@ -864,8 +864,80 @@ def test_candidate_portal_callback_replaces_original_card_with_private_url(tmp_p
         assert len(app.client.edits) == 1
         assert app.client.edits[0]["ts"] == "card-1"
         assert "Private Draft Ready" in app.client.edits[0]["text"]
+        assert "sha256:" not in app.client.edits[0]["text"]
+        assert _slack_action(app.client.edits[0]["blocks"], "Show checks")
+        assert _slack_action(app.client.edits[0]["blocks"], "View More Details")
         portal = _slack_action(app.client.edits[0]["blocks"], "Review in Portal")
         assert portal["url"] == portal_url
+        service.publication_submit_private.assert_called_once()
+
+    asyncio.run(scenario())
+
+
+def test_telegram_private_draft_details_toggle_edits_original_card_read_only(tmp_path: Path):
+    async def scenario():
+        bot = TelegramBot()
+        adapter = TelegramAdapter(bot)
+        route = native_invocation(
+            adapter, platform="telegram", chat_type="private", chat_id="123",
+            actor_id="7", actor_name="shannon", thread_id="", scope_id="",
+            message_id="77", session_key="telegram:123:7",
+        )
+        store, _queue, assessment_id, _event_id = _delivered_candidate(tmp_path, route)
+        plan = publication_review(
+            "local-draft",
+            editorial_name="Incident Review",
+            editorial_description="Turns incident notes into a repeatable review.",
+            description="Exact description with private evidence.",
+            files=[{
+                "path": "SKILL.md", "hash": "sha256:" + "d" * 64,
+                "content_utf8": "# Incident Review\n",
+            }],
+        )
+        service = SimpleNamespace(
+            store=store, close=Mock(), native_owner=Mock(return_value=dict(OWNER)),
+            native_candidate_prepare=Mock(return_value="local-draft"),
+            publication_review=Mock(side_effect=[
+                plan, {**plan, "operation_id": "publication-operation"},
+            ]),
+            publication_submit_private=Mock(return_value={
+                "operation_id": "publication-operation", "state": "pending",
+                "phase": "policy_review_required", "publication_state": "ready",
+                "remote_draft_id": "remote-draft",
+                "portal_url": "https://portal.example/wisdom/review/remote-draft",
+            }),
+            publication_submit=Mock(),
+        )
+        runtime = NativeSurfaceRuntime(
+            tmp_path / "state", "default", lambda: service, FakeLlm(),
+            lambda coro, **_kwargs: asyncio.create_task(coro),
+        )
+        token = runtime._lease("telegram", object(), adapter)
+
+        await runtime._telegram_callback(
+            object(), adapter, token,
+            TelegramQuery(bot, assessment_id=assessment_id, action="candidate_portal"),
+        )
+        record = runtime.reviews._candidate_action_record("org", "default", assessment_id)
+        assert record is not None
+        record_id = record["id"]
+        assert "Private Draft Ready" in bot.edits[-1][1]["rich_message"]["html"]
+        assert "sha256:" not in bot.edits[-1][1]["rich_message"]["html"]
+
+        await runtime._telegram_callback(
+            object(), adapter, token,
+            TelegramQuery(bot, assessment_id=record_id, action="details.0"),
+        )
+        assert "Publication details" in bot.edits[-1][1]["rich_message"]["html"]
+        assert "Share My Skill" not in bot.edits[-1][1]["rich_message"]["html"]
+
+        await runtime._telegram_callback(
+            object(), adapter, token,
+            TelegramQuery(bot, assessment_id=record_id, action="back"),
+        )
+        assert "Private Draft Ready" in bot.edits[-1][1]["rich_message"]["html"]
+        assert "Share My Skill" in bot.edits[-1][1]["rich_message"]["html"]
+        service.publication_submit.assert_not_called()
         service.publication_submit_private.assert_called_once()
 
     asyncio.run(scenario())

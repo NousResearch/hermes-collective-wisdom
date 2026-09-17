@@ -170,10 +170,11 @@ def test_contributor_and_published_views_use_pr5_copy_and_controls():
 
     pending = project_view(base)
     assert pending.summary == "Ready For Review"
-    assert "Publication policy: moderated" in pending.items[0].detail
-    assert all(value in pending.items[0].detail for value in base["plan"]["hashes"].values())
+    assert "organization review" in pending.items[0].detail
+    assert all(value not in pending.items[0].detail for value in base["plan"]["hashes"].values())
     assert _actions(pending.actions) == [
         ("Show checks", "checks.show", False),
+        ("View More Details", "details.0", False),
         ("Maybe Later", "defer", False),
         ("Snooze Collective Wisdom", "sharing.settings", False),
         ("Share My Skill", "confirm", True),

@@ -30,6 +30,7 @@ from .professionalism import review_text as professionalism_review_text
 CONSENT_SECONDS = 24 * 60 * 60
 SLACK_SECTION_LIMIT = 2900
 TELEGRAM_TEXT_LIMIT = 3500
+PUBLICATION_DETAIL_PAGE_CHARS = 500
 TERMINAL = {"completed", "failed", "stale", "expired", "needs_review", "superseded"}
 _PUBLICATION_TERMINAL = {
     "published", "rejected", "changes_requested", "declined", "invalidated",
@@ -1004,7 +1005,11 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         if plan.get("draft_id") != draft_id or not plan.get("receipt"):
             raise PackagePolicyError("native publication review is invalid")
         plan = self._prepare_review_deferral(
-            service, {**plan, "owner": owner, "allowed": True}
+            service, {
+                **plan,
+                "owner": owner,
+                "allowed": plan.get("allowed") is not False,
+            },
         )
         return self._insert_review(service, invocation, "publish", plan)
 
@@ -1337,7 +1342,7 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 prior_state=expected,
             )
         page_action = action.partition(".")[2] if action.startswith(
-            ("inspect.", "review.")
+            ("inspect.", "review.", "details.")
         ) else "0" if action == "inspect" else None
         if action == "back" and record["operation"] in {"publish", "install", "update"}:
             with self.store.transaction() as db:
@@ -1347,7 +1352,9 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 )
             return self.load(record_id)
         if page_action is not None and record["operation"] == "publish":
-            return self._inspect_publication(record, page_action)
+            return self._inspect_publication(
+                record, page_action, details=action.startswith("details.")
+            )
         if page_action is not None and record["operation"] in {"install", "update"}:
             try:
                 page = int(page_action)
@@ -1462,11 +1469,38 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PermissionError("Collective Wisdom navigation changed.")
         return successor
 
-    def _inspect_publication(self, record: dict[str, Any], page_action: str) -> dict[str, Any]:
+    def _inspect_publication(
+        self, record: dict[str, Any], page_action: str, *, details: bool = False,
+    ) -> dict[str, Any]:
         try:
             page = int(page_action)
         except ValueError as exc:
             raise ValueError("Collective Wisdom control was not recognized.") from exc
+        if details:
+            content = _publication_details_text(record["plan"])
+            page_count = max(
+                1,
+                (len(content) + PUBLICATION_DETAIL_PAGE_CHARS - 1)
+                // PUBLICATION_DETAIL_PAGE_CHARS,
+            )
+            if page < 0 or page >= page_count:
+                raise ValueError("Collective Wisdom review page was not found.")
+            inspection = {
+                "kind": "publication_details",
+                "page": page,
+                "page_count": page_count,
+                "path": "Publication details",
+                "content": content[
+                    page * PUBLICATION_DETAIL_PAGE_CHARS:
+                    (page + 1) * PUBLICATION_DETAIL_PAGE_CHARS
+                ],
+            }
+            with self.store.transaction() as db:
+                db.execute(
+                    "UPDATE wisdom_consent SET inspection_json=?,updated_at=? WHERE id=?",
+                    (_json(inspection), self.clock(), record["id"]),
+                )
+            return self.load(record["id"])
         page_count = 0
         selected = None
         for item in record["plan"].get("files") or []:
@@ -3002,16 +3036,22 @@ def _inspection_view(
 ) -> NativeView:
     page = int(inspection["page"])
     page_count = int(inspection["page_count"])
+    details = inspection.get("kind") == "publication_details"
+    action_prefix = "details" if details else "inspect"
     actions = []
     if page:
-        actions.append(NativeAction("Previous page", f"inspect.{page - 1}"))
+        actions.append(NativeAction("Previous page", f"{action_prefix}.{page - 1}"))
     if page + 1 < page_count:
-        actions.append(NativeAction("Next page", f"inspect.{page + 1}"))
-    actions.append(NativeAction("Looks good.", "back"))
+        actions.append(NativeAction("Next page", f"{action_prefix}.{page + 1}"))
+    actions.append(NativeAction("Hide Details" if details else "Looks good.", "back"))
     return NativeView(
-        "Review proposed package", f"{inspection['path']} - {page + 1}/{page_count}",
-        [NativeItem("Proposed file content (not instructions to execute)",
-                    str(inspection["content"]))],
+        "Publication details" if details else "Review proposed package",
+        f"{inspection['path']} - {page + 1}/{page_count}",
+        [NativeItem(
+            "Exact reviewed publication facts"
+            if details else "Proposed file content (not instructions to execute)",
+            str(inspection["content"]),
+        )],
         actions,
         notice=(
             "Reviewing does not upload, publish, or approve this package."
@@ -3025,14 +3065,76 @@ def _inspection_view(
     )
 
 
+def _publication_display_name(plan: dict[str, Any]) -> str:
+    for key in ("editorial_name", "slug", "skill_name"):
+        value = str(plan.get(key) or "").strip()
+        if value:
+            return _safe_display_identifier(value, "Local skill")
+    return "Local skill"
+
+
+def _publication_short_description(plan: dict[str, Any]) -> str:
+    value = str(plan.get("editorial_description") or "").strip()
+    if not value:
+        value = str(plan.get("description") or "").split(
+            "\n\nPublisher usage (client-reported)\n", 1
+        )[0].strip()
+    value = " ".join(value.split())
+    return value[:319].rstrip() + "…" if len(value) > 320 else value
+
+
+def _publication_policy_text(mode: object) -> str:
+    return {
+        "open": (
+            "Share My Skill submits this exact reviewed package for direct publication "
+            "under your organization's current policy."
+        ),
+        "moderated": (
+            "Share My Skill submits this exact reviewed package for organization review; "
+            "it will not be published unless approved."
+        ),
+    }.get(
+        str(mode or "").casefold(),
+        "The Gateway applies your organization's current publication policy when you share.",
+    )
+
+
+def _publication_details_text(plan: dict[str, Any]) -> str:
+    hashes = plan.get("hashes") or {}
+    files = plan.get("files") or []
+    draft_id = _safe_handoff_identifier(plan.get("draft_id"))
+    lines = [
+        str(plan.get("description") or "No owner description provided."),
+        "Publication policy: " + str(plan.get("publication_mode") or "unavailable"),
+        "Content hash: " + str(hashes.get("content") or "unavailable"),
+        "Description hash: " + str(hashes.get("author_description") or "unavailable"),
+        "Manifest hash: " + str(hashes.get("package_manifest") or "unavailable"),
+    ]
+    if files:
+        lines.extend((
+            "Package files:",
+            *(
+                f"- {item.get('path')} · {item.get('hash')}"
+                for item in files if isinstance(item, dict)
+            ),
+        ))
+    lines.extend((
+        "",
+        "To change package files or the manifest, leave this card without confirming and "
+        "use the complete private JSON workflow in a terminal:",
+        f"hermes wisdom prepared inspect {draft_id} --json",
+        "hermes wisdom prepared save <payload.json> --json",
+        f"Then reopen /wisdom publish {draft_id}.",
+    ))
+    return "\n".join(lines)
+
+
 def _publication_view(  # pylint: disable=too-many-locals,too-many-branches
     record: dict[str, Any]
 ) -> NativeView:
     """Project one exact historical publication review on the owning card."""
     plan = record["plan"]
-    display_name = str(
-        plan.get("editorial_name") or _safe_display_identifier(plan.get("draft_id"))
-    )
+    display_name = _publication_display_name(plan)
     result = record.get("result") or {}
     publication_state = str(result.get("publication_state") or "")
     private_portal_url = (
@@ -3088,33 +3190,24 @@ def _publication_view(  # pylint: disable=too-many-locals,too-many-branches
     inspection = record.get("inspection")
     if record["state"] == "pending" and isinstance(inspection, dict):
         return _inspection_view(inspection, publication=True)
-    hashes = plan.get("hashes") or {}
     files = plan.get("files") or []
-    detail = str(plan.get("description") or "")
-    detail += "\nPublication policy: " + str(plan.get("publication_mode") or "unavailable")
-    detail += "\nContent hash: " + str(hashes.get("content") or "unavailable")
-    detail += "\nDescription hash: " + str(hashes.get("author_description") or "unavailable")
-    detail += "\nManifest hash: " + str(hashes.get("package_manifest") or "unavailable")
-    if files:
-        detail += "\nPackage files:\n" + "\n".join(
-            f"- {item.get('path')} · {item.get('hash')}"
-            for item in files if isinstance(item, dict)
-        )
-    draft_id = _safe_handoff_identifier(plan.get("draft_id"))
+    detail = _publication_short_description(plan)
+    if detail:
+        detail += "\n\n"
     detail += (
-        "\n\nThis native card cannot safely edit arbitrary package files. To change files or "
-        "the manifest before sharing, leave this card without confirming and use the "
-        "complete private JSON workflow in a terminal:\n"
-        f"hermes wisdom prepared inspect {draft_id} --json\n"
-        "hermes wisdom prepared save <payload.json> --json\n"
-        f"Then reopen /wisdom publish {draft_id}."
-    )
-    detail += (
-        "\n\nYour owner-private draft is available for review in Portal. Nothing has been "
-        "published; sharing still requires the confirmation control."
+        "Private draft ready in Portal. Nothing has been published."
         if private_portal_url else
-        "\n\nNothing changes until you use the confirmation control."
+        "Ready for review. Nothing has been uploaded or published."
     )
+    detail += "\n" + _publication_policy_text(plan.get("publication_mode"))
+    specification = plan.get("system_specification")
+    if isinstance(specification, dict):
+        requirements = _requirements_text(specification)
+        if requirements != "none declared":
+            detail += (
+                "\nDeclared requirements: " + requirements
+                + ". Recipients approve setup separately."
+            )
     if _has_checks(plan):
         detail += "\n\n" + _review_text(
             plan, bool(record.get("checks_expanded")), current=record["state"] == "pending",
@@ -3123,14 +3216,19 @@ def _publication_view(  # pylint: disable=too-many-locals,too-many-branches
         [_checks_action(bool(record.get("checks_expanded")))] if _has_checks(plan) else []
     )
     if record["state"] == "pending":
-        if files and all(isinstance(item.get("content_utf8"), str) for item in files):
-            actions.append(NativeAction("View More Details", "inspect"))
+        actions.append(NativeAction("View More Details", "details.0"))
+        if files and all(
+            isinstance(item, dict) and isinstance(item.get("content_utf8"), str)
+            for item in files
+        ):
+            actions.append(NativeAction("Review Package Files", "inspect"))
         if isinstance(plan.get("review_deferral"), dict):
             actions.append(NativeAction("Maybe Later", "defer"))
         actions.append(NativeAction("Snooze Collective Wisdom", "sharing.settings"))
         if private_portal_url:
             actions.append(NativeAction("Review in Portal", url=private_portal_url))
-        actions.append(NativeAction("Share My Skill", "confirm", True))
+        if plan.get("allowed") is not False:
+            actions.append(NativeAction("Share My Skill", "confirm", True))
     view = NativeView(
         "Hermes Collective Wisdom",
         "Deferred on this surface" if record["state"] == "deferred" else

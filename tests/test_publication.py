@@ -200,6 +200,22 @@ def test_private_draft_stops_before_owner_approval_and_requires_fresh_confirmati
     )
 
 
+def test_publication_review_carries_local_skill_slug_for_safe_name_fallback(tmp_path: Path):
+    controller, prepared, _client, _ = publication(tmp_path)
+    reopen = controller.reviewer.reopen
+
+    def without_editorial_name(*args, **kwargs):
+        result = reopen(*args, **kwargs)
+        result.pop("editorial_name", None)
+        return result
+
+    controller.reviewer.reopen = without_editorial_name
+    review = controller.review(prepared["draft_id"])
+
+    assert review["slug"] == "reviewed-skill"
+    assert "editorial_name" not in review
+
+
 def test_private_draft_lost_submit_ack_reopens_after_restart_without_publication(
     tmp_path: Path,
 ):

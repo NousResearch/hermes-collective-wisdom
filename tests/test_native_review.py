@@ -1499,7 +1499,7 @@ def test_generic_recover_cannot_replay_or_complete_a_running_setup(tmp_path: Pat
 
 
 @pytest.mark.parametrize("platform", ["slack", "telegram"])
-def test_publication_confirmation_is_removed_when_exact_review_is_truncated(
+def test_compact_publication_approval_survives_large_optional_details(
     tmp_path: Path, platform: str,
 ):
     class PublicationService(Service):
@@ -1525,20 +1525,24 @@ def test_publication_confirmation_is_removed_when_exact_review_is_truncated(
     record = controller.request_publication(service, request, "draft-large")
     controller.bind_delivery(record["id"], request, "publication-card")
     view = controller.view(record)
-    assert view.summary == "Complete review required in terminal"
-    assert [action.label for action in view.actions] == []
-    assert "publication review draft-large --json" in view.to_text()
-    with pytest.raises(PermissionError, match="cannot be shown"):
-        controller.act(
-            service, record["id"],
-            invocation(platform=platform, message_id="publication-card"), "confirm",
-        )
+    assert view.summary == "Ready For Review"
+    assert any(action.action == "confirm" for action in view.actions)
+    assert "z" * 7000 not in view.to_text()
+
+    details = controller.act(
+        service, record["id"],
+        invocation(platform=platform, message_id="publication-card"), "details.0",
+    )
+    assert details["inspection"]["page_count"] > 1
+    assert len(details["inspection"]["content"]) <= 1000
+    assert not any(action.action == "confirm" for action in controller.view(details).actions)
+    assert controller.load(record["id"])["state"] == "pending"
 
 
 @pytest.mark.parametrize("unsafe_id", ["draft-\x1b[2J", "draft-\u202ejson"])
 def test_native_publication_handoffs_never_interpolate_display_controls(
     tmp_path: Path, unsafe_id: str,
-):
+):  # pylint: disable=too-many-locals
     class PublicationService(Service):
         def publication_review(self, _draft_id):
             return publication_review(
@@ -1551,16 +1555,28 @@ def test_native_publication_handoffs_never_interpolate_display_controls(
     service = PublicationService()
     request = invocation(platform="slack")
     record = controller.request_publication(service, request, unsafe_id)
-    view = controller.view(record)
+    controller.bind_delivery(record["id"], request, "publication-card")
+    details = controller.act(
+        service, record["id"],
+        invocation(platform="slack", message_id="publication-card"), "details.0",
+    )
+    pages = []
+    for page in range(details["inspection"]["page_count"]):
+        current = controller.act(
+            service, record["id"],
+            invocation(platform="slack", message_id="publication-card"), f"details.{page}",
+        )
+        pages.append(current["inspection"]["content"])
+    rendered = "".join(pages)
 
-    assert unsafe_id not in view.to_text()
-    assert unsafe_id not in view.items[0].title
-    assert "<draft-id>" in view.to_text()
+    assert unsafe_id not in rendered
+    assert unsafe_id not in controller.view(details).items[0].title
+    assert "<draft-id>" in rendered
 
 
 def test_publication_terminal_status_is_monotonic_and_duplicate_callbacks_do_not_poll(
     tmp_path: Path,
-):
+):  # pylint: disable=too-many-locals
     class PublicationService(Service):
         def __init__(self):
             super().__init__()
@@ -1597,10 +1613,20 @@ def test_publication_terminal_status_is_monotonic_and_duplicate_callbacks_do_not
     request = invocation()
     record = controller.request_publication(service, request, "draft-1")
     review_view = controller.view(record)
-    assert "prepared inspect draft-1 --json" in review_view.to_text()
-    assert "prepared save <payload.json> --json" in review_view.to_text()
+    assert "prepared inspect draft-1 --json" not in review_view.to_text()
     controller.bind_delivery(record["id"], request, "publication-card")
     callback = invocation(message_id="publication-card")
+
+    details = controller.act(service, record["id"], callback, "details.0")
+    detail_pages = []
+    for page in range(details["inspection"]["page_count"]):
+        detail_pages.append(controller.act(
+            service, record["id"], callback, f"details.{page}"
+        )["inspection"]["content"])
+    exact_details = "".join(detail_pages)
+    assert "prepared inspect draft-1 --json" in exact_details
+    assert "prepared save <payload.json> --json" in exact_details
+    controller.act(service, record["id"], callback, "back")
 
     inspected = controller.act(service, record["id"], callback, "inspect")
     inspection_view = controller.view(inspected)
