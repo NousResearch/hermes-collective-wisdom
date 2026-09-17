@@ -31,6 +31,103 @@ from .store import WisdomStore
 
 logger = logging.getLogger(__name__)
 
+_TELEGRAM_DIAGNOSTIC_STAGES = frozenset({
+    "wiring", "received", "acknowledged", "authorized", "action", "edit", "alert",
+    "completed",
+})
+_TELEGRAM_ACTION_CLASSES = frozenset({
+    "unknown", "catalog", "candidate", "recommendation", "settings", "install",
+    "update", "setup", "publication", "navigation", "other",
+})
+_TELEGRAM_DIAGNOSTIC_REASONS = frozenset({
+    "handler_registered", "callback_received", "callback_acknowledged",
+    "callback_authorized", "action_completed", "edit_completed", "alert_completed",
+    "callback_completed", "authorization_denied", "authorization_failure",
+    "invalid_control", "action_denied", "service_failure", "transport_timeout",
+    "transport_failure", "edit_failure", "alert_failure", "internal_failure",
+})
+
+
+def _telegram_action_class(value: object) -> str:
+    """Project callback data onto a fixed, non-identifying operation class."""
+    try:
+        _record_id, action = parse_callback(str(value or ""))
+    except (TypeError, ValueError):
+        return "unknown"
+    prefix = action.partition(".")[0]
+    direct = {
+        "catalog": "catalog", "candidate_defer": "candidate",
+        "candidate_share": "candidate", "candidate_portal": "candidate",
+        "recommendation": "recommendation", "settings": "settings",
+        "install": "install", "update": "update", "setup": "setup",
+        "sharing": "publication", "publish": "publication",
+    }
+    if prefix in {"back", "inspect", "review", "details", "checks", "assessment"}:
+        return "navigation"
+    return direct.get(prefix, "other")
+
+
+def _telegram_failure_reason(stage: str, error: Exception) -> str:
+    """Map failures to bounded categories without rendering exception details."""
+    reason = "edit_failure"
+    if stage == "authorized":
+        reason = "authorization_failure"
+        if isinstance(error, PermissionError):
+            reason = "authorization_denied"
+        elif isinstance(error, ValueError):
+            reason = "invalid_control"
+    elif stage == "action":
+        reason = "action_denied" if isinstance(error, PermissionError) else "service_failure"
+    elif isinstance(error, TimeoutError) or type(error).__name__ == "TimedOut":
+        reason = "transport_timeout"
+    elif stage in {"acknowledged", "alert"}:
+        reason = "transport_failure"
+    return reason
+
+
+def _telegram_diagnostic(
+    level: int, *, stage: str, outcome: str, reason: str, action_class: str,
+) -> None:
+    """Emit only fixed-vocabulary Telegram callback diagnostics."""
+    safe_stage = stage if stage in _TELEGRAM_DIAGNOSTIC_STAGES else "completed"
+    safe_outcome = outcome if outcome in {"success", "failure"} else "failure"
+    safe_action = action_class if action_class in _TELEGRAM_ACTION_CLASSES else "unknown"
+    safe_reason = reason if reason in _TELEGRAM_DIAGNOSTIC_REASONS else "internal_failure"
+    logger.log(
+        level,
+        "Collective Wisdom Telegram callback "
+        "(stage=%s; outcome=%s; reason=%s; action_class=%s)",
+        safe_stage, safe_outcome, safe_reason, safe_action,
+    )
+
+
+class _TelegramCallbackDiagnostics:
+    """Track one callback using fixed, non-identifying diagnostic values."""
+
+    def __init__(self, callback_data: object) -> None:
+        self.action_class = _telegram_action_class(callback_data)
+        self.stage = "authorized"
+        self.failed = False
+
+    def success(self, reason: str) -> None:
+        """Record a successful boundary at debug level."""
+        _telegram_diagnostic(
+            logging.DEBUG, stage=self.stage, outcome="success",
+            reason=reason, action_class=self.action_class,
+        )
+
+    def failure(self, error: Exception) -> None:
+        """Record at most one operational failure for this callback."""
+        if self.failed:
+            return
+        self.failed = True
+        _telegram_diagnostic(
+            logging.WARNING, stage=self.stage, outcome="failure",
+            reason=_telegram_failure_reason(self.stage, error),
+            action_class=self.action_class,
+        )
+
+
 _SETUP_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["command", "explanation"],
@@ -783,9 +880,31 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             query = getattr(update, "callback_query", None)
             if query is None:
                 return
-            await query.answer()
+            action_class = _telegram_action_class(getattr(query, "data", ""))
+            _telegram_diagnostic(
+                logging.INFO, stage="received", outcome="success",
+                reason="callback_received", action_class="unknown",
+            )
             try:
-                await self._telegram_callback(native, adapter, token, query)
+                await query.answer()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                _telegram_diagnostic(
+                    logging.WARNING, stage="acknowledged", outcome="failure",
+                    reason=_telegram_failure_reason("acknowledged", exc),
+                    action_class="unknown",
+                )
+                raise ApplicationHandlerStop from None
+            _telegram_diagnostic(
+                logging.DEBUG, stage="acknowledged", outcome="success",
+                reason="callback_acknowledged", action_class=action_class,
+            )
+            try:
+                completed = await self._telegram_callback(native, adapter, token, query)
+                if completed:
+                    _telegram_diagnostic(
+                        logging.INFO, stage="completed", outcome="success",
+                        reason="callback_completed", action_class=action_class,
+                    )
             except Exception:  # pylint: disable=broad-exception-caught  # native errors are rendered, never leaked to PTB
                 try:
                     await query.answer(
@@ -795,13 +914,25 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                         ),
                         show_alert=True,
                     )
-                except Exception:  # pylint: disable=broad-exception-caught
-                    pass
+                    _telegram_diagnostic(
+                        logging.DEBUG, stage="alert", outcome="success",
+                        reason="alert_completed", action_class=action_class,
+                    )
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    _telegram_diagnostic(
+                        logging.WARNING, stage="alert", outcome="failure",
+                        reason=_telegram_failure_reason("alert", exc),
+                        action_class=action_class,
+                    )
             raise ApplicationHandlerStop
 
         native.add_handler(CallbackQueryHandler(
             callback, pattern=r"^wi:agent:", block=True
         ), group=-10)
+        _telegram_diagnostic(
+            logging.INFO, stage="wiring", outcome="success",
+            reason="handler_registered", action_class="unknown",
+        )
 
     def _lease(self, platform_name: str, native: Any, adapter: Any) -> object:
         loop = asyncio.get_running_loop()
@@ -1273,9 +1404,22 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         except Exception:  # pylint: disable=broad-exception-caught
             pass
 
-    async def _telegram_callback(  # pylint: disable=too-many-locals
-        self, _native: Any, adapter: Any, token: object,
-                                 query: Any) -> None:
+    async def _telegram_callback(self, native: Any, adapter: Any, token: object,
+                                 query: Any) -> bool:
+        diagnostics = _TelegramCallbackDiagnostics(getattr(query, "data", ""))
+        try:
+            return await self._telegram_callback_flow(
+                native, adapter, token, query, diagnostics
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            diagnostics.failure(exc)
+            raise
+
+    async def _telegram_callback_flow(  # pylint: disable=too-many-locals,too-many-statements
+        self, _native: Any, adapter: Any, token: object, query: Any,
+        diagnostics: _TelegramCallbackDiagnostics,
+    ) -> bool:
+        """Run one callback while exposing only bounded stage transitions."""
         from .native_telegram import callback_invocation  # pylint: disable=import-outside-toplevel
         self._assert_lease("telegram", adapter, token)
         record_id, action = parse_callback(str(getattr(query, "data", "") or ""))
@@ -1290,6 +1434,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     queue.candidate_callback_record, org, record_id
                 )
                 invocation = callback_invocation(adapter, query, record)
+                diagnostics.success("callback_authorized")
+                diagnostics.stage = "action"
 
                 def guard(*, transactional: bool = False) -> None:
                     if not transactional and service.native_owner() != owner:
@@ -1306,8 +1452,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                         service, queue, org, record_id, record, invocation, action,
                         guard=guard,
                     )
+                    diagnostics.success("action_completed")
                     if view is None:
-                        return
+                        return True
+                    diagnostics.stage = "edit"
                     try:
                         await _edit_telegram_projection(query, view, projected_id)
                         if delivery is not None:
@@ -1329,13 +1477,18 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                                 expected_revision=delivery[0], attempt=delivery[1],
                             )
                         raise
-                return
+                    diagnostics.success("edit_completed")
+                return True
             finally:
                 service.close()
         record = self.reviews.load(record_id)
         invocation = callback_invocation(adapter, query, record)
+        diagnostics.success("callback_authorized")
+        diagnostics.stage = "action"
         async with self._delivery_lock(invocation):
             result = await self._act(record_id, action, invocation)
+            diagnostics.success("action_completed")
+            diagnostics.stage = "edit"
             projected_id = str(result["id"])
             projected, revision, attempt = await asyncio.to_thread(
                 self.reviews.delivery_projection, projected_id
@@ -1352,6 +1505,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     self.reviews.delivery_failed, projected_id, str(exc),
                     expected_revision=revision, attempt=attempt,
                 )
+                diagnostics.failure(exc)
+                return False
+            diagnostics.success("edit_completed")
+        return True
 
     @staticmethod
     async def _defer_candidate(  # pylint: disable=too-many-arguments
