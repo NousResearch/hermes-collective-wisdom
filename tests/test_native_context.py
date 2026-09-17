@@ -2,7 +2,7 @@
 
 # Behavior-named tests use minimal doubles for pinned private host admission seams.
 # pylint: disable=missing-class-docstring,missing-function-docstring
-# pylint: disable=too-few-public-methods,protected-access
+# pylint: disable=too-few-public-methods,protected-access,too-many-arguments
 
 from __future__ import annotations
 
@@ -21,6 +21,12 @@ LIFECYCLE = {
     "platform": "slack", "parent_session_id": "",
 }
 
+HOST_CONTEXT = {
+    "platform": "slack", "profile": "default", "chat_id": "D1", "user_id": "U1",
+    "thread_id": "T1", "scope_id": "W1", "message_id": "M1",
+    "session_key": "slack:W1:D1:U1",
+}
+
 
 class Gateway:
     def __init__(self, *, authorized=True, adapter=None):
@@ -37,14 +43,15 @@ class Gateway:
         return f"slack:{source.scope_id}:{source.chat_id}:{source.user_id}"
 
 
-def event(*, args="update skill-1", command="wisdom", internal=False, user="U1", profile="default"):
+def event(*, args="update skill-1", command="wisdom", internal=False, user="U1",
+          profile="default", message="M1"):
     source = SimpleNamespace(
         platform=SimpleNamespace(value="slack"), profile=profile, chat_type="dm",
         chat_id="D1", user_id=user, user_name="shannon", thread_id="T1",
         scope_id="W1",
     )
     return SimpleNamespace(
-        source=source, message_id="M1", internal=internal,
+        source=source, message_id=message, internal=internal,
         get_command=lambda: command, get_command_args=lambda: args,
     )
 
@@ -161,5 +168,84 @@ def test_lifecycle_admission_is_one_shot_across_independent_context_copies():
             await asyncio.to_thread(
                 replay.run, captures.consume_lifecycle, **LIFECYCLE
             )
+
+    asyncio.run(scenario())
+
+
+def test_cached_turn_recovers_fresh_capture_from_exact_host_route():
+    async def scenario():
+        captures = InvocationCapture()
+        captures.hook(event=event(command="", args=""), gateway=Gateway())
+
+        invocation = await asyncio.to_thread(
+            contextvars.Context().run,
+            captures.consume_lifecycle,
+            **LIFECYCLE,
+            host_context=HOST_CONTEXT,
+        )
+
+        assert invocation is not None
+        assert invocation.message_id == "M1"
+        with pytest.raises(PermissionError, match="current admitted"):
+            await asyncio.to_thread(
+                contextvars.Context().run,
+                captures.consume_lifecycle,
+                **LIFECYCLE,
+                host_context=HOST_CONTEXT,
+            )
+
+    asyncio.run(scenario())
+
+
+def test_cached_turn_recovery_rejects_a_different_host_route():
+    async def scenario():
+        captures = InvocationCapture()
+        captures.hook(event=event(command="", args=""), gateway=Gateway())
+        changed = {**HOST_CONTEXT, "message_id": "other-message"}
+
+        with pytest.raises(PermissionError, match="current admitted"):
+            await asyncio.to_thread(
+                contextvars.Context().run,
+                captures.consume_lifecycle,
+                **LIFECYCLE,
+                host_context=changed,
+            )
+
+    asyncio.run(scenario())
+
+
+def test_cached_turn_fallback_has_a_hard_capacity_limit():
+    async def scenario():
+        captures = InvocationCapture()
+        for index in range(captures._MAX_PENDING_LIFECYCLES + 20):
+            captures.hook(
+                event=event(command="", args="", message=f"M{index}"), gateway=Gateway()
+            )
+
+        assert len(captures._pending_lifecycle) == captures._MAX_PENDING_LIFECYCLES
+        assert captures._host_route_key(HOST_CONTEXT) not in captures._pending_lifecycle
+
+    asyncio.run(scenario())
+
+
+def test_cached_turn_lookup_prunes_expired_fallbacks_without_new_capture():
+    async def scenario():
+        clock = [10.0]
+        captures = InvocationCapture(clock=lambda: clock[0], ttl_seconds=2.0)
+        for index in range(3):
+            captures.hook(
+                event=event(command="", args="", message=f"M{index}"), gateway=Gateway()
+            )
+        clock[0] = 13.0
+
+        changed = {**HOST_CONTEXT, "message_id": "missing"}
+        with pytest.raises(PermissionError, match="current admitted"):
+            await asyncio.to_thread(
+                contextvars.Context().run,
+                captures.consume_lifecycle,
+                **LIFECYCLE,
+                host_context=changed,
+            )
+        assert not captures._pending_lifecycle
 
     asyncio.run(scenario())

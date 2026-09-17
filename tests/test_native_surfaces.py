@@ -1954,6 +1954,56 @@ def test_lifecycle_from_host_worker_schedules_on_native_loop(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_cached_slack_worker_recovers_route_when_capture_context_is_missing(tmp_path: Path):
+    async def scenario():
+        route = {
+            "platform": "slack", "profile": "default", "chat_id": "D1",
+            "user_id": "U1", "thread_id": "", "scope_id": "W1",
+            "message_id": "request-2", "session_key": "slack:W1:D1:U1",
+            "session_id": "durable-session-1",
+        }
+        runtime = NativeSurfaceRuntime(
+            tmp_path, "default", Service, FakeLlm(),
+            lambda coro, **_kwargs: asyncio.create_task(coro),
+            session_context=lambda: dict(route),
+        )
+        app = SlackApp()
+        adapter = SlackAdapter()
+        runtime.wire_slack(app, adapter)
+        called = asyncio.Event()
+
+        async def resume(invocation, *, expected_model):  # pylint: disable=redefined-outer-name
+            assert invocation.message_id == "request-2"
+            assert expected_model == "active-model"
+            called.set()
+
+        runtime.resume_setup = resume
+        source = SimpleNamespace(
+            platform=SimpleNamespace(value="slack"), profile="default", chat_type="dm",
+            chat_id="D1", user_id="U1", user_name="Shannon", thread_id="", scope_id="W1",
+        )
+        event = SimpleNamespace(
+            source=source, message_id="request-2", internal=False,
+            get_command=lambda: "", get_command_args=lambda: "",
+        )
+        gateway = SimpleNamespace(
+            _session_key_for_source=lambda _source: "slack:W1:D1:U1",
+            _adapter_for_source=lambda _source: adapter,
+            _is_user_authorized_for_source=lambda _source: True,
+        )
+        runtime.hook(event=event, gateway=gateway)
+        runtime.capture._value.set(None)
+
+        await asyncio.to_thread(
+            runtime.lifecycle_hook, model="active-model",
+            session_id="durable-session-1", task_id="host-task-1", turn_id="turn-1",
+            platform="slack", sender_id="U1", parent_session_id="",
+        )
+        await asyncio.wait_for(called.wait(), timeout=1)
+
+    asyncio.run(scenario())
+
+
 def test_lifecycle_rejects_non_owning_or_subagent_payload(tmp_path: Path):
     async def scenario():
         runtime = NativeSurfaceRuntime(
