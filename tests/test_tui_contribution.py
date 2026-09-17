@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_wisdom_plugin.tui_contribution import (
+    MAX_TUI_REVIEW_CHARS,
     handles_plugin_only_candidate_action,
     handles_tui_contribution,
     run_tui_contribution,
@@ -231,6 +232,25 @@ def test_candidate_publication_approval_is_a_separate_exact_receipt_action():
     assert [call[:2] for call in service.calls] == [
         ("candidate_publication_approve", "publication-receipt"),
     ]
+
+
+def test_oversized_candidate_share_exposes_no_receipt_or_handoff():
+    service = FakeContributionService()
+    service.payload["files"][0]["content_utf8"] = "x" * MAX_TUI_REVIEW_CHARS
+
+    output = run_tui_contribution(
+        "candidate assessment-1 share", service,
+        lambda **_kwargs: pytest.fail("stock TUI action must not request host review"),
+        None, None, may_apply=lambda: True,
+    )
+
+    assert output == (
+        "The complete exact candidate review is too large for the TUI. "
+        "No approval is available and nothing was published."
+    )
+    assert "publication-receipt" not in output
+    assert "/wisdom publication approve" not in output
+    assert "terminal" not in output.casefold()
 
 
 @pytest.mark.parametrize("action", ["portal", "later"])

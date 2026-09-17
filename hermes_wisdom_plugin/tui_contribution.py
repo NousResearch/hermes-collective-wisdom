@@ -40,6 +40,16 @@ _OVERSIZED = (
     "The TUI cannot display the complete exact review without truncation. "
     "Use the terminal `hermes wisdom` contribution workflow instead. Nothing was changed."
 )
+_CANDIDATE_OVERSIZED = (
+    "The complete exact candidate review is too large for the TUI. "
+    "No approval is available and nothing was published."
+)
+_CANDIDATE_UNAVAILABLE = (
+    "This candidate action is no longer available. No action was taken."
+)
+_CANDIDATE_APPROVAL_UNAVAILABLE = (
+    "This candidate publication approval is no longer available. No action was taken."
+)
 
 
 class _InvocationEnded(RuntimeError):
@@ -188,11 +198,13 @@ def _candidate(
                 service.candidate_slash_action, assessment_id, action,
                 may_apply=may_apply,
             )
-        except WisdomConflict as exc:
-            return str(exc)
+        except (PermissionError, WisdomConflict):
+            return _CANDIDATE_UNAVAILABLE
         literal = _json(result, pretty=True)
         if action != "share":
             return literal
+        if len(literal) > MAX_TUI_REVIEW_CHARS:
+            return _CANDIDATE_OVERSIZED
         review = result.get("review") if isinstance(result, dict) else None
         receipt = review.get("receipt") if isinstance(review, dict) else None
         if not isinstance(receipt, str) or not _ACTION_ID.fullmatch(receipt):
@@ -363,9 +375,12 @@ def _publication(  # pylint: disable=too-many-arguments
         receipt = words[2]
         if not _ACTION_ID.fullmatch(receipt):
             raise ValueError(_APPROVAL_USAGE)
-        return _json(_read(
-            service.candidate_publication_approve, receipt, may_apply=may_apply
-        ))
+        try:
+            return _json(_read(
+                service.candidate_publication_approve, receipt, may_apply=may_apply
+            ))
+        except (PermissionError, WisdomConflict):
+            return _CANDIDATE_APPROVAL_UNAVAILABLE
     if words[1:2] == ["approve"]:
         raise ValueError(_APPROVAL_USAGE)
     if len(words) != 3:

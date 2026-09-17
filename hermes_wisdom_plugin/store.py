@@ -2029,11 +2029,12 @@ class WisdomStore:
     def publication_for_candidate_assessment(
         self, assessment_id: str
     ) -> dict[str, Any] | None:
-        """Return the pending publication durably linked to one candidate card."""
+        """Return the latest publication durably linked to one candidate card."""
 
         with self.transaction() as db:
             rows = db.execute(
-                "SELECT * FROM operation_journal WHERE kind='publication' AND state='pending'"
+                "SELECT * FROM operation_journal WHERE kind='publication' "
+                "ORDER BY created_at DESC"
             ).fetchall()
         for row in rows:
             value = dict(row)

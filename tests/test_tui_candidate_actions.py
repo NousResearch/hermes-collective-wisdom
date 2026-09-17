@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,12 +15,13 @@ from native_test_support import native_invocation, owner, publication_review
 from test_native_surfaces import _delivered_candidate
 
 from hermes_wisdom_plugin.errors import WisdomConflict
+from hermes_wisdom_plugin.native_review import NativeReviewController
 from hermes_wisdom_plugin.qualification import snapshot_tree
 from hermes_wisdom_plugin.runtime import InvocationService
 from hermes_wisdom_plugin.tui_contribution import run_tui_contribution
 
 
-class CandidateService(InvocationService):
+class CandidateService(InvocationService):  # pylint: disable=too-many-instance-attributes
     """Bind the real candidate slash methods to one disposable owner/store."""
 
     def __init__(self, store, binding):  # pylint: disable=super-init-not-called
@@ -84,7 +86,9 @@ class CandidateService(InvocationService):
             "portal_url": "https://portal.example/wisdom/review/remote-draft",
         }
 
-    def publication_submit(self, receipt, *, may_apply=None):
+    def publication_submit(
+        self, receipt, *, may_apply=None, candidate_assessment_id=None,
+    ):
         assert may_apply is None or may_apply() is True
         self.public_submissions(receipt)
         return {
@@ -138,10 +142,31 @@ def test_completed_share_replay_is_unavailable_without_receipt(tmp_path):
         None, None, may_apply=lambda: True,
     )
 
-    assert output == "Candidate action is already completed; Share is unavailable"
+    assert output == "This candidate action is no longer available. No action was taken."
     assert "publication-receipt" not in output
     assert "/wisdom publication approve" not in output
     service.private_submissions.assert_not_called()
+    service.public_submissions.assert_called_once_with("publication-receipt")
+
+
+def test_consumed_candidate_approval_has_safe_tui_message(tmp_path):
+    service, assessment_id = delivered(tmp_path)
+    service.candidate_slash_action(assessment_id, "share", may_apply=lambda: True)
+    service.candidate_publication_approve(
+        "publication-receipt", may_apply=lambda: True
+    )
+
+    output = run_tui_contribution(
+        "publication approve publication-receipt", service,
+        lambda **_kwargs: pytest.fail("stock TUI action must not request host review"),
+        None, None, may_apply=lambda: True,
+    )
+
+    assert output == (
+        "This candidate publication approval is no longer available. "
+        "No action was taken."
+    )
+    assert assessment_id not in output
     service.public_submissions.assert_called_once_with("publication-receipt")
 
 
@@ -216,6 +241,46 @@ def test_share_can_be_deliberately_upgraded_to_one_private_portal_draft(tmp_path
     service.public_submissions.assert_not_called()
 
 
+def test_share_portal_upgrade_recovers_after_private_submit_before_projection(
+    tmp_path, monkeypatch,
+):
+    service, assessment_id = delivered(tmp_path)
+    service.candidate_slash_action(assessment_id, "share", may_apply=lambda: True)
+    operation = {"id": "private-operation", "state": "pending"}
+    submitted = []
+
+    def submit_then_lose_projection(receipt, *, may_apply=None, candidate_assessment_id=None):
+        assert may_apply is None or may_apply() is True
+        submitted.append((receipt, candidate_assessment_id))
+        if len(submitted) == 1:
+            raise RuntimeError("injected after private submission")
+        pytest.fail("private submission was replayed")
+
+    service.publication_submit_private = submit_then_lose_projection
+    monkeypatch.setattr(
+        service.store,
+        "publication_for_candidate_assessment",
+        lambda target: operation if target == assessment_id and submitted else None,
+    )
+
+    with pytest.raises(RuntimeError, match="injected after private submission"):
+        service.candidate_slash_action(assessment_id, "portal", may_apply=lambda: True)
+
+    recovered = service.candidate_slash_action(
+        assessment_id, "portal", may_apply=lambda: True
+    )
+
+    assert recovered["portal_url"] == "https://portal.example/wisdom/review/remote-draft"
+    assert submitted == [("publication-receipt", assessment_id)]
+
+
+def test_candidate_runtime_uses_only_public_controller_transitions():
+    source = inspect.getsource(InvocationService)
+    assert "controller._replace_candidate_action" not in source
+    assert "controller._complete_candidate_portal" not in source
+    assert callable(getattr(NativeReviewController, "upgrade_candidate_to_portal", None))
+
+
 def test_share_after_portal_refuses_without_displaying_unusable_approval(tmp_path):
     service, assessment_id = delivered(tmp_path)
     service.candidate_slash_action(assessment_id, "portal", may_apply=lambda: True)
@@ -226,10 +291,58 @@ def test_share_after_portal_refuses_without_displaying_unusable_approval(tmp_pat
         None, None, may_apply=lambda: True,
     )
 
-    assert output == "Candidate was already opened in Portal; Share approval is unavailable"
+    assert output == "This candidate action is no longer available. No action was taken."
     assert "/wisdom publication approve" not in output
     service.private_submissions.assert_called_once()
     service.public_submissions.assert_not_called()
+
+
+def test_public_approval_recovers_after_submit_before_consent_completion(
+    tmp_path, monkeypatch,
+):
+    service, assessment_id = delivered(tmp_path)
+    service.candidate_slash_action(assessment_id, "share", may_apply=lambda: True)
+    operation = {"id": "public-operation", "state": "done"}
+    submissions = []
+
+    def submit_then_lose_projection(receipt, *, may_apply=None,
+                                    candidate_assessment_id=None):
+        assert may_apply is None or may_apply() is True
+        submissions.append((receipt, candidate_assessment_id))
+        if len(submissions) == 1:
+            raise RuntimeError("injected after public submission")
+        pytest.fail("public submission was replayed")
+
+    service.publication_submit = submit_then_lose_projection
+    service.publication_reopen = Mock(return_value={
+        "operation_id": "public-operation", "state": "pending",
+        "publication_state": "pending_moderation",
+    })
+    monkeypatch.setattr(
+        service.store,
+        "publication_for_candidate_assessment",
+        lambda target: operation if target == assessment_id and submissions else None,
+    )
+
+    with pytest.raises(RuntimeError, match="injected after public submission"):
+        service.candidate_publication_approve(
+            "publication-receipt", may_apply=lambda: True
+        )
+
+    recovered = service.candidate_publication_approve(
+        "publication-receipt", may_apply=lambda: True
+    )
+    assert recovered["publication_state"] == "pending_moderation"
+    assert submissions == [("publication-receipt", assessment_id)]
+    assert service.publication_reopen.call_count == 1
+
+    output = run_tui_contribution(
+        f"candidate {assessment_id} share", service,
+        lambda **_kwargs: pytest.fail("stock TUI action must not request host review"),
+        None, None, may_apply=lambda: True,
+    )
+    assert output == "This candidate action is no longer available. No action was taken."
+    assert "publication-receipt" not in output
 
 
 def test_later_uses_bound_policy_and_is_idempotent(tmp_path):

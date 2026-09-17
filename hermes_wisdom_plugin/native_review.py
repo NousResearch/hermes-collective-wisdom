@@ -637,6 +637,95 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PermissionError("Collective Wisdom candidate review changed.")
         return self.load(record_id)
 
+    def upgrade_candidate_to_portal(  # pylint: disable=too-many-arguments
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Persist a deliberate Share-to-Portal upgrade before its remote effect."""
+
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        lock_key = (
+            f"candidate-action:{self._org(owner)}:"
+            f"{owner.get('profile_name', record['profile'])}:{assessment_id}"
+        )
+        lock = self.store.acquire_operation_lock(lock_key)
+        if lock is None:
+            return record
+
+        def owns_current_claim() -> bool:
+            self.store.assert_operation_lock(lock_key, lock)
+            return may_apply()
+
+        try:
+            current = self.load(record["id"])
+            if current["state"] != "pending":
+                raise PermissionError("Collective Wisdom candidate review changed.")
+            plan = current["plan"]
+            if (
+                plan.get("owner") != owner
+                or plan.get("candidate_assessment_id") != assessment_id
+                or service.native_owner() != owner
+                or owns_current_claim() is not True
+            ):
+                raise PermissionError("Collective Wisdom candidate owner changed.")
+            action = plan.get("candidate_action")
+            if action == "share":
+                current = self._replace_candidate_action(
+                    current["id"], "publish", {**plan, "candidate_action": "portal"}
+                )
+            elif action != "portal":
+                raise PermissionError("Collective Wisdom candidate review changed.")
+            if _safe_url((current.get("result") or {}).get("portal_url")):
+                return current
+            operation = self.store.publication_for_candidate_assessment(assessment_id)
+            outcome = None
+            if operation is None:
+                outcome = service.publication_submit_private(
+                    current["plan"]["receipt"], may_apply=owns_current_claim,
+                    candidate_assessment_id=assessment_id,
+                )
+            return self._complete_candidate_portal(
+                service, current, assessment_id,
+                may_apply=owns_current_claim, outcome=outcome,
+            )
+        finally:
+            self.store.release_operation_lock(lock_key, lock)
+
+    def submit_candidate_publication(
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Submit or reconcile one candidate publication, then project its consent."""
+
+        operation = self.store.publication_for_candidate_assessment(assessment_id)
+        if operation is None:
+            result = service.publication_submit(
+                record["plan"]["receipt"], may_apply=may_apply,
+                candidate_assessment_id=assessment_id,
+            )
+        else:
+            result = service.publication_reopen(
+                str(operation["id"]), may_apply=may_apply
+            )
+        if not isinstance(result, dict) or not result.get("operation_id"):
+            raise PackagePolicyError("candidate publication response is invalid")
+        state = "needs_review" if result.get("state") == "uncertain" else "completed"
+        return self._store_result(record, result, state=state)
+
+    def reconcile_candidate_publication(
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Reconcile a consumed candidate receipt before displaying another approval."""
+
+        if self.store.publication_for_candidate_assessment(assessment_id) is None:
+            return record
+        return self.submit_candidate_publication(
+            service, record, assessment_id, may_apply=may_apply
+        )
+
     def request_candidate_action(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
         self, service: Any, invocation: NativeInvocation, event_id: str, *,
         assessment_id: str, open_in_portal: bool,

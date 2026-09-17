@@ -405,6 +405,7 @@ class PublicationController:  # pylint: disable=too-many-public-methods
 
     def submit(  # pylint: disable=too-many-locals
         self, receipt_id: str, *, may_apply: Callable[[], bool] | None = None,
+        candidate_assessment_id: str | None = None,
     ) -> dict[str, Any]:
         """Consume one final hash-bound authorization and drive its durable operation."""
 
@@ -459,6 +460,8 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                 if prepared["hashes"] != reviewed_hashes:
                     raise WisdomConflict("The package changed; review it again before submitting")
                 intent = self._intent(draft, prepared, owner, policy)
+                if candidate_assessment_id is not None:
+                    intent["candidate_assessment_id"] = candidate_assessment_id
                 self._require_current(may_apply)
                 operation_id = self.store.begin_publication(
                     receipt_id=receipt_id,

@@ -540,60 +540,6 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise PermissionError("Collective Wisdom candidate assessment changed.")
         return owner, record, queue
 
-    def _candidate_tui_portal_upgrade(
-        self, controller: Any, successor: dict[str, Any], assessment_id: str,
-        owner: dict[str, str], *, may_apply: Callable[[], bool],
-    ) -> dict[str, Any]:
-        """Upgrade a TUI Share review without changing native callback replay."""
-
-        action = successor["plan"].get("candidate_action")
-        if action == "portal":
-            return successor
-        if action != "share":
-            raise WisdomConflict("Candidate action is not available for Portal upgrade")
-        lock_key = (
-            f"candidate-action:{owner['organization_id']}:"
-            f"{owner['profile_name']}:{assessment_id}"
-        )
-        store = cast(Any, self.store)
-        lock = store.acquire_operation_lock(lock_key)
-        if lock is None:
-            return successor
-
-        def owns_current_claim() -> bool:
-            store.assert_operation_lock(lock_key, lock)
-            return may_apply()
-
-        try:
-            current = controller.load(successor["id"])
-            if current.get("state") != "pending":
-                raise WisdomConflict(
-                    "Candidate action is already completed; Portal is unavailable"
-                )
-            plan = current["plan"]
-            if (
-                plan.get("owner") != owner
-                or plan.get("candidate_assessment_id") != assessment_id
-            ):
-                raise PermissionError("Collective Wisdom candidate owner changed.")
-            if plan.get("candidate_action") == "portal":
-                return current
-            if plan.get("candidate_action") != "share" or owns_current_claim() is not True:
-                raise PermissionError("Collective Wisdom candidate review changed.")
-            outcome = self.publication_submit_private(
-                plan["receipt"], may_apply=owns_current_claim,
-                candidate_assessment_id=assessment_id,
-            )
-            current = controller._replace_candidate_action(  # pylint: disable=protected-access
-                current["id"], "publish", {**plan, "candidate_action": "portal"},
-            )
-            return controller._complete_candidate_portal(  # pylint: disable=protected-access
-                self, current, assessment_id,
-                may_apply=owns_current_claim, outcome=outcome,
-            )
-        finally:
-            store.release_operation_lock(lock_key, lock)
-
     def candidate_slash_action(  # pylint: disable=too-many-locals
         self, assessment_id: str, action: str, *, may_apply: Callable[[], bool]
     ) -> dict[str, Any]:
@@ -647,6 +593,14 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             may_apply=may_apply,
         )
         _require_current(may_apply)
+        if (
+            action == "share"
+            and successor.get("state") == "pending"
+            and successor["plan"].get("candidate_action") == "share"
+        ):
+            successor = controller.reconcile_candidate_publication(
+                self, successor, assessment_id, may_apply=may_apply
+            )
         if successor.get("state") != "pending":
             label = "Share" if action == "share" else "Portal"
             raise WisdomConflict(
@@ -666,8 +620,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                 if key not in internal
             }
             return {"action": "share", "candidate_id": assessment_id, "review": review}
-        successor = self._candidate_tui_portal_upgrade(
-            controller, successor, assessment_id, owner, may_apply=may_apply
+        successor = controller.upgrade_candidate_to_portal(
+            self, successor, assessment_id, may_apply=may_apply
         )
         result = successor.get("result") if isinstance(successor.get("result"), dict) else {}
         portal_url = safe_portal_url(result.get("portal_url"))
@@ -687,6 +641,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self, receipt: str, *, may_apply: Callable[[], bool]
     ) -> dict[str, Any]:
         """Submit one exact candidate receipt only after a second typed slash action."""
+
+        from .native_review import NativeReviewController  # pylint: disable=import-outside-toplevel
 
         owner = self.native_owner()
         with self.store.transaction() as db:
@@ -738,18 +694,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                 raise PermissionError(
                     "Collective Wisdom candidate publication review is invalid."
                 )
-            _require_current(owns_current_claim)
-            result = self.publication_submit(receipt, may_apply=owns_current_claim)
-            _require_current(owns_current_claim)
-            with store.transaction() as db:
-                changed = db.execute(
-                    "UPDATE wisdom_consent SET state='completed',result_json=?,updated_at=? "
-                    "WHERE id=? AND state='pending'",
-                    (json.dumps(result, sort_keys=True), time.time(), rows[0]["id"]),
-                ).rowcount
-            if changed != 1:
-                raise WisdomConflict("Candidate publication review changed after submission")
-            return result
+            controller = NativeReviewController(store)
+            completed = controller.submit_candidate_publication(
+                self, controller.load(str(rows[0]["id"])), assessment_id,
+                may_apply=owns_current_claim,
+            )
+            return dict(completed.get("result") or {})
         finally:
             store.release_operation_lock(lock_key, lock)
 
@@ -964,11 +914,18 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
     def publication_submit(
         self, receipt, *, may_apply: Callable[[], bool] | None = None,
+        candidate_assessment_id: str | None = None,
     ):
         """Consume one explicit final owner authorization and submit exact bytes."""
 
         _require_current(may_apply)
-        result = self._publication_service().submit(receipt, may_apply=may_apply)
+        submit_options = (
+            {"candidate_assessment_id": candidate_assessment_id}
+            if candidate_assessment_id is not None else {}
+        )
+        result = self._publication_service().submit(
+            receipt, may_apply=may_apply, **submit_options
+        )
         self.check_owner()
         _require_current(may_apply)
         return result
