@@ -107,6 +107,23 @@ def delivered(tmp_path):
     return CandidateService(store, binding), assessment_id
 
 
+def test_candidate_action_parser_accepts_display_contract_limit():
+    candidate_id = "c" * 256
+    service = SimpleNamespace(candidate_slash_action=Mock(return_value={"portal_url": "safe"}))
+
+    output = run_tui_contribution(
+        f"candidate {candidate_id} portal", service,
+        lambda **_kwargs: pytest.fail("candidate portal needs no host review"),
+        None, None, may_apply=lambda: True,
+    )
+
+    assert '"portal_url": "safe"' in output
+    service.candidate_slash_action.assert_called_once_with(
+        candidate_id, "portal",
+        may_apply=service.candidate_slash_action.call_args.kwargs["may_apply"],
+    )
+
+
 def test_share_is_review_only_then_exact_approval_is_single_use(tmp_path):
     service, assessment_id = delivered(tmp_path)
 

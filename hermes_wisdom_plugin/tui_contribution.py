@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from .commands import _read_prepared_payload  # pylint: disable=protected-access
 from .errors import WisdomConflict
+from .notification_contracts import is_candidate_slash_target
 
 # Small command adapters share the host's review boundary explicitly.
 # pylint: disable=too-many-positional-arguments
@@ -189,7 +190,7 @@ def _candidate(
 ) -> str:
     if len(words) == 3:
         assessment_id, action = words[1], words[2].casefold()
-        if action not in {"share", "portal", "later"} or not _ACTION_ID.fullmatch(
+        if action not in {"share", "portal", "later"} or not is_candidate_slash_target(
             assessment_id
         ):
             raise ValueError(_CANDIDATE_USAGE)

@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .mediation_store import MediationStore
+from .notification_contracts import MAX_QUALIFICATION_COUNT
 from .preferences import WisdomPreferences, suppression_key
 from .weekly_queue import enqueue_weekly_review, weekly_policy_from_agent
 
 _MAX_CANDIDATES = 8
-_MAX_QUALIFICATION_COUNT = 365
 _QUALIFICATION_REASON_KEYS = {
     "high_usage": ("consecutive_business_days",),
     "refinement": ("meaningful_refinements", "stable_days"),
@@ -70,7 +70,7 @@ def _candidate_reference(store: Any, item: dict[str, Any]) -> dict[str, Any] | N
                 for key in reason_keys
                 if isinstance(reasons, dict)
                 and type(reasons.get(key)) is int
-                and 1 <= reasons[key] <= _MAX_QUALIFICATION_COUNT
+                and 1 <= reasons[key] <= MAX_QUALIFICATION_COUNT
             }
             if projected:
                 reference.update({

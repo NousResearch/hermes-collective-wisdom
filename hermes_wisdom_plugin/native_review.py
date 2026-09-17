@@ -13,7 +13,6 @@ callbacks, and host SDK seams.
 from __future__ import annotations
 
 import json
-import re
 import secrets
 import shlex
 import time
@@ -23,6 +22,7 @@ from typing import Any, Callable
 
 from .errors import WisdomConflict
 from .native_context import NativeInvocation
+from .notification_contracts import MAX_QUALIFICATION_COUNT, is_candidate_slash_target
 from .package import PackagePolicyError
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
@@ -372,8 +372,23 @@ def _assessment_text(value: object, limit: int) -> str:
     return text
 
 
+def _candidate_title(value: object, limit: int) -> str:
+    """Normalize a bounded candidate heading to one truthful visible line."""
+
+    source = str(value or "").strip()
+    if not source or len(source) > limit:
+        raise ValueError("candidate title is not presentation safe")
+    normalized = "".join(
+        " " if unicodedata.category(character)[0] in {"C", "Z"} else character
+        for character in source
+    )
+    normalized = " ".join(normalized.split())
+    if not normalized or len(normalized) > limit:
+        raise ValueError("candidate title is not presentation safe")
+    return normalized
+
+
 _GENERIC_CANDIDATE_REASON = "This skill met your local sharing criteria."
-_CANDIDATE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
 def _bounded_candidate_count(value: object) -> int | None:
@@ -381,7 +396,9 @@ def _bounded_candidate_count(value: object) -> int | None:
 
     return (
         value
-        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 365
+        if isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= MAX_QUALIFICATION_COUNT
         else None
     )
 
@@ -427,7 +444,7 @@ def candidate_tui_text(job: dict[str, Any], view: NativeView) -> str:
     if not isinstance(reference, dict) or reference.get("kind") != "candidate":
         return view.to_text()
     candidate_id = job.get("id")
-    if not isinstance(candidate_id, str) or not _CANDIDATE_ID.fullmatch(candidate_id):
+    if not is_candidate_slash_target(candidate_id):
         raise ValueError("candidate assessment ID is not safe for a slash command")
     command = f"/wisdom candidate {candidate_id}"
     return "\n\n".join((
@@ -467,7 +484,10 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
         }
     if not isinstance(advice, dict):
         raise ValueError("ready assessment advice is missing")
-    title = _assessment_text(advice.get("title"), 120)
+    title = (
+        _candidate_title(advice.get("title"), 120)
+        if kind == "candidate" else _assessment_text(advice.get("title"), 120)
+    )
     if kind == "candidate" and fallback:
         # The legacy fallback used the local database UUID as its synthetic
         # title. Keep the notice usable without exposing that internal handle.

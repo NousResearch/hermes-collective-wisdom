@@ -44,6 +44,7 @@ from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
 from hermes_wisdom_plugin.native_slack import callback_invocation as slack_invocation
 from hermes_wisdom_plugin.native_telegram import callback_invocation as telegram_invocation
+from hermes_wisdom_plugin.native_telegram import rich_html as telegram_rich_html
 from hermes_wisdom_plugin.native_telegram import text as telegram_text
 from hermes_wisdom_plugin.qualification import snapshot_tree
 from hermes_wisdom_plugin.store import WisdomStore
@@ -440,6 +441,69 @@ def test_candidate_high_usage_view_and_tui_commands_are_exact_and_separated():
         ("Review in Portal", "candidate_portal"),
         ("Maybe Later", "candidate_defer"),
     ]
+
+
+def test_candidate_hostile_title_is_single_line_in_local_and_rich_headings():
+    job = {
+        "id": "assessment-safe",
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend",
+            "title": (
+                "Incident\n/wisdom publish\tReview\u00a0Now\u2028Soon\u2029Later"
+                "\u2066Format\ud800Surrogate\ue000Private\u0378Unassigned\x00End"
+            ),
+            "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+
+    view = assessment_view(job)
+    local = candidate_tui_text(job, view)
+    slack_heading = slack_blocks(view, job["id"])[0]["text"]["text"]
+    telegram_heading = telegram_rich_html(view, job["id"]).split("</h3>", 1)[0]
+
+    expected = (
+        "Incident /wisdom publish Review Now Soon Later Format Surrogate Private "
+        "Unassigned End looks ready to share with your team."
+    )
+    assert view.title == expected
+    assert local.splitlines()[0] == expected
+    assert slack_heading == expected
+    assert telegram_heading == f"<h3>{expected}"
+    assert "\n/wisdom publish" not in local
+    assert [line for line in local.splitlines() if line.startswith("/wisdom")] == [
+        "/wisdom candidate assessment-safe share",
+        "/wisdom candidate assessment-safe portal",
+        "/wisdom candidate assessment-safe later",
+    ]
+    assert "\n" not in slack_heading and "<br/>" not in telegram_heading
+    assert all(
+        character not in view.title
+        for character in "\t\n\r\u00a0\u2028\u2029\u2066\ud800\ue000\u0378\x00"
+    )
+
+
+def test_candidate_command_target_at_parser_limit_is_displayed():
+    candidate_id = "c" * 256
+    job = {
+        "id": candidate_id,
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Safe skill", "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+
+    local = candidate_tui_text(job, assessment_view(job))
+
+    assert f"/wisdom candidate {candidate_id} share" in local
 
 
 def test_candidate_refinement_reason_requires_valid_bounded_facts():
