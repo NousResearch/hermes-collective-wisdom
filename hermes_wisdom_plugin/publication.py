@@ -473,6 +473,62 @@ class PublicationController:  # pylint: disable=too-many-public-methods
         finally:
             self.store.release_operation_lock(lock_key, lock)
 
+    def submit_private_draft(  # pylint: disable=too-many-locals
+        self, receipt_id: str, *, may_apply: Callable[[], bool] | None = None,
+        candidate_assessment_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload one exact owner-private draft, stopping before approval/publication."""
+
+        draft, prepared, owner, policy, existing = self._verified_receipt(
+            receipt_id, may_apply=may_apply
+        )
+        if existing is not None:
+            raise WisdomConflict("This private draft already exists; reopen its current review")
+        reviewed_hashes = dict(prepared.get("hashes") or {})
+        entity_id = str(draft["skill_id"])
+        lock_key = "publication:" + entity_id
+        self._require_current(may_apply)
+        lock = self.store.acquire_operation_lock(lock_key)
+        if lock is None:
+            raise WisdomConflict("This package is already being submitted. Reload its status")
+        try:
+            prepared = self.reviewer.reopen(str(draft["id"]), may_apply=may_apply)
+            current_owner = self._owner()
+            self._require_current(may_apply)
+            if current_owner != owner:
+                raise WisdomAuthError("Collective Wisdom publication owner changed")
+            security = prepared.get("security_check") or {}
+            if security.get("upload_allowed") is not True:
+                raise WisdomConflict(
+                    str(security.get("summary") or "Current local security checks block sharing")
+                )
+            skill = self.store.local_skill(str(draft["skill_id"]))
+            if skill is None or source_fingerprint(
+                Path(str(skill["canonical_path"]))
+            ) != draft["source_hash"]:
+                raise WisdomConflict(
+                    "The local source changed. Prepare and review it before submitting"
+                )
+            if prepared["hashes"] != reviewed_hashes:
+                raise WisdomConflict("The package changed; review it again before submitting")
+            intent = self._intent(draft, prepared, owner, policy)
+            intent["requested_action"] = "private_draft"
+            if candidate_assessment_id is not None:
+                intent["candidate_assessment_id"] = candidate_assessment_id
+            self._require_current(may_apply)
+            operation_id = self.store.begin_publication(
+                receipt_id=receipt_id,
+                draft_id=str(draft["id"]),
+                entity_id=entity_id,
+                payload=intent,
+            )
+            return self._drive(
+                operation_id, lock_key=lock_key, lock_owner=lock,
+                may_apply=may_apply,
+            )
+        finally:
+            self.store.release_operation_lock(lock_key, lock)
+
     def _operation(self, operation_id: str) -> dict[str, Any]:
         operation = self.store.operation(operation_id)
         if operation is None or operation.get("kind") != "publication":
@@ -826,6 +882,23 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                     lock_key=lock_key, lock_owner=lock_owner,
                 )
 
+        private_draft = payload.get("requested_action") == "private_draft"
+        if phase == "policy_review_required":
+            return {
+                "operation_id": operation_id,
+                "state": "pending",
+                "phase": phase,
+                "publication_state": remote_state or None,
+                "remote_draft_id": remote_id,
+                "retry_safe": False,
+                "detail": (
+                    "Private draft submitted. Final sharing still requires a fresh "
+                    "exact-package approval."
+                    if private_draft else
+                    "This publication is waiting for a fresh exact-package approval."
+                ),
+            }
+
         if not self._is_current(may_apply):
             return self._stopped_result(operation_id, phase)
         policy = self._policy(payload["owner"], may_apply)
@@ -833,7 +906,12 @@ class PublicationController:  # pylint: disable=too-many-public-methods
             "publication_mode": _value(policy, "publication_mode"),
             "version": _value(policy, "version"),
         }
-        if payload["policy"] != current_policy:
+        if private_draft and payload["policy"] != current_policy:
+            payload = dict(payload)
+            payload["policy"] = current_policy
+            self.store.assert_operation_lock(lock_key, lock_owner)
+            self.store.replace_operation_payload(operation_id, payload)
+        elif payload["policy"] != current_policy:
             payload = dict(payload)
             payload["resume_phase"] = phase
             self.store.assert_operation_lock(lock_key, lock_owner)
@@ -918,6 +996,28 @@ class PublicationController:  # pylint: disable=too-many-public-methods
                     "Authoritative publication draft no longer matches intent"
                 )
             remote_state = str(_value(remote, "state"))
+
+        if private_draft and phase == "draft_submitted":
+            payload = dict(payload)
+            payload["resume_phase"] = "draft_submitted"
+            self.store.assert_operation_lock(lock_key, lock_owner)
+            self.store.replace_operation_payload(operation_id, payload)
+            self.store.advance_claimed(
+                operation_id, "policy_review_required",
+                entity_id=lock_key, owner=lock_owner,
+            )
+            return {
+                "operation_id": operation_id,
+                "state": "pending",
+                "phase": "policy_review_required",
+                "publication_state": remote_state,
+                "remote_draft_id": remote_id,
+                "retry_safe": False,
+                "detail": (
+                    "Private draft submitted. Final sharing still requires a fresh "
+                    "exact-package approval."
+                ),
+            }
 
         if not remote_id:
             return self._uncertain(

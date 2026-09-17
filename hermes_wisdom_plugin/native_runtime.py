@@ -1128,13 +1128,55 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             chat_id=invocation.chat_id, thread_id=invocation.thread_id,
         )
 
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments,too-many-locals
+    async def _candidate_action(
+        self, service: Any, queue: Any, org: str, record_id: str,
+        record: dict[str, Any], invocation: NativeInvocation, action: str, *,
+        guard: Callable[..., None],
+    ) -> tuple[NativeView | None, str, tuple[int, int] | None]:
+        """Resolve one exact delivered candidate without bypassing final publication review."""
+
+        if action == "candidate_defer":
+            projected, should_edit = await self._defer_candidate(
+                service, queue, org, record_id, invocation, guard=guard,
+            )
+            if not should_edit:
+                return None, record_id, None
+            guard()
+            return candidate_deferred_view(projected), record_id, None
+        reference = record.get("reference") or {}
+        event_id = str(reference.get("event_id") or "")
+        if reference.get("kind") != "candidate" or not event_id:
+            raise PermissionError("Collective Wisdom candidate reference changed.")
+        def candidate_current() -> bool:
+            try:
+                guard()
+            except PermissionError:
+                return False
+            return not self._closed
+
+        successor = await asyncio.to_thread(
+            self.reviews.request_candidate_action,
+            service, invocation, event_id,
+            assessment_id=record_id,
+            open_in_portal=action == "candidate_portal",
+            may_apply=candidate_current,
+        )
+        projected_id = str(successor["id"])
+        if successor["plan"].get("candidate_action_state") == "preparing":
+            return None, projected_id, None
+        projected, revision, attempt = await asyncio.to_thread(
+            self.reviews.delivery_projection, projected_id, initial=True
+        )
+        return self.reviews.view(projected), projected_id, (revision, attempt)
+
     async def _slack_callback(  # pylint: disable=too-many-locals
         self, native: Any, adapter: Any, token: object,
                               body: dict[str, Any], action_payload: dict[str, Any]) -> None:
         from .native_slack import callback_invocation  # pylint: disable=import-outside-toplevel
         self._assert_lease("slack", adapter, token)
         record_id, action = parse_callback(str(action_payload.get("value") or ""))
-        if action == "candidate_defer":
+        if action in {"candidate_defer", "candidate_share", "candidate_portal"}:
             service = self.service_factory()
             try:
                 from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
@@ -1157,22 +1199,34 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     if await asyncio.to_thread(service.native_owner) != owner:
                         raise PermissionError("Collective Wisdom candidate owner changed.")
                     self._assert_lease(invocation.platform, invocation.adapter, token)
-                    projected, should_edit = await self._defer_candidate(
-                        service, queue, org, record_id, invocation, guard=guard,
+                    view, projected_id, delivery = await self._candidate_action(
+                        service, queue, org, record_id, record, invocation, action,
+                        guard=guard,
                     )
-                    if not should_edit:
+                    if view is None:
                         return
-                    guard()
-                    view = candidate_deferred_view(projected)
                     try:
                         await _edit_slack_projection(
-                            native, invocation, body, view, record_id,
+                            native, invocation, body, view, projected_id,
                         )
+                        if delivery is not None:
+                            await asyncio.to_thread(
+                                self.reviews.bind_delivery, projected_id, invocation,
+                                invocation.message_id,
+                                expected_revision=delivery[0], attempt=delivery[1],
+                            )
                     except Exception as exc:  # the edit may have reached Slack
-                        await asyncio.to_thread(
-                            queue.candidate_edit_uncertain, org, record_id,
-                            error=type(exc).__name__,
-                        )
+                        if action == "candidate_defer":
+                            await asyncio.to_thread(
+                                queue.candidate_edit_uncertain, org, record_id,
+                                error=type(exc).__name__,
+                            )
+                        elif delivery is not None:
+                            await asyncio.to_thread(
+                                self.reviews.delivery_uncertain, projected_id,
+                                type(exc).__name__,
+                                expected_revision=delivery[0], attempt=delivery[1],
+                            )
                         raise
                 return
             finally:
@@ -1225,7 +1279,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         from .native_telegram import callback_invocation  # pylint: disable=import-outside-toplevel
         self._assert_lease("telegram", adapter, token)
         record_id, action = parse_callback(str(getattr(query, "data", "") or ""))
-        if action == "candidate_defer":
+        if action in {"candidate_defer", "candidate_share", "candidate_portal"}:
             service = self.service_factory()
             try:
                 from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
@@ -1248,20 +1302,32 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     if await asyncio.to_thread(service.native_owner) != owner:
                         raise PermissionError("Collective Wisdom candidate owner changed.")
                     self._assert_lease(invocation.platform, invocation.adapter, token)
-                    projected, should_edit = await self._defer_candidate(
-                        service, queue, org, record_id, invocation, guard=guard,
+                    view, projected_id, delivery = await self._candidate_action(
+                        service, queue, org, record_id, record, invocation, action,
+                        guard=guard,
                     )
-                    if not should_edit:
+                    if view is None:
                         return
-                    guard()
-                    view = candidate_deferred_view(projected)
                     try:
-                        await _edit_telegram_projection(query, view, record_id)
+                        await _edit_telegram_projection(query, view, projected_id)
+                        if delivery is not None:
+                            await asyncio.to_thread(
+                                self.reviews.bind_delivery, projected_id, invocation,
+                                invocation.message_id,
+                                expected_revision=delivery[0], attempt=delivery[1],
+                            )
                     except Exception as exc:  # the edit may have reached Telegram
-                        await asyncio.to_thread(
-                            queue.candidate_edit_uncertain, org, record_id,
-                            error=type(exc).__name__,
-                        )
+                        if action == "candidate_defer":
+                            await asyncio.to_thread(
+                                queue.candidate_edit_uncertain, org, record_id,
+                                error=type(exc).__name__,
+                            )
+                        elif delivery is not None:
+                            await asyncio.to_thread(
+                                self.reviews.delivery_uncertain, projected_id,
+                                type(exc).__name__,
+                                expected_revision=delivery[0], attempt=delivery[1],
+                            )
                         raise
                 return
             finally:

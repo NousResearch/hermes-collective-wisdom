@@ -179,6 +179,24 @@ def test_contributor_and_published_views_use_pr5_copy_and_controls():
         ("Share My Skill", "confirm", True),
     ]
 
+    private_draft = project_view({
+        **base,
+        "result": {
+            "state": "pending", "publication_state": "ready",
+            "remote_draft_id": "remote-draft",
+            "portal_url": "https://portal.example/wisdom/review/remote-draft",
+        },
+    })
+    assert private_draft.summary == "Private Draft Ready"
+    assert "Nothing has been published" in private_draft.items[0].detail
+    assert _actions(private_draft.actions)[-1] == (
+        "Share My Skill", "confirm", True
+    )
+    assert private_draft.actions[-2].label == "Review in Portal"
+    assert private_draft.actions[-2].url == (
+        "https://portal.example/wisdom/review/remote-draft"
+    )
+
     published = project_view({
         **base,
         "state": "completed",
@@ -194,7 +212,7 @@ def test_contributor_and_published_views_use_pr5_copy_and_controls():
     ]
 
 
-def test_candidate_advice_uses_supportive_preamble_and_maybe_later():
+def test_candidate_advice_uses_supportive_preamble_and_original_actions():
     view = assessment_view({
         "state": "ready",
         "advice": {
@@ -212,7 +230,13 @@ def test_candidate_advice_uses_supportive_preamble_and_maybe_later():
     assert view.items[0].preamble == (
         "Hermes thinks the following skill would be useful to the rest of your team:"
     )
-    assert _actions(view.actions) == [("Maybe Later", "candidate_defer", False)]
+    assert _actions(view.actions) == [
+        ("Share", "candidate_share", True),
+        ("Review in Portal", "candidate_portal", False),
+        ("Maybe Later", "candidate_defer", False),
+    ]
+    assert "candidate-event-id" not in view.notice
+    assert "wisdom_inspect" not in view.notice
 
 
 def test_project_review_keeps_update_policy_and_warnings_visible():
