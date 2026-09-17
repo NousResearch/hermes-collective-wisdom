@@ -12,6 +12,7 @@ import contextvars
 import copy
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -80,13 +81,59 @@ class _Admission:  # pylint: disable=too-few-public-methods
 class InvocationCapture:
     """Task-local one-shot bridge from the pre-auth hook to admitted code."""
 
+    _MAX_PENDING_LIFECYCLES = 256
+
     def __init__(self, *, clock: Callable[[], float] = time.monotonic,
                  ttl_seconds: float = 30.0) -> None:
         self.clock = clock
         self.ttl_seconds = ttl_seconds
+        self._pending_lock = threading.Lock()
+        self._pending_lifecycle: OrderedDict[tuple[str, ...], _Captured] = OrderedDict()
         self._value: contextvars.ContextVar[_Captured | None] = contextvars.ContextVar(
             f"wisdom_native_invocation_{id(self)}", default=None
         )
+
+    @staticmethod
+    def _route_key(invocation: NativeInvocation) -> tuple[str, ...]:
+        return tuple(str(value or "") for value in (
+            invocation.platform, invocation.profile, invocation.chat_id,
+            invocation.actor_id, invocation.thread_id, invocation.scope_id,
+            invocation.message_id, invocation.session_key,
+        ))
+
+    @staticmethod
+    def _host_route_key(host_context: Any) -> tuple[str, ...] | None:
+        if not isinstance(host_context, dict):
+            return None
+        return tuple(str(host_context.get(name) or "") for name in (
+            "platform", "profile", "chat_id", "user_id", "thread_id", "scope_id",
+            "message_id", "session_key",
+        ))
+
+    def _prune_lifecycle_locked(self, now: float) -> None:
+        while self._pending_lifecycle:
+            _key, oldest = next(iter(self._pending_lifecycle.items()))
+            if now - oldest.captured_at <= self.ttl_seconds:
+                break
+            self._pending_lifecycle.popitem(last=False)
+
+    def _remember_lifecycle(self, captured: _Captured) -> None:
+        """Keep a bounded exact-route fallback when a cached worker drops fresh ContextVars."""
+        key = self._route_key(captured.invocation)
+        with self._pending_lock:
+            self._prune_lifecycle_locked(self.clock())
+            self._pending_lifecycle.pop(key, None)
+            self._pending_lifecycle[key] = captured
+            while len(self._pending_lifecycle) > self._MAX_PENDING_LIFECYCLES:
+                self._pending_lifecycle.popitem(last=False)
+
+    def _take_lifecycle(self, host_context: Any) -> _Captured | None:
+        key = self._host_route_key(host_context)
+        if key is None:
+            return None
+        with self._pending_lock:
+            self._prune_lifecycle_locked(self.clock())
+            return self._pending_lifecycle.pop(key, None)
 
     def hook(self, *, event: Any, gateway: Any, **_kwargs: Any) -> None:
         """Snapshot only: no authorization, persistence, reply, or local inspection."""
@@ -125,7 +172,7 @@ class InvocationCapture:
             session_key=session_key,
             adapter=adapter,
         )
-        self._value.set(_Captured(
+        captured = _Captured(
             invocation=invocation,
             source_snapshot=source_snapshot,
             gateway=gateway,
@@ -134,7 +181,10 @@ class InvocationCapture:
             task=task,
             captured_at=self.clock(),
             admission=_Admission(),
-        ))
+        )
+        self._value.set(captured)
+        if not captured.command:
+            self._remember_lifecycle(captured)
         return None
 
     def consume_command(self, raw_args: str, *, profile_name: str) -> NativeInvocation:
@@ -147,10 +197,13 @@ class InvocationCapture:
     def consume_lifecycle(  # pylint: disable=too-many-arguments
         self, *, profile_name: str, session_id: str, task_id: str, turn_id: str,
         sender_id: str, platform: str, parent_session_id: str,
+        host_context: Any = None,
     ) -> NativeInvocation | None:
         """Consume a normal admitted main-agent turn and bind its durable host ids."""
         captured = self._value.get()
-        if captured is None or captured.command:
+        if (captured is None and host_context is None) or (
+            captured is not None and captured.command
+        ):
             return None
         invocation = self._consume(
             profile_name=profile_name, allow_sync_worker=True,
@@ -158,6 +211,7 @@ class InvocationCapture:
             expected_platform=str(platform or "").casefold(),
             lifecycle_ids=(str(session_id or ""), str(task_id or ""), str(turn_id or "")),
             parent_session_id=str(parent_session_id or ""),
+            host_context=host_context,
         )
         return replace(
             invocation, host_session_id=str(session_id), task_id=str(task_id), turn_id=str(turn_id)
@@ -174,8 +228,10 @@ class InvocationCapture:
                  expected_actor: str | None = None,
                  expected_platform: str | None = None,
                  lifecycle_ids: tuple[str, str, str] | None = None,
-                 parent_session_id: str = "") -> NativeInvocation:
-        captured = self._value.get()
+                 parent_session_id: str = "", host_context: Any = None) -> NativeInvocation:
+        captured = self._take_lifecycle(host_context) if allow_sync_worker else None
+        if captured is None:
+            captured = self._value.get()
         self._value.set(None)
         try:
             current_task = asyncio.current_task()
@@ -192,6 +248,9 @@ class InvocationCapture:
         )
         if captured is None or wrong_owner:
             raise PermissionError("Native Wisdom action has no current admitted invocation.")
+        if not captured.command:
+            with self._pending_lock:
+                self._pending_lifecycle.pop(self._route_key(captured.invocation), None)
         if not captured.admission.claim():
             raise PermissionError("Native Wisdom action has no current admitted invocation.")
         if self.clock() - captured.captured_at > self.ttl_seconds:

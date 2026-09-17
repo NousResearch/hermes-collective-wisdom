@@ -342,6 +342,13 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         """
         if self._closed:
             return None
+        host_context = None
+        context_error = False
+        if self.session_context is not None:
+            try:
+                host_context = self.session_context()
+            except Exception:  # pylint: disable=broad-exception-caught
+                context_error = True
         try:
             invocation = self.capture.consume_lifecycle(
                 profile_name=self.profile_name,
@@ -351,6 +358,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 sender_id=str(kwargs.get("sender_id") or ""),
                 platform=str(kwargs.get("platform") or ""),
                 parent_session_id=str(kwargs.get("parent_session_id") or ""),
+                host_context=host_context,
             )
         except PermissionError:
             logger.warning(
@@ -359,9 +367,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             return None
         if invocation is None:
             return None
+        if context_error:
+            logger.warning(
+                "Collective Wisdom lifecycle admission rejected "
+                "(reason=context_unavailable)"
+            )
+            return None
         if self.session_context is not None:
             try:
-                host_context = self.session_context()
                 context_matches = self._host_context_matches(invocation, host_context)
                 expected_context = {
                     "platform": invocation.platform,
