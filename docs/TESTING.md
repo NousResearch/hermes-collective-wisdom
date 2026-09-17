@@ -106,6 +106,18 @@ publication without a connector or live service. Run it with the immutable pinne
 host checkout documented below. A live Telegram client/server pass remains required
 to accept Bot API 10.1 rendering and button appearance.
 
+The plugin also emits bounded native Telegram callback diagnostics through the
+module logger. Handler wiring, callback receipt, and final completion are INFO,
+so normal logging can distinguish an undelivered click from a failed callback
+without enabling global Telegram DEBUG logs. Intermediate acknowledgement,
+authorization, action/service completion, edit, and alert events are DEBUG;
+operational failures are WARNING. Values are fixed stage/reason/action classes:
+callback payloads, identities, routes, record identifiers, exception text, and
+package content are never logged. An acknowledgement failure aborts before
+authorization/effects while retaining plugin ownership of the callback update.
+`tests/test_telegram_callback_diagnostics.py` exercises those boundaries with a
+real disposable PTB application and recording transport.
+
 ### Required behavioral evidence
 
 - Recommendation delivery: reject background invocations before assessment,
