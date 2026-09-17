@@ -19,6 +19,7 @@ from hermes_wisdom_plugin.tui_contribution import (
     run_tui_contribution,
 )
 from hermes_wisdom_plugin.client import WisdomGatewayCredentials
+from hermes_wisdom_plugin.errors import WisdomAuthError
 from test_publication import RecordingPublicationClient
 from test_contribution_review import reviewer
 from hermes_wisdom_plugin.publication import PublicationController
@@ -281,6 +282,65 @@ def test_qualified_candidate_exports_complete_private_edit_payload():
     assert value["hashes"] == service.payload["hashes"]
     assert "hermes wisdom prepared save" in output
     assert "Nothing was uploaded" in output
+
+
+def test_qualified_candidate_uses_real_invocation_service_path():
+    service = object.__new__(InvocationService)
+    payload = FakeContributionService().payload
+    calls = []
+    service.native_candidate_inspect = lambda event_id: (
+        calls.append(("inspect_candidate", event_id))
+        or {"facts": {"name": "reviewed-skill"}}
+    )
+    service.suggest = lambda skill_name, *, allow_model_review: (
+        calls.append(("prepare", skill_name, allow_model_review))
+        or {"draft_id": "draft-1"}
+    )
+    service._installation_owner = lambda: calls.append(("owner",))  # pylint: disable=protected-access
+    service._contribution_reviewer = lambda: SimpleNamespace(  # pylint: disable=protected-access
+        inspect_prepared=lambda draft_id: calls.append(("inspect_draft", draft_id)) or payload
+    )
+    service.check_owner = lambda: calls.append(("check_owner",))
+
+    output = run_tui_contribution(
+        "candidate event-1", service, selected_request([]), Action, Outcome,
+        may_apply=lambda: True,
+    )
+
+    assert json.loads(output.split("\n\n", 1)[0]) == payload
+    assert calls == [
+        ("inspect_candidate", "event-1"),
+        ("prepare", "reviewed-skill", False),
+        ("owner",),
+        ("inspect_draft", "draft-1"),
+        ("check_owner",),
+    ]
+
+
+def test_real_candidate_prepare_rechecks_invocation_after_effect():
+    service = object.__new__(InvocationService)
+    events = []
+    current = iter((True, False))
+    service.native_candidate_inspect = lambda event_id: (
+        events.append(("inspect_candidate", event_id))
+        or {"facts": {"name": "reviewed-skill"}}
+    )
+    service.suggest = lambda skill_name, *, allow_model_review: (
+        events.append(("prepare", skill_name, allow_model_review))
+        or {"draft_id": "draft-1"}
+    )
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        service.native_candidate_prepare(
+            "event-1", may_apply=lambda: events.append(("current",)) or next(current)
+        )
+
+    assert events == [
+        ("current",),
+        ("inspect_candidate", "event-1"),
+        ("prepare", "reviewed-skill", False),
+        ("current",),
+    ]
 
 
 def test_private_save_reviews_complete_result_and_honors_cancel(tmp_path: Path):

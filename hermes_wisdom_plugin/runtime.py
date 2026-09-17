@@ -471,8 +471,11 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         return {"kind": "skill", "skill_id": skill_id, "version": version, "facts": result}
 
-    def native_candidate_prepare(self, event_id):
+    def native_candidate_prepare(
+        self, event_id, *, may_apply: Callable[[], bool] | None = None,
+    ):
         """Prepare a local candidate for native publication review without upload."""
+        _require_current(may_apply)
         inspected = self.native_candidate_inspect(event_id)
         skill_name = str((inspected.get("facts") or {}).get("name") or "")
         from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
@@ -485,6 +488,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         draft_id = str(prepared.get("draft_id") or prepared.get("local_draft_id") or "")
         if not draft_id:
             raise SharePackagingError()
+        _require_current(may_apply)
         return draft_id
 
     def _candidate_slash_context(  # pylint: disable=too-many-locals
@@ -899,12 +903,16 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             "automatic_updates": updates,
         }
 
-    def prepared_inspect(self, draft_id):
+    def prepared_inspect(
+        self, draft_id, *, may_apply: Callable[[], bool] | None = None,
+    ):
         """Export one complete exact owner-private editable draft payload."""
 
+        _require_current(may_apply)
         self._installation_owner()
         result = self._contribution_reviewer().inspect_prepared(draft_id)
         self.check_owner()
+        _require_current(may_apply)
         return result
 
     def prepared_save(

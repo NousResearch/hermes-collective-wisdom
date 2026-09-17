@@ -51,7 +51,8 @@ class CandidateService(InvocationService):
     def check_owner(self):
         return None
 
-    def native_candidate_prepare(self, event_id):
+    def native_candidate_prepare(self, event_id, *, may_apply=None):
+        assert may_apply is None or may_apply() is True
         inspected = self.native_candidate_inspect(event_id)
         event = self.store.local_event(event_id)
         local = self.store.local_skill(event["skill_id"])
@@ -292,8 +293,10 @@ def test_candidate_action_rechecks_invocation_before_mutation(tmp_path):
     service, assessment_id = delivered(tmp_path)
     current = [True]
 
-    def revoke_during_prepare(event_id):
-        result = CandidateService.native_candidate_prepare(service, event_id)
+    def revoke_during_prepare(event_id, *, may_apply=None):
+        result = CandidateService.native_candidate_prepare(
+            service, event_id, may_apply=may_apply
+        )
         current[0] = False
         return result
 
