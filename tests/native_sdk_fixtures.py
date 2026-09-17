@@ -221,8 +221,11 @@ class Service(InvocationService):
             "notice": "Nothing has been uploaded.",
         }
 
-    def publication_submit(self, receipt, *, may_apply=None):
+    def publication_submit(
+        self, receipt, *, may_apply=None, candidate_assessment_id=None,
+    ):
         assert may_apply is not None and may_apply() is True
+        assert candidate_assessment_id is None
         assert receipt == "publication-receipt"
         return {
             "operation_id": "publication-operation", "state": "done",

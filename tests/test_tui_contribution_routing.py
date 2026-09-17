@@ -55,3 +55,33 @@ def test_unadmitted_contribution_never_constructs_private_service(runtime, raw):
 
     assert "terminal" in result.casefold()
     assert "private" in result.casefold()
+
+
+@pytest.mark.parametrize("raw", [
+    "candidate assessment-1 share", "candidate assessment-1 portal",
+    "candidate assessment-1 later", "publication approve receipt-1",
+])
+def test_candidate_actions_work_without_host_review_capability(runtime, raw):
+    """A deliberate stock-TUI slash action uses plugin authority, not request_review."""
+    runtime.request_review = None
+    runtime.can_request_review = None
+    runtime.is_review_current = None
+    service = Mock()
+    service.candidate_slash_action.return_value = {
+        "action": raw.rsplit(" ", 1)[-1], "candidate_id": "assessment-1",
+        "review": {"receipt": "receipt-1", "hashes": {"content": "sha256:a"}},
+    }
+    service.candidate_publication_approve.return_value = {
+        "state": "pending", "publication_state": "pending_moderation",
+    }
+    runtime._service = Mock(return_value=service)
+    runtime._run_worker = lambda *_args: pytest.fail("candidate action reached shared worker")
+
+    result = asyncio.run(runtime.slash(raw))
+
+    assert "terminal" not in result.casefold()
+    service.close.assert_called_once_with()
+    if "approve" in raw:
+        service.candidate_publication_approve.assert_called_once()
+    else:
+        service.candidate_slash_action.assert_called_once()

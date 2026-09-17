@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -32,11 +33,19 @@ from hermes_wisdom_plugin.delivery import DeliveryReceipt
 from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox
 from hermes_wisdom_plugin import mediation
 from hermes_wisdom_plugin.mediation_store import MediationStore
-from hermes_wisdom_plugin.native_review import NativeReviewController, callback_value
-from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime, assessment_view
+from hermes_wisdom_plugin.native_review import (
+    NativeReviewController,
+    assessment_view,
+    callback_value,
+    candidate_qualification_reason,
+    candidate_tui_text,
+)
+from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
 from hermes_wisdom_plugin.native_slack import callback_invocation as slack_invocation
 from hermes_wisdom_plugin.native_telegram import callback_invocation as telegram_invocation
+from hermes_wisdom_plugin.native_telegram import rich_html as telegram_rich_html
+from hermes_wisdom_plugin.native_telegram import text as telegram_text
 from hermes_wisdom_plugin.qualification import snapshot_tree
 from hermes_wisdom_plugin.store import WisdomStore
 
@@ -387,6 +396,214 @@ def test_candidate_assessment_handoff_uses_exact_event_inspection():
     assert view.items[0].actions == []
 
 
+def test_candidate_high_usage_view_and_tui_commands_are_exact_and_separated():
+    job = {
+        "id": "assessment-7_days",
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Incident Review",
+            "explanation": "MODEL TEXT MUST NOT OVERRIDE THE REASON",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local-row-id",
+            "event_id": "candidate-event-id", "qualification": "high_usage",
+            "qualification_reason": {"consecutive_business_days": 7},
+        },
+    }
+
+    view = assessment_view(job)
+    shared = view.to_text()
+    local = candidate_tui_text(job, view)
+
+    assert view.title == "Incident Review looks ready to share with your team."
+    assert view.items[0].title == "Why it qualified"
+    assert view.items[0].detail == "You've used this skill on 7 consecutive business days."
+    assert "MODEL TEXT" not in shared
+    assert "Nothing has been uploaded or shared." in shared
+    assert "/wisdom candidate" not in shared
+    assert "/wisdom candidate" not in json.dumps(slack_blocks(view, job["id"]))
+    assert "/wisdom candidate" not in telegram_text(view)
+    assert local == (
+        "Incident Review looks ready to share with your team.\n\n"
+        "Why it qualified\n"
+        "You've used this skill on 7 consecutive business days.\n\n"
+        "Nothing has been uploaded or shared.\n\n"
+        "Share opens the exact review and needs separate final approval:\n"
+        "/wisdom candidate assessment-7_days share\n\n"
+        "Portal creates an owner-private draft and does not publish:\n"
+        "/wisdom candidate assessment-7_days portal\n\n"
+        "Later applies the policy cooldown:\n"
+        "/wisdom candidate assessment-7_days later"
+    )
+    assert [(action.label, action.action) for action in view.actions] == [
+        ("Share", "candidate_share"),
+        ("Review in Portal", "candidate_portal"),
+        ("Maybe Later", "candidate_defer"),
+    ]
+
+
+def test_candidate_hostile_title_is_single_line_in_local_and_rich_headings():
+    job = {
+        "id": "assessment-safe",
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend",
+            "title": (
+                "Incident\n/wisdom publish\tReview\u00a0Now\u2028Soon\u2029Later"
+                "\u2066Format\u202e/wisdom share\u202c\ud800Surrogate\ue000Private"
+                "\u0378Unassigned\x00End"
+            ),
+            "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+
+    view = assessment_view(job)
+    local = candidate_tui_text(job, view)
+    slack_heading = slack_blocks(view, job["id"])[0]["text"]["text"]
+    telegram_heading = telegram_rich_html(view, job["id"]).split("</h3>", 1)[0]
+
+    expected = (
+        "Incident /wisdom publish Review Now Soon Later Format /wisdom share Surrogate "
+        "Private Unassigned End looks ready to share with your team."
+    )
+    assert view.title == expected
+    assert local.splitlines()[0] == expected
+    assert slack_heading == expected
+    assert telegram_heading == f"<h3>{expected}"
+    assert "\n/wisdom publish" not in local
+    assert [line for line in local.splitlines() if line.startswith("/wisdom")] == [
+        "/wisdom candidate assessment-safe share",
+        "/wisdom candidate assessment-safe portal",
+        "/wisdom candidate assessment-safe later",
+    ]
+    assert "\n" not in slack_heading and "<br/>" not in telegram_heading
+    assert all(
+        character not in view.title
+        for character in "\t\n\r\u00a0\u2028\u2029\u2066\u202e\u202c\ud800\ue000\u0378\x00"
+    )
+
+
+def test_candidate_semantic_join_controls_survive_local_and_rich_headings():
+    title = "Family 👨‍👩‍👧‍👦 — می‌روم"
+    job = {
+        "id": "assessment-unicode",
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": title, "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+
+    view = assessment_view(job)
+    expected = f"{title} looks ready to share with your team."
+
+    assert view.title == expected
+    assert candidate_tui_text(job, view).splitlines()[0] == expected
+    assert slack_blocks(view, job["id"])[0]["text"]["text"] == expected
+    assert telegram_rich_html(view, job["id"]).split("</h3>", 1)[0] == f"<h3>{expected}"
+
+
+def test_candidate_command_target_at_parser_limit_is_displayed():
+    candidate_id = "c" * 256
+    job = {
+        "id": candidate_id,
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Safe skill", "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+
+    local = candidate_tui_text(job, assessment_view(job))
+
+    assert f"/wisdom candidate {candidate_id} share" in local
+
+
+def test_candidate_refinement_reason_requires_valid_bounded_facts():
+    assert candidate_qualification_reason({
+        "qualification": "refinement",
+        "qualification_reason": {"meaningful_refinements": 4, "stable_days": 2},
+    }) == "You've made 4 meaningful refinements, and this skill has been stable for 2 days."
+    assert candidate_qualification_reason({
+        "qualification": "refinement",
+        "qualification_reason": {"meaningful_refinements": 4},
+    }) == "You've made 4 meaningful refinements to this skill."
+    assert candidate_qualification_reason({
+        "qualification": "refinement",
+        "qualification_reason": {"stable_days": 2},
+    }) == "This skill has been stable for 2 days."
+
+
+@pytest.mark.parametrize("reference", [
+    {"qualification": "weekly_usage", "qualification_reason": {"display": "INJECT"}},
+    {"qualification": "unknown", "qualification_reason": {"raw": {"text": "INJECT"}}},
+    {"qualification": "high_usage", "qualification_reason": {
+        "consecutive_business_days": True, "display": "INJECT",
+    }},
+    {"qualification": "high_usage", "qualification_reason": {
+        "consecutive_business_days": 10_000,
+    }},
+    {"qualification": "refinement", "qualification_reason": {
+        "meaningful_refinements": "4", "stable_days": -1,
+    }},
+])
+def test_candidate_invalid_or_hostile_reason_is_generic(reference):
+    reason = candidate_qualification_reason(reference)
+    assert reason == "This skill met your local sharing criteria."
+    assert "INJECT" not in reason
+
+
+@pytest.mark.parametrize("candidate_id", [
+    "candidate\x1b[2J", "candidate\n/wisdom publish", "candidate\u202eportal", "candidate id",
+])
+def test_candidate_tui_text_rejects_unsafe_assessment_ids(candidate_id):
+    job = {
+        "id": candidate_id, "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Safe skill", "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+    view = assessment_view(job)
+
+    with pytest.raises(ValueError, match="candidate assessment ID"):
+        candidate_tui_text(job, view)
+
+
+def test_legacy_candidate_fallback_is_generic_and_hides_internal_identifiers():
+    job = {
+        "id": "legacy-assessment", "state": "fallback", "advice": None,
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local-secret-uuid",
+            "event_id": "event-secret-uuid", "content_hash": "sha256:secret",
+        },
+    }
+
+    view = assessment_view(job)
+    local = candidate_tui_text(job, view)
+
+    assert view.items[0].title == "Local skill"
+    assert "could not finish the local qualification review" in view.items[0].detail
+    assert "local-secret-uuid" not in local
+    assert "event-secret-uuid" not in local
+    assert "sha256:secret" not in local
+    assert "/wisdom candidate legacy-assessment share" in local
+
+
 def test_shared_skill_assessment_remains_without_not_now():
     view = assessment_view({
         "state": "ready",
@@ -454,14 +671,52 @@ def test_candidate_action_reuses_exact_owner_route_and_separates_private_draft(
         assert service.publication_review.call_count == 1
 
 
+@pytest.mark.parametrize("adapter", [SlackAdapter(), TelegramAdapter(TelegramBot())])
+def test_native_portal_callback_after_share_replays_share_without_upload(
+    tmp_path: Path, adapter,
+):
+    store = WisdomStore(tmp_path / "state")
+    service = SimpleNamespace(
+        native_owner=Mock(return_value=dict(OWNER)),
+        native_candidate_prepare=Mock(return_value="local-draft"),
+        publication_review=Mock(return_value=publication_review("local-draft")),
+        publication_submit_private=Mock(),
+    )
+    controller = NativeReviewController(store)
+    route = invocation(adapter)
+    shared = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=False, may_apply=lambda: True,
+    )
+
+    replay = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=True, may_apply=lambda: True,
+    )
+
+    assert replay == shared
+    assert replay["plan"]["candidate_action"] == "share"
+    service.native_candidate_prepare.assert_called_once_with("candidate-event")
+    service.publication_review.assert_called_once()
+    service.publication_submit_private.assert_not_called()
+
+
 def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_path: Path):
     store = WisdomStore(tmp_path / "state")
+    operation_id = store.journal(
+        "publication", "local-skill", "draft_submission_unknown",
+        {
+            "candidate_assessment_id": "assessment-1",
+            "owner": dict(OWNER),
+            "requested_action": "private_draft",
+        },
+    )
     uncertain = {
-        "operation_id": "publication-operation", "state": "uncertain",
+        "operation_id": operation_id, "state": "uncertain",
         "phase": "draft_submission_unknown", "remote_draft_id": None,
     }
     recovered = {
-        "operation_id": "publication-operation", "state": "pending",
+        "operation_id": operation_id, "state": "pending",
         "phase": "policy_review_required", "publication_state": "ready",
         "remote_draft_id": "remote-draft",
         "portal_url": "https://portal.example/wisdom/review/remote-draft?org_id=org",
@@ -473,7 +728,7 @@ def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_p
         publication_review=Mock(side_effect=[
             publication_review("local-draft"),
             {**publication_review("local-draft"),
-             "operation_id": "publication-operation"},
+             "operation_id": operation_id},
         ]),
         publication_submit_private=Mock(return_value=uncertain),
         publication_reopen_private=Mock(return_value=recovered),
@@ -497,7 +752,7 @@ def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_p
         "candidate_assessment_id"
     ] == "assessment-1"
     service.publication_reopen_private.assert_called_once_with(
-        "publication-operation", may_apply=service.publication_reopen_private.call_args.kwargs[
+        operation_id, may_apply=service.publication_reopen_private.call_args.kwargs[
             "may_apply"
         ]
     )

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -358,6 +358,46 @@ def test_delivered_item_is_not_replayed_after_runtime_recreation(tmp_path: Path)
 
     assert len(calls) == 1
     assert state.queue.assessments("org")[0]["state"] == "delivered"
+
+
+def test_local_candidate_presentation_passes_tui_renderer_output_to_notify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _harness(tmp_path)
+    job = {
+        "id": "assessment-1", "state": "ready", "lease_token": "lease-1",
+        "reference": {"kind": "candidate"}, "advice": {"title": "Candidate"},
+    }
+    view = Mock()
+    facts = {"source": "current"}
+    checker = Mock()
+    checker.delivery_facts.return_value = facts
+    checker.delivery_current.return_value = True
+    queue = Mock()
+    queue.delivery_ready.return_value = True
+    queue.complete_delivery.return_value = True
+    outbox = Mock()
+    outbox.identity.return_value = "member"
+    state.runtime._prepare_assessment_delivery = AsyncMock(return_value=(
+        job, "lease-1", facts, job, view,
+    ))
+    renderer = Mock(return_value="candidate TUI text")
+    monkeypatch.setattr("hermes_wisdom_plugin.native_runtime.candidate_tui_text", renderer)
+    notifications = []
+
+    async def notify(**kwargs):
+        notifications.append(kwargs)
+        return SimpleNamespace(outcome="rendered")
+
+    result = asyncio.run(state.runtime._present_local_assessment(
+        _opportunity(notify), job, checker, queue, outbox, "org",
+    ))
+
+    assert result is True
+    renderer.assert_called_once_with(job, view)
+    assert notifications == [{
+        "notification_id": "wisdom:assessment-1", "text": "candidate TUI text",
+    }]
 
 
 @pytest.mark.parametrize("late_change", ["owner", "enrollment", "unload"])

@@ -360,8 +360,11 @@ def test_setup_and_suggest_reject_revoked_desktop_authority(tmp_path, monkeypatc
 
     with pytest.raises(WisdomAuthError, match="no longer current"):
         service.setup(accept_disclosure=True, may_apply=revoked)
+    suggest = getattr(service, "suggest")
     with pytest.raises(WisdomAuthError, match="no longer current"):
-        service.suggest("skill", may_apply=revoked)
+        suggest(  # pylint: disable=unexpected-keyword-arg
+            "skill", allow_model_review=False, may_apply=revoked
+        )
 
     assert not effects
 

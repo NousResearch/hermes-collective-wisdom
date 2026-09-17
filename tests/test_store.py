@@ -342,6 +342,45 @@ def test_operation_journal_survives_restart(tmp_path: Path):
     assert resumed[0]["phase"] == "files_committed"
 
 
+def test_candidate_publication_lookup_requires_exact_owner_and_operation_kind(tmp_path: Path):
+    store = WisdomStore(tmp_path / "wisdom")
+    owner = {"account_id": "account-1", "organization_id": "org-1"}
+    foreign = {"account_id": "account-2", "organization_id": "org-1"}
+    public_id = store.journal(
+        "publication", "public-skill", "gateway_recorded",
+        {"candidate_assessment_id": "assessment-1", "owner": owner},
+    )
+    store.advance(public_id, "gateway_recorded", done=True)
+    private_id = store.journal(
+        "publication", "private-skill", "policy_review_required",
+        {
+            "candidate_assessment_id": "assessment-1", "owner": owner,
+            "requested_action": "private_draft",
+        },
+    )
+    foreign_id = store.journal(
+        "publication", "foreign-skill", "gateway_recorded",
+        {"candidate_assessment_id": "assessment-1", "owner": foreign},
+    )
+
+    public = store.publication_for_candidate_assessment(
+        "assessment-1", owner=owner, operation_kind="public"
+    )
+    private = store.publication_for_candidate_assessment(
+        "assessment-1", owner=owner, operation_kind="private_draft"
+    )
+    foreign_public = store.publication_for_candidate_assessment(
+        "assessment-1", owner=foreign, operation_kind="public"
+    )
+    assert public is not None and public["id"] == public_id
+    assert private is not None and private["id"] == private_id
+    assert foreign_public is not None and foreign_public["id"] == foreign_id
+    assert store.publication_for_candidate_assessment(
+        "assessment-1", owner={**owner, "account_id": "missing"},
+        operation_kind="public",
+    ) is None
+
+
 def test_local_events_hide_a_contribution_that_already_reached_publication(
     tmp_path: Path,
 ):

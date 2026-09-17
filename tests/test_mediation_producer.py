@@ -15,7 +15,10 @@ from hermes_wisdom_plugin.client import (
 )
 from hermes_wisdom_plugin.consumption import WisdomConsumption
 from hermes_wisdom_plugin.mediation import QueuedAssessment
-from hermes_wisdom_plugin.mediation_producer import MaintenanceMediationProducer
+from hermes_wisdom_plugin.mediation_producer import (
+    MaintenanceMediationProducer,
+    _candidate_reference,
+)
 from hermes_wisdom_plugin.mediation_store import MediationStore
 from hermes_wisdom_plugin.runtime import InvocationService
 from test_consumption_shared import _feed, _service
@@ -54,6 +57,106 @@ def _preferences(client, *, muted=False, suppressions=None):
     client.recommendation_suppressions.return_value = suppressions or []
     client.set_recommendation_mute = Mock()
     client.suppress_recommendation = Mock()
+
+
+def _candidate_item(*signals):
+    return {
+        "local_skill_id": "local-1",
+        "content_hash": "sha256:" + "a" * 64,
+        "evidence": {"supporting_signals": list(signals)},
+    }
+
+
+def _candidate_event(qualification, reasons, **changes):
+    event = {
+        "id": "event-1", "kind": "wisdom.candidate", "state": "unread",
+        "skill_id": "local-1", "content_hash": "sha256:" + "a" * 64,
+        "qualification": qualification,
+        "payload": {
+            "local_reasons": reasons,
+            "editorial_name": "Do not persist this display text",
+            "nested": {"arbitrary": "payload"},
+        },
+    }
+    event.update(changes)
+    return event
+
+
+def test_candidate_reference_preserves_only_bounded_high_usage_reason():
+    store = Mock()
+    store.local_events.return_value = [_candidate_event(
+        "high_usage",
+        {
+            "consecutive_business_days": 7,
+            "business_day_timezone": "Australia/Brisbane",
+            "business_week": "monday_friday",
+            "unknown_nested": {"display": "never persist"},
+        },
+    )]
+
+    reference = _candidate_reference(store, _candidate_item("high_usage"))
+
+    assert reference == {
+        "kind": "candidate", "event_id": "event-1",
+        "local_skill_id": "local-1", "content_hash": "sha256:" + "a" * 64,
+        "qualification": "high_usage",
+        "qualification_reason": {"consecutive_business_days": 7},
+    }
+    store.local_events.assert_called_once_with(kind="wisdom.candidate")
+
+
+def test_candidate_reference_preserves_only_bounded_refinement_reason():
+    store = Mock()
+    store.local_events.return_value = [_candidate_event(
+        "refinement",
+        {
+            "meaningful_refinements": 3,
+            "stable_days": 7,
+            "used_within_days": 30,
+            "unknown": "never persist",
+        },
+    )]
+
+    assert _candidate_reference(store, _candidate_item("refinement")) == {
+        "kind": "candidate", "event_id": "event-1",
+        "local_skill_id": "local-1", "content_hash": "sha256:" + "a" * 64,
+        "qualification": "refinement",
+        "qualification_reason": {"meaningful_refinements": 3, "stable_days": 7},
+    }
+
+
+def test_candidate_reference_omits_invalid_or_unknown_evidence_without_dropping_candidate():
+    invalid = (None, True, 0, -1, 366, "7", {"count": 7})
+    for value in invalid:
+        store = Mock()
+        store.local_events.return_value = [_candidate_event(
+            "high_usage", {"consecutive_business_days": value},
+        )]
+        assert _candidate_reference(store, _candidate_item("high_usage")) == {
+            "kind": "candidate", "event_id": "event-1",
+            "local_skill_id": "local-1", "content_hash": "sha256:" + "a" * 64,
+        }
+
+    store = Mock()
+    store.local_events.return_value = [_candidate_event(
+        "future_qualification", {"consecutive_business_days": 7},
+    )]
+    assert _candidate_reference(store, _candidate_item("future_qualification")) == {
+        "kind": "candidate", "event_id": "event-1",
+        "local_skill_id": "local-1", "content_hash": "sha256:" + "a" * 64,
+    }
+
+
+def test_candidate_reference_still_rejects_stale_or_mismatched_event_identity():
+    store = Mock()
+    store.local_events.return_value = []  # The store excludes stale/read events.
+    assert _candidate_reference(store, _candidate_item("high_usage")) is None
+
+    store.local_events.return_value = [_candidate_event(
+        "high_usage", {"consecutive_business_days": 7},
+        content_hash="sha256:" + "b" * 64,
+    )]
+    assert _candidate_reference(store, _candidate_item("high_usage")) is None
 
 
 def test_maintenance_queues_enriched_feed_and_weekly_evidence_without_model_or_send(
@@ -102,6 +205,8 @@ def test_maintenance_queues_enriched_feed_and_weekly_evidence_without_model_or_s
     assert (event["skill_id"], event["content_hash"]) == (
         candidate["local_skill_id"], candidate["content_hash"],
     )
+    assert candidate["qualification"] == "high_usage"
+    assert candidate["qualification_reason"] == {"consecutive_business_days": 3}
     assert all("evidence" not in row["reference"] for row in rows)
     assert service.client.recommendation_mute.call_count == 1
     assert service.client.recommendation_suppressions.call_count == 1

@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .mediation_store import MediationStore
+from .notification_contracts import MAX_QUALIFICATION_COUNT
 from .preferences import WisdomPreferences, suppression_key
 from .weekly_queue import enqueue_weekly_review, weekly_policy_from_agent
 
 _MAX_CANDIDATES = 8
+_QUALIFICATION_REASON_KEYS = {
+    "high_usage": ("consecutive_business_days",),
+    "refinement": ("meaningful_refinements", "stable_days"),
+}
 
 
 def _feed_reference(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -52,10 +57,27 @@ def _candidate_reference(store: Any, item: dict[str, Any]) -> dict[str, Any] | N
             and event.get("content_hash") == content_hash
             and event.get("qualification") in signals
         ):
-            return {
+            reference: dict[str, Any] = {
                 "kind": "candidate", "event_id": str(event["id"]),
                 "local_skill_id": skill_id, "content_hash": content_hash,
             }
+            qualification = event.get("qualification")
+            reason_keys = _QUALIFICATION_REASON_KEYS.get(qualification, ())
+            payload = event.get("payload")
+            reasons = payload.get("local_reasons") if isinstance(payload, dict) else None
+            projected = {
+                key: reasons[key]
+                for key in reason_keys
+                if isinstance(reasons, dict)
+                and type(reasons.get(key)) is int
+                and 1 <= reasons[key] <= MAX_QUALIFICATION_COUNT
+            }
+            if projected:
+                reference.update({
+                    "qualification": qualification,
+                    "qualification_reason": projected,
+                })
+            return reference
     return None
 
 

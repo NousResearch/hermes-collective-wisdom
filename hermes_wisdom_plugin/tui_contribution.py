@@ -11,18 +11,27 @@ terminal workflow rather than truncating bytes the owner is asked to approve.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
 from .commands import _read_prepared_payload  # pylint: disable=protected-access
+from .errors import WisdomConflict
+from .notification_contracts import is_candidate_slash_target
 
 # Small command adapters share the host's review boundary explicitly.
 # pylint: disable=too-many-positional-arguments
 
 
 MAX_TUI_REVIEW_CHARS = 65_536
+_ACTION_ID = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+_CANDIDATE_USAGE = (
+    "Usage: /wisdom candidate <qualified-event-id> OR "
+    "/wisdom candidate <candidate-id> <share|portal|later>"
+)
+_APPROVAL_USAGE = "Usage: /wisdom publication approve <receipt>"
 _UNAVAILABLE = (
     "Interactive TUI review is unavailable. No further action was taken; "
     "inspect private state before retrying in a fully interactive terminal."
@@ -31,6 +40,16 @@ _CANCELLED = "Review cancelled. Nothing was changed."
 _OVERSIZED = (
     "The TUI cannot display the complete exact review without truncation. "
     "Use the terminal `hermes wisdom` contribution workflow instead. Nothing was changed."
+)
+_CANDIDATE_OVERSIZED = (
+    "The complete exact candidate review is too large for the TUI. "
+    "No approval is available and nothing was published."
+)
+_CANDIDATE_UNAVAILABLE = (
+    "This candidate action is no longer available. No action was taken."
+)
+_CANDIDATE_APPROVAL_UNAVAILABLE = (
+    "This candidate publication approval is no longer available. No action was taken."
 )
 
 
@@ -88,8 +107,22 @@ def handles_tui_contribution(raw_args: str) -> bool:
         return words[1].casefold() in {"inspect", "save", "review"}
     if command == "publication" and len(words) > 1:
         # A bare receipt must never bypass the complete interactive review.
-        return words[1].casefold() in {"review", "status", "reopen", "decline"}
+        return words[1].casefold() in {"approve", "review", "status", "reopen", "decline"}
     return False
+
+
+def handles_plugin_only_candidate_action(raw_args: str) -> bool:
+    """Recognize deliberate stock-TUI actions that need no host review API."""
+
+    words = _words(raw_args)
+    if not words:
+        return False
+    command = words[0].casefold()
+    if command == "candidate":
+        # Preserve the existing two-word candidate preparation route. Any other
+        # candidate form belongs here so malformed action syntax gets safe usage.
+        return len(words) != 2
+    return command == "publication" and len(words) > 1 and words[1].casefold() == "approve"
 
 
 def _json(value: object, *, pretty: bool = False) -> str:
@@ -155,8 +188,36 @@ def _prepared_payload_text(value: dict[str, Any]) -> str:
 def _candidate(
     words: list[str], service: Any, may_apply: Callable[[], bool],
 ) -> str:
+    if len(words) == 3:
+        assessment_id, action = words[1], words[2].casefold()
+        if action not in {"share", "portal", "later"} or not is_candidate_slash_target(
+            assessment_id
+        ):
+            raise ValueError(_CANDIDATE_USAGE)
+        try:
+            result = _read(
+                service.candidate_slash_action, assessment_id, action,
+                may_apply=may_apply,
+            )
+        except (PermissionError, WisdomConflict):
+            return _CANDIDATE_UNAVAILABLE
+        literal = _json(result, pretty=True)
+        if action != "share":
+            return literal
+        if len(literal) > MAX_TUI_REVIEW_CHARS:
+            return _CANDIDATE_OVERSIZED
+        review = result.get("review") if isinstance(result, dict) else None
+        receipt = review.get("receipt") if isinstance(review, dict) else None
+        if not isinstance(receipt, str) or not _ACTION_ID.fullmatch(receipt):
+            raise ValueError("Candidate publication review is invalid")
+        command = shlex.join(("/wisdom", "publication", "approve", receipt))
+        return (
+            literal
+            + "\n\nNothing was published. After reviewing every exact field above, "
+            + f"approve this receipt in a separate TUI action: {command}"
+        )
     if len(words) != 2:
-        raise ValueError("Usage: /wisdom candidate <qualified-event-id>")
+        raise ValueError(_CANDIDATE_USAGE)
     _require_current(may_apply)
     draft_id = service.native_candidate_prepare(words[1], may_apply=may_apply)
     return _prepared_payload_text(
@@ -311,9 +372,21 @@ def _publication(  # pylint: disable=too-many-arguments
     words: list[str], service: Any, request_review: Callable[..., Any],
     action_type: Any, outcome_type: Any, may_apply: Callable[[], bool],
 ) -> str:
+    if len(words) == 3 and words[1].casefold() == "approve":
+        receipt = words[2]
+        if not _ACTION_ID.fullmatch(receipt):
+            raise ValueError(_APPROVAL_USAGE)
+        try:
+            return _json(_read(
+                service.candidate_publication_approve, receipt, may_apply=may_apply
+            ))
+        except (PermissionError, WisdomConflict):
+            return _CANDIDATE_APPROVAL_UNAVAILABLE
+    if words[1:2] == ["approve"]:
+        raise ValueError(_APPROVAL_USAGE)
     if len(words) != 3:
         raise ValueError(
-            "Usage: /wisdom publication <review|status|reopen|decline> <target>"
+            "Usage: /wisdom publication <approve|review|status|reopen|decline> <target>"
         )
     action, target = words[1].casefold(), words[2]
     if action == "review":
@@ -352,7 +425,7 @@ def _publication(  # pylint: disable=too-many-arguments
         )
         return _json(result)
     raise ValueError(
-        "Usage: /wisdom publication <review|status|reopen|decline> <target>"
+        "Usage: /wisdom publication <approve|review|status|reopen|decline> <target>"
     )
 
 

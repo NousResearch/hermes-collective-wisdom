@@ -20,7 +20,9 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from .errors import WisdomConflict
 from .native_context import NativeInvocation
+from .notification_contracts import MAX_QUALIFICATION_COUNT, is_candidate_slash_target
 from .package import PackagePolicyError
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
@@ -371,6 +373,93 @@ def _assessment_text(value: object, limit: int) -> str:
     return text
 
 
+def _candidate_title(value: object, limit: int) -> str:
+    """Normalize a bounded candidate heading to one truthful visible line."""
+
+    source = str(value or "").strip()
+    if not source or len(source) > limit:
+        raise ValueError("candidate title is not presentation safe")
+    normalized = "".join(
+        character
+        if character in "\u200c\u200d"
+        else " "
+        if character.isspace() or unicodedata.category(character)[0] in {"C", "Z"}
+        else character
+        for character in source
+    )
+    normalized = " ".join(normalized.split())
+    if not normalized or len(normalized) > limit:
+        raise ValueError("candidate title is not presentation safe")
+    return normalized
+
+
+_GENERIC_CANDIDATE_REASON = "This skill met your local sharing criteria."
+
+
+def _bounded_candidate_count(value: object) -> int | None:
+    """Accept only small source-projected counts, never coercing hostile values."""
+
+    return (
+        value
+        if isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= MAX_QUALIFICATION_COUNT
+        else None
+    )
+
+
+def candidate_qualification_reason(reference: object) -> str:
+    """Render one deterministic sentence from allowlisted bounded qualification facts."""
+
+    result = _GENERIC_CANDIDATE_REASON
+    if isinstance(reference, dict):
+        facts = reference.get("qualification_reason")
+        if isinstance(facts, dict):
+            qualification = reference.get("qualification")
+            days = _bounded_candidate_count(facts.get("consecutive_business_days"))
+            refinements = _bounded_candidate_count(facts.get("meaningful_refinements"))
+            stable_days = _bounded_candidate_count(facts.get("stable_days"))
+
+            # A validated allowlisted signal remains useful for legacy projections that
+            # predate the qualification discriminator. Known types stay type-specific.
+            if days is not None and qualification in {None, "", "high_usage"}:
+                unit = "day" if days == 1 else "days"
+                result = f"You've used this skill on {days} consecutive business {unit}."
+            elif qualification in {None, "", "refinement"}:
+                if refinements is not None and stable_days is not None:
+                    refinement_unit = "refinement" if refinements == 1 else "refinements"
+                    day_unit = "day" if stable_days == 1 else "days"
+                    result = (
+                        f"You've made {refinements} meaningful {refinement_unit}, and this "
+                        f"skill has been stable for {stable_days} {day_unit}."
+                    )
+                elif refinements is not None:
+                    unit = "refinement" if refinements == 1 else "refinements"
+                    result = f"You've made {refinements} meaningful {unit} to this skill."
+                elif stable_days is not None:
+                    unit = "day" if stable_days == 1 else "days"
+                    result = f"This skill has been stable for {stable_days} {unit}."
+    return result
+
+
+def candidate_tui_text(job: dict[str, Any], view: NativeView) -> str:
+    """Add typed stock-TUI handoffs without changing shared rich-card content."""
+
+    reference = job.get("reference")
+    if not isinstance(reference, dict) or reference.get("kind") != "candidate":
+        return view.to_text()
+    candidate_id = job.get("id")
+    if not is_candidate_slash_target(candidate_id):
+        raise ValueError("candidate assessment ID is not safe for a slash command")
+    command = f"/wisdom candidate {candidate_id}"
+    return "\n\n".join((
+        view.to_text(),
+        f"Share opens the exact review and needs separate final approval:\n{command} share",
+        f"Portal creates an owner-private draft and does not publish:\n{command} portal",
+        f"Later applies the policy cooldown:\n{command} later",
+    ))
+
+
 def assessment_view(job: dict[str, Any]) -> NativeView:
     """Project immutable advice and deliberate candidate workflow controls."""
 
@@ -400,7 +489,14 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
         }
     if not isinstance(advice, dict):
         raise ValueError("ready assessment advice is missing")
-    title = _assessment_text(advice.get("title"), 120)
+    title = (
+        _candidate_title(advice.get("title"), 120)
+        if kind == "candidate" else _assessment_text(advice.get("title"), 120)
+    )
+    if kind == "candidate" and fallback:
+        # The legacy fallback used the local database UUID as its synthetic
+        # title. Keep the notice usable without exposing that internal handle.
+        title = "Local skill"
     explanation = _assessment_text(advice.get("explanation"), 600)
     if str(advice.get("relevance") or "") not in {"recommend", "digest"}:
         raise ValueError("assessment advice relevance is invalid")
@@ -414,15 +510,11 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
         _assessment_text(reference.get("local_skill_id"), 256)
         _assessment_text(reference.get("event_id"), 128)
         summary = "Local qualification review unavailable" if fallback else ""
-        preamble = (
-            "" if fallback else
-            "Hermes thinks the following skill would be useful to the rest of your team:"
-        )
+        preamble = ""
         handoff = (
             "Ask Hermes to inspect the candidate from your Wisdom inbox"
             if fallback else
-            "Choose Share to review the exact package before final approval, or open a "
-            "private draft in Portal. Nothing has been uploaded or shared yet"
+            "Nothing has been uploaded or shared"
         )
     elif kind == "skill":
         if provenance_kind != "agent_assessed":
@@ -441,12 +533,24 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
     else:
         raise ValueError("assessment reference is unsupported")
     return NativeView(
-        title="Hermes Collective Wisdom",
+        title=(
+            "Hermes Collective Wisdom"
+            if kind != "candidate" or fallback else
+            f"{title} looks ready to share with your team."
+        ),
         summary=summary,
-        items=[NativeItem(title=title, detail=explanation, preamble=preamble)],
+        items=[NativeItem(
+            title=("Why it qualified" if kind == "candidate" and not fallback else title),
+            detail=(
+                candidate_qualification_reason(reference)
+                if kind == "candidate" and not fallback else explanation
+            ),
+            preamble=preamble,
+        )],
         notice=(
-            f"{handoff}. This is advisory only; nothing was installed, approved, "
-            "or shared."
+            f"{handoff}."
+            if kind == "candidate" and not fallback else
+            f"{handoff}. This is advisory only; nothing was installed, approved, or shared."
         ),
         actions=(
             [
@@ -638,6 +742,154 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
             raise PermissionError("Collective Wisdom candidate review changed.")
         return self.load(record_id)
 
+    def upgrade_candidate_to_portal(  # pylint: disable=too-many-arguments
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Persist a deliberate Share-to-Portal upgrade before its remote effect."""
+
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        lock_key = (
+            f"candidate-action:{self._org(owner)}:"
+            f"{owner.get('profile_name', record['profile'])}:{assessment_id}"
+        )
+        lock = self.store.acquire_operation_lock(lock_key)
+        if lock is None:
+            return record
+
+        def owns_current_claim() -> bool:
+            self.store.assert_operation_lock(lock_key, lock)
+            return may_apply()
+
+        try:
+            current = self.load(record["id"])
+            if current["state"] != "pending":
+                raise PermissionError("Collective Wisdom candidate review changed.")
+            plan = current["plan"]
+            if (
+                plan.get("owner") != owner
+                or plan.get("candidate_assessment_id") != assessment_id
+                or service.native_owner() != owner
+                or owns_current_claim() is not True
+            ):
+                raise PermissionError("Collective Wisdom candidate owner changed.")
+            action = plan.get("candidate_action")
+            public_operation = self.store.publication_for_candidate_assessment(
+                assessment_id, owner=owner, operation_kind="public"
+            )
+            if public_operation is not None:
+                self.submit_candidate_publication(
+                    service, current, assessment_id, may_apply=owns_current_claim
+                )
+                raise WisdomConflict(
+                    "Candidate was already submitted publicly; Portal is unavailable"
+                )
+            if action == "share":
+                current = self._replace_candidate_action(
+                    current["id"], "publish", {**plan, "candidate_action": "portal"}
+                )
+            elif action != "portal":
+                raise PermissionError("Collective Wisdom candidate review changed.")
+            if _safe_url((current.get("result") or {}).get("portal_url")):
+                return current
+            operation = self.store.publication_for_candidate_assessment(
+                assessment_id, owner=owner, operation_kind="private_draft"
+            )
+            outcome = None
+            if operation is None:
+                outcome = service.publication_submit_private(
+                    current["plan"]["receipt"], may_apply=owns_current_claim,
+                    candidate_assessment_id=assessment_id,
+                )
+            return self._complete_candidate_portal(
+                service, current, assessment_id,
+                may_apply=owns_current_claim, outcome=outcome,
+            )
+        finally:
+            self.store.release_operation_lock(lock_key, lock)
+
+    def submit_candidate_publication(
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Submit or reconcile one candidate publication, then project its consent."""
+
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="public"
+        )
+        if operation is None:
+            result = service.publication_submit(
+                record["plan"]["receipt"], may_apply=may_apply,
+                candidate_assessment_id=assessment_id,
+            )
+        else:
+            result = service.publication_reopen(
+                str(operation["id"]), may_apply=may_apply
+            )
+        if not isinstance(result, dict) or not result.get("operation_id"):
+            raise PackagePolicyError("candidate publication response is invalid")
+        state = "needs_review" if result.get("state") == "uncertain" else "completed"
+        return self._store_result(record, result, state=state)
+
+    def reconcile_candidate_publication(
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Reconcile a consumed candidate receipt before displaying another approval."""
+
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        if self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="public"
+        ) is None:
+            return record
+        return self.submit_candidate_publication(
+            service, record, assessment_id, may_apply=may_apply
+        )
+
+    def _recover_existing_candidate_action(
+        self, service: Any, record: dict[str, Any], assessment_id: str, *,
+        may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Resume only the operation kind selected by an existing candidate action."""
+
+        if (
+            record["plan"].get("candidate_action") != "portal"
+            or _safe_url((record.get("result") or {}).get("portal_url"))
+        ):
+            return record
+        owner = record["plan"].get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
+        public_operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="public"
+        )
+        if public_operation is not None:
+            self.submit_candidate_publication(
+                service, record, assessment_id, may_apply=may_apply
+            )
+            raise WisdomConflict(
+                "Candidate was already submitted publicly; Portal is unavailable"
+            )
+        private_operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="private_draft"
+        )
+        outcome = None
+        if private_operation is None:
+            outcome = service.publication_submit_private(
+                record["plan"]["receipt"], may_apply=may_apply,
+                candidate_assessment_id=assessment_id,
+            )
+        return self._complete_candidate_portal(
+            service, record, assessment_id, may_apply=may_apply, outcome=outcome
+        )
+
     def request_candidate_action(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
         self, service: Any, invocation: NativeInvocation, event_id: str, *,
         assessment_id: str, open_in_portal: bool,
@@ -684,22 +936,9 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 raise PermissionError("Collective Wisdom candidate owner changed.")
             preparing = existing["plan"].get("candidate_action_state") == "preparing"
             if not claimed and not preparing:
-                if (
-                    existing["plan"].get("candidate_action") == "portal"
-                    and not _safe_url((existing.get("result") or {}).get("portal_url"))
-                ):
-                    operation = self.store.publication_for_candidate_assessment(assessment_id)
-                    outcome = None
-                    if operation is None:
-                        outcome = service.publication_submit_private(
-                            existing["plan"]["receipt"], may_apply=may_apply,
-                            candidate_assessment_id=assessment_id,
-                        )
-                    return self._complete_candidate_portal(
-                        service, existing, assessment_id,
-                        may_apply=may_apply, outcome=outcome,
-                    )
-                return existing
+                return self._recover_existing_candidate_action(
+                    service, existing, assessment_id, may_apply=may_apply
+                )
             if may_apply() is not True:
                 raise PermissionError("Collective Wisdom candidate review is no longer current.")
             from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
@@ -743,13 +982,21 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         """Reconcile and project one candidate's durable private operation."""
 
+        previous = record["plan"]
+        owner = previous.get("owner")
+        if not isinstance(owner, dict):
+            raise PermissionError("Collective Wisdom candidate owner changed.")
         operation_id = str((outcome or {}).get("operation_id") or "")
+        operation = self.store.publication_for_candidate_assessment(
+            assessment_id, owner=owner, operation_kind="private_draft"
+        )
         if not operation_id:
-            operation = self.store.publication_for_candidate_assessment(assessment_id)
             operation_id = str((operation or {}).get("id") or "")
         if not operation_id:
             raise PackagePolicyError("private Portal draft operation is unavailable")
         if not _safe_url((outcome or {}).get("portal_url")):
+            if operation is None or str(operation.get("id") or "") != operation_id:
+                raise PackagePolicyError("private Portal draft operation is unavailable")
             outcome = service.publication_reopen_private(
                 operation_id, may_apply=may_apply
             )
@@ -761,7 +1008,6 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
         plan = service.publication_review(operation_id, may_apply=may_apply)
         if not plan.get("receipt"):
             raise PackagePolicyError("private Portal draft review is invalid")
-        previous = record["plan"]
         plan = self._prepare_review_deferral(service, {
             **plan,
             "owner": previous["owner"],

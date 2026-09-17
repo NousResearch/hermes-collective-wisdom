@@ -213,7 +213,7 @@ def test_contributor_and_published_views_use_pr5_copy_and_controls():
     ]
 
 
-def test_candidate_advice_uses_supportive_preamble_and_original_actions():
+def test_candidate_advice_uses_friendly_reason_copy_and_original_actions():
     view = assessment_view({
         "state": "ready",
         "advice": {
@@ -223,14 +223,19 @@ def test_candidate_advice_uses_supportive_preamble_and_original_actions():
         },
         "reference": {
             "kind": "candidate", "local_skill_id": "local-skill-id",
-            "event_id": "candidate-event-id",
+            "event_id": "candidate-event-id", "qualification": "high_usage",
+            "qualification_reason": {"consecutive_business_days": 7},
         },
     })
 
     assert view.summary == ""
-    assert view.items[0].preamble == (
-        "Hermes thinks the following skill would be useful to the rest of your team:"
+    assert view.title == "Incident Review looks ready to share with your team."
+    assert view.items[0].preamble == ""
+    assert view.items[0].title == "Why it qualified"
+    assert view.items[0].detail == (
+        "You've used this skill on 7 consecutive business days."
     )
+    assert view.notice == "Nothing has been uploaded or shared."
     assert _actions(view.actions) == [
         ("Share", "candidate_share", True),
         ("Review in Portal", "candidate_portal", False),
