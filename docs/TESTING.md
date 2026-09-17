@@ -1,11 +1,56 @@
 # Verification Plan
 
-## Current release gate: stock Agent and Desktop SDK handoffs
+## Current release gate: stock Agent and Desktop management
 
-The current release is the external plugin on unmodified Hermes Agent, plus the
-Desktop SDK command-copy guide. Dashboard and full embedded action parity are
-deferred. Historical modified-host and earlier test-count checkpoints below do
-not establish stock-host, installed-app, service-backed, or release acceptance.
+The current release is the external plugin on unmodified Hermes Agent, plus
+Desktop pages invoking the existing workflows through the plugin REST namespace.
+Dashboard and full six-surface parity are deferred. Historical modified-host and
+earlier test-count checkpoints below do not establish current installed-app,
+service-backed, or release acceptance.
+
+### Desktop management pages — 2026-09-17
+
+- Full Python suite with the Desktop host probe enabled: **1,234 passed,
+  27 skipped**. Skips require other optional host/Gateway fixtures.
+- Renderer workflows: **14 passed** (`npm ci --ignore-scripts && npm test`).
+  Real React/Radix checkbox semantics, catalog/install, update/uninstall,
+  disclosure, publication, uncertain outcomes and lifecycle invalidation;
+  its SDK transport is a fixture, not a deployed Gateway.
+- Pylint: **10.00/10**. Distribution tests/builds pass. Desktop assets and the
+  backend loader belong in the Git/source package; the wheel remains a Python
+  library, not a native plugin installer.
+- Stock plugin scanner: **safe**, allowed without `--force`. Medium/informational
+  findings remain; this is not a claim of zero findings.
+- Installed host `416a8177` mounts the backend outside the repository cwd.
+  The probe covers authentication, two isolated named profiles, a confirmed
+  mutation, wrong-profile denial and Agent-plugin disable/re-enable gates.
+  Its services are fixtures. A separate HTTP test uses real receipts, SQLite
+  and installed files through the shared install executor.
+- Actual stock Electron build: an isolated home/user-data directory discovers
+  and enables the plugin through Capabilities → Plugins, then renders Wisdom's
+  Catalog/Installed/Activity/Contribute tabs and unauthenticated denial view.
+  This validates SDK mounting/layout, not successful production workflows.
+  No production credentials, profiles, enrollment or publication were changed.
+- The optional pre-existing `test_actual_host_cli_and_generic_tui_dispatch`
+  probe fails at its maintenance-enrichment assertion against the separate
+  development-host fixture. It reproduces on an untouched base-commit archive;
+  it is not counted as a green cross-host integration run.
+
+Enable the installed-host probe explicitly (both paths are required):
+
+```bash
+WISDOM_DESKTOP_HOST_DIR=/path/to/hermes-agent \
+WISDOM_HOST_PYTHON=/path/to/hermes-agent/venv/bin/python \
+PYTHONPATH=. .venv/bin/python -m pytest -q
+```
+
+Views expire and bind server-resolved profile/account/installation. Native
+install/update/publication receipts also bind their original view and action:
+closing a page cannot transfer its receipt to a new view. Tests preserve
+same-view native replay/recovery, reject forged identity/coercible consent, and
+recheck lifecycle after owner reads. No atomic lock spans host credentials and
+remote/filesystem effects; the shared kernels' final owner and `may_apply`
+checks remain authoritative.
 
 ### Repeatable local checks
 

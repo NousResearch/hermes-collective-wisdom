@@ -14,6 +14,7 @@ dist/
 *.egg-info/
 .coverage
 htmlcov/
+node_modules/
 
 # Local environment and credentials
 .env

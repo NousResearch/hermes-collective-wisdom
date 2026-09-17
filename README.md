@@ -81,12 +81,16 @@ An empty catalog is normal if nobody in your organization has published a skill 
 - **CLI / TUI chat:** read tools and terminal handoffs are available. Rich review
   and proactive presentation depend on host capabilities; development-only TUI
   behavior is not a promise of stock-host support.
-- **Desktop:** enable the package's Desktop half separately in the app's plugin
-  settings. The Wisdom page offers guidance and copyable terminal commands—not
-  embedded execution or approval. For remote connections, run commands on the
-  intended remote host.
+- **Desktop:** enable the package's Desktop half in **Capabilities → Plugins**
+  (also available through **⌘K → Plugins**), then open **Collective Wisdom**.
+  Catalog, Installed, Activity & Settings, and Contributions call the existing
+  workflows on the selected host/profile. Review exact versions, checks, and
+  files before confirming an install, update, removal, or submission.
 
-Full embedded Desktop and Dashboard workflows are not available yet.
+The Desktop page also offers explicit enrollment after disclosure. It does not
+run setup scripts, edit draft files, or automatically retry uncertain operations.
+Those advanced workflows remain available through the existing native controls.
+Dashboard UI and full six-surface parity remain deferred.
 
 ## Common tasks
 
@@ -191,6 +195,8 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m pylint hermes_wisdom_plugin tests scripts/test_wisdom_offline_acceptance.py
 .venv/bin/python -m pytest
+npm ci --ignore-scripts
+npm test
 .venv/bin/python -m build
 ```
 

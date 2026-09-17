@@ -394,6 +394,98 @@ def test_uninstall_treats_server_not_found_as_already_inactive(executor):
     assert store.records["skill-1"]["state"] == "inactive"
 
 
+def test_uninstall_revocation_during_filesystem_io_stops_before_removal(
+    executor, monkeypatch
+):
+    value, store, client, _receipts, _current = executor
+    installed = value.apply("receipt-1")
+    target = Path(installed["path"])
+    current = {"value": True}
+    original_same_filesystem = install_execution._same_filesystem
+
+    def inspect_then_revoke(source, destination_parent):
+        original_same_filesystem(source, destination_parent)
+        current["value"] = False
+
+    monkeypatch.setattr(install_execution, "_same_filesystem", inspect_then_revoke)
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.uninstall("skill-1", may_apply=lambda: current["value"])
+
+    operation = next(
+        item for item in store.operations.values() if item["kind"] == "uninstall"
+    )
+    assert operation["phase"] == "staged"
+    assert target.is_dir()
+    assert store.records["skill-1"]["state"] == "active"
+    assert client.deactivate_calls == []
+
+
+def test_uninstall_recovery_revocation_during_owner_reread_stops_gateway_effect(
+    executor,
+):
+    value, store, client, _receipts, current_owner = executor
+    value.apply("receipt-1")
+    client.deactivate_error = RuntimeError("offline")
+    assert value.uninstall("skill-1")["pending"] is True
+    client.deactivate_error = None
+    current = {"value": True}
+    owner_reads = {"count": 0}
+    original_owner = value.owner
+
+    def owner_and_revoke():
+        owner_reads["count"] += 1
+        result = original_owner()
+        if owner_reads["count"] == 3:
+            current["value"] = False
+        return result
+
+    value.owner = owner_and_revoke
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.uninstall("skill-1", may_apply=lambda: current["value"])
+
+    operation = next(
+        item for item in store.operations.values() if item["kind"] == "uninstall"
+    )
+    assert operation["phase"] == "local_ledger_committed"
+    assert store.records["skill-1"]["state"] == "inactive"
+    assert len(client.deactivate_calls) == 1
+    assert current_owner["value"] == OWNER
+
+
+def test_uninstall_revocation_during_gateway_io_records_outcome_without_replay(
+    executor,
+):
+    value, store, client, _receipts, _current = executor
+    value.apply("receipt-1")
+    current = {"value": True}
+    original_deactivate = client.deactivate_install
+
+    def deactivate_and_revoke(installation_id, skill_id):
+        result = original_deactivate(installation_id, skill_id)
+        current["value"] = False
+        return result
+
+    client.deactivate_install = deactivate_and_revoke
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        value.uninstall("skill-1", may_apply=lambda: current["value"])
+
+    operation = next(
+        item for item in store.operations.values() if item["kind"] == "uninstall"
+    )
+    assert operation["state"] == "done"
+    assert operation["phase"] == "gateway_recorded"
+    assert len(client.deactivate_calls) == 1
+
+    current["value"] = True
+    result = value.uninstall("skill-1", may_apply=lambda: current["value"])
+
+    assert result["uninstalled"] is True
+    assert len(client.deactivate_calls) == 1
+
+
 def test_duplicate_completed_uninstall_replays_recorded_outcome(executor):
     value, store, client, _receipts, _current = executor
     value.apply("receipt-1")

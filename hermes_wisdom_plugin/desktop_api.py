@@ -1,0 +1,626 @@
+"""Thin Desktop adapter over the existing owner-bound workflow service.
+
+The renderer receives opaque, short-lived view IDs. They are not Hermes session
+identities and carry no authority by themselves: every use is checked against
+the currently scoped profile and freshly read account/enrolment owner.
+"""
+
+from __future__ import annotations
+
+import secrets
+import threading
+import time
+from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .errors import (
+    WisdomAuthError,
+    WisdomConflict,
+    WisdomError,
+    WisdomNotFound,
+    WisdomValidationError,
+)
+from .onboarding import WISDOM_DISCLOSURE
+
+
+_PRE_ENROLLMENT_CODES = frozenset({
+    "setup_required",
+    "not_configured",
+    "registration_incomplete",
+})
+
+
+class ViewBody(BaseModel):
+    """Strict request schema; identity is never accepted from the renderer."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    view_id: str = Field(min_length=8, max_length=128)
+
+
+class InstallReviewBody(ViewBody):
+    """Select a published version without approving installation."""
+
+    reference: str = Field(min_length=1, max_length=512)
+    update_mode: str | None = Field(default=None, max_length=64)
+
+
+class ReceiptBody(ViewBody):
+    """Confirm an exact server-issued receipt."""
+
+    receipt: str = Field(min_length=8, max_length=256)
+    accept_partial: bool = False
+
+
+class SkillBody(ViewBody):
+    """Select an owner-managed skill."""
+
+    skill_id: str = Field(min_length=1, max_length=512)
+
+
+class UpdateReviewBody(SkillBody):
+    """Declare explicit update review choices."""
+
+    preserve_modified: bool = False
+    accept_sensitive: bool = False
+    accept_partial: bool = False
+
+
+class ReviewBody(ViewBody):
+    """Confirm a server-held uninstall snapshot."""
+
+    review_id: str = Field(min_length=8, max_length=128)
+
+
+class ModeBody(ViewBody):
+    """Compare-and-set the notification mode."""
+
+    mode: str = Field(pattern=r"^(agent|fixed)$")
+    expected_mode: str = Field(pattern=r"^(agent|fixed)$")
+
+
+class EnrollmentBody(ViewBody):
+    """Accept the displayed disclosure version."""
+
+    accepted: bool
+    disclosure_version: str
+
+
+class DraftBody(ViewBody):
+    """Prepare one local skill without upload authority."""
+
+    skill_name: str = Field(min_length=1, max_length=256)
+
+
+class DraftReviewBody(ViewBody):
+    """Review a private prepared draft."""
+
+    draft_id: str = Field(min_length=1, max_length=512)
+
+
+@dataclass(slots=True)
+class _View:
+    profile: tuple[str, str]
+    owner: dict[str, str]
+    expires_at: float
+
+
+@dataclass(slots=True)
+class _Review:
+    view_id: str
+    kind: str
+    subject: str
+    snapshot: dict[str, Any]
+    expires_at: float
+
+
+class DesktopWorkflowApi:
+    """Map UI gestures to the shared workflow without duplicating its kernels."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        view_ttl_seconds: float = 15 * 60,
+        enabled: Callable[[], bool] = lambda: True,
+    ) -> None:
+        self._clock = clock
+        self._enabled = enabled
+        self._view_ttl = float(view_ttl_seconds)
+        self._lock = threading.RLock()
+        self._views: dict[str, _View] = {}
+        self._reviews: dict[str, _Review] = {}
+
+    @staticmethod
+    def _profile(service: Any) -> tuple[str, str]:
+        name, home = service.profile
+        return str(name), str(Path(home).resolve(strict=False))
+
+    @staticmethod
+    def _owner(service: Any) -> dict[str, str]:
+        """Prefer the exact enrolment owner; pre-enrolment falls back to account binding."""
+        try:
+            owner = service.native_owner()
+        except (WisdomConflict, WisdomValidationError) as exc:
+            if exc.code not in _PRE_ENROLLMENT_CODES:
+                raise
+            owner = service.binding()
+        if not isinstance(owner, dict) or not owner:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        return {str(key): str(value) for key, value in owner.items()}
+
+    @staticmethod
+    def _binding(service: Any) -> dict[str, str]:
+        owner = service.binding()
+        if not isinstance(owner, dict) or not owner:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        return {str(key): str(value) for key, value in owner.items()}
+
+    def open_view(self, service: Any) -> dict[str, Any]:
+        """Bind a short-lived page to fresh account and profile state."""
+        now = self._clock()
+        view_id = "wiv_" + secrets.token_hex(20)
+        view = _View(
+            profile=self._profile(service),
+            owner=self._owner(service),
+            expires_at=now + self._view_ttl,
+        )
+        with self._lock:
+            self._purge(now)
+            self._views[view_id] = view
+        return {
+            "view_id": view_id,
+            "profile": view.profile[0],
+            "expires_at_monotonic": view.expires_at,
+        }
+
+    def close_view(self, service: Any, view_id: str) -> dict[str, bool]:
+        """Revoke this owner’s page and pending removal reviews."""
+        # Do not let another profile/account use a guessed ID to revoke a live view.
+        self._require_view(service, view_id)
+        with self._lock:
+            self._views.pop(view_id, None)
+            self._reviews = {
+                key: value for key, value in self._reviews.items()
+                if value.view_id != view_id
+            }
+        return {"closed": True}
+
+    def current(
+        self,
+        service: Any,
+        view_id: str,
+        *,
+        enrolling: bool = False,
+        review_id: str | None = None,
+        kind: str | None = None,
+    ) -> bool:
+        """Provide the shared executor’s late authority fence."""
+        try:
+            if review_id is None and kind is None:
+                self._require_view(service, view_id, enrolling=enrolling)
+            elif review_id is not None and kind is not None and not enrolling:
+                self._require_review(service, view_id, review_id, kind)
+            else:
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+        except WisdomAuthError:
+            return False
+        return True
+
+    def _require_lifecycle(
+        self, service: Any, view_id: str, view: _View
+    ) -> None:
+        """Fence one bounded owner read against view and host lifecycle changes."""
+        with self._lock:
+            if (
+                self._views.get(str(view_id)) is not view
+                or view.expires_at <= self._clock()
+                or not self._enabled()
+                or view.profile != self._profile(service)
+            ):
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+
+    def _require_view(self, service: Any, view_id: str, *, enrolling: bool = False) -> _View:
+        now = self._clock()
+        with self._lock:
+            self._purge(now)
+            view = self._views.get(str(view_id))
+        if view is None:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        self._require_lifecycle(service, view_id, view)
+        owner_reader = (
+            self._binding
+            if enrolling and "installation_id" not in view.owner
+            else self._owner
+        )
+        first_owner = owner_reader(service)
+        self._require_lifecycle(service, view_id, view)
+        if view.owner != first_owner:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        # A host-owned credential read can return the old owner while rotating the
+        # backing account immediately afterwards. Two matching snapshots are the
+        # bounded consistency fence; kernels still recheck before effects.
+        second_owner = owner_reader(service)
+        self._require_lifecycle(service, view_id, view)
+        if first_owner != second_owner or view.owner != second_owner:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        return view
+
+    def _record_review(
+        self,
+        service: Any,
+        view_id: str,
+        kind: str,
+        subject: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind an exact native receipt to the live view and intended action."""
+        view = self._require_view(service, view_id)
+        receipt = result.get("receipt")
+        if not isinstance(receipt, str) or not receipt:
+            raise WisdomValidationError("workflow review did not return an exact receipt")
+        with self._lock:
+            if (
+                self._views.get(str(view_id)) is not view
+                or view.expires_at <= self._clock()
+                or not self._enabled()
+            ):
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+            self._reviews[receipt] = _Review(
+                view_id=view_id,
+                kind=kind,
+                subject=subject,
+                snapshot=deepcopy(result),
+                expires_at=view.expires_at,
+            )
+        return result
+
+    def _require_review(
+        self, service: Any, view_id: str, review_id: str, kind: str
+    ) -> _Review:
+        """Require both the live originating view and its matching action review."""
+        self._require_view(service, view_id)
+        with self._lock:
+            review = self._reviews.get(str(review_id))
+            if (
+                review is None
+                or review.view_id != view_id
+                or review.kind != kind
+                or review.expires_at <= self._clock()
+            ):
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+        return review
+
+    def _purge(self, now: float) -> None:
+        expired_views = {
+            key for key, value in self._views.items() if value.expires_at <= now
+        }
+        for key in expired_views:
+            self._views.pop(key, None)
+        self._reviews = {
+            key: value for key, value in self._reviews.items()
+            if value.expires_at > now and value.view_id not in expired_views
+        }
+
+    def install_review(
+        self, service: Any, view_id: str, reference: str, *, update_mode: str | None = None
+    ) -> dict[str, Any]:
+        """Prepare the existing hash-bound installation review."""
+        self._require_view(service, view_id)
+        result = service.install_plan(reference, update_mode=update_mode)
+        return self._record_review(service, view_id, "install", reference, result)
+
+    def install_confirm(
+        self, service: Any, view_id: str, receipt: str, *, accept_partial: bool = False
+    ) -> dict[str, Any]:
+        """Confirm through the shared installer with late revocation checks."""
+        self._require_review(service, view_id, receipt, "install")
+        return service.install_apply(
+            receipt,
+            accept_partial=accept_partial,
+            may_apply=lambda: self.current(
+                service, view_id, review_id=receipt, kind="install"
+            ),
+        )
+
+    def update_review(self, service: Any, view_id: str, skill_id: str, **options: Any):
+        """Obtain an exact update plan, checking scope after I/O."""
+        self._require_view(service, view_id)
+        result = service.update_plan(skill_id, **options)
+        return self._record_review(service, view_id, "update", skill_id, result)
+
+    def update_confirm(self, service: Any, view_id: str, receipt: str):
+        """Apply the reviewed update through the existing receipt kernel."""
+        self._require_review(service, view_id, receipt, "update")
+        return service.update_apply(
+            receipt,
+            may_apply=lambda: self.current(
+                service, view_id, review_id=receipt, kind="update"
+            ),
+        )
+
+    def set_notification_mode(
+        self,
+        service: Any,
+        view_id: str,
+        mode: str,
+        *,
+        expected_mode: str,
+    ):
+        """Apply a deliberate notification choice, not a stale default."""
+        self._require_view(service, view_id)
+        return service.set_notification_mode(
+            mode,
+            expected_mode=expected_mode,
+            may_apply=lambda: self.current(service, view_id),
+        )
+
+    def enroll(self, service: Any, view_id: str, *, accepted: bool):
+        """Enroll only with explicit disclosure and a current account binding."""
+        self._require_view(service, view_id)
+        if accepted is not True:
+            raise WisdomValidationError("Collective Wisdom disclosure was not accepted")
+        return service.setup(
+            accept_disclosure=True,
+            # First enrollment creates an identity. Only this action keeps its
+            # pre-enrollment account binding; old install controls stay stale.
+            may_apply=lambda: self.current(service, view_id, enrolling=True),
+        )
+
+    def prepare_draft(self, service: Any, view_id: str, skill_name: str):
+        """Prepare locally without model-review or publication permission."""
+        self._require_view(service, view_id)
+        return service.suggest(
+            skill_name,
+            allow_model_review=False,
+            may_apply=lambda: self.current(service, view_id),
+        )
+
+    def publication_review(self, service: Any, view_id: str, draft_id: str):
+        """Freeze the existing publication service’s exact review."""
+        self._require_view(service, view_id)
+        result = service.publication_review(
+            draft_id, may_apply=lambda: self.current(service, view_id)
+        )
+        return self._record_review(service, view_id, "publication", draft_id, result)
+
+    def publication_confirm(self, service: Any, view_id: str, receipt: str):
+        """Submit only the previously reviewed private draft."""
+        self._require_review(service, view_id, receipt, "publication")
+        return service.publication_submit(
+            receipt,
+            may_apply=lambda: self.current(
+                service, view_id, review_id=receipt, kind="publication"
+            ),
+        )
+
+    def uninstall_review(self, service: Any, view_id: str, skill_id: str) -> dict[str, Any]:
+        """Snapshot current managed installation facts before removal."""
+        view = self._require_view(service, view_id)
+        installation = next(
+            (item for item in service.list_installations() if item.get("skill_id") == skill_id),
+            None,
+        )
+        self._require_view(service, view_id)
+        if installation is None:
+            raise WisdomNotFound("managed installation not found")
+        review_id = "wir_" + secrets.token_hex(20)
+        snapshot = deepcopy(installation)
+        with self._lock:
+            self._reviews[review_id] = _Review(
+                view_id=view_id,
+                kind="uninstall",
+                subject=skill_id,
+                snapshot=snapshot,
+                expires_at=view.expires_at,
+            )
+        return {"review_id": review_id, "installation": snapshot}
+
+    def uninstall_confirm(self, service: Any, view_id: str, review_id: str):
+        """Remove only after confirming that the reviewed snapshot is unchanged."""
+        self._require_view(service, view_id)
+        with self._lock:
+            review = self._reviews.get(str(review_id))
+        if review is None or review.view_id != view_id or review.kind != "uninstall":
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        current = next(
+            (
+                item for item in service.list_installations()
+                if item.get("skill_id") == review.subject
+            ),
+            None,
+        )
+        self._require_view(service, view_id)
+        if current != review.snapshot:
+            raise WisdomConflict("managed installation changed; review it again")
+        result = service.uninstall(
+            review.subject, may_apply=lambda: self.current(service, view_id)
+        )
+        with self._lock:
+            self._reviews.pop(review_id, None)
+        return result
+
+
+def build_router(  # pylint: disable=too-many-locals
+    service_factory: Callable[[], Any],
+    *,
+    workflow: DesktopWorkflowApi | None = None,
+    route_class: type | None = None,
+):
+    """Build the supported FastAPI router without owning host authentication.
+
+    The host mounts this router below its authenticated plugin namespace. The
+    supplied factory must already be inside the request's validated profile
+    scope; no owner/profile value is accepted in a JSON body.
+    """
+    from fastapi import (  # pylint: disable=import-outside-toplevel
+        APIRouter,
+        HTTPException,
+        Query,
+    )
+    from fastapi.routing import APIRoute  # pylint: disable=import-outside-toplevel
+
+    api = workflow or DesktopWorkflowApi()
+    router = APIRouter(route_class=route_class or APIRoute)
+
+    def invoke(operation: Callable[[Any], Any]):
+        service = None
+        try:
+            service = service_factory()
+            return operation(service)
+        except WisdomAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except WisdomNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (WisdomConflict, WisdomValidationError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except WisdomError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            close = getattr(service, "close", None)
+            if callable(close):
+                close()
+
+    @router.post("/views")
+    def open_view():
+        return invoke(api.open_view)
+
+    @router.delete("/views/{view_id}")
+    def close_view(view_id: str):
+        return invoke(lambda service: api.close_view(service, view_id))
+
+    @router.get("/bootstrap")
+    def bootstrap():
+        def read(service):
+            status = service.status(include_operations=True)
+            configured = status.get("configured") is True
+            return {
+                "status": status,
+                "settings": service.notification_config(),
+                "activity": (
+                    service.inbox() if configured else {
+                        "mode": "agent", "assessments": [], "interactions": [],
+                        "installed_setup": [],
+                    }
+                ),
+                "installations": service.list_installations() if configured else [],
+            }
+        return invoke(read)
+
+    @router.get("/catalog")
+    def catalog(q: str | None = Query(default=None, max_length=256)):
+        return invoke(lambda service: {"skills": service.search_skills(q)})
+
+    @router.get("/catalog/{skill_id}")
+    def catalog_detail(skill_id: str):
+        return invoke(lambda service: service.show(skill_id))
+
+    @router.get("/catalog/{skill_id}/versions")
+    def catalog_versions(skill_id: str):
+        return invoke(lambda service: {"versions": service.versions(skill_id)})
+
+    @router.get("/installed")
+    def installed():
+        return invoke(lambda service: {"installations": service.list_installations()})
+
+    @router.post("/install/review")
+    def install_review(body: InstallReviewBody):
+        return invoke(lambda service: api.install_review(
+            service, body.view_id, body.reference, update_mode=body.update_mode
+        ))
+
+    @router.post("/install/confirm")
+    def install_confirm(body: ReceiptBody):
+        return invoke(lambda service: api.install_confirm(
+            service,
+            body.view_id,
+            body.receipt,
+            accept_partial=body.accept_partial,
+        ))
+
+    @router.post("/update/review")
+    def update_review(body: UpdateReviewBody):
+        return invoke(lambda service: api.update_review(
+            service,
+            body.view_id,
+            body.skill_id,
+            preserve_modified=body.preserve_modified,
+            accept_sensitive=body.accept_sensitive,
+            accept_partial=body.accept_partial,
+        ))
+
+    @router.post("/update/confirm")
+    def update_confirm(body: ReceiptBody):
+        return invoke(lambda service: api.update_confirm(
+            service, body.view_id, body.receipt
+        ))
+
+    @router.post("/uninstall/review")
+    def uninstall_review(body: SkillBody):
+        return invoke(lambda service: api.uninstall_review(
+            service, body.view_id, body.skill_id
+        ))
+
+    @router.post("/uninstall/confirm")
+    def uninstall_confirm(body: ReviewBody):
+        return invoke(lambda service: api.uninstall_confirm(
+            service, body.view_id, body.review_id
+        ))
+
+    @router.patch("/settings/mode")
+    def settings_mode(body: ModeBody):
+        return invoke(lambda service: api.set_notification_mode(
+            service,
+            body.view_id,
+            body.mode,
+            expected_mode=body.expected_mode,
+        ))
+
+    @router.get("/enrollment/disclosure")
+    def enrollment_disclosure():
+        return {
+            "version": "wisdom-desktop-v1",
+            "text": (
+                WISDOM_DISCLOSURE + " Enrolling does not upload local skill contents. "
+                "Install, setup, and publication remain separate approvals."
+            ),
+        }
+
+    @router.post("/enrollment/confirm")
+    def enrollment_confirm(body: EnrollmentBody):
+        if body.disclosure_version != "wisdom-desktop-v1":
+            raise HTTPException(status_code=409, detail="Disclosure changed; review it again")
+        return invoke(lambda service: api.enroll(
+            service, body.view_id, accepted=body.accepted
+        ))
+
+    @router.post("/drafts/prepare")
+    def draft_prepare(body: DraftBody):
+        return invoke(lambda service: api.prepare_draft(
+            service, body.view_id, body.skill_name
+        ))
+
+    @router.get("/drafts/{draft_id}")
+    def draft_inspect(draft_id: str):
+        return invoke(lambda service: service.prepared_inspect(draft_id))
+
+    @router.post("/publication/review")
+    def publication_review(body: DraftReviewBody):
+        return invoke(lambda service: api.publication_review(
+            service, body.view_id, body.draft_id
+        ))
+
+    @router.post("/publication/confirm")
+    def publication_confirm(body: ReceiptBody):
+        return invoke(lambda service: api.publication_confirm(
+            service, body.view_id, body.receipt
+        ))
+
+    return router

@@ -1,0 +1,8 @@
+{
+  "name": "hermes-collective-wisdom",
+  "label": "Collective Wisdom",
+  "description": "Browse and manage owner-bound team skills from Hermes Desktop.",
+  "icon": "Library",
+  "version": "0.1.0.dev0",
+  "api": "plugin_api.py"
+}

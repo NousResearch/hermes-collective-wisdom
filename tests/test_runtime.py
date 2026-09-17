@@ -49,8 +49,9 @@ def test_status_without_setup_does_not_create_storage(tmp_path, monkeypatch):
         "configured": False, "state": "not_configured", "reason": "not_configured"
     }
     assert not service.root.exists()
-    with pytest.raises(WisdomError):
+    with pytest.raises(WisdomError) as exc_info:
         service.require_setup()
+    assert exc_info.value.code == "setup_required"
     assert not service.root.exists()
 
 
@@ -294,6 +295,100 @@ def test_install_apply_propagates_optional_invocation_authority(tmp_path, monkey
         service.install_apply("receipt", accept_partial=True, may_apply=current)
 
     assert captured == [("receipt", True, current)]
+
+
+def test_uninstall_propagates_optional_invocation_authority(tmp_path, monkeypatch):
+    service = runtime.InvocationService(tmp_path / "state", ("default", tmp_path))
+    captured = []
+
+    class Executor:
+        def uninstall(self, skill_id, *, may_apply=None):
+            captured.append((skill_id, may_apply))
+            if may_apply is None or may_apply() is not True:
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+            return {"uninstalled": True}
+
+    monkeypatch.setattr(service, "_installation_services", lambda: (object(), Executor()))
+
+    def revoked():
+        return False
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        service.uninstall("skill", may_apply=revoked)
+
+    assert captured == [("skill", revoked)]
+
+
+def test_setup_and_suggest_reject_revoked_desktop_authority(tmp_path, monkeypatch):
+    service = runtime.InvocationService(tmp_path / "state", ("default", tmp_path))
+    effects = []
+
+    class Onboarding:
+        def setup(self, *, accept_disclosure, may_apply=None):
+            effects.append(("setup", accept_disclosure))
+            del may_apply
+            return {"configured": True}
+
+    class Reviewer:
+        def prepare(self, skill_name, *, allow_model_review, may_apply=None):
+            effects.append(("suggest", skill_name, allow_model_review, may_apply))
+            return {"draft_id": "local:1"}
+
+    class Store:
+        @staticmethod
+        def bind_qualification_owner(owner):
+            del owner
+
+    def open_onboarding():
+        return Onboarding()
+
+    def installation_owner():
+        return {"account_id": "a"}
+
+    def contribution_reviewer():
+        return Reviewer()
+
+    monkeypatch.setattr(service, "_install_credentials", lambda: None)
+    monkeypatch.setattr(service, "_open", open_onboarding)
+    monkeypatch.setattr(service, "_installation_owner", installation_owner)
+    monkeypatch.setattr(service, "_contribution_reviewer", contribution_reviewer)
+    setattr(service, "_onboarding", type("Bound", (), {"store": Store()})())
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+
+    def revoked():
+        return False
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        service.setup(accept_disclosure=True, may_apply=revoked)
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        service.suggest("skill", may_apply=revoked)
+
+    assert not effects
+
+
+def test_setup_propagates_current_authority_to_onboarding(tmp_path, monkeypatch):
+    service = runtime.InvocationService(tmp_path / "state", ("default", tmp_path))
+    captured = []
+
+    class Onboarding:
+        def setup(self, *, accept_disclosure, may_apply=None):
+            captured.append((accept_disclosure, may_apply))
+            return {"configured": True}
+
+    def open_onboarding():
+        return Onboarding()
+
+    def current():
+        return True
+
+    monkeypatch.setattr(service, "_install_credentials", lambda: None)
+    monkeypatch.setattr(service, "_open", open_onboarding)
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+
+    assert service.setup(accept_disclosure=True, may_apply=current) == {
+        "configured": True
+    }
+    assert captured == [(True, current)]
 
 
 def test_update_methods_share_one_owner_bound_reviewer_and_executor(tmp_path, monkeypatch):

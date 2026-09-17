@@ -558,9 +558,9 @@ def test_real_usage_qualification_to_private_edit_and_exact_single_publication(
                 organization_id=binding["organization_id"],
             )
 
-        def suggest(self, skill_name, *, allow_model_review=False):
+        def suggest(self, skill_name, *, allow_model_review=False, may_apply=None):
             return prepared_reviewer.prepare(
-                skill_name, allow_model_review=allow_model_review
+                skill_name, allow_model_review=allow_model_review, may_apply=may_apply
             )
 
     candidate_service = CandidateRuntime()
