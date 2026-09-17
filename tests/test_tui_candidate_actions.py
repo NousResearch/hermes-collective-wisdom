@@ -63,7 +63,10 @@ class CandidateService(InvocationService):  # pylint: disable=too-many-instance-
             raise WisdomConflict("candidate source changed")
         return "local-draft"
 
-    def publication_review(self, draft_id, *, may_apply=None):
+    def publication_review(
+        self, draft_id, *, accept_warnings=False, may_apply=None,
+    ):
+        assert accept_warnings is False
         assert may_apply is None or may_apply() is True
         return publication_review(draft_id)
 
