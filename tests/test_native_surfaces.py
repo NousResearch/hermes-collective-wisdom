@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -32,11 +33,18 @@ from hermes_wisdom_plugin.delivery import DeliveryReceipt
 from hermes_wisdom_plugin.delivery_outbox import DeliveryOutbox
 from hermes_wisdom_plugin import mediation
 from hermes_wisdom_plugin.mediation_store import MediationStore
-from hermes_wisdom_plugin.native_review import NativeReviewController, callback_value
-from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime, assessment_view
+from hermes_wisdom_plugin.native_review import (
+    NativeReviewController,
+    assessment_view,
+    callback_value,
+    candidate_qualification_reason,
+    candidate_tui_text,
+)
+from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
 from hermes_wisdom_plugin.native_slack import callback_invocation as slack_invocation
 from hermes_wisdom_plugin.native_telegram import callback_invocation as telegram_invocation
+from hermes_wisdom_plugin.native_telegram import text as telegram_text
 from hermes_wisdom_plugin.qualification import snapshot_tree
 from hermes_wisdom_plugin.store import WisdomStore
 
@@ -385,6 +393,127 @@ def test_candidate_assessment_handoff_uses_exact_event_inspection():
         ("Maybe Later", "candidate_defer")
     ]
     assert view.items[0].actions == []
+
+
+def test_candidate_high_usage_view_and_tui_commands_are_exact_and_separated():
+    job = {
+        "id": "assessment-7_days",
+        "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Incident Review",
+            "explanation": "MODEL TEXT MUST NOT OVERRIDE THE REASON",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local-row-id",
+            "event_id": "candidate-event-id", "qualification": "high_usage",
+            "qualification_reason": {"consecutive_business_days": 7},
+        },
+    }
+
+    view = assessment_view(job)
+    shared = view.to_text()
+    local = candidate_tui_text(job, view)
+
+    assert view.title == "Incident Review looks ready to share with your team."
+    assert view.items[0].title == "Why it qualified"
+    assert view.items[0].detail == "You've used this skill on 7 consecutive business days."
+    assert "MODEL TEXT" not in shared
+    assert "Nothing has been uploaded or shared." in shared
+    assert "/wisdom candidate" not in shared
+    assert "/wisdom candidate" not in json.dumps(slack_blocks(view, job["id"]))
+    assert "/wisdom candidate" not in telegram_text(view)
+    assert local == (
+        "Incident Review looks ready to share with your team.\n\n"
+        "Why it qualified\n"
+        "You've used this skill on 7 consecutive business days.\n\n"
+        "Nothing has been uploaded or shared.\n\n"
+        "Share opens the exact review and needs separate final approval:\n"
+        "/wisdom candidate assessment-7_days share\n\n"
+        "Portal creates an owner-private draft and does not publish:\n"
+        "/wisdom candidate assessment-7_days portal\n\n"
+        "Later applies the policy cooldown:\n"
+        "/wisdom candidate assessment-7_days later"
+    )
+    assert [(action.label, action.action) for action in view.actions] == [
+        ("Share", "candidate_share"),
+        ("Review in Portal", "candidate_portal"),
+        ("Maybe Later", "candidate_defer"),
+    ]
+
+
+def test_candidate_refinement_reason_requires_valid_bounded_facts():
+    assert candidate_qualification_reason({
+        "qualification": "refinement",
+        "qualification_reason": {"meaningful_refinements": 4, "stable_days": 2},
+    }) == "You've made 4 meaningful refinements, and this skill has been stable for 2 days."
+    assert candidate_qualification_reason({
+        "qualification": "refinement",
+        "qualification_reason": {"meaningful_refinements": 4},
+    }) == "You've made 4 meaningful refinements to this skill."
+    assert candidate_qualification_reason({
+        "qualification": "refinement",
+        "qualification_reason": {"stable_days": 2},
+    }) == "This skill has been stable for 2 days."
+
+
+@pytest.mark.parametrize("reference", [
+    {"qualification": "weekly_usage", "qualification_reason": {"display": "INJECT"}},
+    {"qualification": "unknown", "qualification_reason": {"raw": {"text": "INJECT"}}},
+    {"qualification": "high_usage", "qualification_reason": {
+        "consecutive_business_days": True, "display": "INJECT",
+    }},
+    {"qualification": "high_usage", "qualification_reason": {
+        "consecutive_business_days": 10_000,
+    }},
+    {"qualification": "refinement", "qualification_reason": {
+        "meaningful_refinements": "4", "stable_days": -1,
+    }},
+])
+def test_candidate_invalid_or_hostile_reason_is_generic(reference):
+    reason = candidate_qualification_reason(reference)
+    assert reason == "This skill met your local sharing criteria."
+    assert "INJECT" not in reason
+
+
+@pytest.mark.parametrize("candidate_id", [
+    "candidate\x1b[2J", "candidate\n/wisdom publish", "candidate\u202eportal", "candidate id",
+])
+def test_candidate_tui_text_rejects_unsafe_assessment_ids(candidate_id):
+    job = {
+        "id": candidate_id, "state": "ready",
+        "advice": {
+            "relevance": "recommend", "title": "Safe skill", "explanation": "ignored",
+            "provenance": {"kind": "local_qualification"},
+        },
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local", "event_id": "event",
+        },
+    }
+    view = assessment_view(job)
+
+    with pytest.raises(ValueError, match="candidate assessment ID"):
+        candidate_tui_text(job, view)
+
+
+def test_legacy_candidate_fallback_is_generic_and_hides_internal_identifiers():
+    job = {
+        "id": "legacy-assessment", "state": "fallback", "advice": None,
+        "reference": {
+            "kind": "candidate", "local_skill_id": "local-secret-uuid",
+            "event_id": "event-secret-uuid", "content_hash": "sha256:secret",
+        },
+    }
+
+    view = assessment_view(job)
+    local = candidate_tui_text(job, view)
+
+    assert view.items[0].title == "Local skill"
+    assert "could not finish the local qualification review" in view.items[0].detail
+    assert "local-secret-uuid" not in local
+    assert "event-secret-uuid" not in local
+    assert "sha256:secret" not in local
+    assert "/wisdom candidate legacy-assessment share" in local
 
 
 def test_shared_skill_assessment_remains_without_not_now():

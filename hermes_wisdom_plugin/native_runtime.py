@@ -25,6 +25,7 @@ from .native_review import (
     NativeReviewController,
     NativeView,
     assessment_view,
+    candidate_tui_text,
     parse_callback,
 )
 from .store import WisdomStore
@@ -637,8 +638,13 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
         notification_id = f"wisdom:{job['id']}"
         try:
+            text = (
+                candidate_tui_text(job, view)
+                if (job.get("reference") or {}).get("kind") == "candidate"
+                else view.to_text()
+            )
             host_receipt = await opportunity.notify(
-                notification_id=notification_id, text=view.to_text()
+                notification_id=notification_id, text=text
             )
         except asyncio.CancelledError:
             await asyncio.to_thread(queue.uncertain_delivery, org, job["id"], token)

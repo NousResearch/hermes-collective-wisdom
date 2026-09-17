@@ -121,7 +121,7 @@ def test_candidate_reference_preserves_only_bounded_refinement_reason():
         "kind": "candidate", "event_id": "event-1",
         "local_skill_id": "local-1", "content_hash": "sha256:" + "a" * 64,
         "qualification": "refinement",
-        "qualification_reason": {"meaningful_refinements": 3},
+        "qualification_reason": {"meaningful_refinements": 3, "stable_days": 7},
     }
 
 

@@ -13,6 +13,7 @@ callbacks, and host SDK seams.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import shlex
 import time
@@ -371,6 +372,72 @@ def _assessment_text(value: object, limit: int) -> str:
     return text
 
 
+_GENERIC_CANDIDATE_REASON = "This skill met your local sharing criteria."
+_CANDIDATE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+
+
+def _bounded_candidate_count(value: object) -> int | None:
+    """Accept only small source-projected counts, never coercing hostile values."""
+
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 365
+        else None
+    )
+
+
+def candidate_qualification_reason(reference: object) -> str:
+    """Render one deterministic sentence from allowlisted bounded qualification facts."""
+
+    result = _GENERIC_CANDIDATE_REASON
+    if isinstance(reference, dict):
+        facts = reference.get("qualification_reason")
+        if isinstance(facts, dict):
+            qualification = reference.get("qualification")
+            days = _bounded_candidate_count(facts.get("consecutive_business_days"))
+            refinements = _bounded_candidate_count(facts.get("meaningful_refinements"))
+            stable_days = _bounded_candidate_count(facts.get("stable_days"))
+
+            # A validated allowlisted signal remains useful for legacy projections that
+            # predate the qualification discriminator. Known types stay type-specific.
+            if days is not None and qualification in {None, "", "high_usage"}:
+                unit = "day" if days == 1 else "days"
+                result = f"You've used this skill on {days} consecutive business {unit}."
+            elif qualification in {None, "", "refinement"}:
+                if refinements is not None and stable_days is not None:
+                    refinement_unit = "refinement" if refinements == 1 else "refinements"
+                    day_unit = "day" if stable_days == 1 else "days"
+                    result = (
+                        f"You've made {refinements} meaningful {refinement_unit}, and this "
+                        f"skill has been stable for {stable_days} {day_unit}."
+                    )
+                elif refinements is not None:
+                    unit = "refinement" if refinements == 1 else "refinements"
+                    result = f"You've made {refinements} meaningful {unit} to this skill."
+                elif stable_days is not None:
+                    unit = "day" if stable_days == 1 else "days"
+                    result = f"This skill has been stable for {stable_days} {unit}."
+    return result
+
+
+def candidate_tui_text(job: dict[str, Any], view: NativeView) -> str:
+    """Add typed stock-TUI handoffs without changing shared rich-card content."""
+
+    reference = job.get("reference")
+    if not isinstance(reference, dict) or reference.get("kind") != "candidate":
+        return view.to_text()
+    candidate_id = job.get("id")
+    if not isinstance(candidate_id, str) or not _CANDIDATE_ID.fullmatch(candidate_id):
+        raise ValueError("candidate assessment ID is not safe for a slash command")
+    command = f"/wisdom candidate {candidate_id}"
+    return "\n\n".join((
+        view.to_text(),
+        f"Share opens the exact review and needs separate final approval:\n{command} share",
+        f"Portal creates an owner-private draft and does not publish:\n{command} portal",
+        f"Later applies the policy cooldown:\n{command} later",
+    ))
+
+
 def assessment_view(job: dict[str, Any]) -> NativeView:
     """Project immutable advice and deliberate candidate workflow controls."""
 
@@ -401,6 +468,10 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
     if not isinstance(advice, dict):
         raise ValueError("ready assessment advice is missing")
     title = _assessment_text(advice.get("title"), 120)
+    if kind == "candidate" and fallback:
+        # The legacy fallback used the local database UUID as its synthetic
+        # title. Keep the notice usable without exposing that internal handle.
+        title = "Local skill"
     explanation = _assessment_text(advice.get("explanation"), 600)
     if str(advice.get("relevance") or "") not in {"recommend", "digest"}:
         raise ValueError("assessment advice relevance is invalid")
@@ -414,15 +485,11 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
         _assessment_text(reference.get("local_skill_id"), 256)
         _assessment_text(reference.get("event_id"), 128)
         summary = "Local qualification review unavailable" if fallback else ""
-        preamble = (
-            "" if fallback else
-            "Hermes thinks the following skill would be useful to the rest of your team:"
-        )
+        preamble = ""
         handoff = (
             "Ask Hermes to inspect the candidate from your Wisdom inbox"
             if fallback else
-            "Choose Share to review the exact package before final approval, or open a "
-            "private draft in Portal. Nothing has been uploaded or shared yet"
+            "Nothing has been uploaded or shared"
         )
     elif kind == "skill":
         if provenance_kind != "agent_assessed":
@@ -441,12 +508,24 @@ def assessment_view(job: dict[str, Any]) -> NativeView:
     else:
         raise ValueError("assessment reference is unsupported")
     return NativeView(
-        title="Hermes Collective Wisdom",
+        title=(
+            "Hermes Collective Wisdom"
+            if kind != "candidate" or fallback else
+            f"{title} looks ready to share with your team."
+        ),
         summary=summary,
-        items=[NativeItem(title=title, detail=explanation, preamble=preamble)],
+        items=[NativeItem(
+            title=("Why it qualified" if kind == "candidate" and not fallback else title),
+            detail=(
+                candidate_qualification_reason(reference)
+                if kind == "candidate" and not fallback else explanation
+            ),
+            preamble=preamble,
+        )],
         notice=(
-            f"{handoff}. This is advisory only; nothing was installed, approved, "
-            "or shared."
+            f"{handoff}."
+            if kind == "candidate" and not fallback else
+            f"{handoff}. This is advisory only; nothing was installed, approved, or shared."
         ),
         actions=(
             [

@@ -16,8 +16,8 @@ from .weekly_queue import enqueue_weekly_review, weekly_policy_from_agent
 _MAX_CANDIDATES = 8
 _MAX_QUALIFICATION_COUNT = 365
 _QUALIFICATION_REASON_KEYS = {
-    "high_usage": "consecutive_business_days",
-    "refinement": "meaningful_refinements",
+    "high_usage": ("consecutive_business_days",),
+    "refinement": ("meaningful_refinements", "stable_days"),
 }
 
 
@@ -62,20 +62,20 @@ def _candidate_reference(store: Any, item: dict[str, Any]) -> dict[str, Any] | N
                 "local_skill_id": skill_id, "content_hash": content_hash,
             }
             qualification = event.get("qualification")
-            reason_key = _QUALIFICATION_REASON_KEYS.get(qualification)
+            reason_keys = _QUALIFICATION_REASON_KEYS.get(qualification, ())
             payload = event.get("payload")
             reasons = payload.get("local_reasons") if isinstance(payload, dict) else None
-            reason_value = reasons.get(reason_key) if (
-                isinstance(reasons, dict) and reason_key is not None
-            ) else None
-            if (
-                reason_key is not None
-                and type(reason_value) is int
-                and 1 <= reason_value <= _MAX_QUALIFICATION_COUNT
-            ):
+            projected = {
+                key: reasons[key]
+                for key in reason_keys
+                if isinstance(reasons, dict)
+                and type(reasons.get(key)) is int
+                and 1 <= reasons[key] <= _MAX_QUALIFICATION_COUNT
+            }
+            if projected:
                 reference.update({
                     "qualification": qualification,
-                    "qualification_reason": {reason_key: reason_value},
+                    "qualification_reason": projected,
                 })
             return reference
     return None
