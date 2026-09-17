@@ -441,7 +441,10 @@ def test_candidate_action_reuses_exact_owner_route_and_separates_private_draft(
         assert service.publication_submit_private.call_count == 1
         receipt = service.publication_submit_private.call_args.args[0]
         guard = service.publication_submit_private.call_args.kwargs["may_apply"]
-        assert receipt == "publication-receipt" and guard() is True
+        assert receipt == "publication-receipt"
+        from hermes_wisdom_plugin.errors import WisdomConflict  # pylint: disable=import-outside-toplevel
+        with pytest.raises(WisdomConflict, match="lease was lost"):
+            guard()
         assert record["result"]["publication_state"] == "ready"
         assert record["result"]["portal_url"].startswith("https://portal.example/")
         assert service.publication_review.call_count == 2
@@ -632,6 +635,36 @@ def test_candidate_action_retries_failed_preparation_after_claim(tmp_path: Path)
     assert recovered["operation"] == "publish"
     assert recovered["plan"].get("candidate_action_state") is None
     assert service.native_candidate_prepare.call_count == 2
+    service.publication_submit_private.assert_not_called()
+
+
+def test_candidate_action_stops_when_preparation_outlives_its_lease(tmp_path: Path):
+    from hermes_wisdom_plugin.errors import WisdomConflict  # pylint: disable=import-outside-toplevel
+
+    store = WisdomStore(tmp_path / "state")
+    lock_key = "candidate-action:org:default:assessment-1"
+
+    def expired_preparation(_event_id):
+        with store.transaction() as db:
+            db.execute(
+                "UPDATE operation_lock SET expires_at='1970-01-01T00:00:00+00:00' "
+                "WHERE entity_id=?", (lock_key,),
+            )
+        assert store.acquire_operation_lock(lock_key) is not None
+        return "local-draft"
+
+    service = SimpleNamespace(
+        store=store, native_owner=Mock(return_value=dict(OWNER)),
+        native_candidate_prepare=Mock(side_effect=expired_preparation),
+        publication_review=Mock(return_value=publication_review("local-draft")),
+        publication_submit_private=Mock(),
+    )
+    with pytest.raises(WisdomConflict, match="lease was lost"):
+        NativeReviewController(store).request_candidate_action(
+            service, invocation(SlackAdapter()), "candidate-event",
+            assessment_id="assessment-1", open_in_portal=False, may_apply=lambda: True,
+        )
+    service.publication_review.assert_not_called()
     service.publication_submit_private.assert_not_called()
 
 

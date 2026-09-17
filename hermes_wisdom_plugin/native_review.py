@@ -666,6 +666,13 @@ class NativeReviewController:  # pylint: disable=too-many-public-methods
                 **existing,
                 "plan": {**existing["plan"], "candidate_action_state": "preparing"},
             }
+        route_is_current = may_apply
+
+        def owns_current_claim() -> bool:
+            self.store.assert_operation_lock(lock_key, lock)
+            return route_is_current()
+
+        may_apply = owns_current_claim
         try:
             existing, claimed = self._claim_candidate_action(
                 service, invocation, event_id, assessment_id=assessment_id,
