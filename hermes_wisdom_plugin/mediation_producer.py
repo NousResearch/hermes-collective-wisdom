@@ -14,6 +14,11 @@ from .preferences import WisdomPreferences, suppression_key
 from .weekly_queue import enqueue_weekly_review, weekly_policy_from_agent
 
 _MAX_CANDIDATES = 8
+_MAX_QUALIFICATION_COUNT = 365
+_QUALIFICATION_REASON_KEYS = {
+    "high_usage": "consecutive_business_days",
+    "refinement": "meaningful_refinements",
+}
 
 
 def _feed_reference(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -52,10 +57,27 @@ def _candidate_reference(store: Any, item: dict[str, Any]) -> dict[str, Any] | N
             and event.get("content_hash") == content_hash
             and event.get("qualification") in signals
         ):
-            return {
+            reference: dict[str, Any] = {
                 "kind": "candidate", "event_id": str(event["id"]),
                 "local_skill_id": skill_id, "content_hash": content_hash,
             }
+            qualification = event.get("qualification")
+            reason_key = _QUALIFICATION_REASON_KEYS.get(qualification)
+            payload = event.get("payload")
+            reasons = payload.get("local_reasons") if isinstance(payload, dict) else None
+            reason_value = reasons.get(reason_key) if (
+                isinstance(reasons, dict) and reason_key is not None
+            ) else None
+            if (
+                reason_key is not None
+                and type(reason_value) is int
+                and 1 <= reason_value <= _MAX_QUALIFICATION_COUNT
+            ):
+                reference.update({
+                    "qualification": qualification,
+                    "qualification_reason": {reason_key: reason_value},
+                })
+            return reference
     return None
 
 

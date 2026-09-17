@@ -454,6 +454,36 @@ def test_candidate_action_reuses_exact_owner_route_and_separates_private_draft(
         assert service.publication_review.call_count == 1
 
 
+@pytest.mark.parametrize("adapter", [SlackAdapter(), TelegramAdapter(TelegramBot())])
+def test_native_portal_callback_after_share_replays_share_without_upload(
+    tmp_path: Path, adapter,
+):
+    store = WisdomStore(tmp_path / "state")
+    service = SimpleNamespace(
+        native_owner=Mock(return_value=dict(OWNER)),
+        native_candidate_prepare=Mock(return_value="local-draft"),
+        publication_review=Mock(return_value=publication_review("local-draft")),
+        publication_submit_private=Mock(),
+    )
+    controller = NativeReviewController(store)
+    route = invocation(adapter)
+    shared = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=False, may_apply=lambda: True,
+    )
+
+    replay = controller.request_candidate_action(
+        service, route, "candidate-event", assessment_id="assessment-1",
+        open_in_portal=True, may_apply=lambda: True,
+    )
+
+    assert replay == shared
+    assert replay["plan"]["candidate_action"] == "share"
+    service.native_candidate_prepare.assert_called_once_with("candidate-event")
+    service.publication_review.assert_called_once()
+    service.publication_submit_private.assert_not_called()
+
+
 def test_candidate_portal_action_recovers_lost_ack_without_duplicate_draft(tmp_path: Path):
     store = WisdomStore(tmp_path / "state")
     uncertain = {

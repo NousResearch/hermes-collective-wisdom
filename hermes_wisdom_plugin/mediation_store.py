@@ -1010,7 +1010,7 @@ class MediationStore:
             return _decode(row)
 
     def defer_candidate(
-        self, org: str, assessment_id: str, invocation: Any, *, stage: Any
+        self, org: str, assessment_id: str, invocation: Any | None, *, stage: Any
     ) -> tuple[dict[str, Any], bool]:
         """Atomically fence one delivered candidate and stage its offline suppression."""
 
@@ -1045,26 +1045,27 @@ class MediationStore:
             days = reference.get("not_now_suppression_days")
             if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
                 raise PermissionError("Collective Wisdom candidate policy snapshot is unavailable.")
-            address = json.loads(row["address_json"])
-            receipt = DeliveryReceipt.model_validate_json(row["receipt_json"])
-            expected_route = (
-                owner["profile_name"], row["owner_session"], row["actor_id"],
-                row["platform"], address.get("chat_id", ""),
-                address.get("thread_id", ""), address.get("scope_id", ""),
-                receipt.message_id,
-            )
-            actual_route = (
-                invocation.profile, invocation.session_key, invocation.actor_id,
-                invocation.platform, invocation.chat_id, invocation.thread_id,
-                invocation.scope_id, invocation.message_id,
-            )
-            if actual_route != expected_route or (
-                receipt.platform != invocation.platform
-                or receipt.destination != invocation.chat_id
-                or receipt.thread_id != invocation.thread_id
-                or receipt.scope_id != invocation.scope_id
-            ):
-                raise PermissionError("Collective Wisdom candidate control route changed.")
+            if invocation is not None:
+                address = json.loads(row["address_json"])
+                receipt = DeliveryReceipt.model_validate_json(row["receipt_json"])
+                expected_route = (
+                    owner["profile_name"], row["owner_session"], row["actor_id"],
+                    row["platform"], address.get("chat_id", ""),
+                    address.get("thread_id", ""), address.get("scope_id", ""),
+                    receipt.message_id,
+                )
+                actual_route = (
+                    invocation.profile, invocation.session_key, invocation.actor_id,
+                    invocation.platform, invocation.chat_id, invocation.thread_id,
+                    invocation.scope_id, invocation.message_id,
+                )
+                if actual_route != expected_route or (
+                    receipt.platform != invocation.platform
+                    or receipt.destination != invocation.chat_id
+                    or receipt.thread_id != invocation.thread_id
+                    or receipt.scope_id != invocation.scope_id
+                ):
+                    raise PermissionError("Collective Wisdom candidate control route changed.")
             local = db.execute(
                 """SELECT canonical_path,current_hash,deleted_at,source_kind
                 FROM local_skill WHERE id=?""",
@@ -1112,6 +1113,13 @@ class MediationStore:
             return _decode(db.execute(
                 "SELECT * FROM wisdom_shared_assessment WHERE id=?", (assessment_id,)
             ).fetchone()), True
+
+    def defer_candidate_deliberate(
+        self, org: str, assessment_id: str, *, stage: Any
+    ) -> tuple[dict[str, Any], bool]:
+        """Apply the same verified candidate cooldown for an explicit local slash action."""
+
+        return self.defer_candidate(org, assessment_id, None, stage=stage)
 
     def candidate_edit_uncertain(
         self, org: str, assessment_id: str, *, error: str

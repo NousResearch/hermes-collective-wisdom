@@ -487,6 +487,268 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise SharePackagingError()
         return draft_id
 
+    def _candidate_slash_context(  # pylint: disable=too-many-locals
+        self, assessment_id: str
+    ) -> tuple[dict, dict, Any]:
+        """Resolve one delivered, owner-bound candidate and its exact source."""
+
+        from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
+        from .qualification import (  # pylint: disable=import-outside-toplevel
+            UnsafeSnapshotError, snapshot_tree,
+        )
+
+        owner = self.native_owner()
+        queue = MediationStore(self.store, owner=owner)
+        try:
+            record = queue.candidate_callback_record(owner["organization_id"], assessment_id)
+        except ValueError as exc:
+            # MediationStore uses ValueError for a replaced owner binding.  At this
+            # explicit action boundary that is an authorization failure, not bad input.
+            raise PermissionError(
+                "Collective Wisdom candidate owner changed."
+            ) from exc
+        reference = record.get("reference") if isinstance(record, dict) else None
+        if not isinstance(reference, dict) or reference.get("kind") != "candidate":
+            raise PermissionError("Collective Wisdom candidate assessment is invalid.")
+        event_id = str(reference.get("event_id") or "")
+        inspected = self.native_candidate_inspect(event_id)
+        local = queue.store.local_skill(str(reference.get("local_skill_id") or ""))
+        source_changed = (
+            not local or local.get("deleted_at") is not None
+            or local.get("source_kind") != "local"
+            or local.get("current_hash") != reference.get("content_hash")
+        )
+        if not source_changed:
+            try:
+                current_hash, _tree = snapshot_tree(
+                    Path(str((local or {}).get("canonical_path") or ""))
+                )
+            except (OSError, UnsafeSnapshotError):
+                source_changed = True
+            else:
+                source_changed = current_hash != reference.get("content_hash")
+        if (
+            inspected.get("content_hash") != reference.get("content_hash")
+            or record.get("state") not in {"delivered", "deferred"}
+            or self.native_owner() != owner
+            or source_changed
+        ):
+            raise PermissionError("Collective Wisdom candidate assessment changed.")
+        return owner, record, queue
+
+    def _candidate_tui_portal_upgrade(
+        self, controller: Any, successor: dict[str, Any], assessment_id: str,
+        owner: dict[str, str], *, may_apply: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Upgrade a TUI Share review without changing native callback replay."""
+
+        action = successor["plan"].get("candidate_action")
+        if action == "portal":
+            return successor
+        if action != "share":
+            raise WisdomConflict("Candidate action is not available for Portal upgrade")
+        lock_key = (
+            f"candidate-action:{owner['organization_id']}:"
+            f"{owner['profile_name']}:{assessment_id}"
+        )
+        store = cast(Any, self.store)
+        lock = store.acquire_operation_lock(lock_key)
+        if lock is None:
+            return successor
+
+        def owns_current_claim() -> bool:
+            store.assert_operation_lock(lock_key, lock)
+            return may_apply()
+
+        try:
+            current = controller.load(successor["id"])
+            if current.get("state") != "pending":
+                raise WisdomConflict(
+                    "Candidate action is already completed; Portal is unavailable"
+                )
+            plan = current["plan"]
+            if (
+                plan.get("owner") != owner
+                or plan.get("candidate_assessment_id") != assessment_id
+            ):
+                raise PermissionError("Collective Wisdom candidate owner changed.")
+            if plan.get("candidate_action") == "portal":
+                return current
+            if plan.get("candidate_action") != "share" or owns_current_claim() is not True:
+                raise PermissionError("Collective Wisdom candidate review changed.")
+            outcome = self.publication_submit_private(
+                plan["receipt"], may_apply=owns_current_claim,
+                candidate_assessment_id=assessment_id,
+            )
+            current = controller._replace_candidate_action(  # pylint: disable=protected-access
+                current["id"], "publish", {**plan, "candidate_action": "portal"},
+            )
+            return controller._complete_candidate_portal(  # pylint: disable=protected-access
+                self, current, assessment_id,
+                may_apply=owns_current_claim, outcome=outcome,
+            )
+        finally:
+            store.release_operation_lock(lock_key, lock)
+
+    def candidate_slash_action(  # pylint: disable=too-many-locals
+        self, assessment_id: str, action: str, *, may_apply: Callable[[], bool]
+    ) -> dict[str, Any]:
+        """Apply one explicit stock-TUI candidate action through shared kernels."""
+
+        from .native_context import NativeInvocation  # pylint: disable=import-outside-toplevel
+        from .native_review import NativeReviewController  # pylint: disable=import-outside-toplevel
+        from .portal_urls import safe_portal_url  # pylint: disable=import-outside-toplevel
+        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
+
+        if action not in {"share", "portal", "later"}:
+            raise ValueError("Unsupported candidate action")
+        _require_current(may_apply)
+        owner, record, queue = self._candidate_slash_context(assessment_id)
+        org = owner["organization_id"]
+        if action == "later":
+            preferences = WisdomPreferences(self, clock=queue.clock)
+            user = preferences.identity(org)
+
+            def stage(db, reference, days):
+                _require_current(may_apply)
+                queue._check_bound_owner(db)  # pylint: disable=protected-access
+                preferences.stage_suppression(
+                    db, org=org, user=user, reference=reference, days=days
+                )
+
+            deferred, changed = queue.defer_candidate_deliberate(
+                org, assessment_id, stage=stage
+            )
+            _require_current(may_apply)
+            reference = deferred["reference"]
+            return {
+                "action": "later", "candidate_id": assessment_id,
+                "deferred": True, "already_deferred": not changed,
+                "not_now_suppression_days": reference["not_now_suppression_days"],
+                "preference_sync": "pending" if changed else "unchanged",
+            }
+        if record.get("state") != "delivered":
+            raise PermissionError("Collective Wisdom candidate assessment was already consumed.")
+        reference = record["reference"]
+        invocation = NativeInvocation(
+            platform="tui", profile=owner["profile_name"], chat_type="private",
+            chat_id="", actor_id=owner["account_id"], actor_name="",
+            thread_id="", scope_id="", message_id="",
+            session_key=f"wisdom:tui:candidate:{assessment_id}", adapter=None,
+        )
+        controller = NativeReviewController(self.store)
+        successor = controller.request_candidate_action(
+            self, invocation, str(reference["event_id"]),
+            assessment_id=assessment_id, open_in_portal=action == "portal",
+            may_apply=may_apply,
+        )
+        _require_current(may_apply)
+        if successor.get("state") != "pending":
+            label = "Share" if action == "share" else "Portal"
+            raise WisdomConflict(
+                f"Candidate action is already completed; {label} is unavailable"
+            )
+        if action == "share":
+            if successor["plan"].get("candidate_action") != "share":
+                raise WisdomConflict(
+                    "Candidate was already opened in Portal; Share approval is unavailable"
+                )
+            internal = {
+                "owner", "candidate_assessment_id", "candidate_event_id",
+                "candidate_action", "candidate_action_state", "review_deferral",
+            }
+            review = {
+                key: value for key, value in successor["plan"].items()
+                if key not in internal
+            }
+            return {"action": "share", "candidate_id": assessment_id, "review": review}
+        successor = self._candidate_tui_portal_upgrade(
+            controller, successor, assessment_id, owner, may_apply=may_apply
+        )
+        result = successor.get("result") if isinstance(successor.get("result"), dict) else {}
+        portal_url = safe_portal_url(result.get("portal_url"))
+        if portal_url is None:
+            return {
+                "action": "portal", "candidate_id": assessment_id,
+                "state": "preparing", "publication_state": "private_draft_pending",
+            }
+        return {
+            "action": "portal", "candidate_id": assessment_id,
+            "state": result.get("state"),
+            "publication_state": result.get("publication_state"),
+            "portal_url": portal_url,
+        }
+
+    def candidate_publication_approve(  # pylint: disable=too-many-locals
+        self, receipt: str, *, may_apply: Callable[[], bool]
+    ) -> dict[str, Any]:
+        """Submit one exact candidate receipt only after a second typed slash action."""
+
+        owner = self.native_owner()
+        with self.store.transaction() as db:
+            rows = db.execute(
+                "SELECT id,plan_json FROM wisdom_consent WHERE organization_id=? AND profile=? "
+                "AND operation='publish' AND state='pending' "
+                "AND json_extract(plan_json,'$.receipt')=? "
+                "AND json_type(plan_json,'$.candidate_assessment_id')='text'",
+                (owner["organization_id"], owner["profile_name"], receipt),
+            ).fetchall()
+        if len(rows) != 1:
+            raise WisdomConflict("Candidate publication receipt is missing or already consumed")
+        plan = json.loads(rows[0]["plan_json"])
+        assessment_id = str(plan["candidate_assessment_id"])
+        lock_key = (
+            f"candidate-action:{owner['organization_id']}:"
+            f"{owner['profile_name']}:{assessment_id}"
+        )
+        store = cast(Any, self.store)
+        lock = store.acquire_operation_lock(lock_key)
+        if lock is None:
+            raise WisdomConflict("Candidate publication review is already in progress")
+
+        def owns_current_claim() -> bool:
+            store.assert_operation_lock(lock_key, lock)
+            return may_apply()
+
+        try:
+            with store.transaction() as db:
+                current = db.execute(
+                    "SELECT plan_json FROM wisdom_consent WHERE id=? "
+                    "AND organization_id=? AND profile=? AND operation='publish' "
+                    "AND state='pending'",
+                    (rows[0]["id"], owner["organization_id"], owner["profile_name"]),
+                ).fetchone()
+            if current is None:
+                raise WisdomConflict(
+                    "Candidate publication receipt is missing or already consumed"
+                )
+            plan = json.loads(current["plan_json"])
+            if str(plan.get("candidate_assessment_id") or "") != assessment_id:
+                raise PermissionError(
+                    "Collective Wisdom candidate publication review is invalid."
+                )
+            current_owner, record, _queue = self._candidate_slash_context(assessment_id)
+            if current_owner != owner or record.get("state") != "delivered":
+                raise PermissionError("Collective Wisdom candidate assessment changed.")
+            if plan.get("candidate_action") != "share" or plan.get("owner") != owner:
+                raise PermissionError(
+                    "Collective Wisdom candidate publication review is invalid."
+                )
+            _require_current(owns_current_claim)
+            result = self.publication_submit(receipt, may_apply=owns_current_claim)
+            _require_current(owns_current_claim)
+            with store.transaction() as db:
+                changed = db.execute(
+                    "UPDATE wisdom_consent SET state='completed',result_json=?,updated_at=? "
+                    "WHERE id=? AND state='pending'",
+                    (json.dumps(result, sort_keys=True), time.time(), rows[0]["id"]),
+                ).rowcount
+            if changed != 1:
+                raise WisdomConflict("Candidate publication review changed after submission")
+            return result
+        finally:
+            store.release_operation_lock(lock_key, lock)
+
     def notification_settings(
         self, *, may_apply: Callable[[], bool], include_mute_control: bool = False
     ) -> dict[str, Any]:
@@ -1231,14 +1493,14 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
         return resolve()
 
-    async def _slash(self, raw_args: str) -> str:  # pylint: disable=too-many-locals
+    async def _slash(self, raw_args: str) -> str:  # pylint: disable=too-many-locals,too-many-statements
         """Run network work off-loop; cancelled TUI workers retain their own cleanup."""
         from .commands import (  # pylint: disable=import-outside-toplevel
             CONTRIBUTION_COMMANDS, run_slash,
         )
         from .tui_actions import handles_tui_action  # pylint: disable=import-outside-toplevel
         from .tui_contribution import (  # pylint: disable=import-outside-toplevel
-            handles_tui_contribution,
+            handles_plugin_only_candidate_action, handles_tui_contribution,
         )
 
         service = task = None
@@ -1251,15 +1513,17 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 return "Invalid Wisdom command. Use /wisdom help."
             command = words[0].casefold() if words else "help"
             tui_action = handles_tui_action(raw_args) or handles_tui_contribution(raw_args)
+            plugin_only_action = handles_plugin_only_candidate_action(raw_args)
             can_review = self.can_request_review
             review_current = self.is_review_current
             request_review = self.request_review
             action_type = self.review_action_type
             outcome_type = self.review_outcome_type
-            admitted = False
+            admitted = plugin_only_action
             review_capability = (request_review, review_current, action_type, outcome_type)
             if (
                 tui_action
+                and not plugin_only_action
                 and all(callable(value) for value in (request_review, can_review, review_current))
                 and action_type is not None
                 and outcome_type is not None
@@ -1271,10 +1535,11 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             if not admitted and (tui_action or command in CONTRIBUTION_COMMANDS):
                 return run_slash(raw_args, object())
             if tui_action:
-                assert callable(request_review)
-                assert callable(review_current)
-                assert action_type is not None
-                assert outcome_type is not None
+                if not plugin_only_action:
+                    assert callable(request_review)
+                    assert callable(review_current)
+                    assert action_type is not None
+                    assert outcome_type is not None
                 wait_for_task = False
                 task = asyncio.create_task(asyncio.to_thread(
                     self._run_tui_action_worker,
@@ -1328,10 +1593,13 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             if not self._tui_action_current(cancel, review_current):
                 return _UNAVAILABLE
             if handles_tui_contribution(raw_args):
-                return run_tui_contribution(
-                    raw_args, service, request_review, action_type, outcome_type,
-                    may_apply=lambda: self._tui_action_current(cancel, review_current),
-                )
+                try:
+                    return run_tui_contribution(
+                        raw_args, service, request_review, action_type, outcome_type,
+                        may_apply=lambda: self._tui_action_current(cancel, review_current),
+                    )
+                except ValueError as exc:
+                    return str(exc)
             return run_tui_action(
                 raw_args,
                 service,
@@ -1344,15 +1612,18 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             service.close()
 
     def _tui_action_current(
-        self, cancel: threading.Event, review_current: Callable[[], bool]
+        self, cancel: threading.Event, review_current: Callable[[], bool] | None
     ) -> bool:
         with self._lock:
             if self._closed or cancel.is_set():
                 return False
-        try:
-            current = review_current() is True
-        except Exception:  # pylint: disable=broad-exception-caught
-            return False
+        if review_current is None:
+            current = True
+        else:
+            try:
+                current = review_current() is True
+            except Exception:  # pylint: disable=broad-exception-caught
+                return False
         with self._lock:
             return current and not self._closed and not cancel.is_set()
 

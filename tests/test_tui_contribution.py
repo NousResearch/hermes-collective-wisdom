@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_wisdom_plugin.tui_contribution import (
+    handles_plugin_only_candidate_action,
     handles_tui_contribution,
     run_tui_contribution,
 )
@@ -72,6 +73,34 @@ class FakeContributionService:
     def native_candidate_prepare(self, event_id, *, may_apply):
         self.calls.append(("native_candidate_prepare", event_id, may_apply))
         return "draft-1"
+
+    def candidate_slash_action(self, assessment_id, action, *, may_apply):
+        self.calls.append(("candidate_slash_action", assessment_id, action, may_apply))
+        if action == "share":
+            return {
+                "action": "share", "candidate_id": assessment_id,
+                "review": {
+                    **self.payload, "receipt": "publication-receipt",
+                    "publication_mode": "moderated", "policy_version": 7,
+                },
+            }
+        if action == "portal":
+            return {
+                "action": "portal", "candidate_id": assessment_id,
+                "state": "pending", "publication_state": "ready",
+                "portal_url": "https://portal.example/wisdom/review/remote-draft",
+            }
+        return {
+            "action": "later", "candidate_id": assessment_id,
+            "deferred": True, "not_now_suppression_days": 7,
+        }
+
+    def candidate_publication_approve(self, receipt, *, may_apply):
+        self.calls.append(("candidate_publication_approve", receipt, may_apply))
+        return {
+            "operation_id": "operation-1", "state": "pending",
+            "publication_state": "pending_moderation",
+        }
 
     def suggest(self, skill_name, *, allow_model_review, may_apply):
         self.calls.append(("suggest", skill_name, allow_model_review, may_apply))
@@ -157,6 +186,83 @@ def test_router_claims_only_complete_contribution_journeys():
     assert not handles_tui_contribution("install skill-1")
     assert not handles_tui_contribution("prepared submit forged")
     assert not handles_tui_contribution("publication submit forged")
+
+
+def test_plugin_only_router_claims_only_explicit_candidate_actions_and_approval():
+    assert handles_plugin_only_candidate_action("candidate assessment-1 share")
+    assert handles_plugin_only_candidate_action("candidate assessment-1 portal")
+    assert handles_plugin_only_candidate_action("candidate assessment-1 later")
+    assert handles_plugin_only_candidate_action("publication approve receipt-1")
+    assert not handles_plugin_only_candidate_action("candidate event-1")
+    assert not handles_plugin_only_candidate_action("publish draft-1")
+    assert not handles_plugin_only_candidate_action("publication review draft-1")
+
+
+def test_candidate_share_only_displays_complete_exact_review_and_second_command():
+    service = FakeContributionService()
+    output = run_tui_contribution(
+        "candidate assessment-1 share", service,
+        lambda **_kwargs: pytest.fail("stock TUI action must not request host review"),
+        None, None, may_apply=lambda: True,
+    )
+
+    review_text, instruction = output.split("\n\n", 1)
+    result = json.loads(review_text)
+    assert result["review"]["files"] == service.payload["files"]
+    assert result["review"]["hashes"] == service.payload["hashes"]
+    assert result["review"]["receipt"] == "publication-receipt"
+    assert "/wisdom publication approve publication-receipt" in instruction
+    assert [call[:3] for call in service.calls] == [
+        ("candidate_slash_action", "assessment-1", "share"),
+    ]
+    assert not any(call[0] in {"publication_submit", "candidate_publication_approve"}
+                   for call in service.calls)
+
+
+def test_candidate_publication_approval_is_a_separate_exact_receipt_action():
+    service = FakeContributionService()
+    output = run_tui_contribution(
+        "publication approve publication-receipt", service,
+        lambda **_kwargs: pytest.fail("stock TUI action must not request host review"),
+        None, None, may_apply=lambda: True,
+    )
+    assert json.loads(output)["publication_state"] == "pending_moderation"
+    assert [call[:2] for call in service.calls] == [
+        ("candidate_publication_approve", "publication-receipt"),
+    ]
+
+
+@pytest.mark.parametrize("action", ["portal", "later"])
+def test_candidate_portal_and_later_are_explicit_without_host_review(action):
+    service = FakeContributionService()
+    output = run_tui_contribution(
+        f"candidate assessment-1 {action}", service,
+        lambda **_kwargs: pytest.fail("stock TUI action must not request host review"),
+        None, None, may_apply=lambda: True,
+    )
+    result = json.loads(output)
+    assert result["action"] == action
+    if action == "portal":
+        assert result["portal_url"].startswith("https://portal.example/")
+        assert result["publication_state"] == "ready"
+    else:
+        assert result["deferred"] is True
+        assert result["not_now_suppression_days"] == 7
+
+
+@pytest.mark.parametrize("raw", [
+    "candidate", "candidate assessment-1 forged",
+    "candidate assessment-1 share extra", "publication approve",
+    "publication approve receipt-1 extra",
+])
+def test_candidate_slash_action_malformed_syntax_is_rejected_without_effect(raw):
+    service = FakeContributionService()
+    with pytest.raises(ValueError, match="Usage:"):
+        run_tui_contribution(
+            raw, service, lambda **_kwargs: None, None, None,
+            may_apply=lambda: True,
+        )
+    assert not service.calls
 
 
 def test_qualified_candidate_exports_complete_private_edit_payload():
