@@ -3,13 +3,17 @@
 # pylint: disable=missing-function-docstring
 
 import os
+from pathlib import Path
+import runpy
 import signal
 import sys
 import time
 
 import pytest
 
-from scripts.run_receipt_mutations import _run
+_run = runpy.run_path(
+    str(Path(__file__).parents[1] / "scripts" / "run_receipt_mutations.py")
+)["_run"]
 
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process groups required")
