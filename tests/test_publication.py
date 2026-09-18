@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -248,3 +249,21 @@ def test_currentness_loss_during_head_read_stops_before_publish(tmp_path: Path):
 
     assert client.state.calls["publish"] == 0
     assert service.state.publication_for_draft(prepared["draft_id"])["phase"] == "approved"
+
+
+def test_publication_commit_identity_survives_clock_ticks(tmp_path, monkeypatch):
+    """Rechecking unchanged bytes must not manufacture another commit identity."""
+    from hermes_wisdom_plugin import wire  # pylint: disable=import-outside-toplevel
+
+    ticks = iter(range(10))
+    clock = SimpleNamespace(
+        now=lambda _tz: datetime(2026, 1, 1, tzinfo=timezone.utc)
+        + timedelta(seconds=next(ticks))
+    )
+    monkeypatch.setattr(wire, "datetime", clock)
+    service, prepared, client, _ = publication(tmp_path)
+
+    result = service.submit(service.review(prepared["draft_id"])["receipt"])
+
+    assert result["publication_state"] == "published"
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)

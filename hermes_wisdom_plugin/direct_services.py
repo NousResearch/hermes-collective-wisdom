@@ -1085,6 +1085,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         commit = build_commit(
             tree, [], owner=owner["account_id"], device=owner["installation_id"],
             message="Collective Wisdom owner-private draft", objects=objects,
+            ts=datetime.fromisoformat(draft["created_at"]).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         request = {
             "slug": self._slug(manifest.name), "commit": commit,
