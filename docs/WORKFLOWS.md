@@ -1,377 +1,139 @@
 # Detailed workflows and compatibility notes
 
-Start with the [README](../README.md) for installation and everyday use.
-This reference preserves the detailed command behavior, approval boundaries,
-and development-host limitations. Development-host results are not proof of
-stock-host or deployed-service acceptance.
+Start with the [README](../README.md). This reference describes current plugin-only
+behavior. Local tests do not prove deployed-service or live connector acceptance.
 
-## Installation, updates, and maintenance
+## Enrollment and ownership
 
-Setup requires explicit disclosure acceptance and read/install scopes, but does
-not install a skill. Noninteractive setup requires `--accept-disclosure`.
-`/wisdom browse`, `/wisdom show`, and `/wisdom versions` provide read-only,
-shared-chat-safe cards. Detail/version cards preserve exact source descriptions
-and trusted Portal links. An admitted private Slack/Telegram install can review
-every exact package byte and approve the bound receipt. Supported development
-TUI hosts provide the historical action flow at the end of this reference; shared chats and unsupported
-hosts retain the terminal handoff. Slash uninstall remains terminal-only. `/wisdom setup`
-only points to the terminal; it cannot accept disclosure. Terminal installation
-requires an exact, enrolment-bound review receipt, valid
-for 24 hours before starting. Interactive install also supports a plain terminal
-confirmation. Re-run `install --plan` to recheck an expired or changed review.
-Retry interrupted installation or update with the same `--apply-receipt`;
-status and `check` do not silently resume mutation. Manual update revalidates
-owner, Gateway authority, exact incoming bytes, compatibility, and local scan.
-Local edits block by default; `update --plan --preserve-modified` binds an exact
-unmanaged preservation destination and acknowledgement into the receipt before
-replacement. Explicit `maintenance --apply-automatic` applies only freshly authorized
-`AUTO_WITH_NOTICE` or `REQUIRED` updates. `AUTO_WITH_NOTICE` refuses local edits;
-`REQUIRED` preserves the exact edited tree as an unmanaged copy before replacement.
-`MANUAL` never mutates automatically. Uninstall moves files to recoverable,
-undiscoverable trash.
+`hermes wisdom setup` accepts the current disclosure and creates an owner-bound
+installation through the Gateway. The plugin stores only the returned identity and
+small local domain records in the host-provided PluginState namespace. Every protected
+operation rechecks profile, account, organization, installation, route, and
+entitlement. Switching any owner component invalidates pending authority.
 
-Private native advisory delivery is implemented locally. Native settings, install, update,
-setup, and publication mutate only after exact owner-bound native review; publication
-status/reopen and trusted Portal links edit the original card. Native update `Not Now` and
-explicit command reopen are implemented locally; this is not cadence suppression.
-`--accept-partial` acknowledges setup/compatibility limitations; it never
-authorizes setup commands. Installed files are not proof of verified readiness.
-`--accept-warnings` is a separate, exact-review acknowledgement for unchanged
-host scanner findings. It is bound to the owner, operation, package content and
-modes, and scanner evidence. New findings or bytes require another review;
-automatic updates never supply this acknowledgement. Scanner unavailability,
-credentials/private keys, integrity/path failures, and authoritative server
-policy remain hard stops.
-An update clears readiness across versions even when setup guidance bytes are
-identical; version-two setup/verification must be reviewed separately. The
-recorded update policy does not start a background update worker; mutation occurs only
-through the explicit maintenance flag.
-This development slice verifies installation on Linux/macOS. Secure receipt
-operations fail closed on platforms without descriptor-relative, no-follow
-filesystem support; Windows installation is not yet supported.
+## Catalog, installation, and updates
 
+Catalog commands are read-only:
+
+```bash
+hermes wisdom list --json
+hermes wisdom browse incident --json
+hermes wisdom show <skill-id> --json
+```
+
+Installation and update use exact review receipts. Review the package bytes, hashes,
+compatibility, scanner result, and requested capabilities before applying the receipt:
+
+```bash
+hermes wisdom install <skill-id>@v1 --plan --json
+hermes wisdom install --apply-receipt <receipt> --json
+hermes wisdom update <skill-id> --plan --json
+hermes wisdom update --apply-receipt <receipt> --json
+```
+
+Changed or expired content requires a new review. Installation does not approve or run
+setup. Local edits block replacement unless the explicit preservation workflow is
+reviewed. Automatic updates run only from the explicit bounded maintenance command and
+only under freshly verified server policy:
 
 ```bash
 hermes wisdom maintenance --refresh-policy --json
-# Separately authorized automatic-update application:
 hermes wisdom maintenance --apply-automatic --json
-hermes wisdom notifications --mark-seen --json
-hermes wisdom sync retry --json
 ```
 
-## Local qualification and weekly evidence
+No scheduler or notice-repair worker is started.
 
-Admitted private Slack/Telegram human turns now run a bounded due feed/weekly
-producer pass before the existing assessment step. The durable 60-second refresh
-claim prevents duplicate refreshes across turns or plugin recreation, including
-failed refresh attempts. This does not run automatic updates, renew consent, or
-start a background timer. Fixed mode disables this producer path.
+## Local qualification
 
-CLI/TUI use the optional host post-reply presentation opportunity for a bounded
-producer, assessment and delivery pass. Local pre-LLM capture reads the enrollment
-binding and retains the session's real model context and bounded conversation
-excerpt, but does not claim work or call a model. Background sessions without an
-interactive opportunity cannot claim or deliver advice. Shared durable state,
-not the refresh cooldown, prevents the same item appearing in every session.
-Older hosts without this capability retain manual maintenance/review and inbox
-inspection. See [verification](TESTING.md).
+The plugin observes successful host `on_skill_lifecycle` load/mutation facts. Fixed
+local thresholds qualify repeated business-day use or repeated meaningful refinement
+with stability and recent-use checks. Session completion processes due stability jobs
+but is not itself usage evidence. Signed-out, mismatched-owner, shared, background, or
+subagent activity cannot inherit another owner's counters.
 
+Ambiguous refinement classification is disabled by default. If explicitly enabled, it
+may send bounded exact before/after `SKILL.md` text to the configured auxiliary model
+after an admitted successful private owning-human turn. Model output supplies only one
+piece of refinement evidence; it never qualifies by itself and never grants publication
+consent.
 
-Enrolled profiles observe the host's successful skill-load and mutation facts
-through `on_skill_lifecycle`. Both reference qualification paths are local:
-consecutive business-day usage and independent meaningful refinements with
-stability/recent-use checks. These are not claims of verified task success.
-Signed-out or mismatched owners do not collect evidence; reenrollment cannot
-inherit another account's counters. Session completion processes bounded due
-stability jobs without counting another use.
+`hermes wisdom notifications --json` and `hermes wisdom inbox --json` are explicit
+local reads. They do not poll the feed, call a model, send a notice, or execute an
+action.
 
-`hermes wisdom review-week --dry-run --json` inspects eligible weekly evidence;
-without `--dry-run` it queues local evidence using current server policy. Neither
-form calls a model or sends a recommendation. `maintenance` is the explicit feed
-and policy network entrypoint. `notifications` and `inbox` read only persisted,
-owner-bound local state; they do not poll, fetch metadata, invoke a model, send a
-card, or apply an update. `notifications` is the durable feed; `inbox` projects
-queued assessments, unresolved native reviews, and installed setup references.
-The model tool restricts reviews to its admitted private conversation; terminal
-inspection remains bound to the exact enrolled owner. Fixed mode hides proactive
-assessments without hiding explicit reviews. Expired and uncertain reviews are
-reported without renewal or execution; installed files do not imply readiness.
-Feed cursors and rows are fenced to the exact account,
-organization, installation, Gateway route, and checkpoint generation. Explicit
-maintenance caches at most eight exact-version metadata records per pass. Advice
-fails closed until that local metadata verifies the exact skill/version, and then
-excludes a version published by the current member while private activity retains it.
-Explicit maintenance queues bounded owner-bound feed and qualified-week references only
-after fresh policy, mute, and suppression checks. Already queued feed rows are skipped
-before the eight-item projection bound, so later feed rows and policy-capped weekly evidence
-remain reachable across retries; reported counts are new durable rows, not deduplicated
-replays. Queueing does not mark the native feed seen or delivered. It does not call a model
-or send a notification. Automatic completion is projected as one durable local `updated`
-feed notice; automatic-update notice presentation remains a later checkpoint.
-Ambiguous edits remain conservatively non-meaningful without an authorized
-classifier. The optional refinement review uses the host's auxiliary task
-`hermes_collective_wisdom_refinement`, deferred to `on_session_end` after skill
-operations—not a new background scheduler. Clear structural/trivial edits stay
-local and model-free.
+## Best-effort end-turn notices
 
-Enrollment alone does **not** permit transmitting candidate text. To opt in for
-the active profile:
+Supported private Desktop and messaging routes may check for a notice at turn end.
+There is no proactive notice for plain CLI/TUI chat or unsupported clients.
+
+A check first requires a renderer, then uses the owner-local cooldown, performs one
+bounded cursor-based feed request, combines eligible local qualified candidates, and
+reads current policy, mute, and suppression. It offers at most one deterministic
+human-facing notice. Cursor advancement never skips unconsumed pagination; a failed
+feed preserves the cursor. Renderer failure is swallowed so it cannot fail the agent
+turn. A missed notice stays missed.
+
+The notice path has no LLM presentation, prompt/history injection, synthetic user turn,
+delivery claim, settlement, operation outcome, advisory lease, liveness registry,
+outbox, durable popup, or retry/rescue worker. Opening a notice starts the ordinary
+explicit review and never approves an effect.
+
+## Contribution and publication
+
+`hermes wisdom suggest <local-skill> --json` prepares an owner-private local draft. It
+never uploads or publishes. Inspect/edit/re-review the complete draft and hashes:
 
 ```bash
-hermes config set plugins.entries.hermes-collective-wisdom.settings.qualification.allow_model_review true
+hermes wisdom prepared inspect <draft-id> --json
+hermes wisdom prepared save <draft-file.json> --json
+hermes wisdom prepared review <draft-id> --json
 ```
 
-This uses the host's plugin LLM trust controls; the plugin-owned task needs no
-provider/model override grant. The model-review setting is disabled by default.
-Enabling it permits exact before/after `SKILL.md` text
-(up to 16,000 characters each) and its structural delta to be sent to the
-host-configured auxiliary model after a successful owning private human turn.
-No conversation history or other skill files are sent. Cron, subagent, shared-chat,
-unadmitted, failed, and interrupted turns cannot trigger it. Revoking the setting
-stops queued calls and prevents in-flight results from being applied; already-sent
-text cannot be recalled. Current owner and actual on-disk content are checked
-before sending and again before accepting a result.
-
-Model failure or invalid output stays conservative; there is no plugin-owned
-provider fallback. A meaningful label supplies refinement evidence only:
-thresholds, stability, recent use, and owner checks still gate qualification, and
-publication still requires its separate exact-content consent. See the
-[refinement gate](TESTING.md#authorized-ambiguous-refinement-classifier--2026-09-14)
-for local/pinned-host evidence and release limits.
-
-Preparation may include a frozen, editable “Publisher usage (client-reported)”
-section before hashing. Upload/retry never adds or refreshes those claims.
-
-Terminal `suggest` defaults to a concise local-draft summary. On a TTY it offers
-file/warning review, private draft editing, continuation to sharing review,
-or keeping the draft. The sharing review displays destination, visibility, server
-moderation mode, and warning acknowledgement before an exact final confirmation.
-Non-TTY use never prompts or approves; it prints resume commands. `--json` is the
-stable machine surface and never opens menus. Complete editable bytes remain an
-explicit `prepared inspect ... --json` export rather than ordinary human output.
-
-`hermes wisdom prepared edit <draft-id>` edits a disposable copy of the draft's
-`SKILL.md` using your configured `VISUAL` or `EDITOR`. A successful edit is saved
-against the inspected draft hashes; other files and the original skill are left
-unchanged. Editing never invokes the packaged scripts. Use `prepared review` to
-recheck the saved draft, and `publication review` for a fresh sharing receipt.
-
-Native package preparation preserves ordinary skill files and executable script
-intent under a 10 MiB aggregate payload budget plus a separate path/tree metadata
-budget. Opaque resources are not opened, extracted, executed, or silently passed
-to model review. Gateways enforcing the older instruction-only limits reject
-these expanded packages independently of local preparation. Keep the complete
-draft until Gateway/Portal compatibility is available; do not drop files or treat
-local acceptance as successful service publication.
-
-## Queued recommendation assessments
-
-In the default `agent` notification mode, admitted private Slack/Telegram turns
-process up to eight queued references through `pre_llm_call`. CLI/TUI defer this
-work until the host's interactive post-reply opportunity, using the real owning
-turn's copied Python context rather than a guessed provider/model. The in-memory
-capture is owner/enrollment-bound, single-use, bounded to 32 sessions, replaced
-on the next capture, and cleared on unload. Missing routing waits; it does not
-fall back to another model. A newer unrouted turn discards the previous capture.
-This is a bounded callback, not a poller or schedule. Explicit maintenance stays
-available; reading `inbox` performs no assessment or network request.
-
-Shared arrivals use one structured request through the active owning model
-(`task=None`, no auxiliary route or provider override). Its bounded input contains
-published version metadata, installed shared-skill summaries, prior introduction
-records, and recent user/assistant conversation text—not system/tool messages or
-local candidate files. The request timeout is 45 seconds; host/provider retries
-can add latency. Missing or mismatched context-local main-model routing waits
-without spending a model attempt, rather than using global/profile fallback.
-This narrowly reads the existing host context-local route; compatibility is
-covered by the pinned-host gate, not a claim of a public route-inspection API.
-
-Owner, private admission, queue leases, delivery mode, policy, preferences and
-current version facts gate generation and result acceptance. Structured results
-must cover the exact batch; invalid or failed results retry within the existing
-queue budget and become fallback state, never invented recommendation prose.
-Unread ready assessments do not starve later pending work.
-
-Local contribution candidates stay distinct from installation recommendations.
-They require their real unread qualification event and matching on-disk snapshot;
-the inbox retains that event ID for the existing candidate inspection flow.
-Their explanation uses local qualification evidence. Security review remains
-required and unavailable professionalism review is labeled as such; this path
-sends no candidate body to a model and creates no consent or publication draft.
-
-To stop assessment generation and hide proactive assessment entries while keeping
-explicit reviews available:
+Publication is a separate review and confirmation:
 
 ```bash
-hermes config set plugins.entries.hermes-collective-wisdom.settings.notifications.delivery_mode fixed
-```
-
-Set the same key to `agent` to restore the default behavior. Mode/admission changes
-also fence in-flight results; already-transmitted model context cannot be recalled.
-Advice is visible through `hermes wisdom inbox --json` and the admitted private
-`wisdom_inbox` tool. Assessment does not mark anything seen, introduced, delivered,
-or approved. On admitted private Slack/Telegram turns, a separate bounded native
-drain delivers up to eight eligible ready/fallback entries through the connected
-SDK. It also reaches earlier ready work without reassessing it or requiring new
-model output. There is no autonomous polling schedule.
-
-Delivery reserves durable intent first, then rechecks ownership, private admission,
-mode, preferences, source and lease before sending. Verified SDK receipts complete
-the durable delivery; an unknown outcome is never blindly resent. Advisory cards
-point to exact `wisdom_inspect` inputs and create no approval or publication
-consent. Unavailable assessments remain explicitly labeled, not invented prose.
-CLI/TUI proactive presentation uses the optional capability in the isolated
-[host worktree](HOST-API.md); it is not yet published or installed. Without
-that capability, manual inbox inspection remains available.
-See the [native delivery gate](TESTING.md#native-ready-advice-delivery-gate--2026-09-14)
-for local/recording-SDK evidence and the still-unverified live boundaries.
-
-## Private contribution preparation (terminal)
-
-`hermes wisdom suggest <local-skill> --json` prepares an owner-private local
-review with exact files, manifest/hashes and local security findings. It does
-not upload or publish. Source files remain unchanged; repeated preparation
-preserves an existing edited overlay rather than replacing it.
-
-The prepared draft can then be exported as one complete save-ready JSON object,
-edited in a local editor, saved with stale-writer protection, and re-reviewed:
-
-```bash
-hermes wisdom prepared inspect <local-draft-id> --json > /tmp/wisdom-draft.json
-# Edit author_description and the complete desired files array in /tmp/wisdom-draft.json.
-hermes wisdom prepared save /tmp/wisdom-draft.json --json
-hermes wisdom prepared review <local-draft-id> --json
-```
-
-The terminal editor saves the complete desired file set: add an entry to add a
-supported file, omit an optional file to remove it, or change its path to rename
-it. Keep `SKILL.md` and `skill.manifest.json`; canonical path, size and security
-checks still apply. The original local skill is unchanged. Every save replaces
-the private draft snapshot using the previous exact hashes; old publication
-reviews cannot approve the new bytes. Saving and local re-review do not upload,
-execute, submit, or authorize publication. Rich native file editing remains open.
-
-There is no client-selectable publication visibility field. Drafts remain private
-until explicit submission, and Gateway policy determines direct versus moderated
-handling. The review displays that policy; an editor cannot override it.
-
-`--allow-model-review` explicitly permits sending review content to the configured
-model provider for editorial/professionalism assessment. Without it, preparation
-makes no model request and unavailable assessments remain unavailable. Model
-assessment is not security certification or publication consent. No publisher
-usage claims are invented when the local evidence ledger is absent.
-
-Publication is a separate, explicit terminal step. Review prints the exact file-byte snapshot, hashes, findings, owner identity, and current Gateway policy, then creates one short-lived receipt. Submit consumes that receipt once:
-
-```bash
-hermes wisdom publication review <local-draft-id> --json
+hermes wisdom publication review <draft-id> --json
 hermes wisdom publication submit <publication-receipt> --json
 hermes wisdom publication status <operation-id> --json
 hermes wisdom publication reopen <operation-id> --json
-# Optional cancellation of an existing remote draft:
 hermes wisdom publication decline <operation-id> --json
 ```
 
-The uploaded CAS is built from the reviewed immutable snapshot, not from a second filesystem walk. Submit rechecks owner, source fingerprint, exact hashes, the current local security guard, and current Gateway policy before the first remote effect. Gateway policy alone chooses open, managed, or moderated publication; the client cannot request a bypass. If policy changes before an uncommitted effect, the same operation requires a fresh review/receipt rather than creating another remote draft.
+Submit rechecks owner, entitlement, exact hashes, source fingerprint, security guard,
+and current Gateway policy before the first remote effect. Gateway policy chooses direct
+or moderated publication. Confirmed conflicts require explicit re-review. For a
+genuinely uncertain write, the plugin keeps only the small evidence needed to avoid a
+duplicate submission and reconciles authoritative status before another effect.
+Current Share authorization timing is unchanged.
 
-Publication intent, unknown-outcome phases, decline intent, lock ownership, and final local/remote projections are durable. `reopen` consults exact authoritative remote state before retrying; it never treats an ambiguous exception as proof that no remote mutation occurred. Terminal projection repair is atomic and idempotent. The same exact-review/status/reopen contract is covered locally through the real
-Slack and Telegram SDKs; oversized native publication reviews remove approval and
-hand off to the complete terminal review. This is not live deployed publication
-acceptance. Full file-manifest UI editing and live delivery acceptance remain later slices;
-local qualification and private native advisory delivery are implemented as described above.
-See [publication evidence](TESTING.md#policy-routed-publication-gate).
+Optional editorial/model review is not security certification and is never publication
+consent. Package scripts are not executed during preparation or review.
 
-## Installed-skill setup (terminal)
+## Installed-skill setup
 
-`hermes wisdom setup` still enrolls the profile. `installed-setup` is the separate
-workflow for an already installed, owner-bound skill with valid hash-covered
-`refs/wisdom-setup.md` guidance:
+Installed setup is separate from enrollment and file installation:
 
 ```bash
 hermes wisdom installed-setup inspect <skill-id> --version 1 --json
 hermes wisdom installed-setup plan <skill-id> --version 1 --phase setup --index 0 --command '<exact command>' --json
-# Read the complete receipt before explicitly applying it:
 hermes wisdom installed-setup apply <setup-receipt> --json
 hermes wisdom installed-setup status <skill-id> --json
 ```
 
-Indices are zero-based. `--phase prerequisite --index N` reviews a non-executing
-acknowledgement; missing locally checkable prerequisites cannot be acknowledged
-away. `--phase verify --command '<exact verification command>'` creates another
-separate receipt after prerequisites and setup steps are satisfied. Publisher
-instructions are guidance, not automatically executable commands. Do not put
-credentials in commands; use the intended local environment/credential handoff.
+Publisher instructions are guidance. Each exact command needs its own owner-bound
+review and host terminal approval. Unknown execution outcomes block blind replay; use
+the explicit recovery/status workflow after checking effects. Setup receipt authority
+is never shared with install/update/publication receipts.
 
-Execution uses the configured **local** Hermes terminal backend and its existing
-approval guards. The command is spawned once, with its validated process handle
-recorded before waiting. Install and setup receipts are not interchangeable.
-Uncertain execution blocks further managed mutations; it is never blindly rerun.
-Inspect `installed-setup recover <skill-id> <operation-id> --json`; only after
-checking effects and stopping any remaining process may you add
-`--acknowledge-effects-checked-and-stopped` to abandon that operation. This does
-not undo effects, rerun the command, or declare the skill ready. A fresh receipt
-is required for another attempt. A restored host result whose ownership or exact
-command cannot be verified remains unknown.
+## Surface behavior
 
-`/wisdom installed-setup` is a terminal handoff in CLI/TUI. For an update started
-from an admitted Slack/Telegram `/wisdom update`, the owning later human turn can
-prepare one setup or verification command for separate native approval. No model
-proposal executes by itself. If a native surface cannot show the complete guidance
-and exact command without truncation, it disables native approval and gives an
-explicit terminal inspect/plan/apply handoff; a forged callback is still refused.
+- Terminal: complete explicit review, action, status, and recovery workflows.
+- Slack/Telegram: private `/wisdom` catalog and explicit actor/route-bound review
+  callbacks; sensitive group actions are rejected.
+- Desktop: supported plugin REST routes, completed-turn event, direct notification,
+  and existing Collective Wisdom management page.
+- Plain CLI/TUI chat and unsupported clients: explicit tools/handoffs only, no
+  proactive notice.
 
-
-## Historical development TUI review and actions
-
-On the authorized `shannonsands/plugin-local-presentation` host worktree:
-
-```text
-/wisdom install <skill-id>@v1
-/wisdom update <skill-id>
-/wisdom installed-setup inspect <skill-id> --version 1
-/wisdom installed-setup plan <skill-id> --version 1 --phase setup --index 0
-/wisdom installed
-/wisdom check <skill-id>
-/wisdom installed-setup status <skill-id> --version 1
-```
-
-Install/update opens the exact receipt-bound plan and verified package file
-contents. Arrow/page keys scroll the literal review; Tab selects a named action,
-then Enter confirms that selection. Initial Enter, Esc, and Ctrl+C cancel.
-Replacing a review resets the selection to Cancel. Neither viewing the review
-nor model prose grants consent.
-
-Install does not run setup. Setup inspection is read-only; a separate setup plan
-opens its own exact-command review and uses the existing guarded setup executor.
-`--accept-partial`, `--preserve-modified`, and `--accept-sensitive` are explicit
-choices where supported, not inferred from selecting an action. TUI slash receipt
-apply shortcuts are rejected; terminal plan/apply workflows are unchanged.
-
-Blocked plans and failed install/update review preparation offer an explicit
-`Recheck: /wisdom ...` command preserving the requested target and options. Run
-that command to obtain a fresh exact review; a prior selection never approves
-the replacement. This is a command handoff, not an in-modal Recheck button.
-Failures after entering apply remain uncertain, even if the exception mentions
-expiry: inspect installed/check/setup status before deciding on recovery. These
-TUI reads use existing owner-bound services and do not retry an operation or
-start setup. TUI setup status is the recorded `inspect` snapshot, not the terminal
-status method that polls handles and finalizes receipts. Recovery execution itself
-remains an explicit terminal workflow.
-
-The complete review must fit the host's 65,536-character bound. Oversized reviews
-fail closed with the existing terminal plan/receipt commands; the TUI does not
-silently truncate and approve them. Unknown apply outcomes require status/recovery
-inspection rather than an automatic retry. Cancellation revokes further adapter
-actions; a synchronous executor already started may finish, so cancellation is
-not proof of rollback. There is no released minimum host version for this
-optional API; older hosts retain the terminal handoff. This is not full
-TUI settings/recovery/publication parity or deployed acceptance.
-
-A reviewable TUI update also offers **Not Now** when the current organization
-suppression policy can be verified. This queues exact-version suppression in the
-existing durable preference outbox, without applying the update or changing its
-automatic-update policy. The displayed manual-reopen command creates a new review
-requiring another deliberate selection. If policy cannot be verified, manual
-update remains available but Not Now is omitted. Remote synchronization is
-separate; a local deferral reports pending sync rather than claiming delivery.
-
+Desktop, Slack, and Telegram controls remain review surfaces. A button or notification
+never substitutes for current effect consent.

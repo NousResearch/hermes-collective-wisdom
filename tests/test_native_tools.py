@@ -20,6 +20,10 @@ class Service:
         """Record service lifetime cleanup."""
         self.calls.append(("close",))
 
+    def native_owner(self):
+        """Return the Portal owner namespace, independent of native actors."""
+        return {"profile_name": "default", "account_id": "portal-account"}
+
     def inbox(self, *, invocation):
         """Return one owner-private candidate reference."""
         self.calls.append(("inbox", invocation))
@@ -51,6 +55,7 @@ def tools():
     service = Service()
     native = SimpleNamespace(
         tool_invocation=lambda **_kwargs: SimpleNamespace(platform="telegram"),
+        validate_tool_owner=lambda *_args, **_kwargs: None,
         queue_model_consent=lambda *_args, **_kwargs: {"state": "queued"},
     )
     runtime = SimpleNamespace(native=native, _closed=False, _service=lambda: service)
@@ -124,3 +129,42 @@ def test_present_reports_queued_not_presented():
     assert result["delivery"] == {"state": "queued"}
     assert result["executed"] is False
     assert "presented" not in result
+
+
+def test_present_denies_a_local_route_without_a_native_renderer():
+    """CLI/TUI read grants do not imply that a native card can be displayed."""
+    service = Service()
+    native = SimpleNamespace(
+        tool_invocation=lambda **_kwargs: SimpleNamespace(platform="cli"),
+        queue_model_consent=lambda *_args, **_kwargs: pytest.fail("queued without renderer"),
+    )
+    runtime = SimpleNamespace(native=native, _closed=False, _service=lambda: service)
+
+    with pytest.raises(PermissionError, match="renderer"):
+        NativeModelTools(runtime).present(
+            {
+                "kind": "skill", "identity": "skill-1", "version": 2,
+                "step": None, "title": "Review", "explanation": "Exact package review",
+            },
+            task_id="task", session_id="session",
+        )
+
+    assert not service.calls
+
+
+@pytest.mark.parametrize("handler_name", ["inbox", "inspect", "present"])
+def test_model_tools_explicitly_deny_a_missing_turn_admission(handler_name):
+    """A missing lifecycle grant is denied before service or presentation access."""
+    service = Service()
+    native = SimpleNamespace(tool_invocation=lambda **_kwargs: None)
+    runtime = SimpleNamespace(native=native, _closed=False, _service=lambda: service)
+    model_tools = NativeModelTools(runtime)
+    args = {
+        "kind": "skill", "identity": "skill-1", "version": 2,
+        "step": None, "title": "Review", "explanation": "Exact package review",
+    }
+
+    with pytest.raises(PermissionError, match="admitted private turn"):
+        getattr(model_tools, handler_name)(args, task_id="task", session_id="session")
+
+    assert not service.calls

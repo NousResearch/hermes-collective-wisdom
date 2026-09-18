@@ -78,16 +78,18 @@ An empty catalog is normal if nobody in your organization has published a skill 
 - **Slack / Telegram:** use `/wisdom` for browsing and private review flows.
   Sensitive actions require a private conversation and explicit approval.
   Live platform acceptance is still in progress.
-- **CLI / TUI chat:** read tools and terminal handoffs are available. Rich review
-  and proactive presentation depend on host capabilities; development-only TUI
-  behavior is not a promise of stock-host support.
+- **CLI / TUI chat:** read tools and terminal handoffs are available. These clients
+  do not receive proactive notices.
 - **Desktop:** enable the package's Desktop half in **Capabilities → Plugins**
   (also available through **⌘K → Plugins**), then open **Collective Wisdom**.
   Catalog, Installed, Activity & Settings, and Contributions call the existing
   workflows on the selected host/profile. Review exact versions, checks, and
   files before confirming an install, update, removal, or submission.
 
-The Desktop page also offers explicit enrollment after disclosure. It does not
+The Desktop page also offers explicit enrollment after disclosure. At completed
+turns it may poll a bounded feed and show a direct best-effort notification. A
+missed or failed notification is not queued or retried, and opening one starts a
+review rather than approving any effect. It does not
 run setup scripts, edit draft files, or automatically retry uncertain operations.
 Those advanced workflows remain available through the existing native controls.
 Dashboard UI and full six-surface parity remain deferred.
@@ -161,10 +163,8 @@ as unavailable, not passed.
 | List managed installations | `hermes wisdom installed --json` |
 | Check for an update | `hermes wisdom check <skill-id> --json` |
 | Review an update | `hermes wisdom update <skill-id> --plan --json` |
-| Inspect your inbox | `hermes wisdom inbox --json` |
 | Inspect notification settings | `hermes wisdom settings --json` |
 | Mute proactive notifications for a week | `hermes wisdom mute 1w --json` |
-| Inspect pending synchronization | `hermes wisdom sync status --json` |
 
 After approving an update plan, apply it with
 `hermes wisdom update --apply-receipt <receipt> --json`. Local edits block
@@ -173,14 +173,14 @@ are in the [workflow reference](docs/WORKFLOWS.md).
 
 ## Privacy and approval
 
-Local candidate signals stay on your profile. Enrollment is not consent to upload
+Local candidate signals and notice cursors are small owner-bound PluginState
+records; this plugin has no SQLite database, advisory outbox, delivery lease, or
+retry worker. Enrollment is not consent to upload
 local skill contents. Draft submission, installation, and setup execution each
 have their own approval; a model recommendation cannot approve an action.
 
-Recommendation assessment can use recent conversation context through your
-configured model. Candidate/refinement model review has separate controls.
-See [data flow and controls](docs/WORKFLOWS.md#queued-recommendation-assessments)
-and [Security](SECURITY.md) for the details.
+Proactive notices are deterministic and never add model messages, system-prompt
+text, or synthetic conversation turns. See [Security](SECURITY.md) for details.
 
 Organization policy determines direct versus moderated publication. An unavailable
 check is never reported as passed. Changing accounts or organizations requires

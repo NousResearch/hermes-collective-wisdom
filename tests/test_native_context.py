@@ -62,22 +62,22 @@ def test_capture_is_one_shot_task_local_and_reauthorizes():
         captures = InvocationCapture(clock=lambda: clock[0], ttl_seconds=2)
         gateway = Gateway()
         captures.hook(event=event(), gateway=gateway)
-        value = captures.consume("update skill-1", profile_name="default")
+        value = captures.consume_command("update skill-1", profile_name="default")
         assert value.actor_id == "U1"
         assert value.scope_id == "W1"
         with pytest.raises(PermissionError, match="current admitted"):
-            captures.consume("update skill-1", profile_name="default")
+            captures.consume_command("update skill-1", profile_name="default")
 
         captures.hook(event=event(), gateway=gateway)
         gateway.authorized = False
         with pytest.raises(PermissionError, match="authorized"):
-            captures.consume("update skill-1", profile_name="default")
+            captures.consume_command("update skill-1", profile_name="default")
 
         gateway.authorized = True
         captures.hook(event=event(), gateway=gateway)
         clock[0] = 13.0
         with pytest.raises(PermissionError, match="expired"):
-            captures.consume("update skill-1", profile_name="default")
+            captures.consume_command("update skill-1", profile_name="default")
 
     asyncio.run(scenario())
 
@@ -88,21 +88,21 @@ def test_capture_rejects_unrelated_internal_profile_and_other_task():
         gateway = Gateway()
         captures.hook(event=event(args="browse"), gateway=gateway)
         with pytest.raises(PermissionError, match="arguments"):
-            captures.consume("update skill-1", profile_name="default")
+            captures.consume_command("update skill-1", profile_name="default")
 
         captures.hook(event=event(internal=True), gateway=gateway)
         with pytest.raises(PermissionError, match="current admitted"):
-            captures.consume("update skill-1", profile_name="default")
+            captures.consume_command("update skill-1", profile_name="default")
 
         captures.hook(event=event(profile="other"), gateway=gateway)
         with pytest.raises(PermissionError, match="profile"):
-            captures.consume("update skill-1", profile_name="default")
+            captures.consume_command("update skill-1", profile_name="default")
 
         captures.hook(event=event(), gateway=gateway)
 
         async def other_task():
             with pytest.raises(PermissionError, match="current admitted"):
-                captures.consume("update skill-1", profile_name="default")
+                captures.consume_command("update skill-1", profile_name="default")
 
         await asyncio.create_task(other_task())
 

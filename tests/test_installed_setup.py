@@ -1,7 +1,7 @@
 """Read-only inspection of exact managed installation bytes."""
 
 # pylint: disable=import-outside-toplevel,missing-class-docstring
-# pylint: disable=missing-function-docstring,redefined-outer-name
+# pylint: disable=missing-function-docstring,redefined-outer-name,wrong-import-order
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from hermes_wisdom_plugin.compatibility import LocalCapabilities
 from hermes_wisdom_plugin.contract import canonical_json_bytes, parse_manifest_bytes
 from hermes_wisdom_plugin.package import PackagePolicyError, verify_content_files
 from hermes_wisdom_plugin.setup_document import PREFIX, SETUP_PATH, SUFFIX
-from hermes_wisdom_plugin.store import WisdomStore
+from hermes_wisdom_plugin.direct_services import DirectState
+from installed_test_support import JsonState, installed_store
 
 
 OWNER = {
@@ -66,7 +67,9 @@ def _setup_bytes() -> bytes:
 
 @pytest.fixture
 def installed(tmp_path):
-    store = WisdomStore(tmp_path / "state")
+    root = tmp_path / "state"
+    progress = DirectState(JsonState(root), root)
+    installed_state = installed_store(root)
     root = tmp_path / "skills"
     target = root / "_wisdom" / "org" / "managed"
     target.mkdir(parents=True)
@@ -90,22 +93,24 @@ def installed(tmp_path):
         path.write_bytes(body)
     records, content_hash = verify_content_files(files)
     baseline = {record.path: record.hash for record in records}
-    store.record_install({
+    installed_state.record_install({
         "skill_id": "skill-1", "org_id": "org", "slug": "managed", "version": 1,
         "content_hash": content_hash, "baseline": baseline, "target_path": str(target),
         "update_mode": "MANUAL", "state": "active", "owner": OWNER,
     })
-    return store, Host(root), target
+    return installed_state, progress, Host(root), target
 
 
 def test_inspection_checks_prerequisites_without_execution(installed, monkeypatch):
     from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
 
-    store, host, target = installed
+    installed_state, progress, host, target = installed
     marker = target.parent / "must-not-exist"
     monkeypatch.setattr(os, "system", lambda *_args: pytest.fail("inspection executed a command"))
 
-    result = inspect_installed_setup(store, host, OWNER, "skill-1", version=1)
+    result = inspect_installed_setup(
+        installed_state, progress, host, OWNER, "skill-1", version=1
+    )
 
     assert result["files_installed"] is True
     assert result["execution_authorized"] is False
@@ -121,7 +126,7 @@ def test_inspection_checks_prerequisites_without_execution(installed, monkeypatc
 def test_inspection_rejects_changed_unowned_or_unsettled_install(installed, tmp_path, change):
     from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
 
-    store, host, target = installed
+    installed_state, progress, host, target = installed
     owner = dict(OWNER)
     version = 1
     if change == "bytes":
@@ -131,30 +136,34 @@ def test_inspection_rejects_changed_unowned_or_unsettled_install(installed, tmp_
     elif change == "owner":
         owner["account_id"] = "other"
     elif change == "pending":
-        store.journal("uninstall", "skill-1", "staged", {"owner": OWNER})
+        installed_state.begin("uninstall", "skill-1", {"owner": OWNER}, stage="staged")
     elif change == "hardlink":
         os.link(target / SETUP_PATH, tmp_path / "duplicate")
     else:
         (target / "refs" / "unexpected").mkdir()
 
     with pytest.raises(PackagePolicyError):
-        inspect_installed_setup(store, host, owner, "skill-1", version=version)
+        inspect_installed_setup(
+            installed_state, progress, host, owner, "skill-1", version=version
+        )
 
 
 def test_missing_guidance_is_explicitly_unverified(installed):
     from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
 
-    store, host, target = installed
-    row = store.installation("skill-1", owner=OWNER)
+    installed_state, progress, host, target = installed
+    row = installed_state.installation("skill-1", owner=OWNER)
     (target / SETUP_PATH).unlink()
     files = [(name, "file", (target / name).read_bytes()) for name in (
         "SKILL.md", "skill.manifest.json"
     )]
     records, content_hash = verify_content_files(files)
-    store.record_install({**row, "content_hash": content_hash,
-                          "baseline": {item.path: item.hash for item in records}})
+    installed_state.record_install({
+        **row, "content_hash": content_hash,
+        "baseline": {item.path: item.hash for item in records},
+    })
 
-    result = inspect_installed_setup(store, host, OWNER, "skill-1")
+    result = inspect_installed_setup(installed_state, progress, host, OWNER, "skill-1")
     assert result["state"] == "guidance_unavailable"
     assert result["guidance"] is None
     assert result["ready_to_use"] is None
@@ -163,21 +172,26 @@ def test_missing_guidance_is_explicitly_unverified(installed):
 def test_setup_readiness_never_carries_across_an_updated_version(installed):
     from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
 
-    store, host, _target = installed
-    old = store.installation("skill-1", owner=OWNER)
+    installed_state, progress, host, _target = installed
+    old = installed_state.installation("skill-1", owner=OWNER)
     host.environment.add("EXAMPLE_TOKEN")
-    for phase, index in (("prerequisite", 2), ("setup", 0), ("verify", 0)):
-        operation_id = store.journal(
-            "wisdom_setup", "skill-1", "passed", {
+    with progress.change() as value:
+        value["setup_progress"]["skill-1"] = [
+            {
+                "operation_id": f"old-{phase}-{index}", "receipt": "old",
                 "owner": OWNER, "version": 1, "content_hash": old["content_hash"],
-                "step": {"phase": phase, "index": index},
+                "phase": phase, "index": index, "state": "passed",
             }
-        )
-        store.advance(operation_id, "passed", done=True)
-    assert inspect_installed_setup(store, host, OWNER, "skill-1")["ready_to_use"] is True
+            for phase, index in (("prerequisite", 2), ("setup", 0), ("verify", 0))
+        ]
+    assert inspect_installed_setup(
+        installed_state, progress, host, OWNER, "skill-1"
+    )["ready_to_use"] is True
 
-    store.record_install({**old, "version": 2})
-    updated = inspect_installed_setup(store, host, OWNER, "skill-1", version=2)
+    installed_state.record_install({**old, "version": 2})
+    updated = inspect_installed_setup(
+        installed_state, progress, host, OWNER, "skill-1", version=2
+    )
     assert not updated["setup_progress"]
     assert updated["ready_to_use"] is None
     assert updated["state"] == "setup_required"

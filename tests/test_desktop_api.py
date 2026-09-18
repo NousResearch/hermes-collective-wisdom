@@ -18,7 +18,7 @@ from hermes_wisdom_plugin.errors import (
     WisdomConflict,
     WisdomValidationError,
 )
-from hermes_wisdom_plugin.onboarding import WISDOM_DISCLOSURE
+from hermes_wisdom_plugin.direct_services import WISDOM_DISCLOSURE
 
 
 def _request(app, method, path, **kwargs):
@@ -29,7 +29,7 @@ def _request(app, method, path, **kwargs):
     return asyncio.run(send())
 
 
-class Service:
+class Service:  # pylint: disable=too-many-public-methods
     """Small recording service with the same authority seams as InvocationService."""
 
     def __init__(self, home: Path, *, account: str = "account-a") -> None:
@@ -143,6 +143,11 @@ class Service:
         assert may_apply is not None and may_apply() is True
         return {"configured": True, "state": "active"}
 
+    def end_turn_notices(self, renderer):
+        self.calls.append(("end_turn_notices",))
+        renderer([{"event_id": "event-1", "category": "new_skill", "skill_id": "skill-1"}])
+        return {"supported": True, "offered": 1, "polled": True, "more": False}
+
 
 def test_install_confirmation_is_bound_to_server_issued_view_and_current_profile(tmp_path):
     now = [100.0]
@@ -187,6 +192,23 @@ def test_closing_view_revokes_outstanding_reviews(tmp_path):
 
     with pytest.raises(WisdomAuthError, match="no longer current"):
         api.install_confirm(service, view["view_id"], plan["receipt"])
+
+
+def test_desktop_notice_route_returns_best_effort_human_surface_payload(tmp_path):
+    service = Service(tmp_path / "a")
+    app = FastAPI()
+    app.include_router(build_router(lambda: service, workflow=DesktopWorkflowApi()))
+
+    response = _request(app, "POST", "/notices/end-turn")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "supported": True,
+        "offered": 1,
+        "polled": True,
+        "more": False,
+        "notices": [{"event_id": "event-1", "category": "new_skill", "skill_id": "skill-1"}],
+    }
 
 
 @pytest.mark.parametrize(

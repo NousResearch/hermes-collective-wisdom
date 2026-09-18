@@ -12,8 +12,8 @@ from .package import PackagePolicyError
 
 
 @contextmanager
-def managed_operation_guard(root: Path, skill_id: str):
-    """Hold a no-follow OS descriptor lock through approval/spawn or mutation."""
+def managed_operation_guard(root: Path, skill_id: str, *, wait: bool = False):
+    """Hold a no-follow OS descriptor lock, optionally waiting for short aggregate RMW."""
 
     if not isinstance(root, Path) or not isinstance(skill_id, str) or not skill_id:
         raise TypeError("invalid managed operation lock identity")
@@ -53,7 +53,7 @@ def managed_operation_guard(root: Path, skill_id: str):
         ) from exc
     try:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except OSError as exc:
             raise PackagePolicyError(
                 "another managed operation is starting or running for this skill"

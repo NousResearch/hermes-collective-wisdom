@@ -24,7 +24,7 @@ from .errors import (
     WisdomNotFound,
     WisdomValidationError,
 )
-from .onboarding import WISDOM_DISCLOSURE
+from .direct_services import WISDOM_DISCLOSURE
 
 
 _PRE_ENROLLMENT_CODES = frozenset({
@@ -491,6 +491,15 @@ def build_router(  # pylint: disable=too-many-locals
     @router.post("/views")
     def open_view():
         return invoke(api.open_view)
+
+    @router.post("/notices/end-turn")
+    def end_turn_notices():
+        def check(service):
+            notices: list[dict[str, Any]] = []
+            result = service.end_turn_notices(notices.extend)
+            return {**result, "notices": notices}
+
+        return invoke(check)
 
     @router.delete("/views/{view_id}")
     def close_view(view_id: str):

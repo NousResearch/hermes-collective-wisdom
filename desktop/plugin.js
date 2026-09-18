@@ -563,7 +563,25 @@ export default {
       if (!active) return Promise.reject(Object.assign(new Error('Collective Wisdom plugin is disabled.'), { stale: true }))
       return ctx.rest(...args)
     } }
-    ctx.onDispose(() => { active = false })
+    const stopEvents = typeof host.onEvent === 'function' && typeof host.notify === 'function'
+      ? host.onEvent('*', async event => {
+      if (!active || !['session_end', 'session.ended'].includes(event?.type)) return
+      try {
+        const result = await ctx.rest('/notices/end-turn', { method: 'POST' })
+        if (!active || !Array.isArray(result?.notices)) return
+        for (const notice of result.notices) {
+          const subject = notice.skill_name || notice.slug || notice.skill_id || 'A shared skill'
+          host.notify({
+            kind: 'info',
+            message: `Collective Wisdom: ${subject} is available. Open Wisdom to review.`
+          })
+        }
+      } catch {
+        // Best-effort notices never disturb the completed conversation turn.
+      }
+      })
+      : () => undefined
+    ctx.onDispose(() => { active = false; stopEvents?.() })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: WISDOM_ROUTE }, render: () => jsx(WisdomPage, { client }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'library', label: 'Wisdom', path: WISDOM_ROUTE } },

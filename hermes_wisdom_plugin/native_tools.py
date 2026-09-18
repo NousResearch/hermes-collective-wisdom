@@ -91,10 +91,15 @@ class NativeModelTools:
         return not bool(getattr(self.runtime, "_closed", True))
 
     def _invocation(self, kwargs: dict[str, Any]):
-        return self.runtime.native.tool_invocation(
+        invocation = self.runtime.native.tool_invocation(
             task_id=str(kwargs.get("task_id") or ""),
             session_id=str(kwargs.get("session_id") or ""),
         )
+        if invocation is None:
+            raise PermissionError(
+                "Collective Wisdom model tools require a current admitted private turn."
+            )
+        return invocation
 
     def inbox(self, _args: dict[str, Any], **kwargs: Any) -> str:
         """Read pending private work for the admitted route."""
@@ -133,8 +138,7 @@ class NativeModelTools:
     def _service(self, invocation: Any):
         service = self.runtime._service()  # pylint: disable=protected-access
         try:
-            if invocation.platform in {"cli", "tui"}:
-                self.runtime.native.validate_local_tool_owner(invocation, service)
+            self.runtime.native.validate_tool_owner(invocation, service)
             return service
         except Exception:
             service.close()
@@ -143,9 +147,18 @@ class NativeModelTools:
     def present(self, args: dict[str, Any], **kwargs: Any) -> str:
         """Queue a native exact review without approving its action."""
         invocation = self._invocation(kwargs)
+        if invocation.platform not in {"slack", "telegram"}:
+            raise PermissionError("Collective Wisdom native renderer is unavailable.")
+        service = self._service(invocation)
+        try:
+            expected_owner = service.native_owner()
+        finally:
+            service.close()
         delivery = self.runtime.native.queue_model_consent(
-            invocation, args,
+            invocation, args, expected_owner=expected_owner,
         )
+        if delivery.get("state") != "queued":
+            raise PermissionError("Collective Wisdom native review could not be queued.")
         return json.dumps({
             "status": "queued",
             "delivery": delivery,

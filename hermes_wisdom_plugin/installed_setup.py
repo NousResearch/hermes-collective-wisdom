@@ -127,8 +127,10 @@ def _installed_files(  # pylint: disable=too-many-locals,too-many-branches,too-m
     return {name: body for name, _mode, body in files}
 
 
-def _require_committed(store: Any, owner: dict, skill_id: str, version: int | None) -> dict:
-    installation = store.installation(skill_id, owner=owner)
+def _require_committed(
+    installed: Any, owner: dict, skill_id: str, version: int | None
+) -> dict:
+    installation = installed.installation(skill_id, owner=owner)
     if not installation or installation.get("state") != "active":
         raise PackagePolicyError("no active managed installation for this enrolment")
     if installation.get("owner") != owner:
@@ -137,16 +139,17 @@ def _require_committed(store: Any, owner: dict, skill_id: str, version: int | No
         raise PackagePolicyError(
             "installed version changed; inspect the current version before setup"
         )
-    for item in store.pending_operations():
-        if item["entity_id"] == skill_id and item["kind"] != "wisdom_setup":
+    for item in installed.pending_operations(skill_id):
+        if item["kind"] in {"install", "update", "uninstall"}:
             raise PackagePolicyError(
                 "installation has an unfinished operation; recover it before setup"
             )
     return installation
 
 
-def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branches
-    store: Any,
+def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branches,too-many-arguments
+    installed: Any,
+    progress: Any,
     host: Any,
     owner: dict,
     skill_id: str,
@@ -155,7 +158,7 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
 ) -> dict[str, Any]:
     """Inspect installed bytes and prerequisite presence without execution."""
 
-    installation = _require_committed(store, owner, skill_id, version)
+    installation = _require_committed(installed, owner, skill_id, version)
     try:
         files = _installed_files(installation, host)
         manifest = parse_manifest_bytes(files["skill.manifest.json"])
@@ -213,9 +216,9 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
                 or any(row["status"] != "present" for row in result["prerequisites"])
             )
             result["state"] = "setup_required" if needs_setup else "verification_required"
-    result["setup_progress"] = setup_progress(store, owner, result)
+    result["setup_progress"] = setup_progress(progress, owner, result)
     _derive_readiness(result)
-    if _require_committed(store, owner, skill_id, version) != installation:
+    if _require_committed(installed, owner, skill_id, version) != installation:
         raise PackagePolicyError(
             "installation changed during setup inspection; inspect again"
         )
@@ -267,37 +270,7 @@ def _derive_readiness(result: dict[str, Any]) -> None:
 def setup_progress(store: Any, owner: dict, inspection: dict) -> list[dict]:
     """Project owner/content-matched durable progress without launching commands."""
 
-    with store.transaction() as db:
-        rows = db.execute(
-            "SELECT * FROM operation_journal WHERE kind=? AND entity_id=? ORDER BY rowid",
-            ("wisdom_setup", inspection["skill_id"]),
-        ).fetchall()
-    current = []
-    for row in rows:
-        try:
-            payload = json.loads(row["payload_json"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise PackagePolicyError("setup operation journal is invalid") from exc
-        if not isinstance(payload, dict):
-            raise PackagePolicyError("setup operation journal is invalid")
-        if (
-            payload.get("owner") != owner
-            or payload.get("version") != inspection["version"]
-            or payload.get("content_hash") != inspection["content_hash"]
-        ):
-            continue
-        state = row["phase"]
-        if row["state"] != "done" and state == "starting":
-            state = "unknown"
-        item = {
-            "operation_id": row["id"],
-            "receipt": payload.get("receipt"),
-            "phase": payload["step"]["phase"],
-            "index": payload["step"]["index"],
-            "state": state,
-        }
-        code = payload.get("exit_code")
-        if isinstance(code, int) and not isinstance(code, bool):
-            item["exit_code"] = code
-        current.append(item)
-    return current
+    direct = getattr(store, "setup_progress", None)
+    if not callable(direct):
+        raise TypeError("installed setup requires direct setup state")
+    return direct(owner, inspection)

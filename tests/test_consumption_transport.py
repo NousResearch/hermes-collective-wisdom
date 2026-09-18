@@ -58,6 +58,6 @@ def test_terminal_parser_exposes_explicit_consumption_controls():
     build_parser(parser)
     assert parser.parse_args(["notifications", "--mark-seen"]).wisdom_command == "notifications"
     assert parser.parse_args(["mute", "1w"]).mute_duration == "1w"
-    assert parser.parse_args(["sync", "retry"]).sync_action == "retry"
+
     assert parser.parse_args(["inbox"]).wisdom_command == "inbox"
     assert parser.parse_args(["maintenance", "--refresh-policy"]).refresh_policy is True

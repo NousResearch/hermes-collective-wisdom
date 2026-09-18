@@ -479,14 +479,10 @@ def gateway_driver_bootstrap_commands(
     """Return isolated offline driver probes pinned to one extracted artifact."""
 
     driver_root = gateway_dir / "test" / "e2e"
-    commands = [
-        [str(agent_python), "-I", "-B", str(driver_root / name), "--offline-bootstrap"]
-        for name in (
-            "wisdom_delivery_driver.py",
-            "wisdom_outbox_driver.py",
-            "wisdom_publication_driver.py",
-        )
-    ]
+    commands = [[
+        str(agent_python), "-I", "-B",
+        str(driver_root / "wisdom_publication_driver.py"), "--offline-bootstrap",
+    ]]
     environment = dict(os.environ)
     environment.update(
         {

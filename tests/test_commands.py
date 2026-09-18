@@ -49,7 +49,7 @@ def test_cli_notification_settings_are_explicit_and_status_does_not_write(choice
     )
 
 
-@pytest.mark.parametrize("command", ["settings fixed", "mute forever", "sync retry"])
+@pytest.mark.parametrize("command", ["settings fixed", "mute forever"])
 def test_shared_slash_controls_only_offer_terminal_handoff(command):
     service = _Service()
     output = run_slash(command, service)
@@ -360,7 +360,7 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
         "show": ["skill-1", "--json"],
         "versions": ["skill-1", "--json"],
         "suggest": ["local-skill", "--json"],
-        "review-week": ["--dry-run", "--json"],
+
         "help": ["--json"],
     }
     for command, trailing in cases.items():
@@ -371,17 +371,6 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
     assert "check" in parser.format_help()
     assert "update" in parser.format_help()
 
-
-def test_cli_review_week_uses_public_owner_authorized_service_path_without_model_flag(capsys):
-    parser = _parser()
-    service = _Service()
-    args = parser.parse_args(["review-week", "--dry-run", "--json"])
-    assert not hasattr(args, "allow_model_review")
-    assert run_cli(args, service) == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "queued": False, "dry_run": True, "network_submission": False
-    }
-    assert service.calls == [("review_week", True)]
 
 
 def test_cli_suggest_requires_explicit_model_disclosure_authorization(capsys):
@@ -892,13 +881,12 @@ def test_cli_setup_noninteractive_requires_switch(monkeypatch, capsys):
 
 def test_cli_interactive_disclosure_precedes_setup(monkeypatch, capsys):
     service = _Service()
-    module = SimpleNamespace(WISDOM_DISCLOSURE="CANONICAL DISCLOSURE")
-    monkeypatch.setitem(sys.modules, "hermes_wisdom_plugin.onboarding", module)
+
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
 
     assert run_cli(_parser().parse_args(["setup"]), service) == 0
-    assert "CANONICAL DISCLOSURE" in capsys.readouterr().out
+    assert "Candidate signals stay on this profile" in capsys.readouterr().out
     assert service.calls == [("setup", True)]
 
 

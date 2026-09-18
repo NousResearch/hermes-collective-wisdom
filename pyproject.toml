@@ -18,10 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mutation = ["mutmut==3.8.0"]
 dev = [
   "build==1.6.1",
   "fastapi==0.133.1",
   "httpx==0.28.1",
+  "mccabe==0.7.0",
+  "pre-commit==4.6.2",
   "pylint==4.0.8",
   "pytest==9.1.1",
 ]

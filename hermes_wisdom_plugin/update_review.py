@@ -399,7 +399,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         expected_remote = dict(expected_authority)
         remote_committed = False
         if authority is not None and authority.get("installed_version") == plan.get("version"):
-            if recovery_phase != "local_ledger_committed":
+            if recovery_phase not in {"local_committed", "outcome_recorded"}:
                 raise PackagePolicyError(
                     "Gateway target version is inconsistent with local recovery phase"
                 )
@@ -457,60 +457,39 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
 
     @staticmethod
     def _verify_local_recovery_state(
-        plan: dict[str, Any],
-        installation: dict[str, Any],
-        expected_previous: Any,
-        target: Path,
-        recovery_phase: str | None,
+        plan: dict[str, Any], installation: dict[str, Any], expected_previous: Any,
+        target: Path, recovery_phase: str | None,
     ) -> None:
-        """Accept only filesystem/ledger states reachable at the recorded phase."""
-
         if recovery_phase is None:
             if installation != expected_previous:
                 raise PackagePolicyError("managed installation changed after update review")
             if _tree_hashes(target) != plan.get("local_snapshot"):
                 raise PackagePolicyError("managed local bytes changed after update review")
             return
-        if recovery_phase not in {
-            "reviewed", "staged", "old_preserved", "edits_preserved",
-            "files_committed", "local_ledger_committed",
-        }:
-            raise PackagePolicyError("unsupported update recovery phase")
+        allowed_hash = {
+            "prepared": plan.get("local_snapshot"), "old_preserved": None,
+            "files_committed": plan.get("baseline"),
+            "local_committed": plan.get("baseline"),
+        }.get(recovery_phase, object())
+        if _tree_hashes(target) != allowed_hash:
+            raise PackagePolicyError("managed local bytes do not match the update recovery phase")
         version = installation.get("version")
         if version == plan.get("from_version"):
             if installation != expected_previous:
                 raise PackagePolicyError("managed installation changed after update review")
-        elif version == plan.get("version"):
-            expected = {
-                "skill_id": plan.get("skill_id"),
-                "org_id": plan.get("owner", {}).get("organization_id"),
-                "slug": plan.get("slug"),
-                "version": plan.get("version"),
-                "content_hash": plan.get("content_hash"),
-                "baseline": plan.get("baseline"),
-                "target_path": plan.get("target_path"),
-                "state": "active",
-                "owner": plan.get("owner"),
-            }
-            if any(installation.get(key) != value for key, value in expected.items()):
-                raise PackagePolicyError("managed installation changed during update recovery")
-            if installation.get("update_mode") not in _UPDATE_MODES:
-                raise PackagePolicyError("managed update policy is invalid during recovery")
-            if recovery_phase not in {"files_committed", "local_ledger_committed"}:
-                raise PackagePolicyError("managed ledger is ahead of the update recovery phase")
-        else:
-            raise PackagePolicyError("managed installation changed after update review")
-
-        hashes = _tree_hashes(target)
-        previous = plan.get("local_snapshot")
-        incoming = plan.get("baseline")
-        allowed = {
-            "reviewed": (previous,),
-            "staged": (previous, None),
-            "old_preserved": (None,),
-            "edits_preserved": (None, incoming),
-            "files_committed": (incoming,),
-            "local_ledger_committed": (incoming,),
-        }[recovery_phase]
-        if not any(hashes == candidate for candidate in allowed):
-            raise PackagePolicyError("managed local bytes do not match the update recovery phase")
+            return
+        expected = {
+            "skill_id": plan.get("skill_id"),
+            "org_id": plan.get("owner", {}).get("organization_id"),
+            "slug": plan.get("slug"), "version": plan.get("version"),
+            "content_hash": plan.get("content_hash"), "baseline": plan.get("baseline"),
+            "target_path": plan.get("target_path"), "state": "active",
+            "owner": plan.get("owner"),
+        }
+        if (
+            version != plan.get("version")
+            or recovery_phase not in {"files_committed", "local_committed"}
+            or installation.get("update_mode") not in _UPDATE_MODES
+            or any(installation.get(key) != value for key, value in expected.items())
+        ):
+            raise PackagePolicyError("managed installation changed during update recovery")

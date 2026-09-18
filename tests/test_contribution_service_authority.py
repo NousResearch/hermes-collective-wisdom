@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import pytest
+from installed_test_support import JsonState
 from test_contribution_review import RecordingLlm, reviewer
 from test_publication import publication
 
@@ -18,7 +19,10 @@ def test_service_rechecks_authority_inside_contribution_kernel(tmp_path, monkeyp
     kernel, _source, owner = reviewer(tmp_path, llm=llm)
     prepared = kernel.prepare("reviewed-skill")
     before = kernel.store.draft(prepared["draft_id"])
-    service = InvocationService(kernel.store.root, ("default", Path(owner["profile_home"])))
+    service = InvocationService(
+        kernel.store.root, ("default", Path(owner["profile_home"])),
+        state=JsonState(kernel.store.root),
+    )
     monkeypatch.setattr(service, "_installation_owner", lambda: dict(owner))
     monkeypatch.setattr(service, "_contribution_reviewer", lambda: kernel)
     monkeypatch.setattr(service, "check_owner", lambda: None)
@@ -55,13 +59,27 @@ def test_publication_service_carries_authority_past_kernel_owner_read(
     kernel, prepared, client, owner = publication(tmp_path)
     review = kernel.review(prepared["draft_id"])
     target = review["receipt"] if action == "submit" else prepared["draft_id"]
-    if action in {"reopen", "decline"}:
+    if action == "reopen":
         client.state.fail_after_effect.add("submit")
         pending = kernel.submit(review["receipt"])
         target = pending["operation_id"]
         client.state.calls.clear()
-    before = kernel.store.operation(target)
-    service = InvocationService(kernel.store.root, ("default", Path(owner["profile_home"])))
+    elif action == "decline":
+        pending = kernel.submit_private_draft(review["receipt"])
+        target = pending["operation_id"]
+        client.state.calls.clear()
+    def snapshot():
+        if action == "review":
+            return kernel.store.draft(target)
+        if action == "submit":
+            return kernel.store.publication_review(target)
+        return kernel.store.publication(target)
+
+    before = snapshot()
+    service = InvocationService(
+        kernel.store.root, ("default", Path(owner["profile_home"])),
+        state=JsonState(kernel.store.root),
+    )
     monkeypatch.setattr(service, "_publication_service", lambda: kernel)
     monkeypatch.setattr(service, "check_owner", lambda: None)
     active = [True]
@@ -76,4 +94,4 @@ def test_publication_service_carries_authority_past_kernel_owner_read(
 
     assert not active[0]
     assert not client.state.calls
-    assert kernel.store.operation(target) == before
+    assert snapshot() == before

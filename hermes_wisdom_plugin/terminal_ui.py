@@ -170,48 +170,64 @@ def _list_lines(label: str, value: object) -> list[str]:
     return lines
 
 
-def render_action_review(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    kind: str, value: object
-) -> str:
-    """Render approval-critical install/update/publication/setup facts."""
+_REVIEW_TITLES = {
+    "install": "Installation review",
+    "update": "Update review",
+    "publication": "Sharing review",
+    "installed-setup": "Installed setup review",
+}
 
-    data = value if isinstance(value, dict) else {}
-    title = {
-        "install": "Installation review",
-        "update": "Update review",
-        "publication": "Sharing review",
-        "installed-setup": "Installed setup review",
-    }.get(kind, "Collective Wisdom review")
-    lines = [title]
-    lines.extend(_owner_lines(data))
-    for key, label in (
-        ("slug", "Skill"), ("skill_id", "Skill ID"),
-        ("from_version", "Installed version"), ("version", "Version"),
-        ("update_mode", "Update mode"), ("publication_mode", "Handling"),
-        ("state", "State"), ("publication_state", "Publication state"),
-        ("operation_id", "Operation"), ("draft_id", "Draft"),
-    ):
-        value_item = data.get(key)
-        if isinstance(value_item, (str, int)) and not isinstance(value_item, bool):
-            lines.append(f"{label}: {text(value_item)}")
+_REVIEW_FACTS = (
+    ("slug", "Skill"), ("skill_id", "Skill ID"),
+    ("from_version", "Installed version"), ("version", "Version"),
+    ("update_mode", "Update mode"), ("publication_mode", "Handling"),
+    ("state", "State"), ("publication_state", "Publication state"),
+    ("operation_id", "Operation"), ("draft_id", "Draft"),
+)
+
+_RECEIPT_COMMANDS = {
+    "install": "hermes wisdom install --apply-receipt ",
+    "update": "hermes wisdom update --apply-receipt ",
+    "publication": "hermes wisdom publication submit ",
+    "installed-setup": "hermes wisdom installed-setup apply ",
+}
+
+
+def _review_header_lines(kind: str, data: dict[str, Any]) -> list[str]:
+    lines = [_REVIEW_TITLES.get(kind, "Collective Wisdom review"), *_owner_lines(data)]
+    for key, label in _REVIEW_FACTS:
+        value = data.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            lines.append(f"{label}: {text(value)}")
     description = data.get("description") or data.get("drafted_description")
     if isinstance(description, str) and description:
         lines.append("Description: " + text(description, limit=1024))
+    return lines
+
+
+def _compatibility_lines(data: dict[str, Any]) -> list[str]:
     compatibility = data.get("compatibility")
-    compatibility = compatibility if isinstance(compatibility, dict) else {}
-    if compatibility:
+    lines: list[str] = []
+    if isinstance(compatibility, dict) and compatibility:
         lines.append("Compatibility: " + text(compatibility.get("outcome") or "unknown"))
-        lines.extend(_list_lines("Satisfied checks", compatibility.get("satisfied")))
-        lines.extend(_list_lines("Required setup actions", compatibility.get("setup_actions")))
-        lines.extend(_list_lines("Known limitations", compatibility.get("limitations")))
-        lines.extend(_list_lines("Blocking requirements", compatibility.get("blocked")))
+        for key, label in (
+            ("satisfied", "Satisfied checks"),
+            ("setup_actions", "Required setup actions"),
+            ("limitations", "Known limitations"),
+            ("blocked", "Blocking requirements"),
+        ):
+            lines.extend(_list_lines(label, compatibility.get(key)))
     requirements = data.get("system_specification")
     if not isinstance(requirements, dict):
         manifest = data.get("manifest") if isinstance(data.get("manifest"), dict) else {}
         requirements = manifest.get("requirements")
     if isinstance(requirements, dict) and requirements:
         lines.append("Requirements: " + _requirements_summary(requirements))
-    lines.append(render_inventory(data))
+    return lines
+
+
+def _review_check_lines(data: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     server = data.get("server_checks")
     if isinstance(server, dict) and server:
         lines.append("Server checks:")
@@ -228,46 +244,51 @@ def render_action_review(  # pylint: disable=too-many-locals,too-many-branches,t
         state = "accepted" if acceptance.get("accepted") is True else "not accepted"
         lines.append("Warning acknowledgement: " + state)
     if data.get("modified") is True:
-        preservation = (
-            data.get("preservation")
-            if isinstance(data.get("preservation"), dict) else {}
+        preservation = data.get("preservation")
+        preservation = preservation if isinstance(preservation, dict) else {}
+        lines.append(
+            "Local edits: detected; action: "
+            + text(preservation.get("action") or "blocked")
         )
-        action = text(preservation.get("action") or "blocked")
-        lines.append("Local edits: detected; action: " + action)
     if data.get("sensitive_expansion"):
         lines.extend(_list_lines("New sensitive capabilities", data["sensitive_expansion"]))
-    step = data.get("step") if isinstance(data.get("step"), dict) else {}
-    if step:
-        phase = step.get("phase")
-        index = step.get("index")
-        if isinstance(phase, str):
-            lines.append("Setup phase: " + text(phase))
-        if isinstance(index, int) and not isinstance(index, bool):
-            lines.append(f"Setup step: {index + 1}")
-        command = step.get("command")
-        if isinstance(command, str) and command:
-            lines.append(
-                "Command (escaped literal; not executed by review): "
-                + json.dumps(command, ensure_ascii=True)
-            )
+    return lines
+
+
+def _setup_lines(data: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    step_value = data.get("step")
+    step = step_value if isinstance(step_value, dict) else {}
+    phase = step.get("phase")
+    if isinstance(phase, str):
+        lines.append("Setup phase: " + text(phase))
+    index = step.get("index")
+    if isinstance(index, int) and not isinstance(index, bool):
+        lines.append(f"Setup step: {index + 1}")
+    command = step.get("command")
+    if isinstance(command, str) and command:
+        lines.append(
+            "Command (escaped literal; not executed by review): "
+            + json.dumps(command, ensure_ascii=True)
+        )
     prerequisites = data.get("prerequisites")
     if isinstance(prerequisites, list) and prerequisites:
         lines.append("Prerequisites:")
         for prerequisite in prerequisites:
-            if not isinstance(prerequisite, dict):
-                continue
-            name = text(prerequisite.get("name") or prerequisite.get("kind") or "check")
-            status = text(prerequisite.get("status") or "unknown")
-            lines.append(f"  - {name}: {status}")
+            if isinstance(prerequisite, dict):
+                name = text(prerequisite.get("name") or prerequisite.get("kind") or "check")
+                status = text(prerequisite.get("status") or "unknown")
+                lines.append(f"  - {name}: {status}")
     verification = data.get("verification")
     if isinstance(verification, dict):
-        lines.append(
-            "Verification: " + text(verification.get("state") or "unknown")
-        )
+        lines.append("Verification: " + text(verification.get("state") or "unknown"))
+    return lines
+
+
+def _decision_lines(kind: str, data: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     if data.get("allowed") is False:
-        lines.append(
-            "Approval status: blocked until the listed review actions are completed."
-        )
+        lines.append("Approval status: blocked until the listed review actions are completed.")
     elif data.get("allowed") is True:
         lines.append("Approval status: eligible for exact final confirmation.")
     if kind in {"install", "update"}:
@@ -285,24 +306,22 @@ def render_action_review(  # pylint: disable=too-many-locals,too-many-branches,t
         if data.get("network_submission") is False:
             lines.append("Nothing has been uploaded yet.")
     receipt = data.get("receipt")
-    if isinstance(receipt, str) and receipt:
-        safe_receipt = shlex.quote(without_controls(receipt))
-        if kind == "install":
-            lines.append(
-                "Next: hermes wisdom install --apply-receipt " + safe_receipt
-            )
-        elif kind == "update":
-            lines.append(
-                "Next: hermes wisdom update --apply-receipt " + safe_receipt
-            )
-        elif kind == "publication":
-            lines.append(
-                "Next: hermes wisdom publication submit " + safe_receipt
-            )
-        elif kind == "installed-setup":
-            lines.append(
-                "Next: hermes wisdom installed-setup apply " + safe_receipt
-            )
+    command = _RECEIPT_COMMANDS.get(kind)
+    if isinstance(receipt, str) and receipt and command is not None:
+        lines.append("Next: " + command + shlex.quote(without_controls(receipt)))
+    return lines
+
+
+def render_action_review(kind: str, value: object) -> str:
+    """Render approval-critical install/update/publication/setup facts."""
+
+    data = value if isinstance(value, dict) else {}
+    lines = _review_header_lines(kind, data)
+    lines.extend(_compatibility_lines(data))
+    lines.append(render_inventory(data))
+    lines.extend(_review_check_lines(data))
+    lines.extend(_setup_lines(data))
+    lines.extend(_decision_lines(kind, data))
     return "\n".join(line for line in lines if line)
 
 
