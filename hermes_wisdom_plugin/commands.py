@@ -96,6 +96,16 @@ class _DuplicateJsonKey(ValueError):
     """One JSON object repeated a key and is therefore ambiguous."""
 
 
+def parse_slash(raw_args: str) -> tuple[str, list[str]] | None:
+    """Return normalized shell words, or no command when quoting is malformed."""
+    try:
+        parts = shlex.split(raw_args or "")
+    except ValueError:
+        return None
+    command = parts[0].casefold() if parts else "help"
+    return ("help", []) if command in {"--help", "-h"} else (command, parts[1:])
+
+
 def _file_identity(value: os.stat_result) -> tuple[int, ...]:
     """Return the stable fields used to fence a local JSON read."""
 
@@ -428,17 +438,14 @@ def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-m
 
 
 def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
-    raw_args: str, service: object
+    parsed: tuple[str, list[str]] | None, service: object
 ) -> str:
     """Synchronously render one mutation-free, shared-chat-safe slash view."""
 
-    try:
-        parts = shlex.split(raw_args or "")
-    except ValueError:
+    if parsed is None:
         return "Could not parse /wisdom arguments."
     try:
-        command = parts[0].casefold() if parts else "help"
-        args = parts[1:]
+        command, args = parsed
         if command not in _SLASH_COMMANDS:
             return _unsupported_command()
         if command == "list":

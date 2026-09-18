@@ -1,5 +1,4 @@
 """Owned terminal command lifetime on the existing Hermes plugin APIs."""
-# Keep the established command/service ownership boundary intact for this bounded slice.
 # pylint: disable=too-many-lines
 
 from __future__ import annotations
@@ -8,7 +7,6 @@ import asyncio
 import contextvars
 import json
 import os
-import shlex
 import subprocess
 import sys
 import threading
@@ -1245,6 +1243,11 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             self._services.add(service)
             return service
 
+    def _close_service(self, service):
+        service.close()
+        with self._lock:
+            self._services.discard(service)
+
     def cli(self, args) -> int:
         """Synchronous native CLI entry, including interactive terminal setup."""
         from .commands import run_cli  # pylint: disable=import-outside-toplevel
@@ -1253,20 +1256,18 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         try:
             return run_cli(args, service)
         finally:
-            service.close()
-            with self._lock:
-                self._services.discard(service)
+            self._close_service(service)
 
     def slash(self, raw_args: str):
         """Route exact effects to native review after real host admission."""
         invocation = self.native.consume_request(raw_args)
+        from .commands import parse_slash  # pylint: disable=import-outside-toplevel
+        parsed = parse_slash(raw_args)
+        if parsed is None:
+            return "Invalid Wisdom command. Use /wisdom help."
+        command, args = parsed
         if invocation is not None:
-            try:
-                words = shlex.split(raw_args)
-            except ValueError:
-                return "Invalid Wisdom command. Use /wisdom help."
-            command = words[0].casefold() if words else "help"
-            target = " ".join(words[1:])
+            target = " ".join(args)
             effect_review = {
                 "install": self.native.begin_install_modes,
                 "update": self.native.begin_update,
@@ -1282,32 +1283,27 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         context = contextvars.copy_context()
 
         async def resolve():
-            task = context.run(asyncio.create_task, self._slash(raw_args))
+            task = context.run(asyncio.create_task, self._slash(parsed))
             return await task
 
         return resolve()
 
-    async def _slash(self, raw_args: str) -> str:  # pylint: disable=too-many-locals
+    async def _slash(self, parsed: tuple[str, list[str]]) -> str:
         """Run network work off-loop; cancelled TUI workers retain their own cleanup."""
         from .commands import CONTRIBUTION_COMMANDS, run_slash  # pylint: disable=import-outside-toplevel
-
         service = task = None
         cancel = threading.Event()
         try:
-            try:
-                words = shlex.split(raw_args)
-            except ValueError:
-                return "Invalid Wisdom command. Use /wisdom help."
-            command = words[0].casefold() if words else "help"
+            command, _args = parsed
             if command in CONTRIBUTION_COMMANDS:
-                return run_slash(raw_args, object())
+                return run_slash(parsed, object())
             service = self._service()
-            if command in {"help", "--help", "-h", "setup", "install", "installed", "uninstall"}:
-                return run_slash("help" if command in {"--help", "-h"} else raw_args, service)
+            if command in {"help", "setup", "install", "installed", "uninstall"}:
+                return run_slash(parsed, service)
             binding = service.binding()
-            task = asyncio.create_task(asyncio.to_thread(
-                self._run_worker, raw_args, binding, cancel
-            ))
+            task = asyncio.create_task(
+                asyncio.to_thread(self._run_worker, parsed, binding, cancel)
+            )
             result = await asyncio.shield(task)
             service.check_owner()
             return result
@@ -1318,12 +1314,10 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             if task is not None and not task.done():
                 await asyncio.shield(task)
             if service is not None:
-                service.close()
-                with self._lock:
-                    self._services.discard(service)
+                self._close_service(service)
 
 
-    def _run_worker(self, raw_args, binding, cancel):
+    def _run_worker(self, parsed: tuple[str, list[str]], binding, cancel):
         # A process boundary provides a real deadline even for stalled DNS or a
         # slow-drip HTTP response. No bearer is serialized or passed on argv.
         deadline = time.monotonic() + SLASH_BUDGET_SECONDS
@@ -1339,11 +1333,9 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             )
             for key, default in defaults.items()
         }}
-        request = {
-            "package": str(Path(__file__).resolve().parent), "sys_path": sys.path,
-            "root": str(self.root), "profile": [self.profile[0], str(self.profile[1])],
-            "binding": binding, "args": raw_args, "config": live_config,
-        }
+        request = {"package": str(Path(__file__).resolve().parent), "sys_path": sys.path,
+                   "root": str(self.root), "profile": [self.profile[0], str(self.profile[1])],
+                   "binding": binding, "command": parsed, "config": live_config}
         payload = json.dumps(request)
         environment = os.environ.copy()
         # Host multi-profile callbacks may bind a ContextVar rather than an env
@@ -1409,7 +1401,7 @@ def worker_main(request) -> str:
     try:
         if service.binding() != request["binding"]:
             return _UNAVAILABLE
-        result = run_slash(request["args"], service)
+        result = run_slash((request["command"][0], request["command"][1]), service)
         service.check_owner()
         return result
     except WisdomError:

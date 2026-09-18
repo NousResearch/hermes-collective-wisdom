@@ -19,10 +19,15 @@ from hermes_wisdom_plugin.commands import (
     MAX_PREPARED_PAYLOAD_BYTES,
     PAGE_SIZE,
     build_parser,
+    parse_slash,
     run_cli,
-    run_slash,
+    run_slash as render_slash,
 )
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound
+
+
+def run_slash(raw_args, service):
+    return render_slash(parse_slash(raw_args), service)
 
 
 @pytest.mark.parametrize("choice", ["status", "agent", "fixed"])
