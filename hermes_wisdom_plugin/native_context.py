@@ -217,10 +217,6 @@ class InvocationCapture:
             invocation, host_session_id=str(session_id), task_id=str(task_id), turn_id=str(turn_id)
         )
 
-    def consume(self, raw_args: str, *, profile_name: str) -> NativeInvocation:
-        """Compatibility alias for the admitted slash-command path."""
-        return self.consume_command(raw_args, profile_name=profile_name)
-
     def _consume(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
                  self, *, profile_name: str, expected_command: str | None = None,
                  expected_args: str | None = None,

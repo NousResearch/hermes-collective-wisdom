@@ -2,21 +2,18 @@
 
 # pylint: disable=missing-function-docstring,redefined-outer-name
 
-import json
-import os
-import subprocess
-import sys
-
 import pytest
+from installed_test_support import installed_store
 
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomValidationError
 from hermes_wisdom_plugin.install_receipts import InstallReceipts, REVIEW_SECONDS
-from hermes_wisdom_plugin.store import WisdomStore
+
 
 
 @pytest.fixture
 def receipt_state(tmp_path):
-    store = WisdomStore(tmp_path / "state")
+    root = tmp_path / "state"
+    store = installed_store(root)
     owner = {"account_id": "member", "organization_id": "org", "installation_id": "hwi_one",
              "profile_name": "test", "profile_home": str(tmp_path),
              "base_url": "https://test.invalid"}
@@ -59,75 +56,18 @@ def test_invalid_identifier_denied_before_storage(receipt_state, identifier):
         receipts.load(identifier)
 
 
-def test_plan_tampering_is_not_authority(receipt_state):
+def test_review_is_stored_only_in_plugin_state(receipt_state):
     store, _, _, receipts = receipt_state
     plan = _plan(receipts)
-    path = store.root / "plans" / (plan["receipt"] + ".json")
-    value = json.loads(path.read_bytes())
-    value["version"] = 2
-    path.write_text(json.dumps(value))
-    with pytest.raises(WisdomValidationError, match="changed"):
-        receipts.load(plan["receipt"])
 
-
-@pytest.mark.parametrize("redirect", ["file", "directory", "hardlink"])
-def test_redirected_storage_denied(receipt_state, tmp_path, redirect):
-    store, _, _, receipts = receipt_state
-    plan = _plan(receipts)
-    path = store.root / "plans" / (plan["receipt"] + ".json")
-    if redirect == "directory":
-        (store.root / "plans").rename(tmp_path / "original")
-        (store.root / "plans").symlink_to(tmp_path / "original", target_is_directory=True)
-    elif redirect == "file":
-        path.rename(tmp_path / "original")
-        path.symlink_to(tmp_path / "original")
-    else:
-        os.link(path, tmp_path / "duplicate")
-    with pytest.raises(WisdomValidationError):
-        receipts.load(plan["receipt"])
-
-
-def test_fifo_receipt_is_rejected_without_blocking(receipt_state):
-    store, owner, _, receipts = receipt_state
-    plan = _plan(receipts)
-    path = store.root / "plans" / (plan["receipt"] + ".json")
-    path.unlink()
-    os.mkfifo(path)
-    script = """
-import json
-import sys
-
-from hermes_wisdom_plugin.errors import WisdomValidationError
-from hermes_wisdom_plugin.install_receipts import InstallReceipts
-from hermes_wisdom_plugin.store import WisdomStore
-
-store = WisdomStore(sys.argv[1])
-owner = json.loads(sys.argv[2])
-try:
-    InstallReceipts(store, lambda: owner).load(sys.argv[3])
-except WisdomValidationError:
-    print("rejected")
-else:
-    raise SystemExit("FIFO receipt was accepted")
-"""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script, str(store.root), json.dumps(owner), plan["receipt"]],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    finally:
-        path.unlink(missing_ok=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "rejected\n"
+    assert receipts.load(plan["receipt"]) == plan
+    assert not (store.root / "plans").exists()
 
 
 def test_accepted_operation_can_recover_after_expiry_and_replay_result(receipt_state):
     store, _, now, receipts = receipt_state
     plan = _plan(receipts)
-    operation = store.journal("install", "skill", "staged", plan)
+    operation = store.begin("install", "skill", plan, stage="staged")
     receipts.start(plan["receipt"], operation)
     now[0] += REVIEW_SECONDS + 1
     assert receipts.load(plan["receipt"], allow_started=True) == plan
@@ -137,10 +77,44 @@ def test_accepted_operation_can_recover_after_expiry_and_replay_result(receipt_s
         receipts.complete(plan["receipt"], {"installed": False})
 
 
-def test_recovery_requires_matching_journal_owner_and_receipt(receipt_state):
+@pytest.mark.parametrize("mismatch", ["owner", "receipt", "kind"])
+def test_recovery_requires_matching_journal_binding(receipt_state, mismatch):
     store, _, _, receipts = receipt_state
     plan = _plan(receipts)
-    operation = store.journal("install", "skill", "staged", {**plan, "owner": {}})
+    payload = dict(plan)
+    kind = "install"
+    if mismatch == "owner":
+        payload["owner"] = {}
+    elif mismatch == "receipt":
+        payload["receipt"] = _plan(receipts)["receipt"]
+    else:
+        kind = "update"
+    operation = store.begin(kind, "skill", payload, stage="staged")
     with pytest.raises(WisdomConflict, match="does not match"):
         receipts.start(plan["receipt"], operation)
     assert receipts.outcome(plan["receipt"]) is None
+
+
+def test_owner_change_during_receipt_read_denies_authority(receipt_state):
+    store, owner, now, receipts = receipt_state
+    plan = _plan(receipts)
+    owners = iter([dict(owner), {**owner, "account_id": "different-member"}])
+    changing_owner = InstallReceipts(store, lambda: next(owners), clock=lambda: now[0])
+
+    with pytest.raises(WisdomAuthError, match="Installation owner changed"):
+        changing_owner.load(plan["receipt"])
+
+
+def test_receipt_cannot_be_rebound_to_a_second_valid_operation(receipt_state):
+    store, _, _, receipts = receipt_state
+    plan = _plan(receipts)
+    first = store.begin("install", "skill", plan, stage="staged")
+    receipts.start(plan["receipt"], first)
+    receipts.start(plan["receipt"], first)  # Replaying the same binding is safe.
+    store.finish(first, {"installed": True}, stage="complete")
+    second = store.begin("install", "skill", plan, stage="staged")
+    assert second != first
+
+    with pytest.raises(WisdomConflict, match="already in use"):
+        receipts.start(plan["receipt"], second)
+    assert store.review("install_receipt:" + plan["receipt"])["operation_id"] == first

@@ -1,5 +1,21 @@
 # Host API Map
 
+## Current replacement boundary
+
+Use the injected public `ctx.state` namespace for domain records and
+`ctx.get_config` / `ctx.set_config` for settings. The end-turn hook emits only
+best-effort supported-surface notices; no presentation-receipt extension,
+SQLite database, delivery reservation or custom TUI bridge is required.
+Model tools require a current private admission; exact review callbacks retain
+separate actor, original-message, owner and expiry checks.
+
+The inventory and development checkpoints below are historical API evidence,
+not dependencies or acceptance claims for this replacement. In particular, the
+local presentation and TUI experiments are not part of the shipped plugin.
+See [Architecture](ARCHITECTURE.md) and [Verification](TESTING.md).
+
+## Historical host audits
+
 Audited against Agent `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
 See [SOURCES.md](SOURCES.md) for immutable source notation. The historical API
 inventory below describes those pinned hosts, not unpublished host development.

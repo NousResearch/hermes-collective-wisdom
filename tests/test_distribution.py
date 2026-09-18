@@ -53,6 +53,12 @@ def test_built_distributions_contain_native_and_python_surfaces(tmp_path: Path) 
         assert f"{sdist_root}/dashboard/plugin_api.py" in sdist_paths
         assert f"{sdist_root}/desktop/plugin.js" in sdist_paths
         assert f"{sdist_root}/__init__.py" in sdist_paths
+        for asset in (
+            "pyproject.toml", ".pre-commit-config.yaml", "scripts/check_complexity.py",
+            "scripts/complexity-baseline.json", "scripts/install_complexity_hook.py",
+            "scripts/run_receipt_mutations.py",
+        ):
+            assert f"{sdist_root}/{asset}" in sdist_paths
         assert f"{sdist_root}/hermes_wisdom_plugin/__init__.py" in sdist_paths
 
         for filename, expected_digest in RUNTIME_CONTRACT_DIGESTS.items():

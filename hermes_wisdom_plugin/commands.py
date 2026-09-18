@@ -33,6 +33,7 @@ from .package import (
 )
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
+from .direct_services import WISDOM_DISCLOSURE
 from .terminal_ui import (
     edit_prepared as _edit_prepared,
     has_reviewable_warnings as _has_reviewable_warnings,
@@ -57,7 +58,7 @@ MAX_PREPARED_PAYLOAD_BYTES = (
 )
 CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
 _SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
-    {"setup", "status", "settings", "mute", "sync", "list", "browse", "show", "versions", "help",
+    {"setup", "status", "settings", "mute", "list", "browse", "show", "versions", "help",
      "install", "installed", "check", "update", "uninstall", "installed-setup"}
 )
 _CHECK_LABELS = (
@@ -81,8 +82,8 @@ _PUBLIC_STATUS_STATES = {
     "degraded": "attention required",
     "unavailable": "unavailable",
 }
-_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "sync", "inbox",
-                 "maintenance", "list", "browse", "show", "versions", "suggest", "review-week",
+_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "inbox",
+                 "maintenance", "list", "browse", "show", "versions", "suggest",
                  "prepared", "publication", "install", "installed", "check", "update",
                  "installed-setup", "uninstall", "help")
 
@@ -93,6 +94,16 @@ class _SlashUsageError(ValueError):
 
 class _DuplicateJsonKey(ValueError):
     """One JSON object repeated a key and is therefore ambiguous."""
+
+
+def parse_slash(raw_args: str) -> tuple[str, list[str]] | None:
+    """Return normalized shell words, or no command when quoting is malformed."""
+    try:
+        parts = shlex.split(raw_args or "")
+    except ValueError:
+        return None
+    command = parts[0].casefold() if parts else "help"
+    return ("help", []) if command in {"--help", "-h"} else (command, parts[1:])
 
 
 def _file_identity(value: os.stat_result) -> tuple[int, ...]:
@@ -135,10 +146,9 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         "mute_duration", nargs="?", default="status",
         choices=["status", "1d", "1w", "30d", "forever", "off"],
     )
-    sync = add("sync", "Inspect or retry saved delivery and operation reports")
-    sync.add_argument("sync_action", nargs="?", default="status", choices=["status", "retry"])
+
     add("inbox", "Read local Wisdom activity without polling or delivery")
-    maintenance = add("maintenance", "Explicitly refresh feed and policy authority")
+    maintenance = add("maintenance", "Refresh policy or run bounded automatic updates")
     maintenance.add_argument("--refresh-policy", action="store_true")
     maintenance.add_argument(
         "--apply-automatic", action="store_true",
@@ -160,13 +170,7 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
             "the current model provider for editorial and professionalism review"
         ),
     )
-    review_week = add(
-        "review-week", "Queue this week's local review under current Gateway policy"
-    )
-    review_week.add_argument(
-        "--dry-run", action="store_true",
-        help="Preview bounded local evidence without queueing or calling a model",
-    )
+
     prepared = commands.add_parser(
         "prepared", help="Inspect, save, or re-review one owner-private local draft"
     )
@@ -313,52 +317,18 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                     raise PackagePolicyError(
                         "noninteractive setup requires --accept-disclosure"
                     )
-                # The onboarding slice owns the canonical disclosure text.
-                from .onboarding import (  # pylint: disable=import-error,import-outside-toplevel
-                    WISDOM_DISCLOSURE,
-                )
-
                 print(WISDOM_DISCLOSURE)
                 answer = input("Enable Collective Wisdom for this profile? [y/N] ")
                 if answer.strip().lower() not in {"y", "yes"}:
                     return 7
                 accepted = True
             result = service.setup(accept_disclosure=accepted)
-        elif command == "status":
-            result = service.status(include_operations=True)
-        elif command == "settings":
-            service.require_setup()
-            if args.notification_mode != "status":
-                service.set_notification_mode(args.notification_mode)
-            result = {
-                "delivery_mode": service.notification_mode(),
-                "writable": service.notification_mode_writable(),
-            }
-        elif command == "notifications":
-            result = service.notifications(mark_seen=bool(args.mark_seen))
-        elif command == "mute":
-            result = service.mute(args.mute_duration)
-        elif command == "sync":
-            result = service.sync_retry() if args.sync_action == "retry" else service.sync_status()
-        elif command == "inbox":
-            result = service.inbox()
-        elif command == "maintenance":
-            result = service.maintenance(
-                refresh_policy=bool(args.refresh_policy),
-                apply_automatic=bool(args.apply_automatic),
-            )
-        elif command == "list":
-            service.require_setup()
-            result = service.list_skills()
-        elif command == "browse":
-            service.require_setup()
-            result = {"skills": service.search_skills(args.query)}
-        elif command == "show":
-            service.require_setup()
-            result = service.show(args.skill_id)
-        elif command == "versions":
-            service.require_setup()
-            result = {"versions": service.versions(args.skill_id)}
+        elif command in {
+            "status", "settings", "notifications", "mute", "inbox",
+            "maintenance", "list", "browse", "show", "versions",
+            "publication", "installed", "check", "installed-setup",
+        }:
+            result = _run_noninteractive_cli(args, service, command)
         elif command == "suggest":
             result = service.suggest(
                 args.skill, allow_model_review=bool(args.allow_model_review)
@@ -366,29 +336,19 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             if not as_json:
                 _suggest_human(result, service)
                 return 0
-        elif command == "review-week":
-            result = service.review_week(dry_run=bool(args.dry_run))
         elif command == "prepared":
             result = _prepared_cli(args, service)
             if args.prepared_action == "edit":
                 print("Draft saved locally.\n" + _human_render("prepared", result))
                 return 0
-        elif command == "publication":
-            result = _publication_cli(args, service)
         elif command == "install":
             result = _install_cli(args, service)
             if result is None:
                 return 7
-        elif command == "installed":
-            result = {"installations": service.list_installations()}
-        elif command == "check":
-            result = service.check_update(args.skill_id)
         elif command == "update":
             result = _update_cli(args, service)
             if result is None:
                 return 7
-        elif command == "installed-setup":
-            result = _installed_setup_cli(args, service)
         elif command == "uninstall":
             result = _uninstall_cli(args, service)
             if result is None:
@@ -430,18 +390,62 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         return 8
 
 
+def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-many-branches
+    args: argparse.Namespace, service: Any, command: str,
+) -> Any:
+    """Dispatch commands that never own a prompt or cancellation exit."""
+    if command == "status":
+        return service.status(include_operations=True)
+    if command == "settings":
+        service.require_setup()
+        if args.notification_mode != "status":
+            service.set_notification_mode(args.notification_mode)
+        return {
+            "delivery_mode": service.notification_mode(),
+            "writable": service.notification_mode_writable(),
+        }
+    if command == "notifications":
+        return service.notifications(mark_seen=bool(args.mark_seen))
+    if command == "mute":
+        return service.mute(args.mute_duration)
+
+    if command == "inbox":
+        return service.inbox()
+    if command == "maintenance":
+        return service.maintenance(
+            refresh_policy=bool(args.refresh_policy),
+            apply_automatic=bool(args.apply_automatic),
+        )
+    if command in {"list", "browse", "show", "versions"}:
+        service.require_setup()
+        if command == "list":
+            return service.list_skills()
+        if command == "browse":
+            return {"skills": service.search_skills(args.query)}
+        if command == "show":
+            return service.show(args.skill_id)
+        return {"versions": service.versions(args.skill_id)}
+
+    if command == "publication":
+        return _publication_cli(args, service)
+    if command == "installed":
+        return {"installations": service.list_installations()}
+    if command == "check":
+        return service.check_update(args.skill_id)
+    if command == "installed-setup":
+        return _installed_setup_cli(args, service)
+    raise AssertionError(f"unhandled noninteractive command: {command}")
+
+
 def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
-    raw_args: str, service: object
+    parsed: tuple[str, list[str]] | None, service: object
 ) -> str:
     """Synchronously render one mutation-free, shared-chat-safe slash view."""
 
-    try:
-        parts = shlex.split(raw_args or "")
-    except ValueError:
+    if parsed is None:
         return "Could not parse /wisdom arguments."
     try:
-        command = parts[0].casefold() if parts else "help"
-        args = parts[1:]
+        command, args = parsed
         if command not in _SLASH_COMMANDS:
             return _unsupported_command()
         if command == "list":
@@ -463,10 +467,9 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
                 "Run `hermes wisdom setup` in your terminal to review the disclosure "
                 "and configure this profile."
             )
-        if command in {"settings", "mute", "sync"}:
+        if command in {"settings", "mute"}:
             return (
-                "Use an admitted private control or the terminal for notification settings "
-                "and synchronization.\n\n"
+                "Use an admitted private control or the terminal for notification settings.\n\n"
                 f"Run `hermes wisdom {command} status` to inspect first. Nothing has been changed."
             )
         if command in {
@@ -981,13 +984,11 @@ def _slash_help() -> str:
             "/wisdom setup",
             "/wisdom settings (private controls or terminal instructions)",
             "/wisdom mute (private controls or terminal instructions)",
-            "/wisdom sync (private controls or terminal instructions)",
-            "/wisdom candidate <qualified-event-id> (prepare a private local draft)",
-            "/wisdom candidate <candidate-id> <share|portal|later> (explicit stock-TUI action)",
+
+            "/wisdom candidate <qualified-event-id> (private TUI or terminal instructions)",
             "/wisdom suggest <skill> (private draft; never publishes)",
             "/wisdom prepared <inspect|save|review> (private TUI or terminal instructions)",
             "/wisdom publish <draft-id> (exact private review before submission)",
-            "/wisdom publication approve <receipt> (separate final candidate approval)",
             "/wisdom publication <review|status|reopen|decline> <target> (private controls)",
             "/wisdom install (terminal instructions)",
             "/wisdom installed (terminal instructions)",

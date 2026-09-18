@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_wisdom_plugin.commands import build_parser, run_cli, run_slash
+from hermes_wisdom_plugin.commands import build_parser, parse_slash, run_cli, run_slash
 
 
 class Service:
@@ -179,7 +179,7 @@ def test_installed_and_confirmed_uninstall(capsys):
 ])
 def test_slash_handoffs_do_not_read_or_mutate_any_state(raw):
     service = Service()
-    output = run_slash(raw, service)
+    output = run_slash(parse_slash(raw), service)
     assert "terminal" in output
     assert "Nothing has been changed" in output
     assert "SECRET" not in output

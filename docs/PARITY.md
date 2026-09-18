@@ -1,5 +1,11 @@
 # Reference Parity and Extraction Ledger
 
+> Historical extraction/planning reference, not the current acceptance contract.
+> The replacement-only, queue-free decision supersedes storage, delivery and
+> recovery requirements below. Use [Features](FEATURES.md),
+> [Architecture](ARCHITECTURE.md), [Migration](MIGRATION.md) and
+> [Verification](TESTING.md) for current behavior and gates.
+
 Reference: Agent `0924f7946b937c2ed02d083fc26752d577c54b3b` (reverted PR
 94266). Host audit: `31d0a2428e9db346d6781da66f5b37ff3e12def2`. Paths below
 are relative to the reference unless explicitly marked host. This ledger is

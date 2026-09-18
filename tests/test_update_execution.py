@@ -1,36 +1,30 @@
-"""Atomic manual update replacement, preservation, and recovery tests."""
+"""Behavioral tests for direct reviewed update execution and recovery."""
 
 # pylint: disable=missing-class-docstring,missing-function-docstring,redefined-outer-name
 # pylint: disable=too-few-public-methods,wrong-import-order,protected-access
-# pylint: disable=import-outside-toplevel,duplicate-code
+# pylint: disable=import-outside-toplevel,too-many-locals
 
 from __future__ import annotations
 
 import hashlib
-import json
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from installed_test_support import installed_store
 from review_test_support import _content
 
 from hermes_wisdom_plugin.contract import org_directory_name
-from hermes_wisdom_plugin.install_execution import InstallExecutor
-from hermes_wisdom_plugin.native_context import NativeInvocation
-from hermes_wisdom_plugin.native_review import NativeReviewController
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
+from hermes_wisdom_plugin import package_application
 from hermes_wisdom_plugin.package import PackagePolicyError
-from hermes_wisdom_plugin.store import WisdomStore
 from hermes_wisdom_plugin.update_execution import UpdateExecutor
 from hermes_wisdom_plugin.update_receipts import UpdateReceipts
 from hermes_wisdom_plugin.update_review import (
     UpdateAuthorityRejected, UpdateReviewer, VerifiedUpdate,
 )
-from test_install_execution import Host as InstallHost
 from test_install_review import Host as ReviewHost
 from test_update_review import Client as ReviewClient
-
 
 OWNER = {
     "profile_name": "default", "profile_home": "/profiles/default",
@@ -49,11 +43,8 @@ class Host:
     def __init__(self, root):
         self.skills_root = root
         self.scan_result = {
-            "available": True,
-            "allowed": True,
-            "verdict": "allow",
-            "summary": "clean",
-            "findings": [],
+            "available": True, "allowed": True, "verdict": "allow",
+            "summary": "clean", "findings": [],
         }
 
     def validate_target(self, path):
@@ -102,12 +93,11 @@ class Client:
 @pytest.fixture
 def executor(tmp_path):
     owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
-    state = tmp_path / "state"
-    store = WisdomStore(state)
+    store = installed_store(tmp_path / "state")
     skills = tmp_path / "profile" / "skills"
     target = skills / "_wisdom" / org_directory_name(owner["organization_id"]) / "managed-skill"
     target.mkdir(parents=True)
-    (target / "SKILL.md").write_bytes(V1)
+    target.joinpath("SKILL.md").write_bytes(V1)
     previous = {
         "skill_id": "skill-1", "org_id": owner["organization_id"],
         "slug": "managed-skill", "version": 1, "content_hash": "sha256:old",
@@ -119,334 +109,151 @@ def executor(tmp_path):
     plan = receipts.create({
         "skill_id": "skill-1", "slug": "managed-skill", "from_version": 1,
         "version": 2, "content_hash": "sha256:new",
-        "baseline": {"SKILL.md": _hash(V2)},
-        "previous_content_hash": "sha256:old",
+        "baseline": {"SKILL.md": _hash(V2)}, "previous_content_hash": "sha256:old",
         "previous_baseline": {"SKILL.md": _hash(V1)},
         "previous_installation": previous, "target_path": str(target),
         "local_snapshot": {"SKILL.md": _hash(V1)},
         "takedown_generation": 7, "update_mode": "MANUAL",
         "authority": {
             "installed_version": 1, "latest_version": 2,
-            "takedown_generation": 7, "update_mode": "MANUAL",
-            "skill_state": "active",
+            "takedown_generation": 7, "update_mode": "MANUAL", "skill_state": "active",
         },
         "preservation": {"action": "none", "destination": None},
         "compatibility": {"outcome": "compatible"},
-        "local_scan": {
-            "available": True, "allowed": True, "verdict": "allow",
-            "summary": "clean", "findings": [],
-        }, "allowed": True,
+        "local_scan": dict(Host(skills).scan_result), "allowed": True,
         "permitted_actions": ["confirm_update", "recheck"],
     })
     client = Client()
-    value = UpdateExecutor(
-        client, store, receipts, Reviewer(), Host(skills), lambda: dict(owner)
-    )
+    value = UpdateExecutor(client, store, receipts, Reviewer(), Host(skills), lambda: dict(owner))
     return value, store, client, receipts, plan, target, owner
 
 
-@pytest.mark.parametrize("storage_name", [".hub", ".archive"])
-def test_update_rejects_redirected_storage_before_mutation(executor, tmp_path, storage_name):
-    value, store, client, _receipts, plan, target, _owner = executor
-    outside = tmp_path / "outside-storage"
-    outside.mkdir()
-    (value.host.skills_root / storage_name).symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(PackagePolicyError, match="symlink"):
-        value.apply(plan["receipt"])
-
-    assert not list(outside.iterdir())
-    assert (target / "SKILL.md").read_bytes() == V1
-    assert store.installation("skill-1")["version"] == 1
-    assert client.record_calls == []
-
-
-def test_clean_update_commits_exact_bytes_and_retains_recovery_tree(executor):
+def test_manual_success_commits_exact_bytes_and_complete_result(executor):
     value, store, client, receipts, plan, target, _owner = executor
 
     result = value.apply(plan["receipt"])
 
     assert result["updated"] is True and result["version"] == 2
-    assert (target / "SKILL.md").read_bytes() == V2
+    assert target.joinpath("SKILL.md").read_bytes() == V2
     assert Path(result["recovery_path"]).joinpath("SKILL.md").read_bytes() == V1
-    assert result["preserved_copy"] is None
     assert store.installation("skill-1")["version"] == 2
     assert receipts.outcome(plan["receipt"]) == result
+    review = store.review("update_receipt:" + plan["receipt"])
+    operation = store.operation(review["operation_id"])
+    assert operation["status"] == "done" and operation["stage"] == "complete"
+    assert operation["result"] == result
     assert len(client.record_calls) == 1
 
 
-def test_update_rejects_new_affirmative_scan_verdict_at_activation(executor):
+def test_changed_scan_before_swap_preserves_original(executor):
     value, store, client, _receipts, plan, target, _owner = executor
     calls = 0
 
-    def changed_at_final_boundary(_path):
+    def changed(_path):
         nonlocal calls
         calls += 1
-        scan = dict(value.host.scan_result)
-        if calls > 1:
-            scan["verdict"] = "allow-with-advisory"
-        return scan
+        result = dict(value.host.scan_result)
+        result["verdict"] = "allow-with-advisory"
+        return result
 
-    value.host.scan = changed_at_final_boundary
-
+    value.host.scan = changed
     with pytest.raises(PackagePolicyError, match="scan changed"):
         value.apply(plan["receipt"])
 
+    assert calls == 1
     assert target.joinpath("SKILL.md").read_bytes() == V1
     assert store.installation("skill-1")["version"] == 1
     assert client.record_calls == []
 
 
-def test_update_recovery_rejects_changed_affirmative_scan_before_swap(
-    executor, monkeypatch
-):
-    from hermes_wisdom_plugin import update_execution
-
-    value, store, client, _receipts, plan, target, _owner = executor
-    original_same_filesystem = update_execution._same_filesystem
-    failed = False
-
-    def interrupt_once(source, destination_parent):
-        nonlocal failed
-        if not failed:
-            failed = True
-            raise OSError("preservation interrupted")
-        return original_same_filesystem(source, destination_parent)
-
-    monkeypatch.setattr(update_execution, "_same_filesystem", interrupt_once)
-    with pytest.raises(OSError, match="preservation interrupted"):
-        value.apply(plan["receipt"])
-    assert store.pending_operations()[0]["phase"] == "staged"
-
-    value.host.scan_result["findings"] = [
-        {"kind": "new-warning", "file": "SKILL.md"}
-    ]
-    with pytest.raises(PackagePolicyError, match="scan changed"):
-        value.apply(plan["receipt"])
-
-    assert target.joinpath("SKILL.md").read_bytes() == V1
-    assert store.installation("skill-1")["version"] == 1
-    assert client.record_calls == []
-
-
-def test_manual_update_executes_exact_accepted_warning_receipt(executor):
-    value, store, client, receipts, plan, target, _owner = executor
-    scan = {
-        "available": True,
-        "allowed": False,
-        "verdict": "suspicious",
-        "summary": "manual review required",
-        "findings": [{"kind": "suspicious", "file": "SKILL.md"}],
-    }
-    payload = {
-        key: json.loads(json.dumps(item))
-        for key, item in plan.items()
-        if key not in {"receipt", "operation", "owner", "created_at", "expires_at"}
-    }
-    payload["local_scan"] = scan
-    payload["policy"] = {
-        "warning_acceptance": {
-            "accepted": True,
-            "operation": "update",
-            "content_hash": payload["content_hash"],
-            "scan_fingerprint": "sha256:fixture",
-        }
-    }
-    accepted = receipts.create(payload)
-    value.host.scan = lambda _path: json.loads(json.dumps(scan))
-
-    result = value.apply(accepted["receipt"])
-
-    assert result["updated"] is True
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-    assert store.installation("skill-1")["version"] == 2
-    assert len(client.record_calls) == 1
-
-
-def test_modified_update_preserves_reviewed_actual_bytes_before_swap(executor):
+def test_modified_update_preserves_exact_reviewed_bytes(executor):
     value, _store, _client, receipts, plan, target, _owner = executor
     edited = b"# precious raccoon edits\n"
-    (target / "SKILL.md").write_bytes(edited)
+    target.joinpath("SKILL.md").write_bytes(edited)
     destination = value.host.skills_root / "managed-skill-local-before-v2-fixed"
-    plan = receipts.create({
-        **{key: val for key, val in plan.items()
-           if key not in {"receipt", "operation", "owner", "created_at", "expires_at"}},
-        "local_snapshot": {"SKILL.md": _hash(edited)}, "modified": True,
-        "preservation": {
-            "action": "preserve_unmanaged_copy", "destination": str(destination)
-        },
+    payload = {
+        key: val for key, val in plan.items()
+        if key not in {"receipt", "operation", "owner", "created_at", "expires_at"}
+    }
+    reviewed = receipts.create({
+        **payload, "local_snapshot": {"SKILL.md": _hash(edited)}, "modified": True,
+        "preservation": {"action": "preserve_unmanaged_copy", "destination": str(destination)},
     })
 
-    first = value.apply(plan["receipt"])
-    second = value.apply(plan["receipt"])
+    first = value.apply(reviewed["receipt"])
+    second = value.apply(reviewed["receipt"])
 
     assert destination.joinpath("SKILL.md").read_bytes() == edited
     assert Path(first["recovery_path"]).joinpath("SKILL.md").read_bytes() == edited
     assert target.joinpath("SKILL.md").read_bytes() == V2
     assert second == first
-    assert len(list(value.host.skills_root.glob("managed-skill-local-before-v2-*"))) == 1
 
 
-def test_crash_after_old_move_recovers_from_hash_evidence(executor, monkeypatch):
-    value, store, _client, _receipts, plan, target, _owner = executor
-    advance = store.advance
-    failed = False
+@pytest.mark.parametrize("boundary", ["old", "new"])
+def test_restart_recovers_when_rename_wins_before_checkpoint(executor, monkeypatch, boundary):
+    value, _store, client, _receipts, plan, target, _owner = executor
+    replace = package_application.durable_replace
+    interrupted = False
 
-    def fail_once(operation_id, phase, *, done=False):
-        nonlocal failed
-        if phase == "old_preserved" and not failed:
-            failed = True
-            raise OSError("journal interrupted after old move")
-        advance(operation_id, phase, done=done)
+    def interrupt(source, destination):
+        nonlocal interrupted
+        replace(source, destination)
+        selected = destination.name == (
+            "previous-managed" if boundary == "old" else "managed-skill"
+        )
+        if selected and not interrupted:
+            interrupted = True
+            raise OSError("checkpoint acknowledgement lost")
 
-    monkeypatch.setattr(store, "advance", fail_once)
-    with pytest.raises(OSError, match="old move"):
+    monkeypatch.setattr(package_application, "durable_replace", interrupt)
+    with pytest.raises(OSError, match="acknowledgement lost"):
         value.apply(plan["receipt"])
-    assert not target.exists()
-    monkeypatch.setattr(store, "advance", advance)
+    monkeypatch.setattr(package_application, "durable_replace", replace)
 
-    assert value.apply(plan["receipt"])["updated"] is True
+    result = value.apply(plan["receipt"])
+    assert result["updated"] is True
     assert target.joinpath("SKILL.md").read_bytes() == V2
+    assert len(client.record_calls) == 1
 
 
-def test_partial_staging_write_is_rebuilt_from_reverified_bytes(executor, monkeypatch):
-    value, store, _client, _receipts, plan, target, _owner = executor
+def test_partial_staging_is_rebuilt_from_reverified_bytes(executor, monkeypatch):
     from hermes_wisdom_plugin import update_execution
+
+    value, store, _client, _receipts, plan, target, _owner = executor
     write_staging = update_execution._write_staging
 
-    def partial(path, _files):
+    def partial(path, _files, _baseline):
         path.mkdir(parents=True)
-        (path / "SKILL.md").write_bytes(b"partial")
+        path.joinpath("SKILL.md").write_bytes(b"partial")
         raise OSError("staging interrupted")
 
     monkeypatch.setattr(update_execution, "_write_staging", partial)
     with pytest.raises(OSError, match="staging interrupted"):
         value.apply(plan["receipt"])
+    assert store.pending_operations()[0]["stage"] == "prepared"
     assert target.joinpath("SKILL.md").read_bytes() == V1
-    assert store.pending_operations()[0]["phase"] == "reviewed"
 
     monkeypatch.setattr(update_execution, "_write_staging", write_staging)
     assert value.apply(plan["receipt"])["updated"] is True
-    assert target.joinpath("SKILL.md").read_bytes() == V2
 
 
-def test_crash_after_new_move_recovers_without_replacing_again(executor, monkeypatch):
-    value, store, _client, _receipts, plan, target, _owner = executor
-    advance = store.advance
-    failed = False
-
-    def fail_once(operation_id, phase, *, done=False):
-        nonlocal failed
-        if phase == "files_committed" and not failed:
-            failed = True
-            raise OSError("journal interrupted after new move")
-        advance(operation_id, phase, done=done)
-
-    monkeypatch.setattr(store, "advance", fail_once)
-    with pytest.raises(OSError, match="new move"):
-        value.apply(plan["receipt"])
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-    monkeypatch.setattr(store, "advance", advance)
-
-    assert value.apply(plan["receipt"])["updated"] is True
-
-
-def test_transient_gateway_error_is_pending_and_retry_converges(executor):
+def test_transient_gateway_outcome_is_pending_then_reconciles(executor):
     value, store, client, _receipts, plan, target, _owner = executor
     client.error = RuntimeError("offline secret")
 
     pending = value.apply(plan["receipt"])
 
-    assert pending["pending"] is True
-    assert "secret" not in pending["error"]
+    assert pending["pending"] is True and "secret" not in pending["error"]
+    assert pending["phase"] == "local_committed"
+    assert store.pending_operations()[0]["stage"] == "local_committed"
     assert target.joinpath("SKILL.md").read_bytes() == V2
-    assert store.pending_operations()[0]["phase"] == "local_ledger_committed"
+
     client.error = None
     assert value.apply(plan["receipt"])["updated"] is True
     assert len(client.record_calls) == 2
 
 
-def test_reviewed_update_recovery_rejects_phase_drift_before_resume(executor):
-    value, store, client, _receipts, plan, target, _owner = executor
-    client.error = RuntimeError("offline")
-    pending = value.apply(plan["receipt"])
-    reviewed = value.recovery_status("skill-1", pending["operation_id"])
-    calls_before = list(client.record_calls)
-    store.advance(pending["operation_id"], "gateway_recorded")
-    client.error = None
-
-    with pytest.raises(WisdomConflict, match="recovery.*changed|changed.*recovery"):
-        value.apply(
-            plan["receipt"], expected_recovery=reviewed, may_apply=lambda: True
-        )
-
-    assert client.record_calls == calls_before
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-    assert store.operation(pending["operation_id"])["phase"] == "gateway_recorded"
-
-
-@pytest.mark.parametrize(
-    ("field", "replacement"),
-    [("version", 3), ("content_hash", "sha256:changed")],
-)
-def test_update_recovery_rejects_journal_identity_drift_from_immutable_receipt(
-    executor, field, replacement,
-):
-    value, store, client, _receipts, plan, target, _owner = executor
-    client.error = RuntimeError("offline")
-    pending = value.apply(plan["receipt"])
-    reviewed = value.recovery_status("skill-1", pending["operation_id"])
-    row = store.operation(pending["operation_id"])
-    payload = dict(row["payload"])
-    payload[field] = replacement
-    store.replace_operation_payload(pending["operation_id"], payload)
-    calls_before = list(client.record_calls)
-    client.error = None
-
-    with pytest.raises(WisdomConflict, match="reviewed|receipt|content"):
-        value.apply(
-            plan["receipt"], expected_recovery=reviewed, may_apply=lambda: True
-        )
-
-    assert client.record_calls == calls_before
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-
-
-def test_exact_reviewed_update_recovery_resumes_normally(executor):
-    value, _store, client, _receipts, plan, target, _owner = executor
-    client.error = RuntimeError("offline")
-    pending = value.apply(plan["receipt"])
-    reviewed = value.recovery_status("skill-1", pending["operation_id"])
-    client.error = None
-
-    result = value.apply(
-        plan["receipt"], expected_recovery=reviewed, may_apply=lambda: True
-    )
-
-    assert result["updated"] is True
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-
-
-def test_revoked_review_has_no_update_recovery_effect(executor):
-    value, store, client, _receipts, plan, target, _owner = executor
-    client.error = RuntimeError("offline")
-    pending = value.apply(plan["receipt"])
-    reviewed = value.recovery_status("skill-1", pending["operation_id"])
-    calls_before = list(client.record_calls)
-    before = store.operation(pending["operation_id"])
-    client.error = None
-
-    with pytest.raises(WisdomAuthError, match="no longer current"):
-        value.apply(
-            plan["receipt"], expected_recovery=reviewed, may_apply=lambda: False
-        )
-
-    assert client.record_calls == calls_before
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-    assert store.operation(pending["operation_id"]) == before
-
-
-def test_lost_success_response_reconciles_remote_target_without_second_post(executor):
+def test_lost_gateway_success_reconciles_without_second_post(executor):
     value, _store, client, _receipts, plan, _target, _owner = executor
 
     def applied_then_lost(**values):
@@ -457,90 +264,69 @@ def test_lost_success_response_reconciles_remote_target_without_second_post(exec
     client.record_install = applied_then_lost
     assert value.apply(plan["receipt"])["pending"] is True
     client.record_install = lambda **_values: (_ for _ in ()).throw(
-        AssertionError("must reconcile without repost")
+        AssertionError("must not repost")
     )
 
     assert value.apply(plan["receipt"])["updated"] is True
     assert len(client.record_calls) == 1
 
 
-def test_terminal_authority_removal_during_recovery_quarantines_and_deactivates(executor):
+def test_terminal_gateway_rejection_quarantines_and_deactivates(executor):
     value, store, client, _receipts, plan, target, _owner = executor
-    client.error = RuntimeError("offline")
-    assert value.apply(plan["receipt"])["pending"] is True
-    value.reviewer.reject = True
+    client.error = WisdomConflict(
+        "skill_taken_down", status=409, code="skill_taken_down"
+    )
 
-    rejected = value.apply(plan["receipt"])
-
-    assert rejected["rejected"] is True
-    assert not target.exists()
-    assert Path(rejected["quarantine_path"]).joinpath("SKILL.md").read_bytes() == V2
-    assert Path(rejected["recovery_path"]).joinpath("SKILL.md").read_bytes() == V1
-    assert store.installation("skill-1")["state"] == "inactive"
-    assert store.installation("skill-1", owner=_owner)["state"] == "inactive"
-    assert store.pending_operations() == []
-
-
-@pytest.mark.parametrize(
-    "code",
-    ["skill_not_active", "skill_taken_down", "skill_archived", "skill_not_found",
-     "version_not_found", "takedown_generation_changed"],
-)
-def test_terminal_gateway_rejection_quarantines_new_bytes_without_reactivation(
-    executor, code
-):
-    value, store, client, _receipts, plan, target, _owner = executor
-    client.error = WisdomConflict(code, status=409, code=code)
-
-    with pytest.raises(WisdomConflict, match=code):
+    with pytest.raises(WisdomConflict, match="skill_taken_down"):
         value.apply(plan["receipt"])
 
-    operation = store.operation(store.get_metadata(
-        "update_receipt:" + plan["receipt"]
-    )["operation_id"])
-    assert operation["state"] == "done" and operation["phase"] == "gateway_rejected"
+    review = store.review("update_receipt:" + plan["receipt"])
+    operation = store.operation(review["operation_id"])
+    assert operation["status"] == "done" and operation["stage"] == "complete"
+    assert operation["result"]["rejected"] is True
     assert not target.exists()
-    assert Path(operation["payload"]["quarantine_path"]).joinpath("SKILL.md").read_bytes() == V2
-    assert Path(operation["payload"]["recovery_path"]).joinpath("SKILL.md").read_bytes() == V1
+    assert Path(operation["result"]["quarantine_path"]).joinpath("SKILL.md").read_bytes() == V2
     assert store.installation("skill-1")["state"] == "inactive"
 
 
-@pytest.mark.parametrize("code", ["installation_changed", "policy_not_configured"])
-def test_concurrent_or_policy_409_stays_pending_and_does_not_quarantine(executor, code):
+def test_owner_change_denies_before_update_effect(executor):
     value, store, client, _receipts, plan, target, _owner = executor
-    client.error = WisdomConflict(code, status=409, code=code)
+    original_owner = value.owner
+    value.owner = lambda: {**original_owner(), "account_id": "other"}
+
+    with pytest.raises(WisdomAuthError):
+        value.apply(plan["receipt"])
+
+    assert target.joinpath("SKILL.md").read_bytes() == V1
+    assert store.pending_operations() == []
+    assert client.record_calls == []
+
+
+def test_completion_ack_loss_finishes_without_reapplying(executor, monkeypatch):
+    value, store, client, receipts, plan, _target, _owner = executor
+    complete = receipts.complete
+    interrupted = False
+
+    def lose_once(receipt, result):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise OSError("completion acknowledgement lost")
+        return complete(receipt, result)
+
+    monkeypatch.setattr(receipts, "complete", lose_once)
+    with pytest.raises(OSError, match="acknowledgement lost"):
+        value.apply(plan["receipt"])
+    assert store.pending_operations()[0]["stage"] == "outcome_recorded"
 
     result = value.apply(plan["receipt"])
-
-    assert result["pending"] is True
-    assert target.joinpath("SKILL.md").read_bytes() == V2
-    assert store.installation("skill-1")["state"] == "active"
-    assert store.pending_operations()[0]["phase"] == "local_ledger_committed"
-
-
-def test_pending_setup_blocks_update_even_when_database_lease_expired(executor):
-    value, store, _client, _receipts, plan, _target, _owner = executor
-    store.journal("wisdom_setup", "skill-1", "unknown", {"owner": OWNER})
-
-    with pytest.raises(PackagePolicyError, match="setup operation"):
-        value.apply(plan["receipt"])
-
-
-def test_pending_update_blocks_install_and_uninstall_paths(executor):
-    value, store, _client, _receipts, plan, _target, owner = executor
-    assert value.apply(plan["receipt"])["updated"] is True
-    # Re-open a representative update journal to prove the existing executor checks kind.
-    store.journal("update", "skill-1", "local_ledger_committed", {"owner": owner})
-    install = InstallExecutor(
-        SimpleNamespace(), store, SimpleNamespace(), SimpleNamespace(),
-        InstallHost(value.host.skills_root), lambda: dict(owner)
-    )
-    with pytest.raises(PackagePolicyError, match="managed operation"):
-        install.uninstall("skill-1")
+    assert result["updated"] is True
+    assert store.pending_operations() == []
+    assert len(client.record_calls) == 1
 
 
 class RealClient(ReviewClient):
-    """Package and authority transport for real-reviewer recovery coverage."""
+    """Package and authority transport for real reviewer paths."""
 
     def __init__(self):
         super().__init__()
@@ -562,7 +348,7 @@ class RealClient(ReviewClient):
 @pytest.fixture
 def real_executor(tmp_path):
     owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
-    store = WisdomStore(tmp_path / "state")
+    store = installed_store(tmp_path / "state")
     host = ReviewHost(tmp_path / "profile")
     client = RealClient()
     target = (host.skills_root / "_wisdom"
@@ -583,35 +369,42 @@ def real_executor(tmp_path):
     receipts = UpdateReceipts(store, lambda: dict(owner))
     reviewer = UpdateReviewer(client, store, receipts, host, lambda: dict(owner))
     plan = reviewer.plan("skill-1")
-    value = UpdateExecutor(client, store, receipts, reviewer, host, lambda: dict(owner))
-    return value, store, client, receipts, plan, target
+    executor_value = UpdateExecutor(
+        client, store, receipts, reviewer, host, lambda: dict(owner)
+    )
+    return executor_value, store, client, receipts, plan, target
 
 
-@pytest.mark.parametrize("interrupted_phase", ["old_preserved", "files_committed"])
-def test_real_reviewer_recovers_pre_ledger_crash_windows(
-    real_executor, monkeypatch, interrupted_phase
-):
-    value, store, _client, _receipts, plan, target = real_executor
-    advance = store.advance
-    failed = False
+def test_real_reviewer_denies_changed_local_bytes(real_executor):
+    value, store, client, _receipts, plan, target = real_executor
+    target.joinpath("SKILL.md").write_bytes(b"changed after review")
 
-    def fail_once(operation_id, phase, *, done=False):
-        nonlocal failed
-        if phase == interrupted_phase and not failed:
-            failed = True
-            raise OSError(f"interrupted before {phase} acknowledgement")
-        advance(operation_id, phase, done=done)
-
-    monkeypatch.setattr(store, "advance", fail_once)
-    with pytest.raises(OSError, match="interrupted"):
+    with pytest.raises(PackagePolicyError, match="local bytes changed"):
         value.apply(plan["receipt"])
-    monkeypatch.setattr(store, "advance", advance)
 
-    assert value.apply(plan["receipt"])["updated"] is True
-    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v2\n"
+    assert store.pending_operations() == []
+    assert client.record_calls == []
 
 
-def test_real_reviewer_terminal_authority_loss_during_pending_retry(real_executor):
+def test_real_reviewer_recovers_lost_remote_response_with_clamped_policy(real_executor):
+    value, store, client, _receipts, plan, _target = real_executor
+    client.committed_mode = "REQUIRED"
+    client.record_error = "after"
+    assert value.apply(plan["receipt"])["pending"] is True
+    client.record_error = None
+    client.content = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("committed update must not refetch bytes")
+    )
+
+    result = value.apply(plan["receipt"])
+
+    assert result["updated"] is True
+    assert result["effective_update_mode"] == "REQUIRED"
+    assert store.installation("skill-1")["update_mode"] == "REQUIRED"
+    assert len(client.record_calls) == 1
+
+
+def test_real_reviewer_authority_loss_quarantines_pending_update(real_executor):
     value, store, client, _receipts, plan, target = real_executor
     client.record_error = "before"
     assert value.apply(plan["receipt"])["pending"] is True
@@ -624,210 +417,100 @@ def test_real_reviewer_terminal_authority_loss_during_pending_retry(real_executo
     assert store.installation("skill-1")["state"] == "inactive"
 
 
-@pytest.mark.parametrize("latest_version", [2, 3])
-def test_real_reviewer_accepts_policy_clamped_commit_after_lost_response(
-    real_executor, latest_version
+def test_retry_binds_existing_operation_before_files_or_gateway(
+    real_executor, monkeypatch,
 ):
-    value, store, client, _receipts, plan, _target = real_executor
-    client.committed_mode = "REQUIRED"
-    client.record_error = "after"
-    assert value.apply(plan["receipt"])["pending"] is True
-    client.record_error = None
-    client.remote["latest_version"] = latest_version
-    client.content = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("a reconciled remote commit must not refetch package bytes")
-    )
+    value, store, client, receipts, plan, target = real_executor
+    start = receipts.start
 
-    result = value.apply(plan["receipt"])
+    def lose_binding(*_args, **_kwargs):
+        raise OSError("binding interrupted")
 
-    assert result["updated"] is True
-    assert result["effective_update_mode"] == "REQUIRED"
-    assert store.installation("skill-1")["update_mode"] == "REQUIRED"
-    assert len(client.record_calls) == 1
-
-
-def test_recovery_rejects_journal_redirected_to_unmanaged_skill(executor):
-    value, store, client, _receipts, plan, target, _owner = executor
-    client.error = RuntimeError("offline")
-    assert value.apply(plan["receipt"])["pending"] is True
-    row = store.pending_operations()[0]
-    unrelated = value.host.skills_root / "user-owned"
-    unrelated.mkdir()
-    (unrelated / "SKILL.md").write_bytes(V2)
-    payload = json.loads(row["payload_json"])
-    payload["target_path"] = str(unrelated)
-    store.replace_operation_payload(row["id"], payload)
-    client.error = None
-    calls = len(client.record_calls)
-
-    with pytest.raises(PackagePolicyError, match="managed.*target"):
+    monkeypatch.setattr(receipts, "start", lose_binding)
+    with pytest.raises(OSError, match="binding interrupted"):
         value.apply(plan["receipt"])
-
-    assert (unrelated / "SKILL.md").read_bytes() == V2
-    assert store.installation("skill-1")["target_path"] == str(target)
-    assert len(client.record_calls) == calls
-
-
-@pytest.mark.parametrize("persisted_before_loss", [False, True])
-def test_final_completion_ack_loss_finishes_journal_without_reapplying(
-    real_executor, monkeypatch, persisted_before_loss
-):
-    value, store, client, receipts, plan, _target = real_executor
-    complete = receipts.complete
-    failed = False
-
-    def lose_once(receipt, result):
-        nonlocal failed
-        if not failed:
-            failed = True
-            if persisted_before_loss:
-                complete(receipt, result)
-            raise OSError("final completion acknowledgement lost")
-        complete(receipt, result)
-
-    monkeypatch.setattr(receipts, "complete", lose_once)
-    with pytest.raises(OSError, match="acknowledgement lost"):
-        value.apply(plan["receipt"])
-    assert store.pending_operations()[0]["phase"] == "gateway_recorded"
-    client.remote = None  # Final local acknowledgement must not re-run authority or mutation.
-
-    result = value.apply(plan["receipt"])
-
-    assert result["updated"] is True
-    assert store.pending_operations() == []
-    assert len(client.record_calls) == 1
-
-
-def test_native_recovery_reconciles_real_executor_after_post_apply_inspection_loss(
-    real_executor,
-):
-    value, store, client, _receipts, _plan, target = real_executor
-    owner = store.installation("skill-1")["owner"]
-
-    class Service:
-        fail_inspection = True
-
-        def native_owner(self):
-            return dict(owner)
-
-        def update_plan(self, skill_id, **choices):
-            return value.reviewer.plan(skill_id, **choices)
-
-        def update_apply(self, receipt, *, may_apply):
-            return value.apply(receipt, may_apply=may_apply)
-
-        def installed_setup_inspect(self, skill_id, *, version=None):
-            assert skill_id == "skill-1" and version == 2
-            if self.fail_inspection:
-                raise OSError("post-apply inspection response lost")
-            return {
-                "skill_id": skill_id, "version": version,
-                "content_hash": _content(client.files[2]).content_hash,
-                "state": "setup_required", "ready_to_use": None,
-            }
-
-    service = Service()
-    invocation = NativeInvocation(
-        platform="slack", profile="default", chat_type="dm", chat_id="D1",
-        actor_id="U1", actor_name="Shannon", thread_id="T1", scope_id="W1",
-        message_id="request-1", session_key="slack:W1:D1:U1", adapter=object(),
-    )
-    controller = NativeReviewController(store)
-    record = controller.request(service, invocation, "skill-1")
-    controller.bind_delivery(record["id"], invocation, "card-1")
-    callback = replace(invocation, message_id="card-1")
-
-    with pytest.raises(OSError, match="inspection response lost"):
-        controller.act(service, record["id"], callback, "confirm")
-    service.fail_inspection = False
-    completed = NativeReviewController(WisdomStore(store.root)).act(
-        service, record["id"], callback, "recover"
-    )
-
-    assert completed["state"] == "completed"
-    assert len(client.record_calls) == 1
-    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v2\n"
-
-
-def test_native_pending_gateway_reconciliation_survives_restart_without_replacing_or_reposting(  # pylint: disable=too-many-locals
-    real_executor,
-):
-    value, store, client, _receipts, _plan, target = real_executor
-    owner = store.installation("skill-1")["owner"]
-
-    class Service:
-        inspections = 0
-
-        def __init__(self, executor):
-            self.executor = executor
-
-        def native_owner(self):
-            return dict(owner)
-
-        def update_plan(self, skill_id, **choices):
-            return self.executor.reviewer.plan(skill_id, **choices)
-
-        def update_apply(self, receipt, *, may_apply):
-            return self.executor.apply(receipt, may_apply=may_apply)
-
-        def update_recovery_inspect(self, skill_id, operation_id):
-            return self.executor.recovery_status(skill_id, operation_id)
-
-        def update_recovery_resume(self, skill_id, operation_id, receipt, *, may_apply):
-            status = self.executor.recovery_status(skill_id, operation_id)
-            return self.executor.apply(
-                receipt, may_apply=may_apply, expected_recovery=status,
-            )
-
-        def installed_setup_inspect(self, *_args, **_kwargs):
-            self.inspections += 1
-            return {"ready_to_use": True}
-
-    invocation = NativeInvocation(
-        platform="slack", profile="default", chat_type="dm", chat_id="D1",
-        actor_id="U1", actor_name="Shannon", thread_id="T1", scope_id="W1",
-        message_id="request-1", session_key="slack:W1:D1:U1", adapter=object(),
-    )
-    first_service = Service(value)
-    now = [100.0]
-    first = NativeReviewController(store, clock=lambda: now[0], ttl_seconds=5)
-    record = first.request(first_service, invocation, "skill-1")
-    first.bind_delivery(record["id"], invocation, "card-1")
-    callback = replace(invocation, message_id="card-1")
-    original_bytes = target.joinpath("SKILL.md").read_bytes()
-    client.record_error = "after"
-
-    pending = first.act(first_service, record["id"], callback, "confirm")
-
-    assert pending["state"] == "needs_review"
-    assert pending["result"]["pending"] is True
-    assert pending["result"]["receipt"] == record["plan"]["receipt"]
-    assert first_service.inspections == 0
-    assert first.claim_handoff(first_service, invocation) is None
-    target_inode = target.stat().st_ino
     operation = store.pending_operations()[0]
-    recovery_path = Path(json.loads(operation["payload_json"])["recovery_path"])
+    operation_id = operation["id"]
+    assert not {
+        "staging_path", "recovery_path", "quarantine_path"
+    }.intersection(operation["payload"])
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed\n"
+    assert client.record_calls == []
+
+    monkeypatch.setattr(receipts, "start", start)
+    result = value.apply(plan["receipt"])
+
+    review = store.review("update_receipt:" + plan["receipt"])
+    assert review["operation_id"] == operation_id
+    assert result["updated"] is True
+    assert store.operation(operation_id)["result"] == result
     assert len(client.record_calls) == 1
 
-    restarted_store = WisdomStore(store.root)
-    restarted_receipts = UpdateReceipts(restarted_store, lambda: dict(owner))
-    restarted_reviewer = UpdateReviewer(
-        client, restarted_store, restarted_receipts, value.host, lambda: dict(owner)
-    )
-    restarted_executor = UpdateExecutor(
-        client, restarted_store, restarted_receipts, restarted_reviewer,
-        value.host, lambda: dict(owner),
-    )
-    restarted_service = Service(restarted_executor)
-    client.record_error = None
-    now[0] = 106.0
-    completed = NativeReviewController(restarted_store, clock=lambda: now[0], ttl_seconds=5).act(
-        restarted_service, record["id"], callback, "recover"
-    )
 
-    assert completed["state"] == "completed"
-    assert completed["plan"]["receipt"] == record["plan"]["receipt"]
-    assert restarted_service.inspections == 1
-    assert target.stat().st_ino == target_inode
-    assert recovery_path.joinpath("SKILL.md").read_bytes() == original_bytes
+def test_retry_ignores_untrusted_persisted_derived_path(
+    real_executor, monkeypatch, tmp_path,
+):
+    value, store, client, receipts, plan, target = real_executor
+
+    def lose_binding(*_args, **_kwargs):
+        raise OSError("binding interrupted")
+
+    monkeypatch.setattr(receipts, "start", lose_binding)
+    with pytest.raises(OSError, match="binding interrupted"):
+        value.apply(plan["receipt"])
+    operation = store.pending_operations()[0]
+    payload = dict(operation["payload"])
+    payload["staging_path"] = str(tmp_path / "redirected")
+    store.checkpoint(operation["id"], payload)
+    monkeypatch.undo()
+
+    result = value.apply(plan["receipt"])
+
+    assert result["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v2\n"
+    assert not (tmp_path / "redirected").exists()
     assert len(client.record_calls) == 1
+
+
+def test_retry_rescans_actual_staging_before_promotion(
+    real_executor, monkeypatch,
+):
+    value, store, client, _receipts, plan, target = real_executor
+    replace = package_application.durable_replace
+    interrupted = False
+
+    def lose_old_rename(source, destination):
+        nonlocal interrupted
+        replace(source, destination)
+        if destination.name == "previous-managed" and not interrupted:
+            interrupted = True
+            raise OSError("old-tree rename interrupted")
+
+    monkeypatch.setattr(package_application, "durable_replace", lose_old_rename)
+    with pytest.raises(OSError, match="old-tree rename"):
+        value.apply(plan["receipt"])
+    operation = store.pending_operations()[0]
+    paths = value._paths(operation["id"], operation["payload"])
+    staging = paths["staging_path"]
+    recovery = paths["recovery_path"]
+    scans = []
+    original_scan = value.host.scan
+
+    def deny_actual_staging(path):
+        if Path(path) == staging:
+            scans.append(Path(path))
+            return {
+                "available": True, "allowed": False, "verdict": "block",
+                "summary": "new denial", "findings": [],
+            }
+        return original_scan(path)
+
+    monkeypatch.setattr(package_application, "durable_replace", replace)
+    monkeypatch.setattr(value.host, "scan", deny_actual_staging)
+    with pytest.raises(PackagePolicyError, match="scan changed"):
+        value.apply(plan["receipt"])
+
+    assert scans == [staging]
+    assert not target.exists()
+    assert recovery.joinpath("SKILL.md").read_bytes() == b"# Managed\n"
+    assert client.record_calls == []

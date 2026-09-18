@@ -3,11 +3,11 @@
 
 from datetime import datetime, timedelta, timezone, tzinfo
 from .qualification import _host_timezone
-from .store import WisdomStore
+from .local_state import QualificationState
 
 
 def publication_description(
-    store: WisdomStore,
+    store: QualificationState,
     skill_id: str,
     description: str,
     *,
@@ -20,21 +20,18 @@ def publication_description(
     This publication snapshot is independent of recommendation thresholds.
     Call only while preparing a new local review, never on upload or retry.
     """
+    skill = store.local_skill(skill_id)
+    if skill is None or skill["source_kind"] != "local":
+        return description
     profile_tz, timezone_name = timezone_info or (timezone_provider or _host_timezone)()
     current = at or datetime.now(timezone.utc)
     if current.tzinfo is None:
         raise ValueError("publisher evidence timestamps must include a timezone")
     end = current.astimezone(profile_tz).date()
     start = end - timedelta(days=6)
-    with store.transaction() as db:
-        count, days = db.execute(
-            "SELECT COALESCE(SUM(u.use_count),0),COUNT(*) "
-            "FROM usage_day u JOIN local_skill s ON s.id=u.skill_id "
-            "WHERE s.id=? AND s.source_kind='local' AND s.deleted_at IS NULL "
-            "AND u.timezone_name=? AND u.day_local>=? AND u.day_local<=? "
-            "AND u.use_count>0",
-            (skill_id, timezone_name, start.isoformat(), end.isoformat()),
-        ).fetchone()
+    count, days = store.usage_summary(
+        skill_id, start=start.isoformat(), end=end.isoformat(), timezone_name=timezone_name
+    )
     if not count:
         return description
     return (

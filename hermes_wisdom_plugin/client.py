@@ -14,14 +14,9 @@ from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from .client_delivery import (
-    ClientDeliveryClaim, ClientDeliveryResponse, Identifier, receipt_projection,
-)
-from .client_outcome import ClientOperationOutcome, ClientOperationResponse
 from .contract import SystemSpecification, parse_manifest_bytes
-from .delivery import DeliveryReceipt
 from .errors import (
     WisdomAuthError,
     WisdomConflict,
@@ -599,57 +594,6 @@ class WisdomClient:
             raise WisdomError("Preference does not match the active organization")
         return response
 
-    def _delivery_identity(self) -> tuple[str, str]:
-        owner = self.owner_user_id
-        if not isinstance(owner, str) or not owner:
-            raise WisdomAuthError("Notification delivery requires an active account")
-        return self.expected_organization_id, owner
-
-    def _delivery_response(
-        self, response, identity, claim, *, event_id: str | None = None
-    ) -> ClientDeliveryResponse:
-        expected = (*identity, claim.request_id, claim.reference, event_id)
-        actual = (
-            response.org_id, response.recipient_user_id, response.request_id,
-            response.reference, event_id if event_id is None else response.event_id,
-        )
-        if self._delivery_identity() != identity or actual != expected:
-            raise WisdomError("Notification delivery response does not match the request")
-        return response
-
-    def claim_notification_delivery(self, request_id: str, reference: dict) -> ClientDeliveryResponse:
-        identity = self._delivery_identity()
-        claim = ClientDeliveryClaim(request_id=request_id, reference=reference)
-        response = self._request(
-            "agent-led/deliveries/claim", model=ClientDeliveryResponse,
-            method="POST", json_body=claim.model_dump(mode="json"),
-        )
-        return self._delivery_response(response, identity, claim)
-
-    def settle_notification_delivery(self, event_id: str, request_id: str, reference: dict, *,
-                                     outcome: Literal["acknowledged", "not_sent", "uncertain"],
-                                     receipt: DeliveryReceipt | None = None) -> ClientDeliveryResponse:
-        identity = self._delivery_identity()
-        claim = ClientDeliveryClaim(request_id=request_id, reference=reference)
-        TypeAdapter(Identifier).validate_python(event_id, strict=True)
-        if (outcome == "acknowledged") != (receipt is not None):
-            raise WisdomValidationError("Only acknowledged delivery requires a receipt")
-        body: dict[str, Any] = {"request_id": request_id, "outcome": outcome}
-        if receipt is not None:
-            body["receipt"] = receipt_projection(receipt).model_dump(mode="json")
-        result = self._request(f"agent-led/deliveries/{quote(event_id, safe='')}/settle",
-                               model=ClientDeliveryResponse, method="POST", json_body=body)
-        self._delivery_response(result, identity, claim, event_id=event_id)
-        if result.state != outcome:
-            raise WisdomError("Notification delivery settlement was not acknowledged")
-        return result
-
-    def report_operation_outcome(self, event_id: str, outcome: dict) -> ClientOperationResponse:
-        TypeAdapter(Identifier).validate_python(event_id, strict=True)
-        report = ClientOperationOutcome.model_validate(outcome)
-        return self._request(f"agent-led/deliveries/{quote(event_id, safe='')}/outcomes",
-                             model=ClientOperationResponse, method="POST",
-                             json_body=report.model_dump(mode="json"))
 
     def suppress_recommendation(self, key: str) -> WisdomSuppressionResponse:
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", key):

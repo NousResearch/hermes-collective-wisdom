@@ -1,5 +1,4 @@
 """Owned terminal command lifetime on the existing Hermes plugin APIs."""
-# Keep the established command/service ownership boundary intact for this bounded slice.
 # pylint: disable=too-many-lines
 
 from __future__ import annotations
@@ -8,14 +7,13 @@ import asyncio
 import contextvars
 import json
 import os
-import shlex
 import subprocess
 import sys
 import threading
 import time
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
@@ -81,20 +79,27 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         root: Path,
         profile: tuple[str, Path],
         *,
+        state: Any,
         llm: Any | None = None,
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
     ):
+        if state is None:
+            raise TypeError("host PluginState is required")
         self.root = root
         self.profile = profile
         self.llm = llm
         self.config = config or {}
         self._get_config = get_config
         self._set_config = set_config
+        self._state = state
+        self._installed = None
         self.account = None
         self.client = None
-        self._onboarding = None
+        self._enrollment = None
+        self._direct_state = None
+        self._qualification = None
         self._closed = False
 
     def notification_config(self) -> dict[str, Any]:
@@ -184,12 +189,119 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                 owner_user_id=self.account.account_id,
                 route_base_url=self.account.base_url,
             )
-        if self._onboarding is None:
-            from .onboarding import Onboarding  # pylint: disable=import-outside-toplevel
-            from .store import WisdomStore  # pylint: disable=import-outside-toplevel
+        if self._enrollment is None:
+            from .direct_services import (  # pylint: disable=import-outside-toplevel
+                DirectState,
+                EnrollmentService,
+            )
 
-            self._onboarding = Onboarding(self.account, WisdomStore(self.root), self.client)
-        return self._onboarding
+            self._direct_state = self._direct_state or DirectState(self._state, self.root)
+            self._enrollment = EnrollmentService(self._direct_state, self.account, self.client)
+        return self._enrollment
+
+    def _local_identity(self):
+        """Read direct enrollment state without constructing credentials or a client."""
+        if self._direct_state is None:
+            from .direct_services import DirectState  # pylint: disable=import-outside-toplevel
+
+            self._direct_state = DirectState(self._state, self.root)
+        return self._direct_state.identity()
+
+    @property
+    def local_state(self):
+        """Return the qualification domain over the injected host state."""
+        if self._qualification is None:
+            from .local_state import QualificationState  # pylint: disable=import-outside-toplevel
+
+            self._qualification = QualificationState(self._state, self.root)
+        return self._qualification
+
+    def notice_feed(self, cursor: str | None):
+        """Read one cursor page without claiming or settling delivery."""
+        owner = self._installation_owner()
+        page = self.client.feed(cursor, installation_id=owner.get("installation_id"))
+        if owner != self._installation_owner():
+            raise WisdomAuthError("Collective Wisdom notice owner changed")
+        categories = {
+            "new": "new_skill",
+            "updated": "update_available",
+            "installation_updated": "update_available",
+        }
+        events = []
+        for item in page.events:
+            row = item.model_dump(mode="json")
+            category = categories.get(str(row.get("kind")))
+            if category is not None:
+                events.append({**row, "category": category})
+        return type("NoticePage", (), {
+            "events": events,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        })()
+
+    def notice_policy(self) -> dict[str, bool]:
+        """Project the existing organization notification defaults."""
+        owner = self._installation_owner()
+        policy = self.client.agent_led_policy()
+        if policy.org_id != owner["organization_id"] or owner != self._installation_owner():
+            raise WisdomAuthError("Collective Wisdom notice policy owner changed")
+        defaults = policy.notification_defaults
+        settings = self.notification_config()["notifications"]
+        enabled = settings["delivery_mode"] == "agent"
+        return {
+            "new_skill": enabled and bool(defaults.teammate_published)
+            and settings["new_skills"] == settings["team_published"] == "immediate",
+            "update_available": enabled and bool(defaults.update_available)
+            and settings["updates"] == "immediate",
+            "skill_ready_to_share": enabled and bool(defaults.skill_ready_to_share),
+        }
+
+    def notice_candidates(self) -> list[dict[str, Any]]:
+        """Return qualified local candidates without model-generated presentation."""
+        owner = self._installation_owner()
+        if self.local_state.owner() != owner:
+            return []
+        return [
+            {
+                **row,
+                "category": "skill_ready_to_share",
+                "skill_name": (row.get("payload") or {}).get("skill_name")
+                or row.get("skill_id"),
+            }
+            for row in self.local_state.candidates()
+            if row.get("state") == "unread"
+        ]
+
+    def notice_preferences(self, references: list[dict[str, Any]]) -> dict[str, Any]:
+        """Read remote mute and exact suppressions; never stage local delivery work."""
+        from .notices import suppression_key  # pylint: disable=import-outside-toplevel
+
+        owner = self._installation_owner()
+        mute = self.client.recommendation_mute()
+        keyed = [
+            (
+                str(reference["notice_key"]),
+                suppression_key(reference),
+            )
+            for reference in references
+        ]
+        remote_keys = list(dict.fromkeys(remote for _local, remote in keyed))
+        rows = self.client.recommendation_suppressions(remote_keys) if remote_keys else []
+        if mute.org_id != owner["organization_id"] or owner != self._installation_owner():
+            raise WisdomAuthError("Collective Wisdom notice preference owner changed")
+        by_remote = {row.key: row.suppress_until for row in rows}
+        suppressed = {local: by_remote[remote] for local, remote in keyed if remote in by_remote}
+        return {"muted": bool(mute.muted), "suppressed": suppressed}
+
+    def end_turn_notices(self, renderer: Callable[[list[dict[str, Any]]], Any] | None):
+        """Run one failure-isolated best-effort check for a supported renderer."""
+        from .notices import EndTurnNotices  # pylint: disable=import-outside-toplevel
+
+        if self._direct_state is None:
+            from .direct_services import DirectState  # pylint: disable=import-outside-toplevel
+
+            self._direct_state = DirectState(self._state, self.root)
+        return EndTurnNotices(self._direct_state, lambda: self).run(renderer=renderer)
 
     def _install_credentials(self):
         self.check_owner()
@@ -221,25 +333,27 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     def status(self, *, include_operations=False):
         """Inspect local setup without enrolling or contacting the Gateway."""
         self.check_owner()
-        if not (self.root / "wisdom.db").is_file():
+        if self._local_identity() is None:
             return {"configured": False, "state": "not_configured", "reason": "not_configured"}
         result = self._open().status()
         if include_operations and result.get("configured"):
             owner = {**self.binding(), "installation_id": result.get("installation_id")}
-            result["pending_operations"] = [
+            managed = [
                 {"operation_id": operation["id"], "kind": operation["kind"],
-                 "phase": operation["phase"], "skill_id": operation["entity_id"]}
-                for operation in self._onboarding.store.pending_operations()
-                if json.loads(operation["payload_json"]).get("owner") == owner
+                 "stage": operation["stage"], "skill_id": operation["skill_id"]}
+                for operation in self.installed.pending_operations()
+                if operation.get("payload", {}).get("owner") == owner
             ]
+            assert self._direct_state is not None
+            local = self._direct_state.pending_direct_operations(owner)
+            result["pending_operations"] = managed + local
         self.check_owner()
         return result
 
     def _installation_owner(self):
         self.require_setup()
         self._install_credentials()
-        return {**self.binding(), "installation_id":
-                self._onboarding.store.existing_installation_identity()}
+        return self._open().owner()
 
     def _installation_services(self):
         from .install_execution import InstallExecutor  # pylint: disable=import-outside-toplevel
@@ -248,7 +362,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         from .install_review import InstallReviewer  # pylint: disable=import-outside-toplevel
 
         self._installation_owner()
-        store = self._onboarding.store
+        store = self.installed
         host = InstallationHost(self.profile[1])
         receipts = InstallReceipts(store, self._installation_owner)
         reviewer = InstallReviewer(self.client, store, receipts, host, self._installation_owner)
@@ -257,18 +371,15 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         return reviewer, executor
 
     def _setup_services(self):
+        from .direct_services import SetupService  # pylint: disable=import-outside-toplevel
         from .install_host import InstallationHost  # pylint: disable=import-outside-toplevel
-        from .setup_execution import SetupController  # pylint: disable=import-outside-toplevel
         from .setup_host import SetupHost  # pylint: disable=import-outside-toplevel
-        from .setup_receipts import SetupReceipts  # pylint: disable=import-outside-toplevel
 
         self._installation_owner()
-        if self._onboarding is None:
-            raise WisdomError("Collective Wisdom setup service is unavailable")
-        store = self._onboarding.store
-        return SetupController(
-            store,
-            SetupReceipts(store, self._installation_owner),
+        assert self._direct_state is not None
+        return SetupService(
+            self._direct_state,
+            self.installed,
             InstallationHost(self.profile[1]),
             SetupHost(),
             self._installation_owner,
@@ -281,9 +392,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         from .update_review import UpdateReviewer  # pylint: disable=import-outside-toplevel
 
         self._installation_owner()
-        if self._onboarding is None:
-            raise WisdomError("Collective Wisdom update service is unavailable")
-        store = self._onboarding.store
+        store = self.installed
         host = InstallationHost(self.profile[1])
         receipts = UpdateReceipts(store, self._installation_owner)
         reviewer = UpdateReviewer(
@@ -300,25 +409,26 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         from .contribution_review import ContributionReviewer  # pylint: disable=import-outside-toplevel
         from .install_host import InstallationHost  # pylint: disable=import-outside-toplevel
 
-        if self._onboarding is None:
-            raise WisdomError("Collective Wisdom contribution service is unavailable")
+        self._installation_owner()
+        assert self._direct_state is not None
         return ContributionReviewer(
-            self._onboarding.store,
+            self._direct_state,
             InstallationHost(self.profile[1]),
             self._installation_owner,
             llm=self.llm,
+            source_store=self.local_state,
         )
 
     def _publication_service(self):
-        """Build the one shared publication state machine over existing services."""
+        """Build the direct PluginState-backed publication service."""
 
-        from .publication import PublicationController  # pylint: disable=import-outside-toplevel
+        from .direct_services import PublicationService  # pylint: disable=import-outside-toplevel
 
         self._installation_owner()
-        if self._onboarding is None or self.client is None:
+        if self.client is None or self._direct_state is None:
             raise WisdomError("Collective Wisdom publication service is unavailable")
-        return PublicationController(
-            self._onboarding.store,
+        return PublicationService(
+            self._direct_state,
             self._contribution_reviewer(),
             self.client,
             self._installation_owner,
@@ -336,7 +446,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         owner = self._installation_owner()
         _require_current(may_apply)
-        self._onboarding.store.bind_qualification_owner(owner)
+        self.local_state.bind_owner(owner)
         result = self._contribution_reviewer().prepare(
             skill_name,
             allow_model_review=bool(allow_model_review),
@@ -348,90 +458,39 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise WisdomAuthError("Collective Wisdom contribution owner changed")
         return result
 
-    def review_week(self, *, dry_run=False):
-        """Use current owner and Gateway policy to queue local evidence; never call a model."""
-        from .weekly_queue import (  # pylint: disable=import-outside-toplevel
-            enqueue_weekly_review,
-            weekly_policy_from_agent,
-        )
-
-        owner = self._installation_owner()
-        policy = self.client.agent_led_policy()
-        if policy.org_id != owner["organization_id"]:
-            raise WisdomAuthError("Collective Wisdom weekly policy owner changed")
-        if owner != self._installation_owner():
-            raise WisdomAuthError("Collective Wisdom weekly review owner changed")
-        store = self._onboarding.store
-        store.bind_qualification_owner(owner)
-
-        def authorized():
-            try:
-                return owner == self._installation_owner()
-            except WisdomError:
-                return False
-
-        return enqueue_weekly_review(
-            store=store,
-            skills_root=self.profile[1] / "skills",
-            policy=weekly_policy_from_agent(policy),
-            authorized=authorized,
-            dry_run=bool(dry_run),
-        )
-
     @property
-    def store(self):
-        """Expose the active profile store to shared state kernels."""
+    def qualification_state(self):
+        """Return the owner-bound qualification aggregate."""
 
         self.require_setup()
-        return self._onboarding.store
+        return self.local_state
 
-    def _consumption(self):
-        """Build the shared feed projection without starting background work."""
+    @property
+    def installed(self):
+        """Resolve the injected, profile-fenced installed-skill aggregate."""
 
-        from .consumption import WisdomConsumption  # pylint: disable=import-outside-toplevel
+        if self._installed is None:
+            from .installed_state import InstalledState  # pylint: disable=import-outside-toplevel
 
-        self._installation_owner()
-        return WisdomConsumption(
-            self._onboarding.store, self.client, config=self.notification_config()
-        )
+            self._installed = InstalledState(self._state, self.root)
+        return self._installed
 
     def notifications(self, *, mark_seen=False):
-        """Read durable local notices, optionally acknowledging selected rows."""
-
-        result = self._consumption().notifications(mark_seen=bool(mark_seen))
-        self.check_owner()
-        return result
+        """Return manually discoverable local candidates; notices are not receipts."""
+        del mark_seen
+        owner = self._installation_owner()
+        if self.local_state.owner() != owner:
+            return {"events": [], "more": False}
+        return {"events": self.notice_candidates(), "more": False}
 
     def inbox(self, *, invocation=None):
         """Read owner-bound assessments and reviews without polling or mutation."""
-        from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
         from .native_review import NativeReviewController  # pylint: disable=import-outside-toplevel
-
+        from .review_state import ReviewState  # pylint: disable=import-outside-toplevel
         owner = self._installation_owner()
-        store = self._onboarding.store
         mode = self.notification_mode()
-        rows = (
-            MediationStore(store, owner=owner, initialize_schema=False).assessments(
-                owner["organization_id"]
-            )
-            if store.get_metadata("qualification_owner") == owner else []
-        )
-        if mode == "fixed":
-            rows = [row for row in rows if row["reference"].get("user_requested") is True]
-        assessments = [{
-            **{key: row.get(key) for key in (
-                "id", "event_key", "state", "advice", "delivered_at", "owner_session",
-            )},
-            "reference": {
-                key: row["reference"].get(key)
-                for key in (
-                    "kind", "skill_id", "version", "event_id", "local_skill_id",
-                    "content_hash",
-                )
-                if row["reference"].get(key) is not None
-            },
-        } for row in rows if row["reference"].get("kind") != "weekly_review"][-100:]
-        interactions = NativeReviewController(store).pending(
+        assessments = self.notice_candidates()[-100:]
+        interactions = NativeReviewController(ReviewState(self._state, self.root)).pending(
             owner, invocation=invocation, limit=100
         )
         installed_setup = [{
@@ -440,7 +499,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             "instruction": (
                 "Inspect installed setup; file installation does not establish readiness."
             ),
-        } for row in store.installations(owner) if row["state"] == "active"][:100]
+        } for row in self.installed.installations(owner) if row["state"] == "active"][:100]
         self.check_owner()
         if owner != self._installation_owner():
             raise WisdomAuthError("Collective Wisdom inbox owner changed")
@@ -452,8 +511,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     def native_candidate_inspect(self, event_id):
         """Inspect one exact owner-private candidate without catalog disclosure."""
         owner = self._installation_owner()
-        store = self.store
-        if store.get_metadata("qualification_owner") != owner:
+        store = self.qualification_state
+        if store.owner() != owner:
             raise WisdomError("Collective Wisdom candidate was not found")
         event = store.local_event(event_id)
         if (
@@ -492,11 +551,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         return {"kind": "skill", "skill_id": skill_id, "version": version, "facts": result}
 
-    def native_candidate_prepare(
-        self, event_id, *, may_apply: Callable[[], bool] | None = None,
-    ):
+    def native_candidate_prepare(self, event_id):
         """Prepare a local candidate for native publication review without upload."""
-        _require_current(may_apply)
         inspected = self.native_candidate_inspect(event_id)
         skill_name = str((inspected.get("facts") or {}).get("name") or "")
         from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
@@ -509,245 +565,22 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         draft_id = str(prepared.get("draft_id") or prepared.get("local_draft_id") or "")
         if not draft_id:
             raise SharePackagingError()
-        _require_current(may_apply)
         return draft_id
-
-    def _candidate_slash_context(  # pylint: disable=too-many-locals
-        self, assessment_id: str
-    ) -> tuple[dict, dict, Any]:
-        """Resolve one delivered, owner-bound candidate and its exact source."""
-
-        from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
-        from .qualification import (  # pylint: disable=import-outside-toplevel
-            UnsafeSnapshotError, snapshot_tree,
-        )
-
-        owner = self.native_owner()
-        queue = MediationStore(self.store, owner=owner)
-        try:
-            record = queue.candidate_callback_record(owner["organization_id"], assessment_id)
-        except ValueError as exc:
-            # MediationStore uses ValueError for a replaced owner binding.  At this
-            # explicit action boundary that is an authorization failure, not bad input.
-            raise PermissionError(
-                "Collective Wisdom candidate owner changed."
-            ) from exc
-        reference = record.get("reference") if isinstance(record, dict) else None
-        if not isinstance(reference, dict) or reference.get("kind") != "candidate":
-            raise PermissionError("Collective Wisdom candidate assessment is invalid.")
-        event_id = str(reference.get("event_id") or "")
-        inspected = self.native_candidate_inspect(event_id)
-        local = queue.store.local_skill(str(reference.get("local_skill_id") or ""))
-        source_changed = (
-            not local or local.get("deleted_at") is not None
-            or local.get("source_kind") != "local"
-            or local.get("current_hash") != reference.get("content_hash")
-        )
-        if not source_changed:
-            try:
-                current_hash, _tree = snapshot_tree(
-                    Path(str((local or {}).get("canonical_path") or ""))
-                )
-            except (OSError, UnsafeSnapshotError):
-                source_changed = True
-            else:
-                source_changed = current_hash != reference.get("content_hash")
-        if (
-            inspected.get("content_hash") != reference.get("content_hash")
-            or record.get("state") not in {"delivered", "deferred"}
-            or self.native_owner() != owner
-            or source_changed
-        ):
-            raise PermissionError("Collective Wisdom candidate assessment changed.")
-        return owner, record, queue
-
-    def candidate_slash_action(  # pylint: disable=too-many-locals
-        self, assessment_id: str, action: str, *, may_apply: Callable[[], bool]
-    ) -> dict[str, Any]:
-        """Apply one explicit stock-TUI candidate action through shared kernels."""
-
-        from .native_context import NativeInvocation  # pylint: disable=import-outside-toplevel
-        from .native_review import NativeReviewController  # pylint: disable=import-outside-toplevel
-        from .portal_urls import safe_portal_url  # pylint: disable=import-outside-toplevel
-        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
-
-        if action not in {"share", "portal", "later"}:
-            raise ValueError("Unsupported candidate action")
-        _require_current(may_apply)
-        owner, record, queue = self._candidate_slash_context(assessment_id)
-        org = owner["organization_id"]
-        if action == "later":
-            preferences = WisdomPreferences(self, clock=queue.clock)
-            user = preferences.identity(org)
-
-            def stage(db, reference, days):
-                _require_current(may_apply)
-                preferences.stage_suppression(
-                    db, org=org, user=user, reference=reference, days=days
-                )
-
-            deferred, changed = queue.defer_candidate_deliberate(
-                org, assessment_id, stage=stage
-            )
-            _require_current(may_apply)
-            reference = deferred["reference"]
-            return {
-                "action": "later", "candidate_id": assessment_id,
-                "deferred": True, "already_deferred": not changed,
-                "not_now_suppression_days": reference["not_now_suppression_days"],
-                "preference_sync": "pending" if changed else "unchanged",
-            }
-        if record.get("state") != "delivered":
-            raise PermissionError("Collective Wisdom candidate assessment was already consumed.")
-        reference = record["reference"]
-        invocation = NativeInvocation(
-            platform="tui", profile=owner["profile_name"], chat_type="private",
-            chat_id="", actor_id=owner["account_id"], actor_name="",
-            thread_id="", scope_id="", message_id="",
-            session_key=f"wisdom:tui:candidate:{assessment_id}", adapter=None,
-        )
-        controller = NativeReviewController(self.store)
-        successor = controller.request_candidate_action(
-            self, invocation, str(reference["event_id"]),
-            assessment_id=assessment_id, open_in_portal=action == "portal",
-            may_apply=may_apply,
-        )
-        _require_current(may_apply)
-        if (
-            action == "share"
-            and successor.get("state") == "pending"
-            and successor["plan"].get("candidate_action") == "share"
-        ):
-            successor = controller.reconcile_candidate_publication(
-                self, successor, assessment_id, may_apply=may_apply
-            )
-        if successor.get("state") != "pending":
-            label = "Share" if action == "share" else "Portal"
-            raise WisdomConflict(
-                f"Candidate action is already completed; {label} is unavailable"
-            )
-        if action == "share":
-            if successor["plan"].get("candidate_action") != "share":
-                raise WisdomConflict(
-                    "Candidate was already opened in Portal; Share approval is unavailable"
-                )
-            internal = {
-                "owner", "candidate_assessment_id", "candidate_event_id",
-                "candidate_action", "candidate_action_state", "review_deferral",
-            }
-            review = {
-                key: value for key, value in successor["plan"].items()
-                if key not in internal
-            }
-            return {"action": "share", "candidate_id": assessment_id, "review": review}
-        successor = controller.upgrade_candidate_to_portal(
-            self, successor, assessment_id, may_apply=may_apply
-        )
-        result = successor.get("result") if isinstance(successor.get("result"), dict) else {}
-        portal_url = safe_portal_url(result.get("portal_url"))
-        if portal_url is None:
-            return {
-                "action": "portal", "candidate_id": assessment_id,
-                "state": "preparing", "publication_state": "private_draft_pending",
-            }
-        return {
-            "action": "portal", "candidate_id": assessment_id,
-            "state": result.get("state"),
-            "publication_state": result.get("publication_state"),
-            "portal_url": portal_url,
-        }
-
-    def candidate_publication_approve(  # pylint: disable=too-many-locals
-        self, receipt: str, *, may_apply: Callable[[], bool]
-    ) -> dict[str, Any]:
-        """Submit one exact candidate receipt only after a second typed slash action."""
-
-        from .native_review import NativeReviewController  # pylint: disable=import-outside-toplevel
-
-        owner = self.native_owner()
-        with self.store.transaction() as db:
-            rows = db.execute(
-                "SELECT id,plan_json FROM wisdom_consent WHERE organization_id=? AND profile=? "
-                "AND operation='publish' AND state='pending' "
-                "AND json_extract(plan_json,'$.receipt')=? "
-                "AND json_type(plan_json,'$.candidate_assessment_id')='text'",
-                (owner["organization_id"], owner["profile_name"], receipt),
-            ).fetchall()
-        if len(rows) != 1:
-            raise WisdomConflict("Candidate publication receipt is missing or already consumed")
-        plan = json.loads(rows[0]["plan_json"])
-        assessment_id = str(plan["candidate_assessment_id"])
-        lock_key = (
-            f"candidate-action:{owner['organization_id']}:"
-            f"{owner['profile_name']}:{assessment_id}"
-        )
-        store = cast(Any, self.store)
-        lock = store.acquire_operation_lock(lock_key)
-        if lock is None:
-            raise WisdomConflict("Candidate publication review is already in progress")
-
-        def owns_current_claim() -> bool:
-            store.assert_operation_lock(lock_key, lock)
-            return may_apply()
-
-        try:
-            with store.transaction() as db:
-                current = db.execute(
-                    "SELECT plan_json FROM wisdom_consent WHERE id=? "
-                    "AND organization_id=? AND profile=? AND operation='publish' "
-                    "AND state='pending'",
-                    (rows[0]["id"], owner["organization_id"], owner["profile_name"]),
-                ).fetchone()
-            if current is None:
-                raise WisdomConflict(
-                    "Candidate publication receipt is missing or already consumed"
-                )
-            plan = json.loads(current["plan_json"])
-            if str(plan.get("candidate_assessment_id") or "") != assessment_id:
-                raise PermissionError(
-                    "Collective Wisdom candidate publication review is invalid."
-                )
-            current_owner, record, _queue = self._candidate_slash_context(assessment_id)
-            if current_owner != owner or record.get("state") != "delivered":
-                raise PermissionError("Collective Wisdom candidate assessment changed.")
-            if plan.get("candidate_action") != "share" or plan.get("owner") != owner:
-                raise PermissionError(
-                    "Collective Wisdom candidate publication review is invalid."
-                )
-            controller = NativeReviewController(store)
-            completed = controller.submit_candidate_publication(
-                self, controller.load(str(rows[0]["id"])), assessment_id,
-                may_apply=owns_current_claim,
-            )
-            return dict(completed.get("result") or {})
-        finally:
-            store.release_operation_lock(lock_key, lock)
 
     def notification_settings(
         self, *, may_apply: Callable[[], bool], include_mute_control: bool = False
     ) -> dict[str, Any]:
         """Prepare one current mode/mute snapshot for an invocation-scoped review."""
 
-        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
-
         _require_current(may_apply)
         owner = self.native_owner()
         _require_current(may_apply)
-        preferences = WisdomPreferences(self)
-        org = owner["organization_id"]
         mode = self.notification_mode()
-        mute_sync = preferences.mute_status(org)
-        _require_current(may_apply)
         try:
-            mute_control = (
-                preferences.prepare_mute_control(org, may_apply=may_apply)
-                if include_mute_control else None
-            )
+            mute = self.client.recommendation_mute()
             gateway_status = "available"
-            gateway_mute = (
-                mute_control["mute"] if mute_control is not None
-                else preferences.gateway_mute(org)
-            )
+            gateway_mute = mute.model_dump(mode="json")
+            mute_control = gateway_mute if include_mute_control else None
         except WisdomAuthError:
             raise
         except Exception:  # pylint: disable=broad-exception-caught
@@ -768,7 +601,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             },
             "gateway_status": gateway_status,
             "gateway_mute": gateway_mute,
-            "mute_sync": mute_sync,
+            "mute_sync": None,
             "mute_control": mute_control,
         }
 
@@ -786,50 +619,27 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     ) -> dict[str, Any]:
         """Apply one exact revision-bound mute choice and attempt its idempotent sync."""
 
-        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
-
         owner = self.native_owner()
-        org = owner["organization_id"]
-        preferences = WisdomPreferences(self)
-        result = preferences.choose_mute_control(
-            org, control_id, duration, may_apply=may_apply
-        )
+        current = self.client.recommendation_mute()
+        if control_id != str(current.revision):
+            raise WisdomConflict("Collective Wisdom mute setting changed; review it again")
+        _require_current(may_apply)
+        result = self.client.set_recommendation_mute(duration)
         if self.native_owner() != owner:
             raise WisdomAuthError("Collective Wisdom notification owner changed")
-        preferences.flush_mute(org, may_apply=may_apply)
-        if self.native_owner() != owner:
-            raise WisdomAuthError("Collective Wisdom notification owner changed")
-        return preferences.mute_status(org) or result
+        return result.model_dump(mode="json")
 
     def mute(self, choice="status"):
         """Inspect or mutate the shared organization notification preference."""
 
-        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
-
         self._installation_owner()
-        result = WisdomPreferences(self).native_mute_command(choice)
+        if choice == "status":
+            result = self.client.recommendation_mute()
+        else:
+            duration = None if choice == "off" else choice
+            result = self.client.set_recommendation_mute(duration)
         self.check_owner()
-        return result
-
-    def sync_status(self):
-        """Inspect durable remote delivery and operation-report recovery state."""
-
-        from .sync_recovery import WisdomSyncRecovery  # pylint: disable=import-outside-toplevel
-
-        self._installation_owner()
-        result = WisdomSyncRecovery(self).status()
-        self.check_owner()
-        return result
-
-    def sync_retry(self, *, may_apply: Callable[[], bool] | None = None):
-        """Explicitly retry pending remote delivery and operation reports."""
-
-        from .sync_recovery import WisdomSyncRecovery  # pylint: disable=import-outside-toplevel
-
-        self._installation_owner()
-        result = WisdomSyncRecovery(self).retry(may_apply=may_apply)
-        self.check_owner()
-        return result
+        return result.model_dump(mode="json")
 
     def maintenance(self, *, refresh_policy=False, apply_automatic=False):
         """Explicit bounded producer; automatic mutation requires its own flag."""
@@ -837,28 +647,14 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         from .automatic_updates import (  # pylint: disable=import-outside-toplevel
             AutomaticUpdateMaintenance,
         )
-        from .mediation_producer import (  # pylint: disable=import-outside-toplevel
-            MaintenanceMediationProducer,
-        )
-
         owner = self._installation_owner()
-        self._onboarding.store.bind_qualification_owner(owner)
+        self.local_state.bind_owner(owner)
         policy = self.client.agent_led_policy()
-        consumption = self._consumption()
-        feed = consumption.poll_feed()
-        metadata = consumption.refresh_metadata()
-        mediation = MaintenanceMediationProducer(
-            self,
-            consumption,
-            owner,
-            skills_root=self.profile[1] / "skills",
-            config=self.notification_config(),
-        ).produce(policy)
         updates = None
         if apply_automatic:
             reviewer, executor = self._update_services()
             updates = AutomaticUpdateMaintenance(
-                self._onboarding.store,
+                self.installed,
                 reviewer,
                 executor,
                 self._installation_owner,
@@ -866,23 +662,16 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             ).run()
         self.check_owner()
         return {
-            "feed": feed,
-            "metadata": metadata,
             "policy": policy.model_dump(mode="json") if refresh_policy else None,
-            "mediation": mediation,
             "automatic_updates": updates,
         }
 
-    def prepared_inspect(
-        self, draft_id, *, may_apply: Callable[[], bool] | None = None,
-    ):
+    def prepared_inspect(self, draft_id):
         """Export one complete exact owner-private editable draft payload."""
 
-        _require_current(may_apply)
         self._installation_owner()
         result = self._contribution_reviewer().inspect_prepared(draft_id)
         self.check_owner()
-        _require_current(may_apply)
         return result
 
     def prepared_save(
@@ -937,21 +726,33 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
     def publication_submit(
         self, receipt, *, may_apply: Callable[[], bool] | None = None,
-        candidate_assessment_id: str | None = None,
     ):
         """Consume one explicit final owner authorization and submit exact bytes."""
 
         _require_current(may_apply)
-        submit_options = (
-            {"candidate_assessment_id": candidate_assessment_id}
-            if candidate_assessment_id is not None else {}
-        )
-        result = self._publication_service().submit(
-            receipt, may_apply=may_apply, **submit_options
-        )
+        result = self._publication_service().submit(receipt, may_apply=may_apply)
         self.check_owner()
         _require_current(may_apply)
         return result
+
+    def publication_for_candidate(self, assessment_id: str):
+        """Read the direct publication identity for one private candidate action."""
+
+        self._installation_owner()
+        if self._direct_state is None:
+            raise WisdomError("Collective Wisdom publication service is unavailable")
+        return self._direct_state.publication_for_candidate(assessment_id)
+
+    def local_publication_install_action(
+        self, *, creator_user_id: str, content_hash: str,
+    ) -> str:
+        """Project exact profile-owned publication provenance from direct state."""
+
+        owner = self._installation_owner()
+        assert self._direct_state is not None
+        return self._direct_state.local_publication_install_action(
+            owner, creator_user_id=creator_user_id, content_hash=content_hash
+        )
 
     def publication_submit_private(
         self, receipt, *, may_apply: Callable[[], bool] | None = None,
@@ -1185,8 +986,6 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     ) -> dict[str, Any]:
         """Bind an exact install/update reference to freshly verified cooldown policy."""
 
-        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
-
         owner = self.native_owner()
         skill_id = plan.get("skill_id")
         version = plan.get("version")
@@ -1200,14 +999,9 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             or version < 1
         ):
             raise WisdomValidationError("Collective Wisdom review deferral is invalid")
-        org = owner["organization_id"]
-        preferences = WisdomPreferences(self)
-        user = preferences.identity(org)
         policy = AgentLedPolicyResponse.model_validate(self.client.agent_led_policy())
         if (
-            policy.org_id != org
-            or user != owner["account_id"]
-            or preferences.identity(org) != user
+            policy.org_id != owner["organization_id"]
             or self.native_owner() != owner
         ):
             raise WisdomAuthError("Collective Wisdom review deferral owner changed")
@@ -1231,8 +1025,6 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     ) -> dict[str, Any]:
         """Persist one exact-version deferral without granting operation consent."""
 
-        from .mediation_store import MediationStore  # pylint: disable=import-outside-toplevel
-        from .preferences import WisdomPreferences  # pylint: disable=import-outside-toplevel
 
         if may_apply() is not True:
             raise WisdomAuthError("Collective Wisdom review is no longer current")
@@ -1253,27 +1045,20 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             or not 1 <= days <= 365
         ):
             raise WisdomValidationError("Collective Wisdom review deferral is invalid")
-        org = owner["organization_id"]
-        preferences = WisdomPreferences(self)
-        user = preferences.identity(org)
         if self.client is None or may_apply() is not True:
             raise WisdomAuthError("Collective Wisdom review is no longer current")
         policy = AgentLedPolicyResponse.model_validate(self.client.agent_led_policy())
-        if policy.org_id != org:
+        if policy.org_id != owner["organization_id"]:
             raise WisdomAuthError("Collective Wisdom review deferral owner changed")
         if policy.not_now_suppression_days != days:
             raise WisdomConflict("Suppression policy changed; open the review again")
-        if user != owner["account_id"] or self.native_owner() != owner:
+        if self.native_owner() != owner:
             raise WisdomAuthError("Collective Wisdom review deferral owner changed")
-        queue = MediationStore(self.store, owner=owner)
-        with self.store.transaction() as db:
-            queue._check_org(db, org)  # pylint: disable=protected-access
-            queue._check_bound_owner(db)  # pylint: disable=protected-access
-            if may_apply() is not True:
-                raise WisdomAuthError("Collective Wisdom review is no longer current")
-            result = preferences.stage_suppression(
-                db, org=org, user=user, reference=reference, days=days
-            )
+        from .notices import suppression_key  # pylint: disable=import-outside-toplevel
+        if may_apply() is not True:
+            raise WisdomAuthError("Collective Wisdom review is no longer current")
+        key = suppression_key(reference)
+        result = self.client.suppress_recommendation(key)
         if self.native_owner() != owner:
             raise WisdomAuthError("Collective Wisdom review deferral owner changed")
         return {
@@ -1281,7 +1066,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             "skill_id": reference["skill_id"],
             "version": reference["version"],
             "not_now_suppression_days": days,
-            "preference_sync": result["preference_sync"],
+            "preference_sync": "confirmed",
+            "suppress_until": result.suppress_until,
         }
 
     def native_owner(self):
@@ -1362,7 +1148,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     def require_setup(self):
         """Deny discovery before creating state or issuing a request."""
         self.check_owner()
-        if not (self.root / "wisdom.db").is_file():
+        if self._local_identity() is None:
             raise WisdomValidationError(
                 "Run hermes wisdom setup in your terminal first",
                 code="setup_required",
@@ -1414,38 +1200,34 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         root: Path,
         profile: tuple[str, Path],
         *,
+        state: Any,
         llm: Any,
         spawn_task: Callable[..., Any],
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
-        request_review: Callable[..., Any] | None = None,
-        can_request_review: Callable[[], bool] | None = None,
-        is_review_current: Callable[[], bool] | None = None,
-        review_action_type: type | None = None,
-        review_outcome_type: type | None = None,
     ):
         from .native_runtime import NativeSurfaceRuntime  # pylint: disable=import-outside-toplevel
 
+        if state is None:
+            raise TypeError("host PluginState is required")
         self.root = Path(root).resolve()
         self.profile = profile
         self.llm = llm
         self.config = config or {}
         self.get_config = get_config
         self.set_config = set_config
-        self.request_review = request_review
-        self.can_request_review = can_request_review
-        self.is_review_current = is_review_current
-        self.review_action_type = review_action_type
-        self.review_outcome_type = review_outcome_type
+        self.state = state
+
         self._lock = threading.RLock()
         self._closed = False
         self._children = set()
         self._services = set()
-        self._tui_tasks = set()
+
         self.registrations = []
         self.native = NativeSurfaceRuntime(
             self.root, profile[0], self._service, llm, spawn_task,
+            installed_state=state,
             session_context=current_session_context,
         )
 
@@ -1456,9 +1238,15 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             service = InvocationService(
                 self.root, self.profile, llm=self.llm, config=self.config,
                 get_config=self.get_config, set_config=self.set_config,
+                state=self.state,
             )
             self._services.add(service)
             return service
+
+    def _close_service(self, service):
+        service.close()
+        with self._lock:
+            self._services.discard(service)
 
     def cli(self, args) -> int:
         """Synchronous native CLI entry, including interactive terminal setup."""
@@ -1468,98 +1256,54 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         try:
             return run_cli(args, service)
         finally:
-            service.close()
-            with self._lock:
-                self._services.discard(service)
+            self._close_service(service)
 
     def slash(self, raw_args: str):
         """Route exact effects to native review after real host admission."""
         invocation = self.native.consume_request(raw_args)
+        from .commands import parse_slash  # pylint: disable=import-outside-toplevel
+        parsed = parse_slash(raw_args)
+        if parsed is None:
+            return "Invalid Wisdom command. Use /wisdom help."
+        command, args = parsed
         if invocation is not None:
-            words = shlex.split(raw_args)
-            command, target = words[0], " ".join(words[1:])
-            if command.casefold() == "install":
-                return self.native.begin_install_modes(invocation, target)
-            if command.casefold() == "publish":
-                return self.native.begin_publication(invocation, target)
-            if command.casefold() in {"browse", "show", "versions"}:
+            target = " ".join(args)
+            effect_review = {
+                "install": self.native.begin_install_modes,
+                "update": self.native.begin_update,
+                "publish": self.native.begin_publication,
+            }.get(command)
+            if effect_review is not None:
+                return effect_review(invocation, target)
+            if command in {"browse", "show", "versions"}:
                 return self.native.begin_catalog(invocation, command, target)
-            if command.casefold() == "settings":
+            if command == "settings":
                 return self.native.begin_settings(invocation)
-            return self.native.begin(invocation, target)
         # Capture the calling profile before the host moves an awaitable to a thread.
         context = contextvars.copy_context()
 
         async def resolve():
-            task = context.run(asyncio.create_task, self._slash(raw_args))
+            task = context.run(asyncio.create_task, self._slash(parsed))
             return await task
 
         return resolve()
 
-    async def _slash(self, raw_args: str) -> str:  # pylint: disable=too-many-locals,too-many-statements
+    async def _slash(self, parsed: tuple[str, list[str]]) -> str:
         """Run network work off-loop; cancelled TUI workers retain their own cleanup."""
-        from .commands import (  # pylint: disable=import-outside-toplevel
-            CONTRIBUTION_COMMANDS, run_slash,
-        )
-        from .tui_actions import handles_tui_action  # pylint: disable=import-outside-toplevel
-        from .tui_contribution import (  # pylint: disable=import-outside-toplevel
-            handles_plugin_only_candidate_action, handles_tui_contribution,
-        )
-
+        from .commands import CONTRIBUTION_COMMANDS, run_slash  # pylint: disable=import-outside-toplevel
         service = task = None
         cancel = threading.Event()
-        wait_for_task = True
         try:
-            try:
-                words = shlex.split(raw_args)
-            except ValueError:
-                return "Invalid Wisdom command. Use /wisdom help."
-            command = words[0].casefold() if words else "help"
-            tui_action = handles_tui_action(raw_args) or handles_tui_contribution(raw_args)
-            plugin_only_action = handles_plugin_only_candidate_action(raw_args)
-            can_review = self.can_request_review
-            review_current = self.is_review_current
-            request_review = self.request_review
-            action_type = self.review_action_type
-            outcome_type = self.review_outcome_type
-            admitted = plugin_only_action
-            review_capability = (request_review, review_current, action_type, outcome_type)
-            if (
-                tui_action
-                and not plugin_only_action
-                and all(callable(value) for value in (request_review, can_review, review_current))
-                and action_type is not None
-                and outcome_type is not None
-            ):
-                try:
-                    admitted = cast(Callable[[], bool], can_review)() is True
-                except Exception:  # pylint: disable=broad-exception-caught
-                    admitted = False
-            if not admitted and (tui_action or command in CONTRIBUTION_COMMANDS):
-                return run_slash(raw_args, object())
-            if tui_action:
-                if not plugin_only_action:
-                    assert callable(request_review)
-                    assert callable(review_current)
-                    assert action_type is not None
-                    assert outcome_type is not None
-                wait_for_task = False
-                task = asyncio.create_task(asyncio.to_thread(
-                    self._run_tui_action_worker,
-                    raw_args,
-                    cancel,
-                    review_capability,
-                ))
-                self._tui_tasks.add(task)
-                task.add_done_callback(self._settle_tui_task)
-                return await asyncio.shield(task)
+            command, _args = parsed
+            if command in CONTRIBUTION_COMMANDS:
+                return run_slash(parsed, object())
             service = self._service()
-            if command in {"help", "--help", "-h", "setup", "install", "installed", "uninstall"}:
-                return run_slash("help" if command in {"--help", "-h"} else raw_args, service)
+            if command in {"help", "setup", "install", "installed", "uninstall"}:
+                return run_slash(parsed, service)
             binding = service.binding()
-            task = asyncio.create_task(asyncio.to_thread(
-                self._run_worker, raw_args, binding, cancel
-            ))
+            task = asyncio.create_task(
+                asyncio.to_thread(self._run_worker, parsed, binding, cancel)
+            )
             result = await asyncio.shield(task)
             service.check_owner()
             return result
@@ -1567,81 +1311,31 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             return _UNAVAILABLE
         finally:
             cancel.set()
-            if wait_for_task and task is not None and not task.done():
+            if task is not None and not task.done():
                 await asyncio.shield(task)
             if service is not None:
-                service.close()
-                with self._lock:
-                    self._services.discard(service)
+                self._close_service(service)
 
-    def _settle_tui_task(self, task: asyncio.Task) -> None:
-        """Release a completed detached worker and consume its terminal exception."""
-        self._tui_tasks.discard(task)
-        if not task.cancelled():
-            task.exception()
 
-    def _run_tui_action_worker(self, raw_args, cancel, review_capability) -> str:
-        from .tui_actions import run_tui_action  # pylint: disable=import-outside-toplevel
-        from .tui_contribution import (  # pylint: disable=import-outside-toplevel
-            handles_tui_contribution, run_tui_contribution,
-        )
-
-        request_review, review_current, action_type, outcome_type = review_capability
-        if not self._tui_action_current(cancel, review_current):
-            return _UNAVAILABLE
-        with self._lock:
-            service = self._service()
-            self._services.discard(service)
-        try:
-            if not self._tui_action_current(cancel, review_current):
-                return _UNAVAILABLE
-            if handles_tui_contribution(raw_args):
-                try:
-                    return run_tui_contribution(
-                        raw_args, service, request_review, action_type, outcome_type,
-                        may_apply=lambda: self._tui_action_current(cancel, review_current),
-                    )
-                except ValueError as exc:
-                    return str(exc)
-            return run_tui_action(
-                raw_args,
-                service,
-                request_review,
-                action_type,
-                outcome_type,
-                lambda: self._tui_action_current(cancel, review_current),
-            )
-        finally:
-            service.close()
-
-    def _tui_action_current(
-        self, cancel: threading.Event, review_current: Callable[[], bool] | None
-    ) -> bool:
-        with self._lock:
-            if self._closed or cancel.is_set():
-                return False
-        if review_current is None:
-            current = True
-        else:
-            try:
-                current = review_current() is True
-            except Exception:  # pylint: disable=broad-exception-caught
-                return False
-        with self._lock:
-            return current and not self._closed and not cancel.is_set()
-
-    def _run_worker(self, raw_args, binding, cancel):
+    def _run_worker(self, parsed: tuple[str, list[str]], binding, cancel):
         # A process boundary provides a real deadline even for stalled DNS or a
         # slow-drip HTTP response. No bearer is serialized or passed on argv.
         deadline = time.monotonic() + SLASH_BUDGET_SECONDS
-        live_config = InvocationService(
-            self.root, self.profile, config=self.config, get_config=self.get_config
-        ).notification_config()
-        request = {
-            "package": str(Path(__file__).resolve().parent), "sys_path": sys.path,
-            "root": str(self.root), "profile": [self.profile[0], str(self.profile[1])],
-            "binding": binding, "args": raw_args, "config": live_config,
+        defaults = {
+            "delivery_mode": "agent", "new_skills": "immediate",
+            "updates": "immediate", "team_published": "immediate",
         }
+        snapshot = self.config.get("notifications") or {}
+        live_config = {"notifications": {
+            key: (
+                self.get_config(f"notifications.{key}", snapshot.get(key, default))
+                if self.get_config is not None else snapshot.get(key, default)
+            )
+            for key, default in defaults.items()
+        }}
+        request = {"package": str(Path(__file__).resolve().parent), "sys_path": sys.path,
+                   "root": str(self.root), "profile": [self.profile[0], str(self.profile[1])],
+                   "binding": binding, "command": parsed, "config": live_config}
         payload = json.dumps(request)
         environment = os.environ.copy()
         # Host multi-profile callbacks may bind a ContextVar rather than an env
@@ -1697,14 +1391,17 @@ def worker_main(request) -> str:
     """Evaluate one read-only slash command against the captured owner."""
     from .commands import run_slash  # pylint: disable=import-outside-toplevel
 
+    plugin_state = import_module("hermes_cli.plugins_state").PluginState
+
     service = InvocationService(
         Path(request["root"]), (request["profile"][0], Path(request["profile"][1])),
+        state=plugin_state("hermes-collective-wisdom"),
         config=request.get("config"),
     )
     try:
         if service.binding() != request["binding"]:
             return _UNAVAILABLE
-        result = run_slash(request["args"], service)
+        result = run_slash((request["command"][0], request["command"][1]), service)
         service.check_owner()
         return result
     except WisdomError:

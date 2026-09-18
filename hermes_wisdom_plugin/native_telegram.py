@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from dataclasses import replace
 from importlib import import_module
 from typing import Any
 
@@ -48,6 +49,24 @@ def plain_html(view: NativeView) -> str:
 def plain_html_is_lossless(view: NativeView) -> bool:
     """Require complete approval facts even after a rich-format fallback."""
     return html.unescape(plain_html(view)) == view.to_text()
+
+
+def _plain_fallback_view(view: NativeView) -> NativeView:
+    """Keep non-consent navigation but remove approvals when fallback loses facts."""
+    if plain_html_is_lossless(view):
+        return view
+    return replace(
+        view,
+        navigation_actions=[action for action in view.navigation_actions if not action.primary],
+        items=[
+            replace(item, actions=[action for action in item.actions if not action.primary])
+            for item in view.items
+        ],
+        actions=[action for action in view.actions if not action.primary],
+        notice=(
+            view.notice + " " if view.notice else ""
+        ) + "Approval is unavailable because this fallback cannot show every review fact.",
+    )
 
 
 def _rich_button(action: Any, record_id: str) -> str:
@@ -231,10 +250,11 @@ async def send(bot: Any, view: NativeView, record_id: str, *, chat_id: str,
         except Exception as exc:  # pylint: disable=broad-exception-caught
             if not definite_format_rejection(exc):
                 raise
+    fallback = _plain_fallback_view(view)
     return await bot.send_message(
         chat_id=_chat_id(chat_id),
-        text=plain_html(view), parse_mode="HTML",
-        reply_markup=keyboard(view, record_id),
+        text=plain_html(fallback), parse_mode="HTML",
+        reply_markup=keyboard(fallback, record_id),
         **({"message_thread_id": int(thread_id)} if thread_id else {}),
     )
 
@@ -269,9 +289,10 @@ async def edit(query: Any, view: NativeView, record_id: str) -> None:
             if not definite_format_rejection(exc):
                 raise
     try:
+        fallback = _plain_fallback_view(view)
         await query.edit_message_text(
-            text=plain_html(view), parse_mode="HTML",
-            reply_markup=keyboard(view, record_id),
+            text=plain_html(fallback), parse_mode="HTML",
+            reply_markup=keyboard(fallback, record_id),
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         if "message is not modified" not in str(exc).lower():

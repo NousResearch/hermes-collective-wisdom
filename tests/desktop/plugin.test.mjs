@@ -65,11 +65,13 @@ function Checkbox({ checked, onCheckedChange, ...props }) {
 
 async function loadPlugin(restHandler, initial = {}) {
   const calls = { navigate: [], notify: [], registrations: [], rest: [] }
+  const events = []
   const profile = atom(initial.profile || 'A')
   const connectionId = atom(initial.connectionId || 'remote-a')
   const gateway = atom(initial.gateway || 'open')
   const host = {
     state: { connectionId, gateway, profile },
+    onEvent(type, callback) { events.push([type, callback]); return () => events.splice(events.findIndex(row => row[1] === callback), 1) },
     navigate(path) { calls.navigate.push(path) },
     notify(payload) { calls.notify.push(payload) },
     notifyError(error, fallback) { calls.notify.push({ kind: 'error', message: fallback, detail: String(error?.message || error) }) }
@@ -115,8 +117,25 @@ async function loadPlugin(restHandler, initial = {}) {
   }
   const plugin = module.namespace.default
   plugin.register(ctx)
-  return { calls, connectionId, dispose, gateway, plugin, profile }
+  return { calls, connectionId, dispose, emit: async event => { for (const [type, callback] of [...events]) if (type === '*' || type === event.type) await callback(event) }, gateway, plugin, profile }
 }
+
+test('completed turns request one best-effort notice and use native notifications', async () => {
+  const loaded = await loadPlugin(async path => {
+    if (path === '/notices/end-turn') return {
+      supported: true, offered: 1, polled: true,
+      notices: [{ category: 'new_skill', skill_name: 'Useful helper' }]
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+
+  await loaded.emit({ type: 'session_end' })
+
+  assert.ok(loaded.calls.rest.some(([path]) => path === '/notices/end-turn'))
+  const notice = loaded.calls.notify.at(-1)
+  assert.equal(notice.kind, 'info')
+  assert.equal(notice.message, 'Collective Wisdom: Useful helper is available. Open Wisdom to review.')
+})
 
 async function renderPage(loaded) {
   const container = document.createElement('div')

@@ -122,13 +122,15 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
 
     def __init__(
         self,
-        store: Any,
+        state: Any,
         host: Any,
         owner_provider: OwnerProvider,
         *,
         llm: Any | None = None,
+        source_store: Any | None = None,
     ) -> None:
-        self.store = store
+        self.store = state
+        self.source_store = source_store
         self.host = host
         self.owner_provider = owner_provider
         self.llm = llm
@@ -481,11 +483,11 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             )
             self._assert_owner(expected_owner, may_apply)
             self._require_current(may_apply)
-            if not self.store.replace_prepared_draft(
+            if not self.store.replace_draft(
                 draft_id,
-                expected_owner=expected_owner,
-                expected_hashes=hashes,
-                values=candidate,
+                owner=expected_owner,
+                hashes=hashes,
+                record=candidate,
             ):
                 raise WisdomConflict("prepared draft changed; inspect it again before saving")
             retained = True
@@ -510,8 +512,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "content_hash": str(draft["content_hash"]),
             "author_description_hash": str(draft["description_hash"]),
         }
-        existing = self.store.professionalism_review(**values)
-        if existing is not None and existing["state"] == "complete":
+        existing = self.store.professionalism(values)
+        if existing is not None:
             result = existing.get("result")
             if isinstance(result, dict):
                 return result
@@ -537,24 +539,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 description_hash=values["author_description_hash"],
                 llm=None,
             )
-        queued = self.store.enqueue_professionalism_review(
-            **values,
-            package=package,
-            author_description=str(draft["description"]),
-        )
-        worker_id = f"contribution:{uuid.uuid4().hex}"
-        claimed = self.store.claim_professionalism_review(
-            worker_id=worker_id, review_id=str(queued["id"])
-        )
         self._require_current(may_apply)
-        if claimed is None:
-            return review_package(
-                package=package,
-                author_description=str(draft["description"]),
-                content_hash=values["content_hash"],
-                description_hash=values["author_description_hash"],
-                llm=None,
-            )
         result = review_package(
             package=package,
             author_description=str(draft["description"]),
@@ -563,11 +548,18 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             llm=self.llm,
         )
         self._assert_owner(expected_owner, may_apply)
-        if not self.store.complete_professionalism_review(
-            str(claimed["id"]), worker_id=worker_id, result=result
-        ):
-            raise WisdomConflict("professionalism review ownership changed")
+        self.store.save_professionalism(values, result)
         return result
+
+    def _local_skill_id(self, source: Path, source_hash: str) -> str:
+        if self.source_store is None:
+            return "local:" + sha256_address(str(source).encode())[7:39]
+        return self.source_store.register_skill(
+            source,
+            content_hash=source_hash,
+            source_kind="local",
+            snapshot_text=(source / "SKILL.md").read_text(encoding="utf-8"),
+        )
 
     def prepare(  # pylint: disable=too-many-locals
         self, skill_name: str, *, allow_model_review: bool = False,
@@ -582,13 +574,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         source_hash = source_fingerprint(source)
         self._assert_owner(expected_owner, may_apply)
         self._require_current(may_apply)
-        skill_id = self.store.register_skill(
-            source,
-            content_hash=source_hash,
-            source_kind="local",
-            snapshot_text=(source / "SKILL.md").read_text(encoding="utf-8"),
-        )
-        existing = self.store.prepared_draft(skill_id, source_hash)
+        skill_id = self._local_skill_id(source, source_hash)
+        existing = self.store.prepared_draft(skill_id, source_hash, expected_owner)
         if existing is not None:
             self._assert_draft_owner(existing, expected_owner)
             return self._result(
@@ -611,7 +598,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             self._require_current(may_apply)
             description = _draft_author_description(skill_markdown, self.llm)
             self._require_current(may_apply)
-        description = publication_description(self.store, skill_id, description)
+        if self.source_store is not None:
+            description = publication_description(self.source_store, skill_id, description)
         self._require_current(may_apply)
         editorial = resolve_editorial_metadata(
             frontmatter=frontmatter,
@@ -653,6 +641,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             draft = {
                 "id": f"local:{skill_id}:{uuid.uuid4().hex}",
                 "skill_id": skill_id,
+                "slug": skill_name,
+                "source_path": str(source),
                 "source_hash": source_hash,
                 "overlay_path": str(package.overlay),
                 "draft_commit": package.commit,
@@ -662,12 +652,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "description_hash": package.description_hash,
                 "manifest_hash": package.manifest_hash,
             }
-            with self.store.transaction() as db:
-                self._require_current(may_apply)
-                self.store.record_draft(draft, _db=db)
-                self.store.bind_draft_owner(
-                    str(draft["id"]), expected_owner, _db=db
-                )
+            self._require_current(may_apply)
+            self.store.save_draft({**draft, "owner": expected_owner})
             retained = True
             saved = self.store.draft(str(draft["id"]))
             if saved is None:

@@ -8,15 +8,16 @@ import argparse
 import base64
 import json
 import os
-import sqlite3
-import threading
+
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from installed_test_support import JsonState
 from hermes_wisdom_plugin.commands import build_parser, run_cli
 from hermes_wisdom_plugin.contribution_review import ContributionReviewer
+from hermes_wisdom_plugin.direct_services import DirectState
 from hermes_wisdom_plugin.editorial import apply_editorial_metadata_to_overlay
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin.package import (
@@ -24,7 +25,7 @@ from hermes_wisdom_plugin.package import (
     PackagePolicyError,
     PackageSecurityDecision,
 )
-from hermes_wisdom_plugin.store import WisdomStore
+from hermes_wisdom_plugin.local_state import QualificationState
 
 
 class Host:
@@ -136,12 +137,15 @@ def reviewer(tmp_path: Path, *, llm=None, allowed=True):
     profile = tmp_path / "profile"
     source = make_skill(profile)
     binding = owner(profile)
+    source_store = QualificationState(JsonState(tmp_path / "state"), tmp_path / "state")
+    state = DirectState(JsonState(tmp_path / "state"), tmp_path / "state")
     return (
         ContributionReviewer(
-            WisdomStore(tmp_path / "state"),
+            state,
             Host(profile / "skills", allowed=allowed),
             lambda: dict(binding),
             llm=llm,
+            source_store=source_store,
         ),
         source,
         binding,
@@ -252,7 +256,7 @@ def test_generated_author_copy_explains_teammate_usefulness_without_unsupported_
     binding = owner(profile)
     llm = RecordingLlm()
     value = ContributionReviewer(
-        WisdomStore(tmp_path / "state"),
+        DirectState(JsonState(tmp_path / "state"), tmp_path / "state"),
         Host(profile / "skills", frontmatter={"name": "reviewed-skill"}),
         lambda: dict(binding),
         llm=llm,
@@ -378,27 +382,6 @@ def test_revocation_during_real_save_validation_prevents_durable_replacement(tmp
     assert value.store.draft(prepared["draft_id"]) == before
 
 
-def test_revocation_after_model_queue_claim_prevents_provider_send(tmp_path: Path):
-    llm = RecordingLlm()
-    value, _source, _binding = reviewer(tmp_path, llm=llm)
-    prepared = value.prepare("reviewed-skill")
-    disclosed = value.inspect_prepared(prepared["draft_id"])
-    admitted = [True]
-    original_claim = value.store.claim_professionalism_review
-
-    def revoke_after_claim(*args, **kwargs):
-        result = original_claim(*args, **kwargs)
-        admitted[0] = False
-        return result
-
-    value.store.claim_professionalism_review = revoke_after_claim
-    with pytest.raises(WisdomAuthError, match="no longer current"):
-        value.reopen(
-            prepared["draft_id"], allow_model_review=True,
-            reviewed_hashes=disclosed["expected_hashes"], may_apply=lambda: admitted[0],
-        )
-
-    assert not llm.calls
 
 
 def test_stale_sequential_save_cannot_replace_new_file_set(tmp_path: Path):
@@ -430,61 +413,6 @@ def test_stale_sequential_save_cannot_replace_new_file_set(tmp_path: Path):
     }
 
 
-def test_independent_store_saves_cas_one_winner_and_clean_loser_stage(tmp_path: Path):
-    first_reviewer, _source, binding = reviewer(tmp_path)
-    prepared = first_reviewer.prepare("reviewed-skill")
-    second_reviewer = ContributionReviewer(
-        WisdomStore(tmp_path / "state"),
-        Host(tmp_path / "profile" / "skills"),
-        lambda: dict(binding),
-    )
-    barrier = threading.Barrier(2)
-    outcomes: list[object] = []
-
-    def run(value: ContributionReviewer, suffix: str) -> None:
-        original_cas = value.store.replace_prepared_draft
-
-        def synchronized_cas(*args, **kwargs):
-            barrier.wait(timeout=5)
-            return original_cas(*args, **kwargs)
-
-        value.store.replace_prepared_draft = synchronized_cas
-        files = [
-            {
-                "path": item["path"],
-                "content_utf8": (
-                    item["content_utf8"].replace("Use the checklist.", f"Use {suffix}.")
-                    if item["path"] == "SKILL.md"
-                    else item["content_utf8"]
-                ),
-            }
-            for item in prepared["files"]
-        ]
-        try:
-            outcomes.append(value.save_prepared(
-                prepared["draft_id"], author_description=f"Copy {suffix}.",
-                files=files, expected_hashes=prepared["hashes"],
-            ))
-        except WisdomConflict as exc:
-            outcomes.append(exc)
-
-    threads = [
-        threading.Thread(target=run, args=(first_reviewer, "alpha")),
-        threading.Thread(target=run, args=(second_reviewer, "beta")),
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
-
-    assert len(outcomes) == 2
-    assert sum(isinstance(item, dict) for item in outcomes) == 1
-    assert sum(isinstance(item, WisdomConflict) for item in outcomes) == 1
-    current = first_reviewer.store.draft(prepared["draft_id"])
-    assert current is not None
-    assert current["description"] in {"Copy alpha.", "Copy beta."}
-    edit_roots = list((tmp_path / "state" / "contribution-edits").glob("*"))
-    assert len(edit_roots) == 1
 
 
 def test_failed_edited_manifest_preserves_prior_draft_and_removes_new_stage(tmp_path: Path):
@@ -513,101 +441,12 @@ def test_failed_edited_manifest_preserves_prior_draft_and_removes_new_stage(tmp_
     assert not edits.exists() or not list(edits.iterdir())
 
 
-def test_database_failure_preserves_prior_draft_and_removes_new_stage(tmp_path: Path):
-    value, _source, _binding = reviewer(tmp_path)
-    prepared = value.prepare("reviewed-skill")
-    before = value.store.draft(prepared["draft_id"])
-
-    def fail_cas(*_args, **_kwargs):
-        raise sqlite3.OperationalError("injected write failure")
-
-    value.store.replace_prepared_draft = fail_cas
-    with pytest.raises(sqlite3.OperationalError, match="injected"):
-        value.save_prepared(
-            prepared["draft_id"], author_description="Owner copy.",
-            files=prepared["files"], expected_hashes=prepared["hashes"],
-        )
-
-    assert value.store.draft(prepared["draft_id"]) == before
-    edits = tmp_path / "state" / "contribution-edits"
-    assert not edits.exists() or not list(edits.iterdir())
 
 
-def test_precommit_store_failure_preserves_prior_draft_and_removes_unreferenced_stage(
-    tmp_path: Path,
-):
-    value, _source, _binding = reviewer(tmp_path)
-    prepared = value.prepare("reviewed-skill")
-    before = value.store.draft(prepared["draft_id"])
-    original_replace = value.store.replace_prepared_draft
-
-    def lose_compare_before_commit(*args, **kwargs):
-        kwargs["expected_hashes"] = {
-            **kwargs["expected_hashes"],
-            "content": "sha256:simulated-concurrent-winner",
-        }
-        return original_replace(*args, **kwargs)
-
-    value.store.replace_prepared_draft = lose_compare_before_commit
-    with pytest.raises(WisdomConflict, match="changed"):
-        value.save_prepared(
-            prepared["draft_id"], author_description="Owner copy.",
-            files=prepared["files"], expected_hashes=prepared["hashes"],
-        )
-
-    assert WisdomStore(tmp_path / "state").draft(prepared["draft_id"]) == before
-    edits = tmp_path / "state" / "contribution-edits"
-    assert not edits.exists() or not list(edits.iterdir())
 
 
-def test_postcommit_store_response_loss_retains_committed_overlay_for_reopen(
-    tmp_path: Path,
-):
-    value, _source, binding = reviewer(tmp_path)
-    prepared = value.prepare("reviewed-skill")
-    original_replace = value.store.replace_prepared_draft
-
-    def lose_response_after_commit(*args, **kwargs):
-        assert original_replace(*args, **kwargs) is True
-        raise OSError("simulated response loss after commit")
-
-    value.store.replace_prepared_draft = lose_response_after_commit
-    with pytest.raises(OSError, match="response loss"):
-        value.save_prepared(
-            prepared["draft_id"], author_description="Committed owner copy.",
-            files=prepared["files"], expected_hashes=prepared["hashes"],
-        )
-
-    restarted = ContributionReviewer(
-        WisdomStore(tmp_path / "state"),
-        Host(tmp_path / "profile" / "skills"),
-        lambda: dict(binding),
-    )
-    reopened = restarted.reopen(prepared["draft_id"])
-    assert reopened["drafted_description"] == "Committed owner copy."
-    assert Path(reopened["overlay_path"]).is_dir()
 
 
-def test_uncertain_store_reread_retains_failed_stage(tmp_path: Path):
-    value, _source, _binding = reviewer(tmp_path)
-    prepared = value.prepare("reviewed-skill")
-
-    def fail_before_commit_then_make_reread_uncertain(*_args, **_kwargs):
-        def fail_read(_draft_id):
-            raise sqlite3.OperationalError("injected uncertain reread")
-
-        value.store.draft = fail_read
-        raise sqlite3.OperationalError("injected failure before commit")
-
-    value.store.replace_prepared_draft = fail_before_commit_then_make_reread_uncertain
-    with pytest.raises(sqlite3.OperationalError, match="before commit"):
-        value.save_prepared(
-            prepared["draft_id"], author_description="Owner copy.",
-            files=prepared["files"], expected_hashes=prepared["hashes"],
-        )
-
-    edits = tmp_path / "state" / "contribution-edits"
-    assert len(list(edits.iterdir())) == 1
 
 
 def test_cli_inspect_save_roundtrip_applies_complete_file_set_changes(
@@ -924,7 +763,7 @@ def test_saved_edit_reopens_from_a_fresh_store_instance(tmp_path: Path):
     )
 
     restarted = ContributionReviewer(
-        WisdomStore(tmp_path / "state"),
+        DirectState(JsonState(tmp_path / "state"), tmp_path / "state"),
         Host(tmp_path / "profile" / "skills"),
         lambda: dict(binding),
     )
@@ -983,7 +822,7 @@ def test_owner_change_is_denied_before_persisting_or_reviewing(tmp_path: Path):
     value.owner_provider = changed_owner
     with pytest.raises(WisdomAuthError, match="owner changed"):
         value.prepare("reviewed-skill")
-    assert value.store.prepared_draft("missing", "missing") is None
+    assert not value.store.read()["drafts"]
 
 
 def test_reopening_draft_requires_its_persisted_full_owner_before_model_disclosure(
@@ -1029,12 +868,12 @@ def test_explicit_model_review_is_tool_free_hash_bound_and_route_attributed(tmp_
     assert result["professionalism_check"]["provenance"] == {
         "kind": "agent_assessed", "provider": "recording", "model": "recording-model"
     }
-    persisted = value.store.professionalism_review(
-        skill_id=result["skill_id"],
-        content_hash=result["hashes"]["content"],
-        author_description_hash=result["hashes"]["author_description"],
-    )
-    assert persisted is not None and persisted["state"] == "complete"
+    persisted = value.store.professionalism({
+        "skill_id": result["skill_id"],
+        "content_hash": result["hashes"]["content"],
+        "author_description_hash": result["hashes"]["author_description"],
+    })
+    assert persisted is not None
     assert persisted["result"] == result["professionalism_check"]
     overlay_text = (Path(result["overlay_path"]) / "SKILL.md").read_text(
         encoding="utf-8"

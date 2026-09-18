@@ -73,6 +73,7 @@ def _service() -> InvocationService:
         config=_notification_config(),
         get_config=_context.get_config,
         set_config=_context.set_config,
+        state=_context.state,
     )
 
 

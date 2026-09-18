@@ -23,8 +23,7 @@ SCRIPT = PROJECT_ROOT / "scripts" / "test_wisdom_offline_acceptance.py"
 WRAPPER = PROJECT_ROOT / "scripts" / "test-wisdom-cross-repo.sh"
 
 
-@pytest.mark.parametrize("driver", ["delivery", "outbox", "publication"])
-def test_configured_gateway_driver_imports_external_package_without_alias(driver):
+def test_configured_publication_driver_imports_external_package_without_alias():
     gateway = os.environ.get("WISDOM_GATEWAY_DIR")
     if not gateway:
         pytest.skip("WISDOM_GATEWAY_DIR is required for actual Gateway driver imports")
@@ -55,7 +54,7 @@ print('External package imports verified without running the service driver')
 """
     result = subprocess.run(
         [sys.executable, "-I", "-B", "-c", program, str(PROJECT_ROOT),
-         str(Path(gateway) / "test" / "e2e" / f"wisdom_{driver}_driver.py")],
+         str(Path(gateway) / "test" / "e2e" / "wisdom_publication_driver.py")],
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -534,8 +533,6 @@ def test_gateway_driver_bootstrap_commands_pin_artifact_and_isolate_python(
     )
 
     assert [command[-2:] for command in commands] == [
-        [str(gateway / "test/e2e/wisdom_delivery_driver.py"), "--offline-bootstrap"],
-        [str(gateway / "test/e2e/wisdom_outbox_driver.py"), "--offline-bootstrap"],
         [str(gateway / "test/e2e/wisdom_publication_driver.py"), "--offline-bootstrap"],
     ]
     assert all(command[:3] == ["/host/python", "-I", "-B"] for command in commands)

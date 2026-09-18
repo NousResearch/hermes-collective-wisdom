@@ -25,6 +25,7 @@ from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import clear_session_vars, get_session_env, set_current_session_id
+from hermes_cli.plugins_state import PluginState
 from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 from hermes_wisdom_plugin.runtime import current_session_context
 
@@ -66,9 +67,15 @@ async def main():
     gateway = Transport(adapter)
     runner = SimpleNamespace(adapters={Platform.TELEGRAM: adapter})
     native = NativeSurfaceRuntime(
-        Path.home() / "wisdom-state", "codex", None, None, None,
+        Path.home() / "wisdom-state", "codex",
+        lambda: SimpleNamespace(
+            native_owner=lambda: {"profile_name": "codex", "account_id": "portal-fixture"},
+            close=lambda: None,
+        ), None, None,
+        installed_state=PluginState("wisdom-binding-fixture"),
         session_context=current_session_context,
     )
+    native.wire_telegram(SimpleNamespace(add_handler=lambda *_a, **_kw: None), adapter)
 
     async def lifecycle(
         label, *, durable="session-A", context_id="", active="session-A",
@@ -96,7 +103,7 @@ async def main():
                 turn_id=f"turn-{label}", platform="telegram", sender_id=user_id,
                 parent_session_id=parent,
             )
-            return (f"task-{label}", durable) in native._tool_invocations
+            return native.tool_invocation(task_id=f"task-{label}", session_id=durable) is not None
         finally:
             if runtime_token is not None:
                 reset_runtime_main(runtime_token)
@@ -119,14 +126,9 @@ async def main():
         )
         assert admitted.host_session_id == "session-A"
         for task_id, session_id in (("other-task", "session-A"), ("task-cached", "session-B")):
-            try:
-                await asyncio.to_thread(
-                    native.tool_invocation, task_id=task_id, session_id=session_id,
-                )
-            except PermissionError:
-                pass
-            else:
-                raise AssertionError("different task/session reused cached admission")
+            assert await asyncio.to_thread(
+                native.tool_invocation, task_id=task_id, session_id=session_id,
+            ) is None, "different task/session reused cached admission"
     finally:
         reset_runtime_main(runtime_token)
         clear_session_vars(tokens)
@@ -153,15 +155,9 @@ async def main():
         "fixture-provider", "fixture-model", session_id="session-A",
     )
     try:
-        try:
-            await asyncio.to_thread(
-                native.tool_invocation,
-                task_id="task-owner-change", session_id="session-A",
-            )
-        except PermissionError:
-            pass
-        else:
-            raise AssertionError("changed owner reused cached admission")
+        assert await asyncio.to_thread(
+            native.tool_invocation, task_id="task-owner-change", session_id="session-A",
+        ) is None, "changed owner reused cached admission"
     finally:
         reset_runtime_main(changed_runtime)
         clear_session_vars(changed_tokens)
@@ -178,14 +174,9 @@ async def main():
         "fixture-provider", "fixture-model", session_id="session-B",
     )
     try:
-        try:
-            await asyncio.to_thread(
-                native.tool_invocation, task_id="task-replay", session_id="session-A",
-            )
-        except PermissionError:
-            pass
-        else:
-            raise AssertionError("another active session replayed cached admission")
+        assert await asyncio.to_thread(
+            native.tool_invocation, task_id="task-replay", session_id="session-A",
+        ) is None, "another active session replayed cached admission"
     finally:
         reset_runtime_main(replay_runtime)
         clear_session_vars(replay_tokens)

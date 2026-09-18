@@ -1,5 +1,11 @@
 # Release Implementation Sequence: Extract, Adapt, and Verify
 
+> Historical extraction/planning reference, not the current acceptance contract.
+> The replacement-only, queue-free decision supersedes storage, delivery and
+> recovery requirements below. Use [Features](FEATURES.md),
+> [Architecture](ARCHITECTURE.md), [Migration](MIGRATION.md) and
+> [Verification](TESTING.md) for current behavior and gates.
+
 The approved initial scope is native workflows on unmodified Agent plus
 external Desktop management pages. Dashboard and full six-surface parity are deferred.
 No Agent changes or replacement backend are allowed. The historical full-parity

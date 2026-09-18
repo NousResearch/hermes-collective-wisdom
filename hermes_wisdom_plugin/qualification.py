@@ -18,7 +18,7 @@ from typing import Any, Callable
 from .contract import sha256_address
 from .editorial import load_skill_editorial_metadata
 from .entitlement import LocalWorkGates, local_work_allowed
-from .store import WisdomStore
+from .local_state import QualificationState
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +247,7 @@ def _normalized_skill_text(text: str) -> str:
 
 
 def _stored_skill_text(snapshot: dict[str, Any]) -> str | None:
-    text = snapshot.get("skill_text")
+    text = snapshot.get("snapshot_text")
     tree = snapshot.get("tree")
     if (
         not isinstance(text, str)
@@ -286,7 +286,7 @@ def _consecutive_business_days(days: list[str], *, required: int) -> bool:
 
 
 def _emit_candidate(
-    store: WisdomStore,
+    store: QualificationState,
     *,
     skill_id: str,
     skill_name: str,
@@ -308,8 +308,7 @@ def _emit_candidate(
         }
     except (OSError, UnicodeError, ValueError):
         editorial = {"editorial_name": skill_name, "editorial_description": ""}
-    return store.emit_local_event(
-        kind="wisdom.candidate",
+    return store.emit_candidate(
         skill_id=skill_id,
         content_hash=content_hash,
         session_id=session_id or None,
@@ -328,7 +327,7 @@ def _emit_candidate(
 
 def process_due_stability_jobs(
     *,
-    store: WisdomStore,
+    store: QualificationState,
     skills_root: Path,
     authorized: Authorizer,
     at: datetime | None = None,
@@ -391,7 +390,7 @@ def process_due_stability_jobs(
 def record_successful_use(
     skill_name: str,
     *,
-    store: WisdomStore,
+    store: QualificationState,
     skills_root: Path,
     authorized: Authorizer,
     skill_resolver: SkillResolver = _host_skill_resolver,
@@ -449,7 +448,7 @@ def record_successful_use(
 def record_mutation(
     skill_name: str,
     *,
-    store: WisdomStore,
+    store: QualificationState,
     skills_root: Path,
     authorized: Authorizer,
     skill_resolver: SkillResolver = _host_skill_resolver,
@@ -524,7 +523,7 @@ class QualificationController:
     def __init__(
         self,
         *,
-        store: WisdomStore,
+        store: QualificationState,
         skills_root: Path,
         authorized: Authorizer,
         timezone_info: Callable[[], tuple[tzinfo, str]] = _host_timezone,
@@ -593,10 +592,13 @@ class LifecycleBridge:
 
     def __init__(
         self, data_root: Path, profile: tuple[str, Path], *,
-        llm: Any | None = None, get_config: ConfigReader | None = None,
+        state: Any, llm: Any | None = None, get_config: ConfigReader | None = None,
     ) -> None:
+        from .direct_services import DirectState  # pylint: disable=import-outside-toplevel
+
         self.data_root = Path(data_root)
         self.profile = (profile[0], Path(profile[1]).resolve())
+        self.direct = DirectState(state, self.data_root)
         self.llm = llm
         self.get_config = get_config or (lambda _key, default=None: default)
         self._controller: QualificationController | None = None
@@ -624,7 +626,8 @@ class LifecycleBridge:
             if native_runtime is None:
                 return
             try:
-                native_runtime.tool_invocation(task_id=task_id, session_id=session_id)
+                if native_runtime.tool_invocation(task_id=task_id, session_id=session_id) is None:
+                    return
             except (PermissionError, RuntimeError, ValueError):
                 return
         if self._get() is None:
@@ -645,7 +648,7 @@ class LifecycleBridge:
         if not self._model_review_allowed():
             return False
         controller = self._controller
-        owner = controller.store.get_metadata("qualification_owner") if controller else None
+        owner = controller.store.owner() if controller else None
         local = controller.store.local_skill(str(observation["skill_id"])) if controller else None
         if (
             not isinstance(owner, dict)
@@ -787,23 +790,23 @@ class LifecycleBridge:
                 return False
             account = HermesAccountAdapter.current()
             store = self._controller.store
-            active_org_id = store.active_org_id()
-            setup = store.get_metadata("terminal_setup")
+            identity = self.direct.identity()
             owner = {
                 "profile_name": account.profile_name,
                 "profile_home": account.profile_home,
                 "account_id": account.account_id,
                 "organization_id": account.organization_id,
                 "base_url": account.base_url,
-                "installation_id": store.existing_installation_identity(),
+                "installation_id": str((identity or {}).get("installation_id") or ""),
             }
             if expected_owner is not None and owner != expected_owner:
                 return False
             if (
-                not isinstance(setup, dict)
-                or setup.get("state") != "active"
-                or not setup.get("disclosure_accepted_at")
-                or any(setup.get(key) != value for key, value in owner.items())
+                not isinstance(identity, dict)
+                or identity.get("state") != "active"
+                or not identity.get("disclosure_accepted_at")
+                or identity.get("owner")
+                != {key: value for key, value in owner.items() if key != "installation_id"}
             ):
                 return False
             allowed = local_work_allowed(
@@ -812,11 +815,11 @@ class LifecycleBridge:
                     feature_opted_in=True,
                     disclosure_acknowledged=True,
                     installation_registered=bool(owner["installation_id"]),
-                    active_org_id=active_org_id,
+                    active_org_id=owner["organization_id"],
                 ),
             )
             if allowed:
-                store.bind_qualification_owner(owner)
+                store.bind_owner(owner)
             return allowed
         except Exception:  # pylint: disable=broad-exception-caught
             return False
@@ -827,7 +830,7 @@ class LifecycleBridge:
                 return None
             if self._controller is not None:
                 return self._controller if self._authorized() else None
-            if not (self.data_root / "wisdom.db").is_file():
+            if self.direct.identity() is None:
                 return None
             try:
                 from .account import HermesAccountAdapter  # pylint: disable=import-outside-toplevel
@@ -839,25 +842,26 @@ class LifecycleBridge:
                 claims = account.entitlement_claims()
                 if claims is None:
                     return None
-                store = WisdomStore(self.data_root)
-                setup = store.get_metadata("terminal_setup")
+                store = QualificationState(self.direct.state, self.data_root)
+                identity = self.direct.identity()
                 owner = {
                     "profile_name": account.profile_name,
                     "profile_home": account.profile_home,
                     "account_id": account.account_id,
                     "organization_id": account.organization_id,
                     "base_url": account.base_url,
-                    "installation_id": store.existing_installation_identity(),
+                    "installation_id": str((identity or {}).get("installation_id") or ""),
                 }
                 if (
-                    claims.org_id != store.active_org_id()
-                    or not isinstance(setup, dict)
-                    or setup.get("state") != "active"
-                    or not setup.get("disclosure_accepted_at")
-                    or any(setup.get(key) != value for key, value in owner.items())
+                    claims.org_id != owner["organization_id"]
+                    or not isinstance(identity, dict)
+                    or identity.get("state") != "active"
+                    or not identity.get("disclosure_accepted_at")
+                    or identity.get("owner")
+                    != {key: value for key, value in owner.items() if key != "installation_id"}
                 ):
                     return None
-                store.bind_qualification_owner(owner)
+                store.bind_owner(owner)
                 self._controller = QualificationController(
                     store=store,
                     skills_root=self.profile[1] / "skills",
