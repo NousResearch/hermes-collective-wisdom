@@ -171,6 +171,9 @@ After approving an update plan, apply it with
 replacement by default. Advanced preservation, maintenance, and recovery options
 are in the [workflow reference](docs/WORKFLOWS.md).
 
+The [review restoration guide](docs/REVIEW_RESTORATION.md) describes private native
+invitations, complete bounded inspection, quiet dismissal, and the gaps that remain.
+
 ## Privacy and approval
 
 Local candidate signals and notice cursors are small owner-bound PluginState
