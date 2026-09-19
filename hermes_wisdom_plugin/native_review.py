@@ -10,7 +10,7 @@ import secrets
 
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .errors import WisdomAuthError, WisdomConflict, WisdomValidationError
@@ -215,7 +215,7 @@ def _fact_lines(value: Any, prefix: str = "") -> list[str]:
     """Render retained review facts deterministically without replacing them by a summary."""
     if isinstance(value, dict):
         lines = []
-        for key, child in value.items():
+        for key, child in sorted(value.items()):
             if not prefix and key in {"owner", "operation", "allowed"}:
                 continue
             words = str(key).replace("_", " ")
@@ -313,6 +313,12 @@ def _settings_view(plan: dict[str, Any], state: str) -> NativeView:
 
 
 def project_view(record: dict[str, Any]) -> NativeView:
+    if record.get("state") == "cancelled":
+        original = project_view({**record, "state": "pending"})
+        return replace(
+            original, actions=[], navigation_actions=[], dismissed=True,
+            items=[replace(item, actions=[]) for item in original.items],
+        )
     raw_plan = record.get("plan")
     plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
     state = str(record.get("state") or "pending")
