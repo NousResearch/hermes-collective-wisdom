@@ -72,6 +72,14 @@ class ReviewState:
             value["records"][record_id] = copy.deepcopy(record)
             return True
 
+    def compare_replace(self, expected: dict[str, Any], record: dict[str, Any]) -> bool:
+        """Fence presentation changes against every concurrent state/plan change."""
+        with self.change() as value:
+            if value["records"].get(expected["id"]) != expected:
+                return False
+            value["records"][expected["id"]] = copy.deepcopy(record)
+            return True
+
     def pending(self, owner: dict[str, str], *, limit: int = 100) -> list[dict[str, Any]]:
         """List the current owner's pending reviews newest-first."""
         rows = [

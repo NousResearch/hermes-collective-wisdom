@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from .errors import WisdomAuthError, WisdomConflict, WisdomValidationError
 from .native_context import NativeInvocation
+from .native_inspection import review_pages, sharing_checks
 from .review_state import ReviewState
 
 SLACK_SECTION_LIMIT = 2900
@@ -246,6 +247,14 @@ def _validate_review_action(record: dict[str, Any], action: str) -> None:
     if action not in {"confirm", "confirm.partial"} or not isinstance(plan, dict):
         raise WisdomValidationError("Collective Wisdom action was not recognized")
     operation = record.get("operation")
+    if operation == "publish" or record.get("screen"):
+        pages = review_pages(plan)
+        if (
+            record.get("screen") != "approval"
+            or record.get("page") != len(pages) - 1
+            or record.get("inspected_through", -1) != len(pages) - 1
+        ):
+            raise WisdomValidationError("Inspect the complete exact review before confirming")
     receipt_missing = operation != "uninstall" and not str(plan.get("receipt") or "")
     if (
         operation not in {"install", "update", "publish", "setup", "uninstall"}
@@ -308,11 +317,63 @@ def _settings_view(plan: dict[str, Any], state: str) -> NativeView:
         actions.insert(0, NativeAction("Unmute recommendations", "settings.mute.off"))
         actions.insert(0, NativeAction("Mute one week", "settings.mute.1w"))
     return NativeView(
-        "Collective Wisdom settings", "Notification settings", [item], actions=actions,
+        "Collective Wisdom settings",
+        "These controls affect Collective Wisdom sharing and installation recommendations, "
+        "not just this skill. Opening settings changes nothing.", [item], actions=actions,
     )
 
 
-def project_view(record: dict[str, Any]) -> NativeView:
+def _inspection_view(record: dict[str, Any]) -> NativeView:
+    plan = record["plan"]
+    pages = review_pages(plan)
+    page = int(record.get("page", 0))
+    approving = record.get("screen") == "approval"
+    actions = []
+    if page:
+        actions.append(NativeAction("Previous", f"page.{page - 1}"))
+    if page + 1 < len(pages):
+        actions.append(NativeAction("Next", f"page.{page + 1}"))
+    elif approving and plan.get("allowed", True):
+        partial = _requires_partial_acknowledgement(plan)
+        actions.append(NativeAction(
+            "Acknowledge partial compatibility and confirm" if partial else "Confirm",
+            "confirm.partial" if partial else "confirm", primary=True,
+        ))
+    actions.append(NativeAction("Back" if approving else "Looks good.", "back"))
+    return NativeView(
+        "Exact package review" if approving else "Private package details",
+        f"Page {page + 1} of {len(pages)}. " + (
+            "Confirm only after inspecting the complete exact plan."
+            if approving else "Inspection does not authorize sharing, installation or setup."
+        ),
+        [NativeItem("Exact review data (JSON)", pages[page])], actions=actions,
+    )
+
+
+def _candidate_view(plan: dict[str, Any]) -> NativeView:
+    facts = plan.get("facts") or {}
+    safe, _checks = sharing_checks(plan)
+    return NativeView(
+        "You created a skill that could help your team",
+        _safe(facts.get("name") or plan.get("editorial_name") or plan.get("draft_id"), "Local skill"),
+        items=[NativeItem(
+            "✅ Safe To Share (security and professionalism checks all passed)"
+            if safe else "Checks need review",
+            "" if safe else "Required checks may be pending or unavailable. Open Review checks.",
+        )],
+        notice="Nothing has been uploaded or published. Share starts local preparation; "
+        "you will still confirm the exact package before submission.",
+        actions=[
+            NativeAction("✅ Safe To Share" if safe else "Review checks", "checks"),
+            NativeAction("View More Details", "details"),
+            NativeAction("Snooze Collective Wisdom", "settings"),
+            NativeAction("Maybe Later", "cancel"),
+            NativeAction("Share My Skill", "share"),
+        ],
+    )
+
+
+def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
     if record.get("state") == "cancelled":
         original = project_view({**record, "state": "pending"})
         return replace(
@@ -322,10 +383,25 @@ def project_view(record: dict[str, Any]) -> NativeView:
     raw_plan = record.get("plan")
     plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
     state = str(record.get("state") or "pending")
+    if state == "pending" and record.get("screen") == "checks":
+        safe, checks = sharing_checks(plan)
+        return NativeView(
+            "Sharing checks", "Results apply only to this reviewed package.",
+            [NativeItem("✅ Safe To Share" if safe else "Checks need review", checks)],
+            actions=[NativeAction("Looks good.", "back")],
+        )
+    if state == "pending" and record.get("screen") in {"details", "approval"}:
+        return _inspection_view(record)
+    if record.get("operation") in {"candidate", "publish"} and state == "pending":
+        return _candidate_view(plan)
     if record.get("operation") == "catalog":
         return _catalog_view(plan, state)
     if record.get("operation") == "settings":
         return _settings_view(plan, state)
+    return _effect_view(record, plan, state)
+
+
+def _effect_view(record: dict[str, Any], plan: dict[str, Any], state: str) -> NativeView:
     title = "Collective Wisdom review"
     summary = _summary(plan)
     details = _fact_lines(plan)
@@ -517,6 +593,82 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
 
+    def _navigation_action(
+        self, record: dict[str, Any], action: str, service: Any,
+        invocation: NativeInvocation, authority: Callable[[], bool],
+    ) -> dict[str, Any] | None:
+        if action == "settings":
+            return self._open_settings(record, service, invocation, authority)
+        if action == "share" and record.get("operation") == "candidate":
+            return self._prepare_candidate(record, service, invocation, authority)
+        if (
+            action in {"details", "back", "checks"} or action.startswith("page.")
+            or (action == "share" and record.get("operation") == "publish")
+        ):
+            return self._navigate(record, action)
+        return None
+
+    def _open_settings(
+        self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
+        authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        plan = service.notification_settings(may_apply=authority, include_mute_control=True)
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        result = {
+            **record, "operation": "settings", "screen": "offer",
+            "plan": {**plan, "operation": "settings", "allowed": False},
+        }
+        if not self.state.compare_replace(record, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return result
+
+    def _navigate(self, record: dict[str, Any], action: str) -> dict[str, Any]:
+        result = copy.deepcopy(record)
+        if action in {"details", "share"}:
+            result.update(screen="approval" if action == "share" else "details",
+                          page=0, inspected_through=0)
+        elif action == "checks":
+            result.update(screen="checks")
+        elif action == "back":
+            result.update(screen="offer", page=0, inspected_through=-1)
+        else:
+            try:
+                page = int(action.split(".", 1)[1])
+            except (ValueError, IndexError) as exc:
+                raise WisdomValidationError("Invalid review page") from exc
+            if (
+                record.get("screen") not in {"details", "approval"}
+                or abs(page - record.get("page", 0)) != 1
+                or not 0 <= page < len(review_pages(record["plan"]))
+            ):
+                raise WisdomValidationError("Invalid review page")
+            result.update(page=page, inspected_through=max(
+                page, record.get("inspected_through", -1)
+            ))
+        if not self.state.compare_replace(record, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return result
+
+    def _prepare_candidate(
+        self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
+        authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        claimed = {**record, "state": "preparing"}
+        if not self.state.replace(record["id"], "pending", claimed):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        draft_id = service.native_candidate_prepare(record["plan"]["event_id"])
+        plan = service.publication_review(draft_id)
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        result = {
+            **record, "operation": "publish", "plan": copy.deepcopy(plan),
+            "updated_at": self.clock(),
+        }
+        if not self.state.replace(record["id"], "preparing", result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return result
+
     def act(
         self, record_id: str, action: str, service: Any,
         invocation: NativeInvocation, *, authority: Callable[[], bool] = lambda: True,
@@ -536,12 +688,23 @@ class NativeReviewController:
             raise WisdomAuthError("Collective Wisdom review expired; open it again")
         if action.startswith("catalog.install.") and record.get("operation") == "catalog":
             return self._select_catalog(record_id, action, record, service)
+        if state == "pending":
+            navigated = self._navigation_action(record, action, service, invocation, authority)
+            if navigated is not None:
+                return navigated
         _validate_review_action(record, action)
         if state != "pending":
             raise WisdomAuthError("Collective Wisdom review is no longer current")
 
+        return self._apply(record, action, service, invocation, authority)
+
+    def _apply(
+        self, record: dict[str, Any], action: str, service: Any,
+        invocation: NativeInvocation, authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        record_id = record["id"]
         claimed = {**record, "state": "applying", "updated_at": self.clock()}
-        if not self.state.replace(record_id, "pending", claimed):
+        if not self.state.compare_replace(record, claimed):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         plan = claimed["plan"]
         operation = claimed["operation"]
