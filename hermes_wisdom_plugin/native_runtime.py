@@ -276,10 +276,11 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 finally:
                     service.close()
                 view = self.reviews.view(updated)
-                await native.client.chat_update(
-                    channel=invocation.chat_id, ts=invocation.message_id,
-                    text=view.to_text(), blocks=blocks(view, record_id),
-                )
+                with self.reviews.displaying(updated):
+                    await native.client.chat_update(
+                        channel=invocation.chat_id, ts=invocation.message_id,
+                        text=view.to_text(), blocks=blocks(view, record_id),
+                    )
             except Exception:  # pylint: disable=broad-exception-caught
                 return
 
@@ -312,7 +313,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     )
                 finally:
                     service.close()
-                await edit(query, self.reviews.view(updated), record_id)
+                with self.reviews.displaying(updated):
+                    await edit(query, self.reviews.view(updated), record_id)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
             raise ApplicationHandlerStop
@@ -438,7 +440,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         reference = f"{target}@v{version}" if isinstance(version, int) else target
         return self._begin(
             invocation,
-            lambda service: self.reviews.request_install(service, invocation, reference),
+            lambda service: self.reviews.request_install(
+                service, invocation, reference, explanation=str(args.get("explanation") or ""),
+            ),
             expected_owner=expected_owner,
         )
 

@@ -2,8 +2,11 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
 import asyncio
 
+import pytest
+
 from native_test_support import owner
 from restoration_support import SlackHarness
+from hermes_wisdom_plugin.errors import SharePackagingError
 
 
 class Service:
@@ -200,4 +203,102 @@ def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
         assert "sharing and installation" in ui.view(identity).to_text()
         assert not changed
         assert not service.applied
+    asyncio.run(scenario())
+
+
+def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch):
+    from test_contribution_review import reviewer  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.runtime import InvocationService  # pylint: disable=import-outside-toplevel
+    async def scenario():
+        prepared, source, _owner = reviewer(tmp_path / "package")
+        (source / "unsafe-link").symlink_to(source / "SKILL.md")
+        service = Service()
+        monkeypatch.setattr(service, "native_candidate_inspect", lambda identity: {
+            "event_id": identity, "facts": {"name": "reviewed-skill"},
+        })
+        monkeypatch.setattr(service, "suggest", prepared.prepare, raising=False)
+        monkeypatch.setattr(service, "native_candidate_prepare",
+                            lambda identity: InvocationService.native_candidate_prepare(
+                                service, identity,
+                            ))
+        with pytest.raises(SharePackagingError):
+            service.native_candidate_prepare("candidate-1")
+        ui = SlackHarness(tmp_path / "native", service)
+        response = ui.runtime.begin_candidate(ui.caller, "candidate-1")
+        await ui.flush()
+        identity = response["review_id"]
+        await ui.click(identity, "share")
+        assert ui.edits[-1]["text"].startswith("Share Packaging failed")
+        assert "Nothing has been uploaded or published" in ui.edits[-1]["text"]
+        assert not ui.view(identity).actions
+        assert not service.applied
+        assert ui.record(identity)["state"] == "failed"
+    asyncio.run(scenario())
+
+
+def test_install_invitation_leads_to_exact_review_not_implicit_consent(tmp_path):
+    async def scenario():
+        service = Service()
+        ui = SlackHarness(tmp_path, service)
+        response = ui.runtime.begin(ui.caller, "incident")
+        await ui.flush()
+        identity = response["review_id"]
+        view = ui.view(identity)
+        assert "your organization" in view.title
+        assert "Would you like to install this skill?" in view.to_text()
+        assert [a.label for a in view.actions] == [
+            "View Details", "Not Now", "Mute Skill Recommendations", "Install Skill",
+        ]
+        assert "Triage incidents" in view.to_text()
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        await ui.click(identity, "details")
+        assert ui.view(identity).actions[-1].label == "Looks good."
+        await ui.click(identity, "back")
+        assert not service.applied
+        await ui.click(identity, "review")
+        while True:
+            action = next((a for a in ui.view(identity).actions if a.label == "Next"), None)
+            if action is None:
+                break
+            await ui.click(identity, action.action)
+        assert not service.applied
+        await ui.click(identity, "confirm")
+        assert service.applied == ["exact-receipt"]
+    asyncio.run(scenario())
+
+
+def test_failed_provider_edit_cannot_leave_unseen_confirmation_usable(tmp_path, monkeypatch):
+    async def scenario():
+        service = Service()
+        ui = SlackHarness(tmp_path, service)
+        response = ui.runtime.begin(ui.caller, "incident")
+        await ui.flush()
+        identity = response["review_id"]
+        async def failed_edit(**_kwargs):
+            raise ConnectionError("provider refused edit")
+        monkeypatch.setattr(ui, "chat_update", failed_edit)
+        await ui.click(identity, "review")
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        assert ui.record(identity)["state"] == "failed"
+    asyncio.run(scenario())
+
+
+def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypatch):
+    async def scenario():
+        service = Service()
+        ui = SlackHarness(tmp_path, service)
+        response = ui.runtime.begin(ui.caller, "incident")
+        await ui.flush()
+        identity = response["review_id"]
+        await ui.click(identity, "review")
+        async def failed_edit(**_kwargs):
+            raise ConnectionError("provider refused result edit")
+        monkeypatch.setattr(ui, "chat_update", failed_edit)
+        await ui.click(identity, "confirm")
+        assert service.applied == ["exact-receipt"]
+        assert ui.record(identity)["state"] == "completed"
+        await ui.click(identity, "confirm")
+        assert service.applied == ["exact-receipt"]
     asyncio.run(scenario())

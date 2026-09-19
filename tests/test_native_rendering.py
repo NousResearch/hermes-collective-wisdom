@@ -57,12 +57,12 @@ def test_effect_review_retains_exact_security_compatibility_and_file_facts():
     }
 
     text = project_view({
-        "state": "pending", "operation": "install", "plan": plan,
+        "state": "pending", "operation": "install", "plan": plan, "screen": "details",
     }).to_text()
 
     for exact_fact in (
         "receipt-exact", "sha256:content", "sha256:manifest",
-        "compatible_after_setup", "Accept partial: True", "ask",
+        'compatible_after_setup', '"accept_partial": true', "ask",
         "Review shell capability", "shell", "scripts/check.sh", "exec", "sha256:file",
     ):
         assert exact_fact in text

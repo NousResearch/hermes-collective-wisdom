@@ -61,6 +61,18 @@ def publication_review(draft_id="draft-1", **changes):
     return review
 
 
+def inspect_for_confirmation(controller, record_id, service, caller):
+    """Traverse the actual new review actions before testing effect invariants."""
+    record = controller.act(record_id, "review", service, caller)
+    while True:
+        with controller.displaying(record):
+            pass  # Simulate successful SDK display in controller-level tests.
+        following = next((a for a in controller.view(record).actions if a.label == "Next"), None)
+        if following is None:
+            return record
+        record = controller.act(record_id, following.action, service, caller)
+
+
 class RecordingPublicationService:
     """Supply exact reviewed files while recording forbidden mutation."""
 

@@ -167,6 +167,8 @@ def test_lifecycle_admission_reaches_registered_consent_and_real_native_review(t
         assert result["status"] == "queued"
         assert result["executed"] is False
         assert len(app.posts) == 1
+        assert "Exact package review" in app.posts[0]["text"]
+        assert "Agent explanation (not authorization)" in app.posts[0]["text"]
         assert not service.applied
         review_id = result["delivery"]["review_id"]
         assert native.reviews.load(review_id)["route"]["actor_id"] == "U_NATIVE"
@@ -175,6 +177,10 @@ def test_lifecycle_admission_reaches_registered_consent_and_real_native_review(t
         async def ack():
             return None
 
+        await app.handler(ack, {
+            "user": {"id": "U_NATIVE"}, "channel": {"id": "D1"},
+            "team": {"id": "W1"}, "message": {"ts": "card-1"},
+        }, {"value": callback_value(review_id, "review")})
         await app.handler(ack, {
             "user": {"id": "U_NATIVE", "name": "Shannon"},
             "channel": {"id": "D1"}, "team": {"id": "W1"},
