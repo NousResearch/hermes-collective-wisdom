@@ -4,6 +4,8 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from installed_test_support import JsonState
 from native_test_support import native_invocation
 from hermes_wisdom_plugin.native_review import callback_value
@@ -59,6 +61,13 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
         await self.handler(ack, body, {"value": callback_value(record_id, action)})
         return self.runtime.reviews.load(record_id)
 
+    async def next_page(self, record_id):
+        following = next((a for a in self.view(record_id).actions if a.label == "Next"), None)
+        if following is None:
+            return False
+        await self.click(record_id, following.action)
+        return True
+
     def record(self, record_id):
         return self.runtime.reviews.load(record_id)
 
@@ -67,3 +76,43 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
 
     def clicked(self):
         return replace(self.caller, message_id="card-1")
+
+
+class TelegramHarness(SlackHarness):
+    """Exercise the actual registered Telegram handler and plain SDK fallback."""
+
+    def __init__(self, root, service):
+        super().__init__(root, service)
+        self.adapter._bot = self
+        self.adapter._is_callback_user_authorized = lambda actor, **_kw: actor == "11"
+        self.caller = replace(
+            self.caller, platform="telegram", chat_type="private", chat_id="11",
+            actor_id="11", scope_id="", session_key="telegram:11",
+        )
+        self.runtime.wire_telegram(self, self.adapter)
+
+    def add_handler(self, handler, **_kwargs):
+        self.handler = handler.callback
+
+    async def send_message(self, **payload):
+        self.posts.append(payload)
+        return SimpleNamespace(message_id=123, chat_id=11)
+
+    async def click(self, record_id, action, **changes):
+        from telegram.ext import ApplicationHandlerStop  # pylint: disable=import-outside-toplevel
+        actor = changes.get("actor_id", 11)
+        query = SimpleNamespace(
+            data=callback_value(record_id, action),
+            from_user=SimpleNamespace(id=actor, username="fixture"),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(type="private"), chat_id=11, message_id=123,
+                message_thread_id=None, get_bot=lambda: self,
+            ),
+            answer=self._answer, edit_message_text=self.chat_update,
+        )
+        with pytest.raises(ApplicationHandlerStop):
+            await self.handler(SimpleNamespace(callback_query=query), None)
+        return self.record(record_id)
+
+    async def _answer(self):
+        return None

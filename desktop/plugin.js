@@ -428,7 +428,7 @@ function Contributions({ client, lifecycle, viewId }) {
   const [outcome, setOutcome] = useState(null)
   const prepare = useCurrentMutation(client, lifecycle, () => client.rest('/drafts/prepare', {
     method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
-  }), setDraft, 'Could not prepare the private draft')
+  }), setDraft, 'Share Packaging failed — nothing was uploaded or shared')
   const publicationReview = useCurrentMutation(client, lifecycle, async () => {
     const inspected = await client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}`)
     const reviewed = await client.rest('/publication/review', { method: 'POST', body: requestBody(viewId, { draft_id: draft.draft_id }) })

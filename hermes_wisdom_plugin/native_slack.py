@@ -72,11 +72,14 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
         body = ""
         if item.preamble:
             body = item.preamble + "\n\n"
-        body += f"*{item.title}*"
+        body += item.title if item.literal else f"*{item.title}*"
         if item.detail:
             body += "\n" + item.detail
+        if item.literal and len(body) > 2900:
+            raise ValueError("Exact native inspection section exceeds the safe display limit")
         rendered.append({"type": "section", "text": {
-            "type": "mrkdwn", "text": slack_section_text(body),
+            "type": "plain_text" if item.literal else "mrkdwn",
+            "text": body if item.literal else slack_section_text(body),
         }})
         rendered.extend(_action_blocks(item.actions, record_id, row=f"item_{item_index}"))
     if view.notice:

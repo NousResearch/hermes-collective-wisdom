@@ -197,7 +197,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         service = self.service_factory()
 
         def render(rows: list[dict[str, Any]]) -> None:
-            coroutine = self._send_notice(invocation, rows)
+            coroutine = self._send_notice(invocation, rows, expected_owner=grant[2])
             if self._closed:
                 coroutine.close()
                 return
@@ -208,26 +208,34 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         finally:
             service.close()
 
-    async def _send_notice(self, invocation: NativeInvocation, rows: list[dict[str, Any]]) -> None:
-        if not rows or self._closed:
+    async def _send_notice(
+        self, invocation: NativeInvocation, rows: list[dict[str, Any]], *,
+        expected_owner: dict[str, str] | None = None,
+    ) -> None:
+        # Existing policy/preferences already selected this bounded best-effort batch.
+        # Reuse the explicit review route; no jobs, delivery claims or retry queue.
+        if self._closed or (invocation.platform, id(invocation.adapter)) not in self._native:
             return
-        names = [str(row.get("skill_name") or row.get("slug") or row.get("skill_id") or "a skill") for row in rows]
-        text = "Collective Wisdom: " + ", ".join(names[:3]) + " available. Use /wisdom to review."
-        native = self._native.get((invocation.platform, id(invocation.adapter)))
-        if native is None:
-            return
-        if invocation.platform == "slack":
-            payload: dict[str, Any] = {"channel": invocation.chat_id, "text": text}
-            if invocation.thread_id:
-                payload["thread_ts"] = invocation.thread_id
-            await native.client.chat_postMessage(**payload)
-            return
-        bot = getattr(invocation.adapter, "_bot", None)
-        if bot is not None:
-            options = {"chat_id": invocation.chat_id, "text": text}
-            if invocation.thread_id:
-                options["message_thread_id"] = int(invocation.thread_id)
-            await bot.send_message(**options)
+        for row in rows:
+            try:
+                self._begin(
+                    invocation,
+                    lambda service, row=row: self._notice_review(service, invocation, row),
+                    expected_owner=expected_owner,
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue  # A missed notice must not fail the owning turn.
+
+    def _notice_review(self, service: Any, invocation: NativeInvocation, row: dict[str, Any]):
+        category = row.get("category")
+        if category == "skill_ready_to_share":
+            return self.reviews.request_candidate(service, invocation, row["event_id"])
+        if category == "update_available":
+            return self.reviews.request_update(service, invocation, row["skill_id"])
+        if category == "new_skill":
+            reference = f"{row['skill_id']}@v{row['version']}"
+            return self.reviews.request_install(service, invocation, reference)
+        raise ValueError("Unsupported Wisdom notice")
 
     def consume_request(self, raw_args: str) -> NativeInvocation | None:
         try:
@@ -322,6 +330,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         native.add_handler(CallbackQueryHandler(callback, pattern=r"^wi:agent:", block=True), group=-10)
 
     async def _post_review(self, invocation: NativeInvocation, record: dict[str, Any]) -> None:
+        service = self.service_factory()
+        try:
+            if service.native_owner() != record["owner"]:
+                return
+        finally:
+            service.close()
         view = self.reviews.view(record)
         native = self._native.get((invocation.platform, id(invocation.adapter)))
         if native is None:

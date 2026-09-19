@@ -302,3 +302,98 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
         await ui.click(identity, "confirm")
         assert service.applied == ["exact-receipt"]
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("category,label", [
+    ("skill_ready_to_share", "Share My Skill"),
+    ("new_skill", "Install Skill"),
+    ("update_available", "Update Skill"),
+])
+def test_eligible_notice_reuses_actionable_native_candidate_flow(
+    tmp_path, monkeypatch, category, label,
+):
+    async def scenario():
+        service = Service()
+        ui = SlackHarness(tmp_path, service)
+        monkeypatch.setattr(service, "update_plan", lambda _skill: {
+            **service.install_plan("incident"), "operation": "update",
+        }, raising=False)
+        await ui.runtime._send_notice(ui.caller, [{  # pylint: disable=protected-access
+            "category": category, "event_id": "candidate-1",
+            "skill_name": "incident", "skill_id": "incident", "version": 2,
+        }])
+        await ui.flush()
+        assert "available. Use /wisdom" not in ui.posts[-1]["text"]
+        controls = [element for block in ui.posts[-1]["blocks"]
+                    for element in block.get("elements", []) if element.get("type") == "button"]
+        value = next(button["value"] for button in controls if button["text"]["text"] == label)
+        identity = value.rsplit(":", 1)[-1]
+        await ui.click(identity, "share" if category == "skill_ready_to_share" else "review")
+        assert ui.record(identity)["operation"] == {
+            "skill_ready_to_share": "publish", "new_skill": "install", "update_available": "update",
+        }[category]
+        assert not service.applied
+    asyncio.run(scenario())
+
+
+def test_slack_inspection_payload_preserves_literal_whitespace_and_markup(tmp_path, monkeypatch):
+    import json  # pylint: disable=import-outside-toplevel
+    async def scenario():
+        service = Service()
+        plan = service.publication_review("draft")
+        plan["files"][0]["content_utf8"] = "a" + " " * 4400 + "*not bold* <https://invalid|label>"
+        monkeypatch.setattr(service, "publication_review", lambda _draft: plan)
+        ui = SlackHarness(tmp_path, service)
+        response = ui.runtime.begin_publication(ui.caller, "draft")
+        await ui.flush()
+        identity = response["review_id"]
+        await ui.click(identity, "details")
+        chunks = []
+        while True:
+            sections = [b["text"] for b in ui.edits[-1]["blocks"] if b["type"] == "section"]
+            content = sections[-1]
+            assert content["type"] == "plain_text"
+            assert len(content["text"]) <= 2900
+            chunks.append(content["text"].split("\n", 1)[1])
+            following = next((a for a in ui.view(identity).actions if a.label == "Next"), None)
+            if following is None:
+                break
+            await ui.click(identity, following.action)
+        assert json.loads("".join(chunks)) == plan
+    asyncio.run(scenario())
+
+
+def test_queued_private_card_is_not_posted_after_account_switch(tmp_path, monkeypatch):
+    async def scenario():
+        service = Service()
+        ui = SlackHarness(tmp_path, service)
+        ui.runtime.begin(ui.caller, "incident")
+        monkeypatch.setattr(service, "native_owner", lambda: owner(account_id="other"))
+        await ui.flush()
+        assert not ui.posts
+        assert not service.applied
+    asyncio.run(scenario())
+
+
+def test_forged_page_jump_cannot_skip_exact_review(tmp_path, monkeypatch):
+    from hermes_wisdom_plugin.native_inspection import review_pages  # pylint: disable=import-outside-toplevel
+
+    async def scenario():
+        service = Service()
+        plan = service.publication_review("local:draft-1")
+        plan["files"][0]["content_utf8"] = "complete content " * 1000
+        monkeypatch.setattr(service, "publication_review", lambda _identity: plan)
+        ui = SlackHarness(tmp_path, service)
+        identity = ui.runtime.begin_publication(ui.caller, "local:draft-1")["review_id"]
+        await ui.flush()
+        last = len(review_pages(ui.record(identity)["plan"])) - 1
+        assert last > 1
+        await ui.click(identity, f"page.{last}")
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        await ui.click(identity, "review")
+        await ui.click(identity, f"page.{last}")
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        assert ui.record(identity)["inspected_through"] == 0
+    asyncio.run(scenario())

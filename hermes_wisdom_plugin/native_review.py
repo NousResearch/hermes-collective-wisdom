@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from .errors import SharePackagingError, WisdomAuthError, WisdomConflict, WisdomValidationError
 from .native_context import NativeInvocation
-from .native_inspection import review_pages, sharing_checks
+from .native_inspection import inspection_pages, sharing_checks
 from .review_state import ReviewState
 
 SLACK_SECTION_LIMIT = 2900
@@ -38,6 +38,7 @@ class NativeItem:
     detail: str
     actions: list[NativeAction] = field(default_factory=list)
     preamble: str = ""
+    literal: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +250,7 @@ def _validate_review_action(record: dict[str, Any], action: str) -> None:
         raise WisdomValidationError("Collective Wisdom action was not recognized")
     operation = record.get("operation")
     if operation in {"install", "update", "publish"} or record.get("screen"):
-        pages = review_pages(plan)
+        pages = inspection_pages(record)
         if (
             record.get("screen") != "approval"
             or record.get("page") != len(pages) - 1
@@ -326,7 +327,7 @@ def _settings_view(plan: dict[str, Any], state: str) -> NativeView:
 
 def _inspection_view(record: dict[str, Any]) -> NativeView:
     plan = record["plan"]
-    pages = review_pages(plan)
+    pages = inspection_pages(record)
     page = int(record.get("page", 0))
     approving = record.get("screen") == "approval"
     actions = []
@@ -347,7 +348,7 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
             "Confirm only after inspecting the complete exact plan."
             if approving else "Inspection does not authorize sharing, installation or setup."
         ),
-        [NativeItem("Exact review data (JSON)", pages[page])], actions=actions,
+        [NativeItem("Exact review data (JSON)", pages[page], literal=True)], actions=actions,
     )
 
 
@@ -631,6 +632,13 @@ class NativeReviewController:
     ) -> dict[str, Any] | None:
         if action == "settings":
             return self._open_settings(record, service, invocation, authority)
+        if (action in {"details", "review"} and record["operation"] in {"install", "update"}
+                and record["plan"].get("files")):
+            inspect = getattr(service, f"native_{record['operation']}_inspect")
+            files = inspect(record["plan"]["receipt"])
+            if not authority() or not _owner_matches(record, service, invocation):
+                raise WisdomAuthError("Collective Wisdom review owner changed")
+            return self._navigate(record, action, package_files=files)
         if action == "share" and record.get("operation") == "candidate":
             return self._prepare_candidate(record, service, invocation, authority)
         if (
@@ -668,8 +676,12 @@ class NativeReviewController:
             raise
         self.state.compare_replace(record, {**record, "display_ready": True})
 
-    def _navigate(self, record: dict[str, Any], action: str) -> dict[str, Any]:
+    def _navigate(
+        self, record: dict[str, Any], action: str, *, package_files: Any = None,
+    ) -> dict[str, Any]:
         result = {**copy.deepcopy(record), "display_ready": False}
+        if package_files is not None:
+            result["package_files"] = copy.deepcopy(package_files)
         if action in {"details", "share", "review"}:
             result.update(screen="details" if action == "details" else "approval",
                           page=0, inspected_through=0)
@@ -685,7 +697,7 @@ class NativeReviewController:
             if (
                 record.get("screen") not in {"details", "approval"}
                 or abs(page - record.get("page", 0)) != 1
-                or not 0 <= page < len(review_pages(record["plan"]))
+                or not 0 <= page < len(inspection_pages(record))
             ):
                 raise WisdomValidationError("Invalid review page")
             result.update(page=page, inspected_through=max(

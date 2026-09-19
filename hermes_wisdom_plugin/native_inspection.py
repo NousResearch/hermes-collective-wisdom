@@ -46,6 +46,14 @@ def sharing_checks(plan):
     return safe, "\n".join(lines)
 
 
+def inspection_pages(record):
+    """Keep separately verified file bytes outside the immutable consent plan."""
+    plan = record["plan"]
+    if "package_files" in record:
+        plan = {"review": plan, "package_files": record["package_files"]}
+    return review_pages(plan)
+
+
 def review_pages(plan):
     """Split canonical JSON at character boundaries within both native encodings.
 
