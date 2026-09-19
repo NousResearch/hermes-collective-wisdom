@@ -40,6 +40,10 @@ class Service:
             "version": 2, "receipt": "receipt-1", "allowed": True,
         }
 
+    def native_install_inspect(self, receipt):
+        assert receipt == "receipt-1"
+        return [{"path": "SKILL.md", "content": "offline fixture"}]
+
     def installed_setup_plan(self, skill_id, *, version, phase, index, command):
         return {
             "operation": "setup", "owner": dict(self.owner), "skill_id": skill_id,

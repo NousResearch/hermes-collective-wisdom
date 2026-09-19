@@ -58,9 +58,14 @@ rendering is not a claim that a person read or understood every byte.
 - `native_inspection.py` is a small pure projection helper. It exists because the old
   renderer could truncate a complete plan and therefore correctly withheld Confirm.
   It serializes bounded pages and check summaries; it owns no storage, IO, or effects.
-- The existing review record retains only the additional inspection/presentation state
-  needed by that flow. Compare-and-replace protects pending transitions; the display
-  context records provider acknowledgement before another approval action is accepted.
+- The existing review record retains the additional inspection/presentation state,
+  including complete inspected package bytes and a receipt binding. All controller
+  transitions use exact-record compare-and-replace; the display context records
+  provider acknowledgement before another approval action is accepted.
+- Expiry revokes callback authority, **not storage retention**. `ReviewState` writes
+  the whole records aggregate into PluginState and does not delete expired records
+  or their package bytes. No host retention guarantee or package-size benchmark was
+  established. No cleanup worker, cache, migration, or production deletion is added.
 - No Agent/Gateway source changes, host patches, new dependencies, platform expansion,
   new CI framework, telemetry, installer, memory, or production changes.
 
@@ -89,6 +94,51 @@ reduce scope. No thresholds/baselines were raised and code was not split merely 
 hide the delta. Desktop changes only one message and add no branch.
 
 ## Verification boundary
+
+### Independent-review security and logic corrections
+
+The independent probes were rerun at
+`fdfcff3ff0e0d5e2e342a3df34cba93c6e93a2f9` before production edits:
+**5 failed / 2 positive controls passed**, reproducing four defects. The fixes:
+
+- Reject callbacks not offered for the current operation/screen, using the existing
+  view projection rather than a second action table. Install/update inspection is
+  mandatory, even if plan metadata omits `files`; confirmation independently requires
+  nonempty verified file disclosure bound to the exact receipt and completed pages.
+- Fence every pending presentation/plan transition until its exact provider edit is
+  acknowledged. Settings cannot mutate during a blocked/failed disclosure. Failed
+  result display leaves completed effects completed and non-replayable.
+- Allow Maybe Later during preparation. Exact claim completion cannot resurrect a
+  cancelled record; duplicate preparation remains rejected.
+- Turn non-packaging preparation/review exceptions into an explicit, accurately named
+  Share preparation failed card with retry/dismissal. No exception text is disclosed,
+  and retry still cannot upload or publish without the separate exact confirmation.
+
+All independent tests and their assertions are retained, including real-receipt
+positive controls on both adapters. Additional registered callback tests cover
+install/update disclosure witnesses, rejected cross-operation actions, both failure
+stages, both adapters, concurrent dismissal, and acknowledged settings effects whose
+result display fails. Existing test doubles now implement the required inspection
+service; one publication pagination test enters through its actual Share button.
+
+The fixed offline suite passes **814 tests / 9 opt-in integration skips**, Pylint
+**10.00/10**, unchanged complexity ratchet **837 functions / 41 baseline exceptions**,
+and **16 Desktop tests**. New targeted probes were observed RED before their fixes;
+full gates use the existing CI commands and thresholds. Independent re-review and
+live service acceptance remain outstanding; this is not a ready-to-merge claim.
+
+Updated `mccabe 0.7.0` measurements over the same seven production files:
+**466 base → 531 independently reviewed head → 536 fixed source**. Only
+`native_review.py` changes in this correction: **116 → 164 → 169**. Function hotspots
+at the fixed source are `project_view` 10, `act` 9, `_navigate` 9,
+`_validate_review_action` 7, `_prepare_candidate` 7, and `displaying` 5.
+Exact-record CAS replaces every controller state-only write, but the existing public
+`ReviewState.replace` API is retained under this correction's no-public-API-removal
+scope; no two-point deletion saving is claimed. The redundant pending branch in
+`act` is removed after moving its lifecycle guard before dispatch. No sharing journey,
+renderer, public API, dependency, or baseline is removed or relaxed to improve a score.
+The aggregate remains **70 above base**, requiring the explicit maintainer decision
+described above. The earlier 65-point figure is historical, not the fixed total.
 
 At the implementation commit, the offline suite passed **773 tests with 9 opt-in
 integration skips**; baseline was 756 passed / 9 skipped. Pylint: 10.00/10. Existing

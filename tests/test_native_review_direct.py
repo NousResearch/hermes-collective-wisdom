@@ -55,6 +55,10 @@ class Service:
             "version": 2, "receipt": "receipt-1", "allowed": True,
         }
 
+    def native_install_inspect(self, receipt):
+        assert receipt in {"receipt-1", "partial-receipt", "blocked-receipt"}
+        return [{"path": "SKILL.md", "content": "offline fixture"}]
+
     def install_apply(self, receipt, *, accept_partial=False, may_apply=None):
         del accept_partial
         assert may_apply is not None and may_apply() is True

@@ -46,6 +46,12 @@ class Service:
             "allowed": True, "description": "Triage incidents", "version": 2,
         }
 
+    def native_install_inspect(self, receipt):
+        assert receipt == "exact-receipt"
+        return [{"path": "SKILL.md", "content": "offline fixture"}]
+
+    native_update_inspect = native_install_inspect
+
     def install_apply(self, receipt, *, may_apply, **_kwargs):
         assert may_apply()
         self.applied.append(receipt)
@@ -391,7 +397,7 @@ def test_forged_page_jump_cannot_skip_exact_review(tmp_path, monkeypatch):
         await ui.click(identity, f"page.{last}")
         await ui.click(identity, "confirm")
         assert not service.applied
-        await ui.click(identity, "review")
+        await ui.click(identity, "share")
         await ui.click(identity, f"page.{last}")
         await ui.click(identity, "confirm")
         assert not service.applied
