@@ -29,13 +29,55 @@ BYTE_CREDENTIAL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = tuple(
 )
 
 
+# Only a finite family of public example values, never arbitrary "test" substrings.
+# Keep broad detection separate: presentation redaction remains conservative.
+_SYNTHETIC_KEY = (
+    r"sk-(?:ant-api03-)?(?:test|dummy|example|placeholder)"
+    r"(?:[-_]?key)?(?:[-_]?1234)?"
+)
+_SYNTHETIC_PATTERNS = {
+    "openai_style_key": re.compile(_SYNTHETIC_KEY, re.IGNORECASE | re.ASCII),
+    "assignment": re.compile(
+        r"api[_-]?key\s*[:=]\s*['\"]?" + _SYNTHETIC_KEY,
+        re.IGNORECASE | re.ASCII,
+    ),
+}
+
+_CUSTOM_SECRET_ASSIGNMENT = re.compile(
+    r"\b(?:secret|token|password|passwd)\b['\"]?\s*[:=]\s*['\"]?\Z",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def _synthetic_match(kind: str, match: re.Match[str] | re.Match[bytes]) -> bool:
+    """Recognize complete dummy API keys, not prefixes of ambiguous credentials."""
+    pattern = _SYNTHETIC_PATTERNS.get(kind)
+    if pattern is None:
+        return False
+    value = match.group()
+    before = match.string[max(0, match.start() - 1):match.start()]
+    after = match.string[match.end():match.end() + 1]
+    # A public dummy API-key value can still be a real user-chosen password.
+    prefix = match.string[:match.start()]
+    value, before, after, prefix = (
+        part.decode("latin-1") if isinstance(part, bytes) else part
+        for part in (value, before, after, prefix)
+    )
+    return (
+        pattern.fullmatch(value) is not None
+        and before in " \t\r\n\"'`([{=:,;"
+        and after in " \t\r\n\"'`)]},;"
+        and not _CUSTOM_SECRET_ASSIGNMENT.search(prefix)
+    )
+
+
 def scan_credentials(files: list[dict[str, str]]) -> list[dict[str, Any]]:
     """Return credential-shaped findings; matches are never echoed back."""
     findings: list[dict[str, Any]] = []
     for item in files:
         for number, line in enumerate(item["content"].splitlines(), start=1):
             for kind, pattern in CREDENTIAL_PATTERNS:
-                if pattern.search(line):
+                if any(not _synthetic_match(kind, match) for match in pattern.finditer(line)):
                     findings.append({
                         "kind": kind,
                         "file": item["path"],
@@ -55,6 +97,6 @@ def scan_credential_bytes(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         for number, line in enumerate(body.splitlines(), start=1):
             for kind, pattern in BYTE_CREDENTIAL_PATTERNS:
-                if pattern.search(line):
+                if any(not _synthetic_match(kind, match) for match in pattern.finditer(line)):
                     findings.append({"kind": kind, "file": path, "line": number})
     return findings

@@ -20,6 +20,15 @@ def owner(**changes):
     return value
 
 
+def direct_owner():
+    """Return the owner shared by direct-review and slash workflow fixtures."""
+    return owner(
+        profile_home="/profiles/default", account_id="account-1",
+        organization_id="org-1", base_url="https://gateway.invalid",
+        installation_id="install-1",
+    )
+
+
 def native_invocation(adapter=None, **changes):
     """Return a fresh private Slack invocation with explicit overrides."""
     values = {

@@ -100,6 +100,7 @@ def main() -> int:  # pylint: disable=too-many-locals
     shutil.copytree(repository / "hermes_wisdom_plugin", artifact / "hermes_wisdom_plugin")
     (artifact / "tests").mkdir()
     shutil.copy2(repository / TEST, artifact / TEST)
+    shutil.copy2(repository / "tests/installed_test_support.py", artifact / "tests")
     shutil.copy2(repository / "pyproject.toml", artifact / "pyproject.toml")
     (artifact / "setup.cfg").write_text(
         "[mutmut]\n"

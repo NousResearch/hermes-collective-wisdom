@@ -46,6 +46,7 @@ class InstallReviewBody(ViewBody):
 
     reference: str = Field(min_length=1, max_length=512)
     update_mode: str | None = Field(default=None, max_length=64)
+    accept_warnings: bool = False
 
 
 class ReceiptBody(ViewBody):
@@ -67,6 +68,7 @@ class UpdateReviewBody(SkillBody):
     preserve_modified: bool = False
     accept_sensitive: bool = False
     accept_partial: bool = False
+    accept_warnings: bool = False
 
 
 class ReviewBody(ViewBody):
@@ -80,6 +82,15 @@ class ModeBody(ViewBody):
 
     mode: str = Field(pattern=r"^(agent|fixed)$")
     expected_mode: str = Field(pattern=r"^(agent|fixed)$")
+
+
+class MuteBody(ViewBody):
+    """Apply one revision-bound organization mute choice."""
+
+    control_id: str = Field(min_length=1, max_length=64)
+    duration: str | None = Field(
+        default=None, pattern=r"^(1_day|1_week|30_days|forever)$"
+    )
 
 
 class EnrollmentBody(ViewBody):
@@ -99,6 +110,21 @@ class DraftReviewBody(ViewBody):
     """Review a private prepared draft."""
 
     draft_id: str = Field(min_length=1, max_length=512)
+    accept_warnings: bool = False
+
+
+class DraftSaveBody(ViewBody):
+    """Replace one complete prepared package using its displayed hash snapshot."""
+
+    author_description: str
+    files: list[dict[str, Any]]
+    expected_hashes: dict[str, str]
+
+
+class PreparedReviewBody(ViewBody):
+    """Re-run local checks for one exact saved prepared package."""
+
+    reviewed_hashes: dict[str, str]
 
 
 @dataclass(slots=True)
@@ -306,11 +332,21 @@ class DesktopWorkflowApi:
         }
 
     def install_review(
-        self, service: Any, view_id: str, reference: str, *, update_mode: str | None = None
+        self,
+        service: Any,
+        view_id: str,
+        reference: str,
+        *,
+        update_mode: str | None = None,
+        accept_warnings: bool = False,
     ) -> dict[str, Any]:
         """Prepare the existing hash-bound installation review."""
         self._require_view(service, view_id)
-        result = service.install_plan(reference, update_mode=update_mode)
+        result = service.install_plan(
+            reference,
+            update_mode=update_mode,
+            accept_warnings=accept_warnings,
+        )
         return self._record_review(service, view_id, "install", reference, result)
 
     def install_confirm(
@@ -331,6 +367,13 @@ class DesktopWorkflowApi:
         self._require_view(service, view_id)
         result = service.update_plan(skill_id, **options)
         return self._record_review(service, view_id, "update", skill_id, result)
+
+    def check_update(self, service: Any, view_id: str, skill_id: str):
+        """Read update availability without creating a review or applying files."""
+        self._require_view(service, view_id)
+        result = service.check_update(skill_id)
+        self._require_view(service, view_id)
+        return result
 
     def update_confirm(self, service: Any, view_id: str, receipt: str):
         """Apply the reviewed update through the existing receipt kernel."""
@@ -358,6 +401,29 @@ class DesktopWorkflowApi:
             may_apply=lambda: self.current(service, view_id),
         )
 
+    def notification_settings(self, service: Any, view_id: str):
+        """Read current mode and a revision-bound organization mute control."""
+        self._require_view(service, view_id)
+        return service.notification_settings(
+            include_mute_control=True,
+            may_apply=lambda: self.current(service, view_id),
+        )
+
+    def choose_notification_mute(
+        self,
+        service: Any,
+        view_id: str,
+        control_id: str,
+        duration: str | None,
+    ):
+        """Apply only the organization mute snapshot displayed in this view."""
+        self._require_view(service, view_id)
+        return service.choose_notification_mute(
+            control_id,
+            duration,
+            may_apply=lambda: self.current(service, view_id),
+        )
+
     def enroll(self, service: Any, view_id: str, *, accepted: bool):
         """Enroll only with explicit disclosure and a current account binding."""
         self._require_view(service, view_id)
@@ -379,11 +445,68 @@ class DesktopWorkflowApi:
             may_apply=lambda: self.current(service, view_id),
         )
 
-    def publication_review(self, service: Any, view_id: str, draft_id: str):
+    def prepared_inspect(self, service: Any, view_id: str, draft_id: str):
+        """Read complete inert draft bytes only for the originating live view."""
+        self._require_view(service, view_id)
+        result = service.prepared_inspect(draft_id)
+        self._require_view(service, view_id)
+        return result
+
+    def prepared_save(  # pylint: disable=too-many-arguments
+        self,
+        service: Any,
+        view_id: str,
+        draft_id: str,
+        *,
+        author_description: str,
+        files: list[dict[str, Any]],
+        expected_hashes: dict[str, str],
+    ):
+        """Save a complete owner-private package through the existing CAS workflow."""
+        self._require_view(service, view_id)
+        result = service.prepared_save(
+            draft_id,
+            author_description=author_description,
+            files=files,
+            expected_hashes=expected_hashes,
+            may_apply=lambda: self.current(service, view_id),
+        )
+        self._require_view(service, view_id)
+        return result
+
+    def prepared_review(
+        self,
+        service: Any,
+        view_id: str,
+        draft_id: str,
+        *,
+        reviewed_hashes: dict[str, str],
+    ):
+        """Re-run exact local checks without model disclosure or upload."""
+        self._require_view(service, view_id)
+        result = service.prepared_review(
+            draft_id,
+            allow_model_review=False,
+            reviewed_hashes=reviewed_hashes,
+            may_apply=lambda: self.current(service, view_id),
+        )
+        self._require_view(service, view_id)
+        return result
+
+    def publication_review(
+        self,
+        service: Any,
+        view_id: str,
+        draft_id: str,
+        *,
+        accept_warnings: bool = False,
+    ):
         """Freeze the existing publication service’s exact review."""
         self._require_view(service, view_id)
         result = service.publication_review(
-            draft_id, may_apply=lambda: self.current(service, view_id)
+            draft_id,
+            accept_warnings=accept_warnings,
+            may_apply=lambda: self.current(service, view_id),
         )
         return self._record_review(service, view_id, "publication", draft_id, result)
 
@@ -488,9 +611,9 @@ def build_router(  # pylint: disable=too-many-locals
             if callable(close):
                 close()
 
-    @router.post("/views")
-    def open_view():
-        return invoke(api.open_view)
+    router.add_api_route(
+        "/views", lambda: invoke(api.open_view), methods=["POST"], name="open_view"
+    )
 
     @router.post("/notices/end-turn")
     def end_turn_notices():
@@ -501,9 +624,12 @@ def build_router(  # pylint: disable=too-many-locals
 
         return invoke(check)
 
-    @router.delete("/views/{view_id}")
-    def close_view(view_id: str):
-        return invoke(lambda service: api.close_view(service, view_id))
+    router.add_api_route(
+        "/views/{view_id}",
+        lambda view_id: invoke(lambda service: api.close_view(service, view_id)),
+        methods=["DELETE"],
+        name="close_view",
+    )
 
     @router.get("/bootstrap")
     def bootstrap():
@@ -527,22 +653,41 @@ def build_router(  # pylint: disable=too-many-locals
     def catalog(q: str | None = Query(default=None, max_length=256)):
         return invoke(lambda service: {"skills": service.search_skills(q)})
 
-    @router.get("/catalog/{skill_id}")
-    def catalog_detail(skill_id: str):
-        return invoke(lambda service: service.show(skill_id))
+    router.add_api_route(
+        "/catalog/{skill_id}",
+        lambda skill_id: invoke(lambda service: service.show(skill_id)),
+        methods=["GET"],
+        name="catalog_detail",
+    )
+    router.add_api_route(
+        "/catalog/{skill_id}/versions",
+        lambda skill_id: invoke(
+            lambda service: {"versions": service.versions(skill_id)}
+        ),
+        methods=["GET"],
+        name="catalog_versions",
+    )
+    router.add_api_route(
+        "/installed",
+        lambda: invoke(
+            lambda service: {"installations": service.list_installations()}
+        ),
+        methods=["GET"],
+        name="installed",
+    )
 
-    @router.get("/catalog/{skill_id}/versions")
-    def catalog_versions(skill_id: str):
-        return invoke(lambda service: {"versions": service.versions(skill_id)})
-
-    @router.get("/installed")
-    def installed():
-        return invoke(lambda service: {"installations": service.list_installations()})
+    @router.get("/updates/{skill_id}")
+    def update_check(skill_id: str, view_id: str = Query(min_length=8, max_length=128)):
+        return invoke(lambda service: api.check_update(service, view_id, skill_id))
 
     @router.post("/install/review")
     def install_review(body: InstallReviewBody):
         return invoke(lambda service: api.install_review(
-            service, body.view_id, body.reference, update_mode=body.update_mode
+            service,
+            body.view_id,
+            body.reference,
+            update_mode=body.update_mode,
+            accept_warnings=body.accept_warnings,
         ))
 
     @router.post("/install/confirm")
@@ -563,6 +708,7 @@ def build_router(  # pylint: disable=too-many-locals
             preserve_modified=body.preserve_modified,
             accept_sensitive=body.accept_sensitive,
             accept_partial=body.accept_partial,
+            accept_warnings=body.accept_warnings,
         ))
 
     @router.post("/update/confirm")
@@ -592,15 +738,31 @@ def build_router(  # pylint: disable=too-many-locals
             expected_mode=body.expected_mode,
         ))
 
-    @router.get("/enrollment/disclosure")
-    def enrollment_disclosure():
-        return {
+    @router.get("/settings")
+    def settings(view_id: str = Query(min_length=8, max_length=128)):
+        return invoke(lambda service: api.notification_settings(service, view_id))
+
+    @router.patch("/settings/mute")
+    def settings_mute(body: MuteBody):
+        return invoke(lambda service: api.choose_notification_mute(
+            service,
+            body.view_id,
+            body.control_id,
+            body.duration,
+        ))
+
+    router.add_api_route(
+        "/enrollment/disclosure",
+        lambda: {
             "version": "wisdom-desktop-v1",
             "text": (
                 WISDOM_DISCLOSURE + " Enrolling does not upload local skill contents. "
                 "Install, setup, and publication remain separate approvals."
             ),
-        }
+        },
+        methods=["GET"],
+        name="enrollment_disclosure",
+    )
 
     @router.post("/enrollment/confirm")
     def enrollment_confirm(body: EnrollmentBody):
@@ -617,13 +779,41 @@ def build_router(  # pylint: disable=too-many-locals
         ))
 
     @router.get("/drafts/{draft_id}")
-    def draft_inspect(draft_id: str):
-        return invoke(lambda service: service.prepared_inspect(draft_id))
+    def draft_inspect(
+        draft_id: str,
+        view_id: str = Query(min_length=8, max_length=128),
+    ):
+        return invoke(lambda service: api.prepared_inspect(
+            service, view_id, draft_id
+        ))
+
+    @router.put("/drafts/{draft_id}")
+    def draft_save(draft_id: str, body: DraftSaveBody):
+        return invoke(lambda service: api.prepared_save(
+            service,
+            body.view_id,
+            draft_id,
+            author_description=body.author_description,
+            files=body.files,
+            expected_hashes=body.expected_hashes,
+        ))
+
+    @router.post("/drafts/{draft_id}/review")
+    def draft_review(draft_id: str, body: PreparedReviewBody):
+        return invoke(lambda service: api.prepared_review(
+            service,
+            body.view_id,
+            draft_id,
+            reviewed_hashes=body.reviewed_hashes,
+        ))
 
     @router.post("/publication/review")
     def publication_review(body: DraftReviewBody):
         return invoke(lambda service: api.publication_review(
-            service, body.view_id, body.draft_id
+            service,
+            body.view_id,
+            body.draft_id,
+            accept_warnings=body.accept_warnings,
         ))
 
     @router.post("/publication/confirm")

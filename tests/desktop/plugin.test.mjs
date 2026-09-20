@@ -51,6 +51,10 @@ function Input(props) {
   return React.createElement(Primitive, { ...props, as: 'input' })
 }
 
+function Textarea(props) {
+  return React.createElement(Primitive, { ...props, as: 'textarea' })
+}
+
 // Faithful to the Radix callback contract used by the real SDK component.
 function Checkbox({ checked, onCheckedChange, ...props }) {
   assert.equal('onChange' in props, false, 'SDK Checkbox must not receive a native onChange handler')
@@ -88,6 +92,7 @@ async function loadPlugin(restHandler, initial = {}) {
     ScrollArea: props => React.createElement(Primitive, props),
     Separator: props => React.createElement(Primitive, { ...props, as: 'hr' }),
     SIDEBAR_NAV_AREA: 'sidebar.nav',
+    Textarea,
     host,
     useMutation,
     useQuery,
@@ -168,7 +173,10 @@ async function click(element) {
 
 async function enter(input, value) {
   assert.ok(input, 'expected input')
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  const prototype = input instanceof window.HTMLTextAreaElement
+    ? window.HTMLTextAreaElement.prototype
+    : window.HTMLInputElement.prototype
+  const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set
   await act(async () => {
     setter.call(input, value)
     input.dispatchEvent(new window.Event('input', { bubbles: true }))
@@ -229,7 +237,7 @@ const button = (mounted, name) => [...mounted.container.querySelectorAll('button
 test('registers the native page and performs catalog search, details, exact install review, and confirmation', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/install/review') {
-      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', reference: 'skill-1@v2' })
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', reference: 'skill-1@v2', accept_warnings: false })
       return installReview()
     }
     if (path === '/install/confirm') {
@@ -263,6 +271,79 @@ test('registers the native page and performs catalog search, details, exact inst
   await mounted.cleanup()
 })
 
+test('catalog keeps native Install visible beside long descriptions at narrow widths', async () => {
+  const longDescription = 'A very long publisher description '.repeat(80)
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: longDescription, latest_version: 2 }] }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  mounted.container.style.width = '320px'
+  const row = mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]')
+  const actions = row.querySelector('[data-testid="catalog-actions-skill-1"]')
+
+  assert.ok(button(mounted, 'Install'))
+  assert.ok(button(mounted, 'Details'))
+  assert.equal(row.style.gridTemplateColumns, 'minmax(0, 1fr) auto')
+  assert.equal(actions.style.flexWrap, 'wrap')
+  assert.equal(row.querySelector('p').style.overflowWrap, 'anywhere')
+  await mounted.cleanup()
+})
+
+test('installed rows check first then expose exact Review update and local-edit protection', async () => {
+  const managed = { ...bootstrap, installations: [{ skill_id: 'skill-1', slug: 'one', version: 1, modified: true, content_hash: hash('0') }] }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return managed
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/updates/skill-1?view_id=view-remote-a-A') return { skill_id: 'skill-1', state: 'update_available', installed_version: 1, latest_version: 2 }
+    if (path === '/update/review') {
+      assert.deepEqual(structuredClone(options.body), {
+        view_id: 'view-remote-a-A', skill_id: 'skill-1', preserve_modified: true,
+        accept_sensitive: false, accept_partial: false, accept_warnings: false
+      })
+      return updateReview({ sensitive_expansion: [] })
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Installed'))
+
+  assert.match(mounted.container.textContent, /local edits detected · preservation required/)
+  assert.equal(button(mounted, 'Review update'), undefined)
+  await click(button(mounted, 'Check for updates'))
+  assert.match(mounted.container.textContent, /v2 is available/)
+  const reviewUpdate = button(mounted, 'Review update')
+  assert.ok(reviewUpdate)
+  const preserve = mounted.container.querySelector('[role="checkbox"][aria-label="Preserve locally modified files"]')
+  await click(preserve)
+  assert.equal(reviewUpdate.disabled, true)
+  assert.match(mounted.container.textContent, /enable preservation to protect local edits/)
+  await click(preserve)
+  await click(button(mounted, 'Review update'))
+  assert.match(mounted.container.textContent, /update review/)
+  assert.match(mounted.container.textContent, /update-receipt/)
+  await mounted.cleanup()
+})
+
+test('installed rows state why update controls are unavailable', async () => {
+  const managed = { ...bootstrap, installations: [{ skill_id: 'skill-1', slug: 'one', version: 1, modified: false }] }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return managed
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/updates/skill-1?view_id=view-remote-a-A') throw new Error('Update service is unavailable for this organization')
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Installed'))
+  await click(button(mounted, 'Check for updates'))
+
+  assert.match(mounted.container.textContent, /Update check unavailable: Update service is unavailable for this organization/)
+  assert.equal(button(mounted, 'Review update'), undefined)
+  await mounted.cleanup()
+})
+
 test('unknown required install review fields fail closed', async () => {
   const loaded = await loadPlugin((path, options, owner) => path === '/install/review'
     ? { receipt: 'looks-real', skill_id: 'skill-1', version: 2, allowed: true }
@@ -275,46 +356,119 @@ test('unknown required install review fields fail closed', async () => {
   await mounted.cleanup()
 })
 
-test('partial compatibility cannot be confirmed without a dedicated acknowledgement control', async () => {
-  const loaded = await loadPlugin((path, options, owner) => path === '/install/review'
-    ? installReview({
-        compatibility: { outcome: 'compatible_after_setup', satisfied: [], setup_actions: ['Run a separate setup review'], limitations: ['Requires setup before use'], blocked: [] },
-        policy: { requested_update_mode: null, requires_explicit_confirmation: true, scan_requires_confirmation: false, compatibility_requires_confirmation: true }
-      })
-    : baseHandler(path, options, owner))
+test('catalog version history selects an exact published version for install review', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }, { version: 1, state: 'published' }] }
+    if (path === '/install/review') {
+      assert.equal(options.body.reference, 'skill-1@v1')
+      return installReview({ version: 1, receipt: 'install-v1' })
+    }
+    return baseHandler(path, options, owner)
+  })
   const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Install'))
-  assert.match(mounted.container.textContent, /Requires setup before use/)
-  assert.match(mounted.container.textContent, /bounded Desktop UI does not collect/)
-  assert.equal(button(mounted, 'Confirm install').disabled, true)
+  await click(button(mounted, 'Details'))
+  await click(button(mounted, 'Install v1'))
+  assert.match(mounted.container.textContent, /install-v1/)
   await mounted.cleanup()
 })
 
-test('installed update renders nested policy/security data and Radix checkbox controls the request', async () => {
+test('install collects exact warning and partial acknowledgements before confirmation', async () => {
+  const finding = { severity: 'medium', category: 'network', path: 'SKILL.md', line: 7, message: 'Review host.' }
+  let reviewCount = 0
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') {
+      reviewCount += 1
+      assert.equal(options.body.accept_warnings, reviewCount === 2)
+      return installReview({
+        receipt: reviewCount === 1 ? 'install-before-acks' : 'install-after-acks',
+        compatibility: { outcome: 'compatible_after_setup', satisfied: [], setup_actions: ['Run a separate setup review'], limitations: ['Requires setup before use'], blocked: [] },
+        local_scan: { allowed: reviewCount === 2, available: true, verdict: 'warning_required', findings: [finding] },
+        policy: {
+          requested_update_mode: null, requires_explicit_confirmation: true,
+          scan_requires_confirmation: true,
+          warning_acceptance: { accepted: reviewCount === 2 },
+          compatibility_requires_confirmation: true
+        },
+        allowed: reviewCount === 2,
+        permitted_actions: reviewCount === 2 ? ['confirm_install', 'recheck'] : ['recheck']
+      })
+    }
+    if (path === '/install/confirm') {
+      assert.deepEqual(structuredClone(options.body), {
+        view_id: 'view-remote-a-A', receipt: 'install-after-acks', accept_partial: true
+      })
+      return { installed: true, skill_id: 'skill-1', version: 2 }
+    }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Install'))
+  assert.match(mounted.container.textContent, /Requires setup before use/)
+  assert.match(mounted.container.textContent, /Review host/)
+  assert.equal(button(mounted, 'Confirm install').disabled, true)
+  await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge install scanner warnings"]'))
+  await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept install partial compatibility"]'))
+  await click(button(mounted, 'Review with acknowledgements'))
+  assert.match(mounted.container.textContent, /install-after-acks/)
+  assert.equal(button(mounted, 'Confirm install').disabled, false)
+  await click(button(mounted, 'Confirm install'))
+  assert.equal(loaded.calls.notify.at(-1)?.message, 'Installed skill-1')
+  await mounted.cleanup()
+})
+
+test('update re-review binds warning partial sensitive and preservation acknowledgements', async () => {
   const managed = { ...bootstrap, installations: [{ skill_id: 'skill-1', slug: 'one', version: 1, modified: true, content_hash: hash('0') }] }
+  const finding = { severity: 'medium', category: 'network', path: 'SKILL.md', line: 9, message: 'Review update host.' }
+  let reviews = 0
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/bootstrap') return managed
     if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/updates/skill-1?view_id=view-remote-a-A') return { skill_id: 'skill-1', state: 'update_available', installed_version: 1, latest_version: 2 }
     if (path === '/update/review') {
-      assert.equal(options.body.preserve_modified, false)
-      return updateReview()
+      reviews += 1
+      assert.equal(options.body.preserve_modified, true)
+      assert.equal(options.body.accept_sensitive, reviews === 2)
+      assert.equal(options.body.accept_partial, reviews === 2)
+      assert.equal(options.body.accept_warnings, reviews === 2)
+      return updateReview({
+        receipt: reviews === 1 ? 'update-before-acks' : 'update-after-acks',
+        compatibility: { outcome: 'partial', satisfied: [], setup_actions: [], limitations: ['Limited platform support'], blocked: [] },
+        local_scan: { allowed: reviews === 2, available: true, findings: [finding] },
+        policy: {
+          requested_update_mode: 'MANUAL', requires_explicit_confirmation: true,
+          scan_requires_confirmation: true,
+          warning_acceptance: { accepted: reviews === 2 },
+          compatibility_requires_confirmation: true, manual_only: true,
+          accepted_sensitive: reviews === 2, accepted_partial: reviews === 2,
+          accepted_warnings: reviews === 2, accepted_modified_preservation: true
+        },
+        allowed: reviews === 2,
+        permitted_actions: reviews === 2 ? ['confirm_update', 'recheck'] : ['recheck']
+      })
     }
-    if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', version: 2 }
+    if (path === '/update/confirm') {
+      assert.equal(options.body.receipt, 'update-after-acks')
+      return { updated: true, skill_id: 'skill-1', version: 2 }
+    }
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderPage(loaded)
   await click(button(mounted, 'Installed'))
   const preserve = mounted.container.querySelector('[role="checkbox"][aria-label="Preserve locally modified files"]')
   assert.equal(preserve.getAttribute('aria-checked'), 'true')
-  await click(preserve)
-  assert.equal(preserve.getAttribute('aria-checked'), 'false')
-  await click(button(mounted, 'Update'))
+  await click(button(mounted, 'Check for updates'))
+  await click(button(mounted, 'Review update'))
   assert.match(mounted.container.textContent, /new network destinations/)
+  assert.match(mounted.container.textContent, /Review update host/)
   assert.match(mounted.container.textContent, /preserve_unmanaged_copy/)
-  assert.match(mounted.container.textContent, /accepted sensitive/)
-  assert.match(mounted.container.textContent, /Server professionalism/)
-  assert.match(mounted.container.textContent, /Server: unavailable/)
+  assert.equal(button(mounted, 'Confirm update').disabled, true)
+  await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge update scanner warnings"]'))
+  await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept update partial compatibility"]'))
+  await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept update sensitive capability expansion"]'))
+  await click(button(mounted, 'Review with acknowledgements'))
+  assert.match(mounted.container.textContent, /update-after-acks/)
+  assert.equal(button(mounted, 'Confirm update').disabled, false)
   await click(button(mounted, 'Confirm update'))
   assert.equal(loaded.calls.notify.at(-1)?.message, 'Skill updated')
   await mounted.cleanup()
@@ -385,7 +539,8 @@ test('enrollment uses the exact disclosure and real Checkbox onCheckedChange sem
 test('publication inspects full bytes, renders checks/hashes/author copy, and reports moderated outcome accurately', async () => {
   const files = [
     { path: 'SKILL.md', content_utf8: '# Exact reviewed bytes' },
-    { path: 'skill.manifest.json', content_utf8: '{"name":"local-skill"}' }
+    { path: 'skill.manifest.json', content_utf8: '{"name":"local-skill"}' },
+    { path: 'assets/logo.bin', content_base64: 'AAH/' }
   ]
   const hashes = { content: hash('3'), author_description: hash('4'), package_manifest: hash('5') }
   const loaded = await loadPlugin((path, options, owner) => {
@@ -393,7 +548,8 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
     if (path === '/bootstrap') return bootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
     if (path === '/drafts/prepare') return { draft_id: 'local:1', skill_id: 'local-skill', files: [{ path: 'SKILL.md' }] }
-    if (path === '/drafts/local%3A1') return { draft_id: 'local:1', author_description: 'Exact author copy for teammates.', files, expected_hashes: hashes }
+    if (path === '/drafts/local%3A1?view_id=view-remote-a-A') return { draft_id: 'local:1', author_description: 'Exact author copy for teammates.', files, expected_hashes: hashes }
+    if (path === '/drafts/local%3A1/review') return { draft_id: 'local:1', drafted_description: 'Exact author copy for teammates.', files, hashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
     if (path === '/publication/review') return {
       receipt: 'publication-receipt', draft_id: 'local:1', skill_id: 'local-skill', hashes,
       description: 'Exact author copy for teammates.',
@@ -409,15 +565,17 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   await click(button(mounted, 'Contribute'))
   await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
   await click(button(mounted, 'Prepare draft'))
-  assert.match(mounted.container.textContent, /No upload or publication has occurred/)
-  await click(button(mounted, 'Review publication'))
+  assert.match(mounted.container.textContent, /Nothing has been uploaded/)
+  await click(button(mounted, 'Continue to sharing review'))
   assert.match(mounted.container.textContent, /Exact author copy for teammates/)
   assert.match(mounted.container.textContent, /# Exact reviewed bytes/)
   assert.match(mounted.container.textContent, new RegExp(hash('3')))
   assert.match(mounted.container.textContent, /Local security: passed/)
   assert.match(mounted.container.textContent, /Assessment: unavailable/)
   assert.match(mounted.container.textContent, /Moderated: confirmation submits for team moderation/)
-  await click(button(mounted, 'Confirm publication'))
+  assert.equal(mounted.container.querySelector('a[download="logo.bin"]').getAttribute('href'), 'data:application/octet-stream;base64,AAH/')
+  assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
+  await click(button(mounted, 'Share this exact reviewed package'))
   assert.equal(loaded.calls.notify.at(-1)?.message, 'Submitted for team moderation')
   await mounted.cleanup()
 })
@@ -439,9 +597,10 @@ test('publication hash comparison ignores object key insertion order', async () 
     if (path === '/bootstrap') return bootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
     if (path === '/drafts/prepare') return { draft_id: 'local:ordered', skill_id: 'local-skill' }
-    if (path === '/drafts/local%3Aordered') return {
+    if (path === '/drafts/local%3Aordered?view_id=view-remote-a-A') return {
       author_description: 'Exact author copy.', files, expected_hashes: expectedHashes
     }
+    if (path === '/drafts/local%3Aordered/review') return { drafted_description: 'Exact author copy.', files, hashes: expectedHashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
     if (path === '/publication/review') return {
       receipt: 'publication-receipt', draft_id: 'local:ordered', skill_id: 'local-skill',
       hashes: reviewedHashes, description: 'Exact author copy.', files,
@@ -456,10 +615,10 @@ test('publication hash comparison ignores object key insertion order', async () 
   await click(button(mounted, 'Contribute'))
   await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
   await click(button(mounted, 'Prepare draft'))
-  await click(button(mounted, 'Review publication'))
+  await click(button(mounted, 'Continue to sharing review'))
 
   assert.match(mounted.container.textContent, /ready to confirm/)
-  assert.equal(button(mounted, 'Confirm publication').disabled, false)
+  assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
   await mounted.cleanup()
 })
 
@@ -470,7 +629,8 @@ test('publication without an explicit security upload gate fails closed', async 
     if (path === '/bootstrap') return bootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
     if (path === '/drafts/prepare') return { draft_id: 'local:1', skill_id: 'local-skill' }
-    if (path === '/drafts/local%3A1') return { author_description: 'Copy', files: [{ path: 'SKILL.md', content_utf8: '# bytes' }], expected_hashes: hashes }
+    if (path === '/drafts/local%3A1?view_id=view-remote-a-A') return { author_description: 'Copy', files: [{ path: 'SKILL.md', content_utf8: '# bytes' }], expected_hashes: hashes }
+    if (path === '/drafts/local%3A1/review') return { drafted_description: 'Copy', files: [{ path: 'SKILL.md', content_utf8: '# bytes' }], hashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
     if (path === '/publication/review') return { receipt: 'publication-receipt', draft_id: 'local:1', skill_id: 'local-skill', hashes, description: 'Copy', files: [], security_check: { summary: 'Scanner unavailable.' }, professionalism_check: { state: 'unavailable' }, publication_mode: 'open', policy_version: 'p1' }
     throw new Error(`unexpected ${path}`)
   })
@@ -478,9 +638,262 @@ test('publication without an explicit security upload gate fails closed', async 
   await click(button(mounted, 'Contribute'))
   await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
   await click(button(mounted, 'Prepare draft'))
-  await click(button(mounted, 'Review publication'))
+  await click(button(mounted, 'Continue to sharing review'))
   assert.match(mounted.container.textContent, /does not explicitly allow upload/)
-  assert.equal(button(mounted, 'Confirm publication').disabled, true)
+  assert.equal(button(mounted, 'Share this exact reviewed package').disabled, true)
+  await mounted.cleanup()
+})
+
+test('contribution review exposes complete files and warnings before a separate final Share', async () => {
+  const longContent = `${'x'.repeat(20000)}LONG-FILE-END`
+  const hashes = { content: hash('6'), author_description: hash('7'), package_manifest: hash('8') }
+  const finding = { severity: 'medium', category: 'network', path: 'references/long.md', line: 42, message: 'Review this outbound host.' }
+  const inspected = {
+    draft_id: 'local:warning', skill_id: 'local-skill',
+    author_description: 'Exact teammate description.', expected_hashes: hashes,
+    files: [{ path: 'SKILL.md', content_utf8: '# Skill' }, { path: 'references/long.md', content_utf8: longContent }],
+    local_scan: { allowed: false, verdict: 'warning_required', findings: [finding] },
+    security_check: { local_status: 'warning_required', summary: 'Warnings require acknowledgement.', findings: [finding] }
+  }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/drafts/prepare') return { draft_id: 'local:warning', skill_id: 'local-skill' }
+    if (path === '/drafts/local%3Awarning?view_id=view-remote-a-A') return inspected
+    if (path === '/drafts/local%3Awarning/review') return { ...inspected, drafted_description: inspected.author_description, hashes, professionalism_check: { state: 'unavailable' } }
+    if (path === '/publication/review') {
+      assert.equal(options.body.accept_warnings, true)
+      return {
+        receipt: 'publication-warning-receipt', draft_id: 'local:warning', skill_id: 'local-skill', hashes,
+        description: inspected.author_description,
+        security_check: { upload_allowed: true, local_status: 'warning_accepted', summary: 'Exact warnings acknowledged.', findings: [finding] },
+        professionalism_check: { state: 'unavailable', summary: 'Optional model review unavailable.', findings: [] },
+        local_scan: inspected.local_scan, publication_mode: 'open', policy_version: 'policy-10'
+      }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Contribute'))
+  await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+  await click(button(mounted, 'Prepare draft'))
+  assert.ok(button(mounted, 'Review and edit exact files'))
+  assert.ok(button(mounted, 'Continue to sharing review'))
+  assert.ok(button(mounted, 'Keep draft and exit'))
+
+  await click(button(mounted, 'Review and edit exact files'))
+  assert.match(mounted.container.textContent, /Review this outbound host/)
+  assert.match(mounted.container.textContent, /medium · network · references\/long\.md:42/)
+  assert.match(mounted.container.textContent, /references\/long\.md/)
+  assert.match(mounted.container.textContent, /LONG-FILE-END/)
+  const continueButton = button(mounted, 'Continue to sharing review')
+  assert.equal(continueButton.disabled, true)
+  const warningAck = mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge displayed scanner warnings for this exact package"]')
+  await click(warningAck)
+  assert.equal(continueButton.disabled, false)
+  await click(continueButton)
+  assert.ok(button(mounted, 'Share this exact reviewed package'))
+  assert.ok(button(mounted, 'Keep draft; do not share'))
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/publication/confirm'), false)
+  await click(button(mounted, 'Keep draft; do not share'))
+  assert.match(mounted.container.textContent, /Draft kept/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/publication/confirm'), false)
+  await mounted.cleanup()
+})
+
+test('changed scanner warning provenance requires a fresh acknowledgement', async () => {
+  const hashes = { content: hash('6'), author_description: hash('7'), package_manifest: hash('8') }
+  const initialFinding = { severity: 'medium', category: 'network', path: 'SKILL.md', line: 4, message: 'Review host A.' }
+  const changedFinding = { ...initialFinding, message: 'Review host B.' }
+  const inspected = {
+    draft_id: 'local:changed-warning', author_description: 'Copy', expected_hashes: hashes,
+    files: [{ path: 'SKILL.md', content_utf8: '# Skill' }],
+    local_scan: { allowed: false, findings: [initialFinding] },
+    security_check: { local_status: 'warning_required', findings: [initialFinding] }
+  }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/drafts/prepare') return { draft_id: 'local:changed-warning', skill_id: 'local-skill' }
+    if (path === '/drafts/local%3Achanged-warning?view_id=view-remote-a-A') return inspected
+    if (path === '/drafts/local%3Achanged-warning/review') return { ...inspected, drafted_description: inspected.author_description, hashes, professionalism_check: { state: 'unavailable' } }
+    if (path === '/publication/review') return {
+      receipt: 'changed-warning-receipt', draft_id: inspected.draft_id, skill_id: 'local-skill', hashes,
+      description: 'Copy', local_scan: { allowed: false, findings: [changedFinding] },
+      security_check: { upload_allowed: true, local_status: 'warning_accepted', findings: [changedFinding] },
+      professionalism_check: { state: 'unavailable' }, publication_mode: 'open', policy_version: 'p1'
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Contribute'))
+  await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+  await click(button(mounted, 'Prepare draft'))
+  await click(button(mounted, 'Review and edit exact files'))
+  await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge displayed scanner warnings for this exact package"]'))
+  await click(button(mounted, 'Continue to sharing review'))
+
+  assert.equal(button(mounted, 'Share this exact reviewed package'), undefined)
+  assert.match(loaded.calls.notify.at(-1)?.detail || '', /scanner findings changed/i)
+  await mounted.cleanup()
+})
+
+test('prepared editor saves and re-reviews exact add remove rename text and opaque files', async () => {
+  const oldHashes = { content: hash('1'), author_description: hash('2'), package_manifest: hash('3') }
+  const newHashes = { content: hash('4'), author_description: hash('5'), package_manifest: hash('6') }
+  const inspected = {
+    draft_id: 'local:edit', author_description: 'Before', expected_hashes: oldHashes,
+    files: [
+      { path: 'SKILL.md', content_utf8: '# Before\n' },
+      { path: 'references/remove.md', content_utf8: 'remove me\n' },
+      { path: 'assets/logo.bin', content_base64: 'AAH/' }
+    ]
+  }
+  const reviewed = {
+    draft_id: 'local:edit', drafted_description: 'After', hashes: newHashes,
+    files: [
+      { path: 'SKILL.md', mode: 'file', content_utf8: '# After\n' },
+      { path: 'assets/renamed.bin', mode: 'file', content_base64: 'AAH/' },
+      { path: 'references/new.md', mode: 'file', content_utf8: 'new file\n' }
+    ],
+    local_scan: { allowed: true, findings: [] },
+    security_check: { upload_allowed: true, local_status: 'pass', findings: [] },
+    professionalism_check: { state: 'unavailable', findings: [] }
+  }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/drafts/prepare') return { draft_id: 'local:edit', skill_id: 'local-skill' }
+    if (path === '/drafts/local%3Aedit?view_id=view-remote-a-A') return inspected
+    if (path === '/drafts/local%3Aedit/review') {
+      const hashes = structuredClone(options.body.reviewed_hashes)
+      assert.deepEqual(hashes, hashes.content === oldHashes.content ? oldHashes : newHashes)
+      return hashes.content === oldHashes.content
+        ? { ...reviewed, drafted_description: 'Before', hashes: oldHashes, files: inspected.files }
+        : reviewed
+    }
+    if (path === '/drafts/local%3Aedit') {
+      assert.equal(options.method, 'PUT')
+      assert.equal(options.body.author_description, 'After')
+      assert.deepEqual(structuredClone(options.body.expected_hashes), oldHashes)
+      assert.deepEqual(structuredClone(options.body.files), [
+        { path: 'SKILL.md', content_utf8: '# After\n' },
+        { path: 'assets/renamed.bin', content_base64: 'AAH/' },
+        { path: 'references/new.md', content_utf8: 'new file\n' }
+      ])
+      return reviewed
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Contribute'))
+  await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+  await click(button(mounted, 'Prepare draft'))
+  await click(button(mounted, 'Review and edit exact files'))
+
+  const opaqueExport = mounted.container.querySelector('a[download="logo.bin"]')
+  assert.equal(opaqueExport.getAttribute('href'), 'data:application/octet-stream;base64,AAH/')
+  const draftExport = mounted.container.querySelector('a[download="wisdom-local-edit.json"]')
+  const exportPayload = JSON.parse(decodeURIComponent(draftExport.getAttribute('href').split(',')[1]))
+  assert.deepEqual(exportPayload, inspected)
+
+  await enter(mounted.container.querySelector('textarea[aria-label="Author description"]'), 'Unsaved draft copy')
+  assert.match(mounted.container.textContent, /Unsaved changes/)
+  for (const label of ['Continue to sharing review', 'Keep draft and exit', 'Review and edit exact files', 'Prepare draft']) {
+    assert.equal(button(mounted, label).disabled, true, `${label} must not bypass unsaved edits`)
+    await click(button(mounted, label))
+  }
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/publication/review'), false)
+  await click(button(mounted, 'Discard unsaved edits'))
+  assert.equal(mounted.container.querySelector('textarea[aria-label="Author description"]').value, 'Before')
+  assert.equal(button(mounted, 'Keep draft and exit').disabled, false)
+  assert.doesNotMatch(mounted.container.textContent, /Unsaved changes/)
+
+  await enter(mounted.container.querySelector('textarea[aria-label="Author description"]'), 'After')
+  await enter(mounted.container.querySelector('textarea[aria-label="Content for SKILL.md"]'), '# After\n')
+  await click(button(mounted, 'Remove references/remove.md'))
+  await enter(mounted.container.querySelector('input[aria-label="Path for assets/logo.bin"]'), 'assets/renamed.bin')
+  await click(button(mounted, 'Add text file'))
+  await enter(mounted.container.querySelector('input[aria-label="Path for new file"]'), 'references/new.md')
+  await enter(mounted.container.querySelector('textarea[aria-label="Content for new file"]'), 'new file\n')
+  await click(button(mounted, 'Save and re-review'))
+
+  assert.match(mounted.container.textContent, /Draft saved and re-reviewed/)
+  assert.doesNotMatch(mounted.container.textContent, /Unsaved changes/)
+  assert.equal(button(mounted, 'Continue to sharing review').disabled, false)
+  assert.equal(button(mounted, 'Keep draft and exit').disabled, false)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/drafts/local%3Aedit').length, 1)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/drafts/local%3Aedit/review').length, 2)
+  await mounted.cleanup()
+})
+
+test('hostile markup and control-like text stays inert in exact draft review', async () => {
+  const hostile = '<img src=x onerror="globalThis.pwned=1"><script>globalThis.pwned=2</script>\u001b[31m'
+  const hashes = { content: hash('a'), author_description: hash('b'), package_manifest: hash('c') }
+  const inspected = {
+    draft_id: 'local:hostile', author_description: hostile,
+    files: [{ path: 'references/<hostile>.md', content_utf8: hostile }],
+    expected_hashes: hashes
+  }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/drafts/prepare') return { draft_id: 'local:hostile', skill_id: 'local-skill' }
+    if (path === '/drafts/local%3Ahostile?view_id=view-remote-a-A') return inspected
+    if (path === '/drafts/local%3Ahostile/review') return {
+      ...inspected, drafted_description: hostile, hashes,
+      local_scan: { allowed: true, findings: [] },
+      security_check: { upload_allowed: true, local_status: 'pass', findings: [] },
+      professionalism_check: { state: 'unavailable' }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Contribute'))
+  await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+  await click(button(mounted, 'Prepare draft'))
+  await click(button(mounted, 'Review and edit exact files'))
+
+  assert.match(mounted.container.textContent, /<img src=x onerror=/)
+  assert.equal(mounted.container.querySelector('img'), null)
+  assert.equal(mounted.container.querySelector('script'), null)
+  assert.equal(globalThis.pwned, undefined)
+  await mounted.cleanup()
+})
+
+test('Activity uses revision-bound organization mute controls and truthful mode wording', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/settings?view_id=view-remote-a-A') return {
+      delivery_mode: 'agent', mode_writable: true,
+      mode_meanings: {
+        agent: 'Eligible recommendations may be assessed and delivered.',
+        fixed: 'Assessment and proactive delivery are off; manual review remains.'
+      },
+      gateway_status: 'available',
+      gateway_mute: { org_id: 'org-1', muted: false, revision: 7 },
+      mute_control: { org_id: 'org-1', muted: false, revision: 7 }
+    }
+    if (path === '/settings/mute') {
+      assert.deepEqual(structuredClone(options.body), {
+        view_id: 'view-remote-a-A', control_id: '7', duration: '1_week'
+      })
+      return { org_id: 'org-1', muted: true, duration: '1_week', muted_until: '2030-01-08T00:00:00Z', revision: 8 }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Activity'))
+  assert.match(mounted.container.textContent, /Eligible recommendations may be assessed and delivered/)
+  assert.match(mounted.container.textContent, /organization-wide/)
+  await click(button(mounted, 'Mute for 1 week'))
+  assert.ok(loaded.calls.rest.some(([path]) => path === '/settings/mute'))
   await mounted.cleanup()
 })
 
@@ -504,6 +917,23 @@ test('A-B-A profile changes suppress a late review and open a fresh generation',
   const currentGeneration = mounted.container.textContent.match(/generation (\d+)/)[1]
   assert.ok(Number(currentGeneration) > Number(firstGeneration))
   assert.ok(loaded.calls.rest.filter(([path]) => path === '/views').length >= 3)
+  await mounted.cleanup()
+})
+
+test('profile replacement clears an already-visible exact review', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview({ receipt: `review-${owner.profile}` })
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Install'))
+  assert.match(mounted.container.textContent, /review-A/)
+
+  await act(async () => loaded.profile.set('B'))
+  await settle()
+
+  assert.doesNotMatch(mounted.container.textContent, /review-A/)
+  assert.match(mounted.container.textContent, /profile B/)
   await mounted.cleanup()
 })
 
