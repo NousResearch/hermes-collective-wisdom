@@ -7,6 +7,8 @@ import json
 import time
 from typing import Any, Callable
 
+from .errors import WisdomAuthError
+
 
 POLL_INTERVAL_SECONDS = 600.0
 MAX_NOTICE_BATCH = 8
@@ -60,11 +62,17 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                 page = service.notice_feed(cursor)
                 events, cursor, more = list(page.events), page.next_cursor, page.has_more
             candidates = list(service.notice_candidates())
-            rows = [
-                row for row in [*events, *candidates]
-                if _key(row) not in checkpoint["offered"]
-            ][:MAX_NOTICE_BATCH]
+            available_events = [
+                row for row in events if _key(row) not in checkpoint["offered"]
+            ]
+            available_candidates = [
+                row for row in candidates if _key(row) not in checkpoint["offered"]
+            ]
             policy = service.notice_policy()
+            policy_allowed = [
+                row for row in [*available_events, *available_candidates]
+                if policy.get(str(row.get("category"))) is True
+            ]
             references = [
                 (
                     {"kind": "skill", "skill_id": row["skill_id"], "version": row["version"],
@@ -73,19 +81,29 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                     {"kind": "candidate", "content_hash": row["content_hash"],
                      "notice_key": _key(row)}
                 )
-                for row in rows
+                for row in policy_allowed
             ]
             preferences = service.notice_preferences(references)
             allowed = [
-                row for row in rows
-                if policy.get(str(row.get("category"))) is True
-                and not preferences.get("muted")
+                row for row in policy_allowed
+                if not preferences.get("muted")
                 and not (preferences.get("suppressed") or {}).get(_key(row))
             ]
+            allowed_events = [row for row in allowed if row in available_events]
+            allowed_candidates = [row for row in allowed if row in available_candidates]
+            event_limit = MAX_NOTICE_BATCH - bool(allowed_candidates)
+            rows = allowed_events[:event_limit]
+            rows.extend(allowed_candidates[:MAX_NOTICE_BATCH - len(rows)])
+            selected_keys = {_key(row) for row in rows}
+            deferred_feed = any(_key(row) not in selected_keys for row in allowed_events)
+            if deferred_feed:
+                cursor, more = checkpoint["cursor"], True
             selected = set(self.state.finish_notice_poll(
                 identity=identity, cursor=cursor, has_more=more,
-                keys=[_key(row) for row in allowed], now=now,
+                keys=[_key(row) for row in rows], now=now,
             ))
+            if self.state.identity() != identity:
+                raise WisdomAuthError("Collective Wisdom notice owner changed")
             offers = [row for row in allowed if _key(row) in selected]
             if offers:
                 renderer(offers)

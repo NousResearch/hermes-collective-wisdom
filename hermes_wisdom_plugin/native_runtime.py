@@ -329,6 +329,49 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
         native.add_handler(CallbackQueryHandler(callback, pattern=r"^wi:agent:", block=True), group=-10)
 
+    def _post_owner_current(self, expected_owner: dict[str, str]) -> bool:
+        try:
+            service = self.service_factory()
+            try:
+                return service.native_owner() == expected_owner
+            finally:
+                service.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+
+    async def _discard_stale_post(
+        self, invocation: NativeInvocation, native: Any, response: Any,
+        record: dict[str, Any],
+    ) -> None:
+        cancelled = {
+            **record, "state": "cancelled", "updated_at": self.reviews.clock(),
+        }
+        self.reviews.state.compare_replace(record, cancelled)
+        try:
+            message_id = _message_id(
+                response, platform=invocation.platform, chat_id=invocation.chat_id
+            )
+        except (TypeError, ValueError, WisdomValidationError):
+            # An uncertain acknowledgement is not permission to invent an ID.
+            return
+        try:
+            if invocation.platform == "slack":
+                remove: Any = getattr(native.client, "chat_delete", None)
+                if callable(remove):
+                    await remove(channel=invocation.chat_id, ts=message_id)
+            else:
+                bot = invocation.adapter._bot  # pylint: disable=protected-access
+                remove = getattr(bot, "delete_message", None)
+                if callable(remove):
+                    chat_id = (
+                        int(invocation.chat_id)
+                        if invocation.chat_id.lstrip("-").isdigit()
+                        else invocation.chat_id
+                    )
+                    await remove(chat_id=chat_id, message_id=int(message_id))
+        except Exception:  # pylint: disable=broad-exception-caught
+            return
+
     async def _post_review(self, invocation: NativeInvocation, record: dict[str, Any]) -> None:
         service = self.service_factory()
         try:
@@ -355,6 +398,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 invocation.adapter._bot, view, record["id"],  # pylint: disable=protected-access
                 chat_id=invocation.chat_id, thread_id=invocation.thread_id,
             )
+        if not self._post_owner_current(record["owner"]):
+            await self._discard_stale_post(invocation, native, response, record)
+            return
         message_id = _message_id(
             response, platform=invocation.platform, chat_id=invocation.chat_id
         )
@@ -394,6 +440,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
     def begin_publication(self, invocation: NativeInvocation, draft_id: str):
         return self._begin(invocation, lambda service: self.reviews.request_publication(service, invocation, draft_id))
+
+    def begin_suggest(self, invocation: NativeInvocation, skill_name: str):
+        return self._begin(
+            invocation,
+            lambda service: self.reviews.request_suggest(service, invocation, skill_name),
+        )
 
     def begin_catalog(self, invocation: NativeInvocation, command: str, target: str = ""):
         return self._begin(invocation, lambda service: self.reviews.request_catalog(service, invocation, command, target))

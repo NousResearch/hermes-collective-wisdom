@@ -949,7 +949,8 @@ def _human_render(  # pylint: disable=too-many-return-statements
             _render_inventory(data),
             _render_findings(data),
             f"Edit: hermes wisdom prepared edit {shlex.quote(_without_controls(draft))}",
-            f"Full export: hermes wisdom prepared inspect {draft} --json",
+            f"Full export: hermes wisdom prepared inspect "
+            f"{shlex.quote(_without_controls(draft))} --json",
         ))
         return "\n".join(lines)
     if command in {"publication", "install", "update", "installed-setup"}:
@@ -977,26 +978,15 @@ def _slash_help() -> str:
         (
             "Collective Wisdom commands",
             "",
-            "/wisdom browse [query]",
-            "/wisdom show <skill>",
-            "/wisdom versions <skill>",
-            "/wisdom status",
-            "/wisdom setup",
-            "/wisdom settings (private controls or terminal instructions)",
-            "/wisdom mute (private controls or terminal instructions)",
-
-            "/wisdom candidate <qualified-event-id> (private TUI or terminal instructions)",
-            "/wisdom suggest <skill> (private draft; never publishes)",
-            "/wisdom prepared <inspect|save|review> (private TUI or terminal instructions)",
-            "/wisdom publish <draft-id> (exact private review before submission)",
-            "/wisdom publication <review|status|reopen|decline> <target> (private controls)",
-            "/wisdom install (terminal instructions)",
-            "/wisdom installed (terminal instructions)",
-            "/wisdom check (terminal instructions)",
-            "/wisdom update (terminal instructions)",
-            "/wisdom installed-setup (terminal instructions)",
-            "/wisdom uninstall (terminal instructions)",
+            "Read: /wisdom browse [query] | /wisdom show <skill>",
+            "      /wisdom versions <skill> | /wisdom status | /wisdom setup",
+            "Private: /wisdom settings | /wisdom mute | /wisdom candidate <id>",
+            "         /wisdom suggest <skill> | /wisdom prepared <action>",
+            "         /wisdom publish <draft> | /wisdom publication <action> <target>",
+            "Terminal: /wisdom install | /wisdom installed | /wisdom check",
+            "          /wisdom update | /wisdom installed-setup | /wisdom uninstall",
             "/wisdom help",
+            "Private effects open a review when supported; terminal paths are shown.",
         )
     )
 

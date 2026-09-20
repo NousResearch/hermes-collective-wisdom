@@ -508,7 +508,7 @@ def record_mutation(
         classification = "non_meaningful"
     store.record_refinement(
         skill_id, from_hash=str(previous["content_hash"]), to_hash=content_hash,
-        classification=classification, structural=delta,
+        classification=classification, structural=delta, at=_now(at),
     )
     if classification == "meaningful" and authorized():
         store.schedule_stability(
@@ -774,6 +774,7 @@ class LifecycleBridge:
                 classification=classification,
                 structural=structural,
                 owner=dict(observation["owner"]),
+                observed_at=observed_at,
                 due_at=due_at,
                 session_id=str(observation["session_id"]) or None,
                 task_id=str(observation["task_id"]) or None,

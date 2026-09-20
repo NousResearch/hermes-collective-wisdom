@@ -12,6 +12,7 @@ import pytest
 
 from installed_test_support import JsonState
 from native_test_support import inspect_for_confirmation
+from native_test_support import direct_owner as owner
 from hermes_wisdom_plugin.errors import (
     WisdomAuthError, WisdomConflict, WisdomValidationError,
 )
@@ -20,14 +21,6 @@ from hermes_wisdom_plugin.native_review import NativeReviewController, callback_
 from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 from hermes_wisdom_plugin.native_telegram import callback_invocation as telegram_callback
 from hermes_wisdom_plugin.review_state import ReviewState
-
-
-def owner():
-    return {
-        "profile_name": "default", "profile_home": "/profiles/default",
-        "account_id": "account-1", "organization_id": "org-1",
-        "base_url": "https://gateway.invalid", "installation_id": "install-1",
-    }
 
 
 def invocation():
@@ -378,6 +371,40 @@ def test_owner_switch_revokes_effect_authority(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(service, "install_apply", apply)
     with pytest.raises(WisdomAuthError, match="owner changed"):
         controller.act(created["id"], "confirm", service, clicked)
+
+    assert not service.applied
+    assert controller.load(created["id"])["state"] == "uncertain"
+
+
+def test_divergent_plan_owner_revokes_effect_authority(tmp_path: Path, monkeypatch):
+    """Service plan metadata cannot authorize against another persisted owner."""
+    service = Service()
+    monkeypatch.setattr(service, "install_plan", lambda *_args, **_kwargs: {
+        "operation": "install", "owner": {
+            **owner(), "account_id": "other-account", "organization_id": "other-org",
+        },
+        "skill_id": "skill-1", "version": 2,
+        "receipt": "receipt-1", "allowed": True,
+    })
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    created = controller.request_install(service, invocation(), "skill-1")
+    controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
+
+    def apply(_receipt, *, accept_partial=False, may_apply):
+        del accept_partial
+        if not may_apply():
+            raise WisdomAuthError("plan owner changed before effect")
+        pytest.fail("divergent plan owner reached the install effect")
+
+    monkeypatch.setattr(service, "install_apply", apply)
+    with pytest.raises(WisdomAuthError, match="plan owner changed"):
+        controller.act(
+            created["id"], "confirm", service,
+            replace(invocation(), message_id="card-1"),
+        )
 
     assert not service.applied
     assert controller.load(created["id"])["state"] == "uncertain"

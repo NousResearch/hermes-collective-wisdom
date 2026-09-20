@@ -4,7 +4,11 @@ import asyncio
 import html
 import json
 
-from restoration_support import TelegramHarness
+from restoration_support import (
+    TelegramHarness, assert_cancelled_review_is_inert,
+    assert_owner_switch_after_post_is_cleaned,
+)
+from native_test_support import owner
 from test_restored_native_flow import Service
 
 
@@ -41,4 +45,42 @@ def test_telegram_complete_inspection_then_quiet_dismissal(tmp_path, monkeypatch
         assert len(ui.posts) == 1
         await ui.click(identity, "confirm")
         assert not service.applied
+    asyncio.run(scenario())
+
+
+def test_telegram_posted_card_is_cancelled_and_deleted_after_account_switch(
+    tmp_path, monkeypatch,
+):
+    asyncio.run(assert_owner_switch_after_post_is_cleaned(
+        monkeypatch, TelegramHarness, tmp_path, Service(),
+        {"chat_id": 11, "message_id": 123},
+    ))
+
+
+def test_telegram_unavailable_owner_and_delete_method_leave_card_cancelled(
+    tmp_path, monkeypatch,
+):
+    async def scenario():
+        service = Service()
+        current_owner: dict[str, object] = {"value": owner()}
+        monkeypatch.setattr(service, "native_owner", lambda: current_owner["value"])
+        ui = TelegramHarness(tmp_path, service)
+        posted = ui.send_message
+
+        async def lose_owner_lookup_after_post(**payload):
+            response = await posted(**payload)
+            current_owner["value"] = None
+            return response
+
+        monkeypatch.setattr(ui, "send_message", lose_owner_lookup_after_post)
+        monkeypatch.setattr(ui, "delete_message", None)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+
+        assert not ui.deletes
+        assert ui.record(identity)["state"] == "cancelled"
+        await assert_cancelled_review_is_inert(
+            ui, service, identity, lambda: current_owner.update(value=owner())
+        )
+
     asyncio.run(scenario())

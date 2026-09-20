@@ -164,6 +164,15 @@ def rich_html_is_lossless(view: NativeView, record_id: str) -> bool:
     )
 
 
+def _rich_projection(view: NativeView, record_id: str) -> str:
+    """Reject lossy approval cards before either rich transport makes a request."""
+    actions = [*view.navigation_actions, *view.actions]
+    actions.extend(action for item in view.items for action in item.actions)
+    if any(action.primary for action in actions) and not rich_html_is_lossless(view, record_id):
+        raise RichProjectionUnsupported("Telegram rich approval facts exceed the API limit")
+    return rich_html(view, record_id)
+
+
 def _button(button_type: Any, action: Any, record_id: str) -> Any:
     values = (
         {"url": action.url} if action.url
@@ -232,7 +241,7 @@ async def send(bot: Any, view: NativeView, record_id: str, *, chat_id: str,
     rendered = ""
     if callable(raw):
         try:
-            rendered = rich_html(view, record_id)
+            rendered = _rich_projection(view, record_id)
         except RichProjectionUnsupported:
             rendered = ""
         if not rendered:
@@ -268,7 +277,7 @@ async def edit(query: Any, view: NativeView, record_id: str) -> None:
     rendered = ""
     if message is not None and callable(raw):
         try:
-            rendered = rich_html(view, record_id)
+            rendered = _rich_projection(view, record_id)
         except RichProjectionUnsupported:
             rendered = ""
         if not rendered:

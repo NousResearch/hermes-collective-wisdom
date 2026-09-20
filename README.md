@@ -89,9 +89,12 @@ An empty catalog is normal if nobody in your organization has published a skill 
 The Desktop page also offers explicit enrollment after disclosure. At completed
 turns it may poll a bounded feed and show a direct best-effort notification. A
 missed or failed notification is not queued or retried, and opening one starts a
-review rather than approving any effect. It does not
-run setup scripts, edit draft files, or automatically retry uncertain operations.
-Those advanced workflows remain available through the existing native controls.
+review rather than approving any effect. Contributions supports complete private
+draft editing and save-and-re-review, including text-file add/remove/rename and
+inert opaque-byte export. Catalog exposes Install; Installed exposes Check for
+updates and a separate exact-version Review update. Neither installs nor draft
+edits run setup scripts or authorize publication. Setup execution and uncertain
+operation recovery remain in the existing native controls.
 Dashboard UI and full six-surface parity remain deferred.
 
 ## Common tasks
@@ -208,6 +211,18 @@ rather than blindly repeating the action.
   acknowledge the exact review with `--accept-warnings` if appropriate. New
   findings invalidate that acknowledgement. Credential/private-key findings and
   unavailable scans remain hard stops; never disable the scanner.
+  The local credential preflight recognizes only complete, delimited synthetic
+  OpenAI/Anthropic-style example keys: a suffix of `test`, `dummy`, `example`,
+  or `placeholder`, optionally followed by `key` and independently by the literal
+  sequence `1234` (each optional part may have one `-` or `_` separator;
+  case-insensitive).
+  This applies to standalone key shapes and API-key assignments, not passwords,
+  generic secrets, or token assignments. A `test` substring, a Markdown code
+  fence, or a test filename grants no exemption. Unknown/extended key values
+  remain blocked; redaction, host warning review, and Gateway checks are unchanged.
+  Opaque-file checks retain their byte-preserving ASCII coverage. The synthetic
+  classifier is shared, but non-ASCII word boundaries and line locations are not
+  guaranteed to match decoded text; invalid bytes are never silently discarded.
 - **Gateway rejects a native package:** the deployed service may still have the
   older instruction-only limits. Keep the local draft and retry after the service
   contract is upgraded; do not remove supporting files to force acceptance.

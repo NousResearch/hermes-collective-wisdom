@@ -24,11 +24,14 @@ _INTERPRETERS = frozenset({
 })
 
 
-def without_controls(value: object) -> str:
-    """Replace terminal control characters while preserving ordinary Unicode."""
+def without_controls(value: object, *, preserve_layout: bool = False) -> str:
+    """Replace active controls while optionally retaining newline/tab layout."""
 
     return "".join(
-        " " if unicodedata.category(character) in {"Cc", "Cf"} else character
+        character
+        if preserve_layout and character in {"\n", "\t"}
+        else " " if unicodedata.category(character) in {"Cc", "Cf"}
+        else character
         for character in str(value)
     )
 
@@ -183,6 +186,7 @@ _REVIEW_FACTS = (
     ("update_mode", "Update mode"), ("publication_mode", "Handling"),
     ("state", "State"), ("publication_state", "Publication state"),
     ("operation_id", "Operation"), ("draft_id", "Draft"),
+    ("review_expires_at", "Review expires"),
 )
 
 _RECEIPT_COMMANDS = {
@@ -288,8 +292,10 @@ def _setup_lines(data: dict[str, Any]) -> list[str]:
 def _decision_lines(kind: str, data: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     if data.get("allowed") is False:
+        lines.append("Approval permission: blocked")
         lines.append("Approval status: blocked until the listed review actions are completed.")
     elif data.get("allowed") is True:
+        lines.append("Approval permission: allowed")
         lines.append("Approval status: eligible for exact final confirmation.")
     if kind in {"install", "update"}:
         lines.append(
@@ -505,7 +511,7 @@ def render_file_preview(item: object) -> str:
             encoded = data.get("content_base64")
             size = "unknown" if not isinstance(encoded, str) else f"base64 length {len(encoded)}"
         return f"{path}\nBinary/opaque file ({size}); active preview is disabled."
-    escaped = without_controls(content)
+    escaped = without_controls(content, preserve_layout=True)
     limit = 16_384
     suffix = (
         "\n[preview truncated; use prepared inspect --json for exact export]"

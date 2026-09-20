@@ -2,7 +2,7 @@
 
 import pytest
 
-from hermes_wisdom_plugin.terminal_ui import render_action_review
+from hermes_wisdom_plugin.terminal_ui import render_action_review, render_file_preview
 
 
 def test_publication_review_preserves_complete_ordered_safe_output():
@@ -107,6 +107,7 @@ Warning acknowledgement: accepted
 Local edits: detected; action: preserve
 New sensitive capabilities:
   - network
+Approval permission: blocked
 Approval status: blocked until the listed review actions are completed.
 Consequence: submits to organization moderation before publication.
 Nothing has been uploaded yet.
@@ -144,6 +145,7 @@ Prerequisites:
   - uv: passed
   - tool: unknown
 Verification: pending
+Approval permission: allowed
 Approval status: eligible for exact final confirmation.
 Next: hermes wisdom installed-setup apply 'setup receipt'"""
 
@@ -176,4 +178,17 @@ def test_unknown_review_kind_retains_generic_denial_without_receipt_action():
 State: denied
 Files (0)
 Scanner warnings: none reported.
+Approval permission: blocked
 Approval status: blocked until the listed review actions are completed."""
+
+
+def test_file_preview_preserves_newlines_and_tabs_but_removes_active_controls():
+    """Inert previews keep source layout without emitting terminal controls."""
+
+    rendered = render_file_preview({
+        "path": "references/example.md",
+        "content_utf8": "first line\n\tindented\nlast\x1b[2J line",
+    })
+
+    assert "first line\n\tindented\nlast [2J line" in rendered
+    assert "\x1b" not in rendered

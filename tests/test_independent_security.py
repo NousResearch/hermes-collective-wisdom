@@ -1,4 +1,4 @@
-"""Independent PR21 review probes. Assertions describe required safe behavior."""
+"""Native review security regressions through registered callbacks."""
 # pylint: disable=missing-function-docstring,missing-class-docstring
 # pylint: disable=protected-access,redefined-outer-name,unused-import
 import asyncio
@@ -16,7 +16,7 @@ from hermes_wisdom_plugin.runtime import InvocationService
 def test_share_action_cannot_install_without_file_inspection(
     invocation_executor, tmp_path, surface, entry_action,
 ):
-    executor, _store, client, _receipts, _plan, target, _authority = invocation_executor
+    executor, _store, _client, _receipts, _plan, target, _authority = invocation_executor
     inspections = []
 
     class RealService:
@@ -46,11 +46,7 @@ def test_share_action_cannot_install_without_file_inspection(
         while await ui.next_page(identity):
             pass
         await ui.click(identity, 'confirm')
-        print('INSPECTION_GATE', surface.__name__, entry_action, {
-              'inspection_calls': len(inspections),
-              'package_files_present': 'package_files' in ui.record(identity),
-              'state': ui.record(identity)['state'], 'installed': target.exists(),
-              'remote_install_records': len(client.record_calls)})
+
         if entry_action == 'review':
             assert target.exists() and len(inspections) == 1
         else:
@@ -74,12 +70,10 @@ def test_cancel_during_candidate_preparation_revokes_review(tmp_path):
         preparing = asyncio.create_task(ui.click(identity, 'share'))
         assert await asyncio.to_thread(started.wait, 5)
         await ui.click(identity, 'cancel')
-        during = ui.record(identity)['state']
+
         release.set()
         await preparing
-        print('CANCEL_DURING_PREPARE', {'during': during, 'after': ui.record(identity)['state'],
-              'operation': ui.record(identity)['operation'],
-              'controls': [a.label for a in ui.view(identity).actions]})
+
         assert ui.record(identity)['state'] == 'cancelled', (
             'Maybe Later was ignored during preparation'
         )
@@ -117,9 +111,7 @@ def test_settings_effect_waits_for_display_ack(tmp_path):
         await ui.click(identity, 'settings.mute.1w')
         release.set()
         await pending
-        print('SETTINGS_WITHOUT_DISPLAY', {
-            'changes': changes, 'state': ui.record(identity)['state'],
-        })
+
         assert not changes, 'Settings effect accepted before failed settings disclosure'
     asyncio.run(scenario())
 
@@ -135,7 +127,7 @@ def test_transient_candidate_failure_leaves_retry_or_cancel(tmp_path):
         await ui.flush()
         await ui.click(identity, 'share')
         await ui.click(identity, 'cancel')
-        print('TRANSIENT_FAILURE', {'state': ui.record(identity)['state'], 'edits': len(ui.edits)})
+
         assert ui.record(identity)['state'] != 'preparing', (
             'Review permanently stuck; all subsequent actions rejected'
         )

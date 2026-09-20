@@ -1,19 +1,26 @@
 """CLI/slash tests adapted from the source Wisdom parser and gateway controller."""
 
-# pylint: disable=missing-function-docstring,too-many-lines
+# pylint: disable=missing-function-docstring,too-many-lines,too-many-locals
+# pylint: disable=missing-class-docstring,too-few-public-methods,invalid-name
+# pylint: disable=import-outside-toplevel
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import inspect
 import json
 import os
 import shlex
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from installed_test_support import JsonState
+from native_test_support import direct_owner as _native_owner
+from review_test_support import prepared_inspection
 
 from hermes_wisdom_plugin.commands import (
     MAX_PREPARED_PAYLOAD_BYTES,
@@ -23,7 +30,18 @@ from hermes_wisdom_plugin.commands import (
     run_cli,
     run_slash as render_slash,
 )
-from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound
+from hermes_wisdom_plugin.errors import (
+    WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+)
+from hermes_wisdom_plugin.native_context import NativeInvocation
+from hermes_wisdom_plugin.native_review import (
+    NativeAction, NativeItem, NativeReviewController, NativeView, callback_value,
+)
+from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
+from hermes_wisdom_plugin.native_slack import callback_invocation as slack_callback
+from hermes_wisdom_plugin.native_telegram import callback_invocation as telegram_callback
+from hermes_wisdom_plugin.review_state import ReviewState
+from hermes_wisdom_plugin.runtime import CommandRuntime
 
 
 def run_slash(raw_args, service):
@@ -178,19 +196,7 @@ class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-att
 
     def prepared_inspect(self, draft_id):
         self.calls.append(("prepared_inspect", draft_id))
-        return {
-            "draft_id": draft_id,
-            "author_description": "Owner copy.",
-            "files": [
-                {"path": "SKILL.md", "content_utf8": "# Before\n"},
-                {"path": "assets/logo.bin", "content_base64": "AAE="},
-            ],
-            "expected_hashes": {
-                "content": "sha256:old-content",
-                "author_description": "sha256:old-description",
-                "package_manifest": "sha256:old-manifest",
-            },
-        }
+        return prepared_inspection(draft_id, "Owner copy.")
 
     def prepared_save(self, draft_id, *, author_description, files, expected_hashes):
         self.calls.append((
@@ -1008,8 +1014,32 @@ def test_slash_help_distinguishes_reads_private_reviews_and_terminal_instruction
     for command in ("candidate", "suggest", "prepared", "publish", "publication"):
         assert f"/wisdom {command} " in output
     for command in ("install", "installed", "check", "update", "uninstall"):
-        assert f"/wisdom {command} (terminal instructions)" in output
+        assert f"/wisdom {command}" in output
+    assert "Terminal:" in output
     assert not service.calls
+
+
+def test_slash_help_is_bounded_for_an_80_by_24_dialog():
+    """Plugin copy leaves room for the host dialog border and close hint."""
+
+    lines = run_slash("help", _Service()).splitlines()
+
+    assert len(lines) <= 16
+    assert max(map(len, lines)) <= 72
+
+
+def test_prepared_human_output_shell_quotes_every_draft_continuation(capsys):
+    """Both displayed commands remain one inert argv value for hostile draft IDs."""
+
+    service = _Service()
+    draft_id = "draft with spaces;echo nope"
+    args = _parser().parse_args(["prepared", "review", draft_id])
+
+    assert run_cli(args, service) == 0
+    output = capsys.readouterr().out
+    quoted = shlex.quote(draft_id)
+    assert f"prepared edit {quoted}" in output
+    assert f"prepared inspect {quoted} --json" in output
 
 
 @pytest.mark.parametrize("command", ["check skill-1", "update skill-1 --plan"])
@@ -1225,7 +1255,7 @@ def test_slash_rejects_mutation_commands_without_service_calls(command):
 
     assert output.startswith("Unsupported")
     assert not service.calls
-    assert "/wisdom install (terminal instructions)" in output
+    assert "Terminal: /wisdom install" in output
 
 
 @pytest.mark.parametrize(
@@ -1245,3 +1275,709 @@ def test_slash_exceptions_are_redacted(error):
 
     assert "secret" not in output
     assert "/Users/private" not in output
+
+
+def _native_invocation(platform="slack", *, adapter=None, message_id="command-1"):
+    return NativeInvocation(
+        platform=platform, profile="default", chat_type="private",
+        chat_id="C1" if platform == "slack" else "123", actor_id="native-user",
+        actor_name="Shannon", thread_id="", scope_id="W1" if platform == "slack" else "",
+        message_id=message_id, session_key=f"{platform}:private", adapter=adapter or object(),
+    )
+
+
+class _NativeSuggestService(_Service):
+    def native_owner(self):
+        return _native_owner()
+
+    def close(self):
+        return None
+
+    def publication_submit(self, receipt, *, may_apply=None):
+        assert may_apply is not None and may_apply() is True
+        return super().publication_submit(receipt)
+
+
+def _act_displayed(controller, record_id, action, service, caller):
+    """Simulate the provider acknowledgement between native card transitions."""
+    result = controller.act(record_id, action, service, caller)
+    with controller.displaying(result):
+        pass
+    return controller.load(record_id)
+
+
+def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path, monkeypatch):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+        spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+    )
+    invocation = _native_invocation()
+    monkeypatch.setattr(runtime.native, "consume_request", lambda raw: invocation)
+    seen = []
+    monkeypatch.setattr(
+        runtime.native, "begin_suggest",
+        lambda caller, skill: seen.append((caller, skill)) or {"state": "queued"},
+        raising=False,
+    )
+
+    try:
+        assert runtime.slash("suggest local-skill") == {"state": "queued"}
+        assert seen == [(invocation, "local-skill")]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("raw", ["suggest", "suggest one two"])
+def test_admitted_native_suggest_rejects_missing_or_ambiguous_name(tmp_path, monkeypatch, raw):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+        spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+    )
+    monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: _native_invocation())
+    monkeypatch.setattr(
+        runtime.native, "begin_suggest",
+        lambda *_args: pytest.fail("invalid suggest must not prepare a draft"),
+    )
+    try:
+        assert runtime.slash(raw) == "Usage: /wisdom suggest <local-skill>"
+    finally:
+        runtime.close()
+
+
+def test_native_suggest_prepare_inspect_keep_and_separate_share_confirmation(tmp_path):
+    service = _NativeSuggestService()
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+
+    prepared = controller.request_suggest(service, caller, "local-skill")
+    assert service.calls == [("suggest", "local-skill", False)]
+    assert prepared["operation"] == "suggest"
+    view = controller.view(prepared)
+    assert view.summary == "Draft prepared locally"
+    assert "Nothing has been uploaded. The original skill is unchanged." in view.to_text()
+    assert [action.label for action in view.actions] == [
+        "Review files", "Review checks", "Re-review edited draft",
+        "Continue to sharing review", "Keep draft", "Cancel",
+    ]
+
+    controller.bind_message(prepared["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    files = _act_displayed(controller, prepared["id"], "suggest.files", service, clicked)
+    assert files["state"] == "pending"
+    assert "SKILL.md" in controller.view(files).to_text()
+    back = _act_displayed(controller, prepared["id"], "suggest.back", service, clicked)
+    checks = _act_displayed(controller, prepared["id"], "suggest.checks", service, clicked)
+    assert "shell-download" in controller.view(checks).to_text()
+    _act_displayed(controller, prepared["id"], "suggest.back", service, clicked)
+    warning_review = _act_displayed(
+        controller, prepared["id"], "suggest.share", service, clicked
+    )
+    assert back["plan"]["native_stage"] == "prepared"
+    assert warning_review["plan"]["native_stage"] == "warnings"
+    assert "shell-download" in controller.view(warning_review).to_text()
+    assert not any(call[0] == "publication_review" for call in service.calls)
+    assert [action.label for action in controller.view(warning_review).actions] == [
+        "Acknowledge displayed warnings and continue", "Back", "Cancel",
+    ]
+    exact = _act_displayed(controller, prepared["id"], "suggest.ack", service, clicked)
+    assert exact["plan"]["native_stage"] == "sharing"
+    assert ("prepared_review", "local:draft-1", False) in service.calls
+    assert ("publication_review", "local:draft-1", True) in service.calls
+    assert not any(call[0] == "publication_submit" for call in service.calls)
+    assert [action.label for action in controller.view(exact).actions] == [
+        "Share this exact reviewed package", "Back", "Cancel",
+    ]
+    with pytest.raises(WisdomValidationError, match="not offered"):
+        controller.act(prepared["id"], "suggest.files", service, clicked)
+    assert controller.load(prepared["id"])["plan"]["native_stage"] == "sharing"
+
+    completed = controller.act(prepared["id"], "suggest.confirm", service, clicked)
+    assert completed["state"] == "completed"
+    assert service.calls[-1] == ("publication_submit", "wpub_review")
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(prepared["id"], "suggest.confirm", service, clicked)
+
+
+def test_native_suggest_cancel_keep_wrong_route_expiry_and_changed_review_fail_closed(
+    tmp_path, monkeypatch
+):
+    now = [10.0]
+    service = _NativeSuggestService()
+    controller = NativeReviewController(
+        ReviewState(JsonState(tmp_path), tmp_path), clock=lambda: now[0], ttl_seconds=5,
+    )
+    caller = _native_invocation()
+    first = controller.request_suggest(service, caller, "local-skill")
+    controller.bind_message(first["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(first["id"], "suggest.share", service, replace(clicked, actor_id="other"))
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(first["id"], "suggest.share", service, replace(clicked, profile="other"))
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(first["id"], "suggest.share", service, replace(clicked, message_id="card-2"))
+    kept = controller.act(first["id"], "suggest.keep", service, clicked)
+    assert kept["state"] == "kept"
+    assert not any(call[0] == "publication_submit" for call in service.calls)
+
+    second = controller.request_suggest(service, caller, "local-skill")
+    controller.bind_message(second["id"], caller, "card-2")
+    cancelled = controller.act(
+        second["id"], "cancel", service, replace(caller, message_id="card-2")
+    )
+    assert cancelled["state"] == "cancelled"
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(
+            second["id"], "cancel", service, replace(caller, message_id="card-2")
+        )
+
+    third = controller.request_suggest(service, caller, "local-skill")
+    controller.bind_message(third["id"], caller, "card-3")
+    now[0] = 20.0
+    with pytest.raises(WisdomAuthError, match="expired"):
+        controller.act(
+            third["id"], "suggest.share", service, replace(caller, message_id="card-3")
+        )
+
+    changed = _NativeSuggestService()
+    original = changed.publication_review
+    def changed_review(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["hashes"]["content"] = "sha256:changed"
+        return result
+    monkeypatch.setattr(changed, "publication_review", changed_review)
+    fresh = NativeReviewController(ReviewState(
+        JsonState(tmp_path / "changed"), tmp_path / "changed",
+    ))
+    record = fresh.request_suggest(changed, caller, "local-skill")
+    fresh.bind_message(record["id"], caller, "card-4")
+    with pytest.raises(WisdomConflict, match="changed"):
+        _act_displayed(
+            fresh, record["id"], "suggest.share", changed,
+            replace(caller, message_id="card-4"),
+        )
+        fresh.act(record["id"], "suggest.ack", changed, replace(caller, message_id="card-4"))
+    assert not any(call[0] == "publication_submit" for call in changed.calls)
+
+
+def test_native_suggest_large_review_has_bounded_same_draft_continuation(tmp_path):
+    service = _NativeSuggestService()
+    original = service.suggest
+    def large(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["files"] = [
+            {"path": f"references/{index:03d}.md", "mode": "file", "size": 5000,
+             "hash": f"sha256:{index}", "content_utf8": "x" * 5000}
+            for index in range(100)
+        ]
+        return result
+    service.suggest = large
+    service.prepared_review = lambda *_args, **_kwargs: large("review")
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "large-skill")
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    files = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
+    first_page = controller.view(files)
+    assert len(first_page.to_text()) <= 3500
+    assert any(action.action == "suggest.files.next" for action in first_page.navigation_actions)
+    second_page = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
+    while second_page["plan"]["native_page"] == 0:
+        second_page = _act_displayed(
+            controller, record["id"], "suggest.files.next", service, clicked,
+        )
+    assert second_page["plan"]["native_page"] == 1
+    first_again = _act_displayed(controller, record["id"], "suggest.files.prev", service, clicked)
+    assert first_again["plan"]["native_page"] == 0
+
+    _act_displayed(controller, record["id"], "suggest.back", service, clicked)
+    _act_displayed(controller, record["id"], "suggest.share", service, clicked)
+    sharing = _act_displayed(controller, record["id"], "suggest.ack", service, clicked)
+    view = controller.view(sharing)
+    assert not any(action.primary for action in view.actions)
+    assert "hermes wisdom publication review local:draft-1" in view.notice
+    assert "same prepared draft" in view.notice
+    with pytest.raises(WisdomValidationError, match="not offered"):
+        controller.act(record["id"], "suggest.confirm", service, clicked)
+    assert not any(call[0] == "publication_submit" for call in service.calls)
+
+
+def test_native_suggest_re_review_refreshes_exact_edited_draft(tmp_path):
+    """A native card can refresh a terminal-edited draft before sharing review."""
+
+    service = _NativeSuggestService()
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "local-skill")
+    controller.bind_message(record["id"], caller, "card-1")
+    original = service.prepared_review
+
+    def edited(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["hashes"]["content"] = "sha256:edited"
+        result["files"][0]["content_utf8"] = "# Edited\n"
+        return result
+
+    service.prepared_review = edited
+
+    refreshed = controller.act(
+        record["id"], "suggest.refresh", service,
+        replace(caller, message_id="card-1"),
+    )
+
+    assert refreshed["plan"]["hashes"]["content"] == "sha256:edited"
+    assert refreshed["plan"]["files"][0]["content_utf8"] == "# Edited\n"
+    assert refreshed["plan"]["native_stage"] == "prepared"
+    assert not any(call[0].startswith("publication_") for call in service.calls)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {},
+        {"draft_id": "local:other"},
+        {"draft_id": "local:draft-1", "local_draft_id": "local:other"},
+    ],
+    ids=["missing", "swapped", "conflicting"],
+)
+def test_native_suggest_refresh_rejects_unbound_draft_identity(tmp_path, identity):
+    """A malformed refresh cannot replace state or become submission authority."""
+
+    service = _NativeSuggestService()
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "local-skill")
+    controller.bind_message(record["id"], caller, "card-1")
+    before = controller.load(record["id"])
+    original = service.prepared_review
+
+    def wrong_identity(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result.pop("draft_id", None)
+        result.pop("local_draft_id", None)
+        result.update(identity)
+        return result
+
+    service.prepared_review = wrong_identity
+    clicked = replace(caller, message_id="card-1")
+
+    with pytest.raises(WisdomConflict, match="draft changed"):
+        controller.act(record["id"], "suggest.refresh", service, clicked)
+    assert controller.load(record["id"]) == before
+
+    with pytest.raises(WisdomConflict, match="draft changed"):
+        controller.act(record["id"], "suggest.share", service, clicked)
+    assert controller.load(record["id"]) == before
+    assert not any(call[0].startswith("publication_") for call in service.calls)
+
+
+def test_native_file_navigation_labels_parts_and_file_boundaries_truthfully(tmp_path):
+    service = _NativeSuggestService()
+    original = service.suggest
+
+    def two_files(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["files"] = [
+            {"path": "first.md", "content_utf8": "a" * 600},
+            {"path": "second.md", "content_utf8": "second"},
+        ]
+        return result
+
+    service.suggest = two_files
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "two-files")
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+
+    current = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
+    assert [action.label for action in controller.view(current).navigation_actions] == [
+        "Back", "Next part",
+    ]
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
+    assert [action.label for action in controller.view(current).navigation_actions] == [
+        "Previous part", "Back", "Next file",
+    ]
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
+    assert [action.label for action in controller.view(current).navigation_actions] == [
+        "Previous file", "Back",
+    ]
+    current = _act_displayed(controller, record["id"], "suggest.files.prev", service, clicked)
+    assert [action.label for action in controller.view(current).navigation_actions] == [
+        "Previous part", "Back", "Next file",
+    ]
+
+
+def test_native_file_preview_distinguishes_empty_opaque_and_sanitized_content(tmp_path):
+    service = _NativeSuggestService()
+    original = service.suggest
+
+    def unusual_files(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["files"] = [
+            {"path": "empty.txt", "content_utf8": "", "size": 0},
+            {"path": "opaque.bin", "content_base64": "AAE=", "size": 2},
+            {"path": "controls.txt", "content_utf8": "before\x00\x1b[2Jafter"},
+        ]
+        return result
+
+    service.suggest = unusual_files
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "unusual-files")
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+
+    current = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
+    assert "Empty UTF-8 file" in controller.view(current).to_text()
+
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
+    assert "Binary/opaque file" in controller.view(current).to_text()
+
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
+    rendered = controller.view(current).to_text()
+    assert "Sanitized display" in rendered
+    assert "control bytes were replaced" in rendered
+    assert "exact bytes" in rendered
+    assert "\x00" not in rendered
+    assert "\x1b" not in rendered
+
+
+
+def test_native_large_text_file_is_completely_reachable_without_terminal_handoff(tmp_path):
+    """Native chunk navigation reaches the exact tail of an oversized text file."""
+
+    service = _NativeSuggestService()
+    original = service.suggest
+
+    def large(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["files"] = [{
+            "path": "references/large.md", "mode": "file", "size": 6000,
+            "hash": "sha256:large", "content_utf8": "START\n" + "&" * 6000 + "\nTAIL",
+        }]
+        return result
+
+    service.suggest = large
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "large-skill")
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    current = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
+    observed = controller.view(current).to_text()
+    assert "…" not in str(slack_blocks(controller.view(current), record["id"]))
+
+    while any(
+        action.action == "suggest.files.next"
+        for action in controller.view(current).navigation_actions
+    ):
+        current = _act_displayed(
+            controller, record["id"], "suggest.files.next", service, clicked,
+        )
+        observed += "\n" + controller.view(current).to_text()
+        assert "…" not in str(slack_blocks(controller.view(current), record["id"]))
+
+    assert "START" in observed
+    assert "TAIL" in observed
+    assert "export full bytes" not in observed
+    assert len(controller.view(current).to_text()) <= 3500
+
+
+def test_slack_truncated_review_drops_primary_control():
+    view = NativeView(
+        "Collective Wisdom sharing review", "Review before sharing",
+        [NativeItem("Exact package", "&" * 2890)],
+        actions=[
+            NativeAction("Share this exact reviewed package", "suggest.confirm", primary=True),
+            NativeAction("Cancel", "cancel", destructive=True),
+        ],
+    )
+
+    rendered = slack_blocks(view, "record-1")
+
+    buttons = [
+        element for block in rendered if block.get("type") == "actions"
+        for element in block.get("elements", [])
+    ]
+    assert not any(button.get("style") == "primary" for button in buttons)
+    assert not any("suggest.confirm" in button.get("value", "") for button in buttons)
+
+
+def test_native_entity_heavy_warning_requires_terminal_review(tmp_path):
+    service = _NativeSuggestService()
+    original = service.suggest
+
+    def entity_heavy(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["local_scan"]["guard"]["findings"][0]["description"] = "&" * 1000
+        result["local_scan"]["guard"]["findings"][0]["file"] = "&" * 500
+        return result
+
+    service.suggest = entity_heavy
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "entity-heavy")
+    controller.bind_message(record["id"], caller, "card-1")
+
+    warning = controller.act(
+        record["id"], "suggest.share", service, replace(caller, message_id="card-1")
+    )
+    view = controller.view(warning)
+
+    assert not any(action.primary for action in view.actions)
+    assert "cannot be acknowledged here" in view.notice
+
+
+def test_native_missing_warning_evidence_blocks_acknowledgement(tmp_path):
+    service = _NativeSuggestService()
+    original = service.suggest
+
+    def missing_details(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["local_scan"]["guard"]["findings"] = []
+        return result
+
+    service.suggest = missing_details
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    record = controller.request_suggest(service, caller, "missing-evidence")
+    controller.bind_message(record["id"], caller, "card-1")
+
+    with pytest.raises(WisdomValidationError, match="warning details are unavailable"):
+        controller.act(
+            record["id"], "suggest.share", service,
+            replace(caller, message_id="card-1"),
+        )
+    assert not any(call[0].startswith("publication_") for call in service.calls)
+
+
+@pytest.mark.parametrize("platform", ["slack", "telegram"])
+def test_native_suggest_callback_adapters_preserve_actor_profile_and_message(
+    tmp_path, platform
+):
+    service = _NativeSuggestService()
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    bot = object()
+    if platform == "slack":
+        class Adapter:
+            _owner_profile = "default"
+            @staticmethod
+            def _is_interactive_user_authorized(user_id, **_kwargs):
+                return user_id == "native-user"
+        adapter = Adapter()
+        caller = _native_invocation("slack", adapter=adapter)
+        record = controller.request_suggest(service, caller, "local-skill")
+        controller.bind_message(record["id"], caller, "card-1")
+        callback = slack_callback(adapter, {
+            "user": {"id": "native-user", "name": "Shannon"},
+            "channel": {"id": "C1"}, "team": {"id": "W1"},
+            "message": {"ts": "card-1"}, "container": {"message_ts": "card-1"},
+        }, record)
+    else:
+        class Adapter:
+            _owner_profile = "default"
+            _bot = bot
+            @staticmethod
+            def _is_callback_user_authorized(user_id, **_kwargs):
+                return user_id == "native-user"
+        adapter = Adapter()
+        caller = _native_invocation("telegram", adapter=adapter)
+        record = controller.request_suggest(service, caller, "local-skill")
+        controller.bind_message(record["id"], caller, "77")
+        query = SimpleNamespace(
+            from_user=SimpleNamespace(id="native-user", username="Shannon", first_name=""),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(type="private"), chat_id=123,
+                message_thread_id=None, message_id=77, get_bot=lambda: bot,
+            ),
+        )
+        callback = telegram_callback(adapter, query, record)
+    assert callback.actor_id == "native-user"
+    assert callback.profile == "default"
+    assert callback.message_id in {"card-1", "77"}
+    assert controller.act(record["id"], "suggest.files", service, callback)["state"] == "pending"
+
+
+def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmation(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        service = _NativeSuggestService()
+        pending = []
+        posts, edits = [], []
+
+        class Adapter:
+            _owner_profile = "default"
+            @staticmethod
+            def _is_interactive_user_authorized(user_id, **_kwargs):
+                return user_id == "native-user"
+
+        class Client:
+            async def chat_postMessage(self, **payload):
+                posts.append(payload)
+                return {"ok": True, "channel": "C1", "ts": "card-1"}
+            async def chat_update(self, **payload):
+                edits.append(payload)
+                return {"ok": True}
+
+        class App:
+            def __init__(self):
+                self.client, self.handler = Client(), None
+            def action(self, _pattern):
+                def register(handler):
+                    self.handler = handler
+                    return handler
+                return register
+
+        def spawn(coroutine, **_kwargs):
+            pending.append(coroutine)
+
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=spawn,
+        )
+        app, adapter = App(), Adapter()
+        runtime.native.wire_slack(app, adapter)
+        caller = _native_invocation("slack", adapter=adapter)
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: caller)
+        monkeypatch.setattr(runtime.native, "service_factory", lambda: service)
+
+        def value(payload, label):
+            buttons = [element for block in payload["blocks"] if block["type"] == "actions"
+                       for element in block["elements"]]
+            return next(button["value"] for button in buttons if button["text"]["text"] == label)
+
+        async def click(label, *, actor="native-user", message="card-1"):
+            payload = edits[-1] if edits else posts[-1]
+            acknowledgements = []
+            async def ack():
+                acknowledgements.append(True)
+            body = {
+                "user": {"id": actor, "name": "Shannon"},
+                "channel": {"id": "C1"}, "team": {"id": "W1"},
+                "message": {"ts": message}, "container": {"message_ts": message},
+            }
+            await app.handler(ack, body, {"value": value(payload, label)})
+            assert acknowledgements == [True]
+
+        try:
+            result = runtime.slash("suggest local-skill")
+            assert result["state"] == "queued"
+            await pending.pop(0)
+            assert runtime.native.reviews.load(result["review_id"])["message_id"] == "card-1"
+            assert "Nothing has been uploaded" in posts[0]["text"]
+            assert not any(call[0].startswith("publication_") for call in service.calls)
+
+            await click("Continue to sharing review")
+            assert "shell-download" in edits[-1]["text"]
+            assert not any(call[0] == "publication_review" for call in service.calls)
+            await click("Acknowledge displayed warnings and continue")
+            assert "Sharing review" in edits[-1]["text"]
+            assert not any(call[0] == "publication_submit" for call in service.calls)
+
+            await click("Share this exact reviewed package")
+            assert service.calls.count(("publication_submit", "wpub_review")) == 1
+            assert runtime.native.reviews.load(result["review_id"])["state"] == "completed"
+            before = len(edits)
+            await app.handler(
+                lambda: asyncio.sleep(0),
+                {"user": {"id": "native-user"}, "channel": {"id": "C1"},
+                 "team": {"id": "W1"}, "message": {"ts": "card-1"}},
+                {"value": f"wi:agent:suggest.confirm:{result['review_id']}"},
+            )
+            assert len(edits) == before
+            assert service.calls.count(("publication_submit", "wpub_review")) == 1
+        finally:
+            runtime.close()
+            for coroutine in pending:
+                coroutine.close()
+
+    asyncio.run(scenario())
+
+
+def test_telegram_actual_dispatch_and_callback_edits_bound_card_without_upload(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        from telegram.ext import ApplicationHandlerStop
+
+        service = _NativeSuggestService()
+        pending, requests = [], []
+
+        class Bot:
+            async def do_api_request(self, endpoint, *, api_kwargs):
+                requests.append((endpoint, api_kwargs))
+                if endpoint == "sendRichMessage":
+                    return {"ok": True, "result": {
+                        "message_id": 77, "chat": {"id": 123},
+                    }}
+                return {"ok": True}
+
+        bot = Bot()
+
+        class Adapter:
+            _owner_profile = "default"
+            _bot = bot
+            @staticmethod
+            def _is_callback_user_authorized(user_id, **_kwargs):
+                return user_id == "native-user"
+
+        class App:
+            def __init__(self):
+                self.handler = None
+            def add_handler(self, handler, group=0):
+                assert group == -10
+                self.handler = handler
+
+        def spawn(coroutine, **_kwargs):
+            pending.append(coroutine)
+
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=spawn,
+        )
+        app, adapter = App(), Adapter()
+        runtime.native.wire_telegram(app, adapter)
+        caller = _native_invocation("telegram", adapter=adapter)
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: caller)
+        monkeypatch.setattr(runtime.native, "service_factory", lambda: service)
+
+        answers = []
+        message = SimpleNamespace(
+            chat=SimpleNamespace(type="private"), chat_id=123,
+            message_thread_id=None, message_id=77, get_bot=lambda: bot,
+        )
+
+        async def answer():
+            answers.append(True)
+
+        try:
+            result = runtime.slash("suggest local-skill")
+            await pending.pop(0)
+            assert result["state"] == "queued"
+            assert requests[0][0] == "sendRichMessage"
+            assert "Continue to sharing review" in requests[0][1]["rich_message"]["html"]
+            assert runtime.native.reviews.load(result["review_id"])["message_id"] == "77"
+
+            query = SimpleNamespace(
+                data=callback_value(result["review_id"], "suggest.share"),
+                from_user=SimpleNamespace(id="native-user", username="Shannon", first_name=""),
+                message=message, answer=answer,
+                edit_message_text=lambda **_kwargs: pytest.fail("rich edit should be used"),
+            )
+            with pytest.raises(ApplicationHandlerStop):
+                await app.handler.callback(SimpleNamespace(callback_query=query), None)
+            assert answers == [True]
+            assert requests[-1][0] == "editMessageText"
+            assert "Acknowledge displayed warnings and continue" in (
+                requests[-1][1]["rich_message"]["html"]
+            )
+            assert not any(call[0].startswith("publication_") for call in service.calls)
+        finally:
+            runtime.close()
+            for coroutine in pending:
+                coroutine.close()
+
+    asyncio.run(scenario())

@@ -49,6 +49,8 @@ def sharing_checks(plan):
 def inspection_pages(record):
     """Keep separately verified file bytes outside the immutable consent plan."""
     plan = record["plan"]
+    if "owner" in plan and isinstance(record.get("owner"), dict):
+        plan = {**plan, "owner": record["owner"]}
     if "package_files" in record:
         plan = {"review": plan, "package_files": record["package_files"]}
     return review_pages(plan)

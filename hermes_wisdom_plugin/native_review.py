@@ -1,13 +1,13 @@
 """Deterministic native views and PluginState-backed explicit reviews."""
 # Self-explanatory immutable view records and narrow adapter methods do not gain clarity
 # from repeating their signatures in docstrings.
-# pylint: disable=missing-class-docstring,missing-function-docstring,line-too-long
+# pylint: disable=missing-class-docstring,missing-function-docstring,line-too-long,too-many-lines
 
 from __future__ import annotations
 
 import copy
 import secrets
-
+import shlex
 import time
 import unicodedata
 from contextlib import contextmanager
@@ -18,9 +18,15 @@ from .errors import SharePackagingError, WisdomAuthError, WisdomConflict, Wisdom
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
 from .review_state import ReviewState
+from .terminal_ui import (
+    has_reviewable_warnings, render_action_review, render_file_preview,
+    render_findings, review_identity, safe_scan_details, without_controls,
+)
 
 SLACK_SECTION_LIMIT = 2900
 TELEGRAM_TEXT_LIMIT = 3500
+_UNHANDLED = object()
+_NATIVE_FILE_CHUNK = 480
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,18 +107,35 @@ def _safe(value: object, placeholder: str = "Unknown") -> str:
     return text
 
 
+def _prepared_review(service: Any, plan: dict[str, Any]) -> dict[str, Any]:
+    """Read a prepared review only when every returned identity matches the request."""
+    requested = str(plan.get("draft_id") or plan.get("local_draft_id") or "")
+    review = service.prepared_review(requested, allow_model_review=False)
+    if not isinstance(review, dict):
+        raise WisdomValidationError("prepared draft review is unavailable")
+    identities = [review[key] for key in ("draft_id", "local_draft_id") if key in review]
+    if not (requested and identities and all(
+        isinstance(identity, str) and identity == requested for identity in identities
+    )):
+        raise WisdomConflict("The prepared draft changed; open it again")
+    return review
+
+
 def _approval_is_lossless(view: NativeView) -> bool:
     """Approval controls are allowed only when the rendered review remains complete."""
     if not any(action.primary for action in view.actions):
         return True
-    return (
-        len(view.to_text()) <= TELEGRAM_TEXT_LIMIT
-        and all(item.detail for item in view.items)
-        and all(
-            len(f"{item.preamble}\n\n{item.title}\n{item.detail}") <= SLACK_SECTION_LIMIT
-            for item in view.items
-        )
-    )
+    def encoded(value: object) -> str:
+        return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").strip()
+    details = [
+        (item.preamble + "\n\n" if item.preamble else "")
+        + f"*{item.title}*" + ("\n" + item.detail if item.detail else "")
+        for item in view.items
+    ]
+    return (len(view.to_text()) <= TELEGRAM_TEXT_LIMIT and len(view.items) <= 5
+            and len(encoded(view.summary)) <= SLACK_SECTION_LIMIT
+            and all(item.detail for item in view.items)
+            and all(len(encoded(detail)) <= SLACK_SECTION_LIMIT for detail in details))
 
 
 def _owner_matches(record: dict[str, Any], service: Any, invocation: NativeInvocation) -> bool:
@@ -133,6 +156,21 @@ def _owner_matches(record: dict[str, Any], service: Any, invocation: NativeInvoc
     )
 
 
+def _plan_owner_matches(record: dict[str, Any]) -> bool:
+    """Reject authority metadata that conflicts with the persisted owner binding."""
+    owner = record.get("owner")
+    plan = record.get("plan")
+    plan_owner = plan.get("owner") if isinstance(plan, dict) else None
+    owner_fields = ("profile_name", "profile_home", "account_id", "organization_id",
+                    "base_url", "installation_id")
+    return not isinstance(plan_owner, dict) or (
+        isinstance(owner, dict) and all(
+            key not in plan_owner or plan_owner[key] == owner.get(key)
+            for key in owner_fields
+        )
+    )
+
+
 def _current_effect(
     current: dict[str, Any], expected: dict[str, Any], service: Any,
     invocation: NativeInvocation, authority: Callable[[], bool],
@@ -145,6 +183,7 @@ def _current_effect(
             and current.get("id") == expected.get("id")
             and current.get("operation") == expected.get("operation")
             and current.get("plan") == expected.get("plan")
+            and _plan_owner_matches(current)
             and _owner_matches(current, service, invocation)
         )
     except Exception:  # pylint: disable=broad-exception-caught
@@ -335,6 +374,7 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
     pages = inspection_pages(record)
     page = int(record.get("page", 0))
     approving = record.get("screen") == "approval"
+    _projected, authority = _authority_projection(record, plan)
     actions = []
     if page:
         actions.append(NativeAction("Previous", f"page.{page - 1}"))
@@ -352,7 +392,7 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
         f"Page {page + 1} of {len(pages)}. " + (
             "Confirm only after inspecting the complete exact plan."
             if approving else "Inspection does not authorize sharing, installation or setup."
-        ),
+        ) + (("\n" + "\n".join(authority)) if authority else ""),
         [NativeItem("Exact review data (JSON)", pages[page], literal=True)], actions=actions,
     )
 
@@ -402,7 +442,217 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
     )
 
 
-def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
+def _suggest_continuation(draft_id: object) -> str:
+    safe_id = shlex.quote(_safe(draft_id, "<draft-id>"))
+    return f"hermes wisdom publication review {safe_id}"
+
+
+def _prepared_command(draft_id: object, action: str, suffix: str = "") -> str:
+    safe_id = shlex.quote(_safe(draft_id, "<draft-id>"))
+    return f"hermes wisdom prepared {action} {safe_id}{suffix}"
+
+
+def _suggest_terminal_view(plan: dict[str, Any], state: str) -> NativeView:
+    draft_id = plan.get("draft_id") or plan.get("local_draft_id")
+    terminal = _prepared_command(draft_id, "review")
+    messages = {
+        "kept": ("Draft kept", f"Resume this local draft with `{terminal}`."),
+        "cancelled": (
+            "Sharing cancelled",
+            f"Nothing was shared by this review. Resume the local draft with `{terminal}`.",
+        ),
+        "completed": (
+            "Sharing request completed", "The reviewed publication result was recorded.",
+        ),
+    }
+    title, detail = messages.get(state, (
+        "Sharing outcome uncertain",
+        "Inspect publication status before attempting another submission.",
+    ))
+    return NativeView(
+        "Collective Wisdom contribution", f"Draft: {_safe(draft_id)}",
+        [NativeItem(title, detail)], notice=f"State: {state}", dismissed=True,
+    )
+
+
+def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
+    draft_id = plan.get("draft_id") or plan.get("local_draft_id")
+    files = [row for row in plan.get("files", []) if isinstance(row, dict)]
+    security = plan.get("security_check")
+    security = security if isinstance(security, dict) else {}
+    detail = "\n".join((
+        f"Draft: {_safe(draft_id)}", f"Files: {len(files)}",
+        f"Warnings: {_safe(security.get('summary'), 'No local scanner summary available')}",
+        "Nothing has been uploaded. The original skill is unchanged.",
+    ))
+    return NativeView(
+        "Collective Wisdom contribution", "Draft prepared locally",
+        [NativeItem(_safe(plan.get("skill_name"), "local skill"), detail)],
+        actions=[
+            NativeAction("Review files", "suggest.files"),
+            NativeAction("Review checks", "suggest.checks"),
+            NativeAction("Re-review edited draft", "suggest.refresh"),
+            NativeAction("Continue to sharing review", "suggest.share"),
+            NativeAction("Keep draft", "suggest.keep"),
+            NativeAction("Cancel", "cancel", destructive=True),
+        ],
+        notice=(
+            "Native editing is unavailable; edit this draft with `"
+            + _prepared_command(draft_id, "edit") + "`."
+        ),
+    )
+
+
+def _native_file_chunks(item: dict[str, Any]) -> list[str]:
+    content = item.get("content_utf8")
+    if not isinstance(content, str):
+        return [render_file_preview(item)]
+    if not content:
+        return ["[Empty UTF-8 file]"]
+    safe = without_controls(content, preserve_layout=True)
+    if safe != content:
+        safe = ("[Sanitized display: control bytes were replaced. "
+                "Use prepared inspect --json for exact bytes.]\n" + safe)
+    return [safe[offset:offset + _NATIVE_FILE_CHUNK]
+            for offset in range(0, len(safe), _NATIVE_FILE_CHUNK)]
+
+
+def _suggest_files_view(plan: dict[str, Any]) -> NativeView:
+    draft_id = plan.get("draft_id") or plan.get("local_draft_id")
+    files = [row for row in plan.get("files", []) if isinstance(row, dict)]
+    page = max(0, min(int(plan.get("native_page") or 0), max(0, len(files) - 1)))
+    if files:
+        selected = files[page]
+        chunks = _native_file_chunks(selected)
+        chunk = max(0, min(int(plan.get("native_chunk") or 0), len(chunks) - 1))
+        facts = " · ".join(
+            f"{label}: {_safe(selected.get(key))}"
+            for key, label in (("mode", "Mode"), ("size", "Size"), ("hash", "Hash"))
+            if selected.get(key) is not None
+        )
+        detail = (facts + "\n" if facts else "") + "---\n" + chunks[chunk] + "\n---"
+        notice = f"File {page + 1} of {len(files)}; part {chunk + 1} of {len(chunks)}."
+        item = NativeItem(_safe(selected.get("path"), "File"), detail)
+    else:
+        chunk = 0
+        chunks = [""]
+        notice = "No files were returned for this draft."
+        item = NativeItem("No files", "Open the same prepared draft in the terminal.")
+    navigation = []
+    if chunk > 0 or page > 0:
+        label = "Previous part" if chunk > 0 else "Previous file"
+        navigation.append(NativeAction(label, "suggest.files.prev"))
+    navigation.append(NativeAction("Back", "suggest.back"))
+    if chunk + 1 < len(chunks) or page + 1 < len(files):
+        label = "Next part" if chunk + 1 < len(chunks) else "Next file"
+        navigation.append(NativeAction(label, "suggest.files.next"))
+    return NativeView(
+        "Collective Wisdom draft files", f"Draft: {_safe(draft_id)}", [item],
+        notice=notice, navigation_actions=navigation,
+    )
+
+
+def _suggest_checks_view(plan: dict[str, Any], *, warnings: bool = False) -> NativeView:
+    draft_id = plan.get("draft_id") or plan.get("local_draft_id")
+    details = render_findings(plan)
+    complete = len(details) <= 2200
+    shown = details if complete else details[:2199].rstrip() + "…"
+    if not warnings:
+        return NativeView(
+            "Collective Wisdom draft checks", f"Draft: {_safe(draft_id)}",
+            [NativeItem("Local scanner findings", shown)],
+            notice=("" if complete else "Checks are bounded here; inspect the same draft in the terminal."),
+            navigation_actions=[NativeAction("Back", "suggest.back")],
+        )
+    actions = [
+        NativeAction("Back", "suggest.back"),
+        NativeAction("Cancel", "cancel", destructive=True),
+    ]
+    actions.insert(0, NativeAction(
+        "Acknowledge displayed warnings and continue", "suggest.ack", primary=True,
+    ))
+    view = NativeView(
+        "Collective Wisdom warning review", f"Draft: {_safe(draft_id)}",
+        [NativeItem("Scanner warnings for this exact package", shown)], actions=actions,
+    )
+    if complete and _approval_is_lossless(view):
+        return view
+    return NativeView(
+        view.title, view.summary, view.items,
+        actions=[action for action in actions if not action.primary],
+        notice="Warnings cannot be acknowledged here; inspect the same draft in the terminal.",
+    )
+
+
+def _suggest_sharing_view(plan: dict[str, Any]) -> NativeView:
+    draft_id = plan.get("draft_id") or plan.get("local_draft_id")
+    actions = [
+        NativeAction("Share this exact reviewed package", "suggest.confirm", primary=True),
+        NativeAction("Back", "suggest.back"),
+        NativeAction("Cancel", "cancel", destructive=True),
+    ]
+    view = NativeView(
+        "Collective Wisdom sharing review", "Review before sharing",
+        [NativeItem(
+            _safe(plan.get("skill_name"), "Prepared skill"),
+            render_action_review("publication", plan),
+        )], actions=actions,
+    )
+    if _approval_is_lossless(view):
+        return view
+    return NativeView(
+        view.title, view.summary, view.items,
+        actions=[action for action in actions if not action.primary],
+        notice=(
+            "This exact review is too large for native approval. Continue the same prepared "
+            f"draft with `{_suggest_continuation(draft_id)}`."
+        ),
+    )
+
+
+def _suggest_view(plan: dict[str, Any], state: str) -> NativeView:
+    if state != "pending":
+        return _suggest_terminal_view(plan, state)
+    stage = str(plan.get("native_stage") or "prepared")
+    views = {
+        "prepared": _suggest_prepared_view,
+        "files": _suggest_files_view,
+        "checks": _suggest_checks_view,
+        "warnings": lambda value: _suggest_checks_view(value, warnings=True),
+        "sharing": _suggest_sharing_view,
+    }
+    render = views.get(stage)
+    if render is not None:
+        return render(plan)
+    draft_id = plan.get("draft_id") or plan.get("local_draft_id")
+    return NativeView(
+        "Collective Wisdom contribution", f"Draft: {_safe(draft_id)}",
+        [NativeItem("Review unavailable", "Open the same prepared draft in the terminal.")],
+        notice=f"Continue with `{_suggest_continuation(draft_id)}`.", dismissed=True,
+    )
+
+
+def _authority_projection(
+    record: dict[str, Any], plan: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Attach and render the exact owner, expiry, and permission facts."""
+    owner = record.get("owner")
+    enriched = {**plan, **({"owner": owner} if isinstance(owner, dict) else {})}
+    if record.get("expires_at") is not None:
+        enriched["review_expires_at"] = record["expires_at"]
+    owner_labels = (("organization_id", "Organization"),
+                    ("account_id", "Owner account"), ("profile_name", "Profile"))
+    lines = ([f"{label}: {_safe(owner.get(key))}" for key, label in owner_labels
+              if owner.get(key)] if isinstance(owner, dict) else [])
+    if record.get("expires_at") is not None:
+        lines.append(f"Review expires: {_safe(record['expires_at'])}")
+    permission = plan.get("allowed")
+    if isinstance(permission, bool):
+        lines.append("Approval permission: " + ("allowed" if permission else "blocked"))
+    return enriched, lines
+
+
+def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",
@@ -422,6 +672,13 @@ def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-m
             "Nothing has been uploaded or published.",
             actions=[NativeAction("Try again", "share"), NativeAction("Maybe Later", "cancel")],
         )
+    return None
+
+
+def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
+    terminal = _terminal_state_view(record)
+    if terminal is not None:
+        return terminal
     raw_plan = record.get("plan")
     plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
     state = str(record.get("state") or "pending")
@@ -442,13 +699,20 @@ def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-m
         return _catalog_view(plan, state)
     if record.get("operation") == "settings":
         return _settings_view(plan, state)
-    return _effect_view(record, plan, state)
+    authority, details = _authority_projection(record, plan)
+    if record.get("operation") == "suggest":
+        return _suggest_view(authority, state)
+    return _effect_view(record, authority, state, details)
 
 
-def _effect_view(record: dict[str, Any], plan: dict[str, Any], state: str) -> NativeView:
+def _effect_view(
+    record: dict[str, Any], plan: dict[str, Any], state: str,
+    authority_details: list[str] | None = None,
+) -> NativeView:
     title = "Collective Wisdom review"
     summary = _summary(plan)
-    details = _fact_lines(plan)
+    details = list(authority_details or [])
+    details.extend(_fact_lines(plan))
     item = NativeItem(summary, "\n".join(details) or "Review the exact action in Collective Wisdom.")
     if state != "pending":
         return NativeView(title, summary, [item], notice=f"State: {state}", dismissed=True)
@@ -589,6 +853,20 @@ class NativeReviewController:
     def request_candidate(self, service: Any, invocation: NativeInvocation, event_id: str) -> dict[str, Any]:
         plan = service.native_candidate_inspect(event_id)
         return self._insert(service, invocation, "candidate", {**plan, "operation": "candidate", "allowed": False})
+
+    def request_suggest(
+        self, service: Any, invocation: NativeInvocation, skill_name: str,
+    ) -> dict[str, Any]:
+        if not str(skill_name or "").strip():
+            raise WisdomValidationError("Usage: /wisdom suggest <local-skill>")
+        prepared = service.suggest(str(skill_name).strip(), allow_model_review=False)
+        if not isinstance(prepared, dict) or not str(
+            prepared.get("draft_id") or prepared.get("local_draft_id") or ""
+        ):
+            raise WisdomValidationError("prepared draft identity is unavailable")
+        return self._insert(service, invocation, "suggest", {
+            **prepared, "skill_name": str(skill_name).strip(), "native_stage": "prepared",
+        })
 
     def load(self, record_id: str) -> dict[str, Any]:
         row = self.state.get(record_id)
@@ -744,11 +1022,28 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         try:
             draft_id = service.native_candidate_prepare(record["plan"]["event_id"])
-            plan = service.publication_review(draft_id)
-            result = {
-                **record, "operation": "publish", "plan": copy.deepcopy(plan),
-                "updated_at": self.clock(), "display_ready": False, "failure": None,
+            prepared = _prepared_review(service, {"draft_id": draft_id})
+            plan = {
+                **prepared,
+                "skill_name": (
+                    record["plan"].get("facts", {}).get("name")
+                    or prepared.get("skill_name")
+                ),
+                "candidate_flow": True,
             }
+            if has_reviewable_warnings(prepared):
+                if not safe_scan_details(prepared.get("local_scan")):
+                    raise WisdomValidationError(
+                        "scanner warning details are unavailable; acknowledgement is blocked"
+                    )
+                result = {
+                    **record, "operation": "suggest",
+                    "plan": {**plan, "native_stage": "warnings"},
+                    "updated_at": self.clock(), "display_ready": False, "failure": None,
+                }
+            else:
+                result = self._sharing_review(record, plan, prepared, service, False)
+                result.update(display_ready=False, failure=None)
         except SharePackagingError:
             result = {**claimed, "state": "failed", "failure": "share_packaging_failed"}
         except Exception:  # pylint: disable=broad-exception-caught
@@ -775,15 +1070,17 @@ class NativeReviewController:
             if not self.state.compare_replace(record, result):
                 raise WisdomConflict("Collective Wisdom review changed; open it again")
             return copy.deepcopy(result)
-        if record.get("display_ready") is False:
-            raise WisdomConflict("Wait for the exact review to finish displaying")
-        if state == "pending" and self.clock() >= record["expires_at"]:
-            raise WisdomAuthError("Collective Wisdom review expired; open it again")
         if state != "pending":
             raise WisdomAuthError("Collective Wisdom review is no longer current")
+        if record.get("display_ready") is False:
+            raise WisdomConflict("Wait for the exact review to finish displaying")
+        if self.clock() >= record["expires_at"]:
+            raise WisdomAuthError("Collective Wisdom review expired; open it again")
         _validate_offered_action(record, action)
-        if action.startswith("catalog.install.") and record.get("operation") == "catalog":
-            return self._select_catalog(action, record, service)
+        if action.startswith(("suggest.", "catalog.install.")):
+            return self._act_special(
+                record_id, action, record, service, invocation, authority,
+            )
         navigated = self._navigation_action(record, action, service, invocation, authority)
         if navigated is not None:
             return navigated
@@ -796,7 +1093,10 @@ class NativeReviewController:
         invocation: NativeInvocation, authority: Callable[[], bool],
     ) -> dict[str, Any]:
         record_id = record["id"]
-        claimed = {**record, "state": "applying", "updated_at": self.clock()}
+        claimed = {
+            **record, "state": "applying", "display_ready": False,
+            "updated_at": self.clock(),
+        }
         if not self.state.compare_replace(record, claimed):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         plan = claimed["plan"]
@@ -819,6 +1119,185 @@ class NativeReviewController:
             "updated_at": self.clock(),
         }
         if not self.state.compare_replace(claimed, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(result)
+
+    def _act_special(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, record_id: str, action: str, record: dict[str, Any], service: Any,
+        invocation: NativeInvocation, authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        operation = record.get("operation")
+        if operation == "suggest" and action.startswith("suggest."):
+            return self._act_suggest(
+                record_id, action, record, service, invocation, authority=authority,
+            )
+        if operation == "catalog" and action.startswith("catalog.install."):
+            return self._select_catalog(action, record, service)
+        raise WisdomValidationError("Collective Wisdom action was not recognized")
+
+    def _sharing_review(
+        self, record: dict[str, Any], plan: dict[str, Any], displayed: dict[str, Any],
+        service: Any, accept_warnings: bool,
+    ) -> dict[str, Any]:
+        draft_id = str(displayed.get("draft_id") or displayed.get("local_draft_id") or "")
+        expected_draft = str(plan.get("draft_id") or plan.get("local_draft_id") or "")
+        if not draft_id or draft_id != expected_draft:
+            raise WisdomConflict("The prepared draft changed; open it again")
+        review = service.publication_review(draft_id, accept_warnings=accept_warnings)
+        if not isinstance(review, dict):
+            raise WisdomValidationError("publication review is unavailable")
+        review_drafts = [review[key] for key in ("draft_id", "local_draft_id") if key in review]
+        if not review_drafts or any(value != draft_id for value in review_drafts):
+            raise WisdomConflict("The prepared draft changed; open it again")
+        if not _plan_owner_matches({**record, "plan": review}):
+            raise WisdomConflict("The publication owner changed; open it again")
+        if review_identity(review) != review_identity(displayed):
+            raise WisdomConflict("The package or scanner findings changed; open it again")
+        if plan.get("candidate_flow") is True:
+            return {
+                **record, "operation": "publish", "plan": copy.deepcopy(review),
+                "screen": "approval", "page": 0, "inspected_through": 0,
+                "updated_at": self.clock(),
+            }
+        return {**record, "plan": {
+            **review, "skill_name": plan.get("skill_name"), "native_stage": "sharing",
+        }, "updated_at": self.clock()}
+
+    def _suggest_navigation(
+        self, action: str, record: dict[str, Any], plan: dict[str, Any], service: Any,
+    ) -> dict[str, Any] | object:
+        stage = str(plan.get("native_stage") or "prepared")
+        result: dict[str, Any] | object = _UNHANDLED
+        if action == "suggest.keep":
+            result = {**record, "state": "kept", "updated_at": self.clock()}
+        elif action in {"suggest.refresh", "suggest.back"}:
+            if action == "suggest.back" or stage == "prepared":
+                result = self._refresh_suggest(record, plan, service)
+        elif action in {"suggest.files", "suggest.checks"}:
+            if stage == "prepared":
+                result = {**record, "plan": {
+                    **plan, "native_stage": action.rsplit(".", 1)[-1],
+                    "native_page": 0, "native_chunk": 0,
+                }, "updated_at": self.clock()}
+        elif action in {"suggest.files.next", "suggest.files.prev"} and stage == "files":
+            result = self._move_suggest_file(action, record, plan)
+        return result
+
+    def _refresh_suggest(
+        self, record: dict[str, Any], plan: dict[str, Any], service: Any,
+    ) -> dict[str, Any]:
+        refreshed = _prepared_review(service, plan)
+        return {**record, "plan": {
+            **refreshed, "skill_name": plan.get("skill_name"), "native_stage": "prepared",
+        }, "updated_at": self.clock()}
+
+    def _move_suggest_file(
+        self, action: str, record: dict[str, Any], plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        rows = [row for row in plan.get("files", []) if isinstance(row, dict)]
+        page = int(plan.get("native_page") or 0)
+        chunk = int(plan.get("native_chunk") or 0)
+        if not 0 <= page < len(rows):
+            raise WisdomValidationError("Draft file page is no longer available")
+        chunks = _native_file_chunks(rows[page])
+        if action.endswith(".next"):
+            page, chunk = (page, chunk + 1) if chunk + 1 < len(chunks) else (page + 1, 0)
+        elif chunk > 0:
+            chunk -= 1
+        else:
+            page -= 1
+            if page >= 0:
+                chunk = len(_native_file_chunks(rows[page])) - 1
+        if not 0 <= page < len(rows):
+            raise WisdomValidationError("Draft file page is no longer available")
+        return {**record, "plan": {
+            **plan, "native_page": page, "native_chunk": chunk,
+        }, "updated_at": self.clock()}
+
+    def _suggest_review_transition(
+        self, action: str, record: dict[str, Any], plan: dict[str, Any], service: Any,
+    ) -> dict[str, Any] | object:
+        stage = str(plan.get("native_stage") or "prepared")
+        allowed_stages = {"prepared", "files", "checks"}
+        if action not in {"suggest.share", "suggest.ack"}:
+            return _UNHANDLED
+        if action == "suggest.ack" and stage != "warnings":
+            return _UNHANDLED
+        if action == "suggest.share" and stage not in allowed_stages:
+            return _UNHANDLED
+        displayed = _prepared_review(service, plan)
+        if action == "suggest.ack":
+            if review_identity(displayed) != review_identity(plan):
+                raise WisdomConflict("The package or scanner findings changed; open it again")
+            return self._sharing_review(record, plan, displayed, service, True)
+        if not has_reviewable_warnings(displayed):
+            return self._sharing_review(record, plan, displayed, service, False)
+        if not safe_scan_details(displayed.get("local_scan")):
+            raise WisdomValidationError(
+                "scanner warning details are unavailable; acknowledgement is blocked"
+            )
+        return {**record, "plan": {
+            **displayed, "skill_name": plan.get("skill_name"),
+            "native_stage": "warnings",
+        }, "updated_at": self.clock()}
+
+    def _confirm_suggest(  # pylint: disable=too-many-arguments
+        self, record_id: str, action: str, record: dict[str, Any], service: Any,
+        invocation: NativeInvocation, *, authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        plan = record.get("plan")
+        if not isinstance(plan, dict):
+            raise WisdomValidationError("Collective Wisdom draft review is unavailable")
+        if action != "suggest.confirm" or plan.get("native_stage") != "sharing":
+            raise WisdomValidationError("Collective Wisdom action was not recognized")
+        receipt = plan.get("receipt")
+        if not isinstance(receipt, str) or not receipt:
+            raise WisdomValidationError("publication review receipt is unavailable")
+        claimed = {
+            **record, "state": "applying", "display_ready": False,
+            "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(record, claimed):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+
+        def current() -> bool:
+            return _current_effect(
+                self.load(record_id), claimed, service, invocation, authority,
+            )
+        try:
+            outcome = service.publication_submit(receipt, may_apply=current)
+        except Exception:  # pylint: disable=broad-exception-caught
+            uncertain = {
+                **claimed, "state": "uncertain", "result": {"outcome": "unknown"},
+                "updated_at": self.clock(),
+            }
+            self.state.compare_replace(claimed, uncertain)
+            raise
+        result = {**claimed, "state": "completed", "result": outcome,
+                  "updated_at": self.clock()}
+        if not self.state.compare_replace(claimed, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(result)
+
+    def _act_suggest(  # pylint: disable=too-many-arguments
+        self, record_id: str, action: str, record: dict[str, Any], service: Any,
+        invocation: NativeInvocation, *, authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        plan = record.get("plan")
+        if not isinstance(plan, dict):
+            raise WisdomValidationError("Collective Wisdom draft review is unavailable")
+        if action == "suggest.confirm":
+            return self._confirm_suggest(
+                record_id, action, record, service, invocation, authority=authority,
+            )
+        result = self._suggest_navigation(action, record, plan, service)
+        if result is _UNHANDLED:
+            result = self._suggest_review_transition(action, record, plan, service)
+        if result is _UNHANDLED:
+            raise WisdomValidationError("Collective Wisdom action was not recognized")
+        assert isinstance(result, dict)
+        result["display_ready"] = False
+        if not self.state.compare_replace(record, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
 

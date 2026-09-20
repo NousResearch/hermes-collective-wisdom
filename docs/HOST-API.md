@@ -275,9 +275,11 @@ need their own Agent-plugin enablement and account authority. The plugin does
 not bypass that host import gate.
 
 The renderer's connection/profile values segregate caches, not authority. Fresh
-account/enrollment reads and shared workflow receipts govern effects. Dashboard
-UI and advanced editing/setup/recovery controls remain deferred. Earlier proposed
-host additions above are historical, not current implementation tasks.
+account/enrollment reads and shared workflow receipts govern effects. Complete
+private draft save/re-review and read-only update checks reuse the shared workflow
+service with live-view binding. Dashboard UI and setup execution/uncertain-operation
+recovery controls remain deferred. Earlier proposed host additions above are
+historical, not current implementation tasks.
 
 ## Deliberately Not Building
 

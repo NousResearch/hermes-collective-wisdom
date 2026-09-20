@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import errno
+import hashlib
 import multiprocessing
+import os
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -70,6 +73,72 @@ def _write_reviews(root: str, prefix: str) -> None:
         state.save_setup_review(f"{prefix}-{index}", {"writer": prefix, "index": index})
 
 
+def test_managed_operation_guard_uses_atomic_create_then_open(tmp_path, monkeypatch) -> None:
+    """Model Darwin's concurrent O_CREAT ENOENT while retaining real filesystem I/O."""
+
+    from hermes_wisdom_plugin import setup_lock
+
+    real_open = os.open
+    lock_flags = []
+
+    def darwin_open(path, flags, mode=0o777, *, dir_fd=None):
+        if isinstance(path, str) and path.endswith(".lock"):
+            lock_flags.append(flags)
+            if flags & os.O_CREAT and not flags & os.O_EXCL:
+                raise FileNotFoundError(errno.ENOENT, "injected concurrent create race", path)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(setup_lock.os, "open", darwin_open)
+    with setup_lock.managed_operation_guard(tmp_path, "skill-1"):
+        pass
+    lock_path = tmp_path / "operation-locks" / (
+        hashlib.sha256(b"skill-1").hexdigest() + ".lock"
+    )
+    first = lock_path.stat()
+    with setup_lock.managed_operation_guard(tmp_path, "skill-1"):
+        pass
+
+    assert lock_flags[0] & os.O_EXCL
+    assert lock_path.stat().st_ino == first.st_ino
+
+
+def test_managed_operation_guard_rejects_redirected_lock_directory(tmp_path) -> None:
+    from hermes_wisdom_plugin.setup_lock import managed_operation_guard
+    from hermes_wisdom_plugin.package import PackagePolicyError
+
+    root = tmp_path / "state"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "operation-locks").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(PackagePolicyError, match="unavailable or unsafe"):
+        with managed_operation_guard(root, "skill-1"):
+            pass
+    assert not list(outside.iterdir())
+
+
+@pytest.mark.parametrize("unsafe_kind", ["hardlink", "fifo"])
+def test_managed_operation_guard_rejects_unsafe_lock_file(
+    tmp_path, unsafe_kind: str,
+) -> None:
+    from hermes_wisdom_plugin.setup_lock import managed_operation_guard
+    from hermes_wisdom_plugin.package import PackagePolicyError
+
+    root = tmp_path / "state"
+    locks = root / "operation-locks"
+    locks.mkdir(parents=True)
+    lock_path = locks / (hashlib.sha256(b"skill-1").hexdigest() + ".lock")
+    if unsafe_kind == "hardlink":
+        lock_path.write_bytes(b"")
+        os.link(lock_path, tmp_path / "duplicate-lock")
+    else:
+        os.mkfifo(lock_path)
+
+    with pytest.raises(PackagePolicyError, match="unavailable or unsafe"):
+        with managed_operation_guard(root, "skill-1"):
+            pass
+
+
 def test_enrollment_status_is_local_only_and_setup_requires_disclosure(tmp_path: Path) -> None:
     account, client, state, enrollment = service(tmp_path)
 
@@ -111,14 +180,23 @@ def test_enrollment_persists_intent_before_network_and_activates_same_identity(
 
 
 def test_direct_state_serializes_overlapping_process_writers(tmp_path: Path) -> None:
-    context = multiprocessing.get_context("fork")
+    context = multiprocessing.get_context("spawn")
     workers = [context.Process(target=_write_reviews, args=(str(tmp_path), prefix))
                for prefix in ("first", "second")]
 
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=10)
+    started = []
+    try:
+        for worker in workers:
+            worker.start()
+            started.append(worker)
+        for worker in started:
+            worker.join(timeout=10)
+    finally:
+        for worker in started:
+            if worker.is_alive():
+                worker.terminate()
+        for worker in started:
+            worker.join(timeout=10)
 
     assert [worker.exitcode for worker in workers] == [0, 0]
     from hermes_wisdom_plugin.direct_services import DirectState

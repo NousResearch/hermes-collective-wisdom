@@ -5,7 +5,10 @@ import asyncio
 import pytest
 
 from native_test_support import owner
-from restoration_support import SlackHarness
+from restoration_support import (
+    SlackHarness, assert_cancelled_review_is_inert,
+    assert_owner_switch_after_post_is_cleaned,
+)
 from hermes_wisdom_plugin.errors import SharePackagingError
 
 
@@ -26,7 +29,12 @@ class Service:
         assert identity == "candidate-1"
         return "local:draft-1"
 
-    def publication_review(self, draft_id):
+    def prepared_review(self, draft_id, *, allow_model_review=False):
+        assert allow_model_review is False
+        return self.publication_review(draft_id)
+
+    def publication_review(self, draft_id, *, accept_warnings=False):
+        del accept_warnings
         return {
             "draft_id": draft_id, "receipt": "publication-receipt", "allowed": True,
             "files": [{"path": "SKILL.md", "content_utf8": "first\nlast"}],
@@ -378,6 +386,108 @@ def test_queued_private_card_is_not_posted_after_account_switch(tmp_path, monkey
         await ui.flush()
         assert not ui.posts
         assert not service.applied
+    asyncio.run(scenario())
+
+
+def test_slack_posted_card_is_cancelled_and_deleted_after_account_switch(
+    tmp_path, monkeypatch,
+):
+    asyncio.run(assert_owner_switch_after_post_is_cleaned(
+        monkeypatch, SlackHarness, tmp_path, Service(),
+        {"channel": "D1", "ts": "card-1"},
+    ))
+
+
+def test_slack_owner_lookup_failure_and_delete_failure_leave_card_cancelled(
+    tmp_path, monkeypatch,
+):
+    async def scenario():
+        service = Service()
+        owner_lookup = {"failed": False}
+
+        def native_owner():
+            if owner_lookup["failed"]:
+                raise ConnectionError("owner unavailable")
+            return owner()
+
+        monkeypatch.setattr(service, "native_owner", native_owner)
+        ui = SlackHarness(tmp_path, service)
+        posted = ui.chat_postMessage
+
+        async def fail_owner_lookup_after_post(**payload):
+            response = await posted(**payload)
+            owner_lookup["failed"] = True
+            return response
+
+        async def failed_delete(**payload):
+            ui.deletes.append(payload)
+            raise ConnectionError("delete unavailable")
+
+        monkeypatch.setattr(ui, "chat_postMessage", fail_owner_lookup_after_post)
+        monkeypatch.setattr(ui, "chat_delete", failed_delete)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+
+        assert ui.deletes == [{"channel": "D1", "ts": "card-1"}]
+        assert ui.record(identity)["state"] == "cancelled"
+        await assert_cancelled_review_is_inert(
+            ui, service, identity, lambda: owner_lookup.update(failed=False)
+        )
+
+    asyncio.run(scenario())
+
+
+def test_stale_post_cleanup_does_not_overwrite_newer_review_state(tmp_path, monkeypatch):
+    async def scenario():
+        service = Service()
+        ui = SlackHarness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        lookups = {"count": 0}
+
+        def native_owner():
+            lookups["count"] += 1
+            if lookups["count"] == 2:
+                current = ui.record(identity)
+                newer = {
+                    **current, "state": "cancelled", "result": {"newer": True},
+                    "updated_at": current["updated_at"] + 1,
+                }
+                assert ui.runtime.reviews.state.compare_replace(current, newer)
+                return owner(account_id="other")
+            return owner()
+
+        monkeypatch.setattr(service, "native_owner", native_owner)
+        await ui.flush()
+
+        assert ui.deletes == [{"channel": "D1", "ts": "card-1"}]
+        assert ui.record(identity)["result"] == {"newer": True}
+        assert ui.record(identity)["state"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_stale_post_with_uncertain_ack_is_cancelled_without_invented_message_id(
+    tmp_path, monkeypatch,
+):
+    async def scenario():
+        service = Service()
+        current_owner = {"value": owner()}
+        monkeypatch.setattr(service, "native_owner", lambda: current_owner["value"])
+        ui = SlackHarness(tmp_path, service)
+
+        async def uncertain_post(**payload):
+            ui.posts.append(payload)
+            current_owner["value"] = owner(account_id="other")
+            return {"ok": True, "channel": "D1"}
+
+        monkeypatch.setattr(ui, "chat_postMessage", uncertain_post)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+
+        assert not ui.deletes
+        assert ui.record(identity)["state"] == "cancelled"
+        assert ui.record(identity)["message_id"] == ""
+
     asyncio.run(scenario())
 
 

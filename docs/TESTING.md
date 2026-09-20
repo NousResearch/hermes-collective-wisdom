@@ -42,7 +42,11 @@ host checkout, a dependency-capable interpreter and disposable profiles:
 WISDOM_AGENT_DIR=/path/to/pinned-agent \
 WISDOM_HOST_PYTHON=/path/to/host/python \
 PYTHONPATH="$PWD" python -m pytest -q -rs \
-  tests/test_host_account_integration.py tests/test_host_install_integration.py \
+  tests/test_host_account_integration.py tests/test_host_install_integration.py
+
+WISDOM_STOCK_AGENT_DIR=/path/to/pinned-agent \
+WISDOM_STOCK_HOST_PYTHON=/path/to/host/python \
+PYTHONPATH="$PWD" python -m pytest -q -rs \
   tests/test_host_gateway_session_binding.py
 
 WISDOM_DESKTOP_HOST_DIR=/path/to/pinned-agent \

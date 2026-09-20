@@ -11,6 +11,18 @@ from pathlib import Path
 from .package import PackagePolicyError
 
 
+def _open_lock(directory_fd: int, name: str) -> int:
+    """Atomically create a lock inode or open the existing inode without following links."""
+
+    lock_flags = os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW
+    try:
+        return os.open(
+            name, lock_flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd
+        )
+    except FileExistsError:
+        return os.open(name, lock_flags, dir_fd=directory_fd)
+
+
 @contextmanager
 def managed_operation_guard(root: Path, skill_id: str, *, wait: bool = False):
     """Hold a no-follow OS descriptor lock, optionally waiting for short aggregate RMW."""
@@ -35,12 +47,7 @@ def managed_operation_guard(root: Path, skill_id: str, *, wait: bool = False):
             pass
         directory_fd = os.open("operation-locks", directory_flags, dir_fd=root_fd)
         name = hashlib.sha256(skill_id.encode("utf-8")).hexdigest() + ".lock"
-        lock_fd = os.open(
-            name,
-            os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_fd,
-        )
+        lock_fd = _open_lock(directory_fd, name)
         lock_info = os.fstat(lock_fd)
         if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1:
             raise OSError("managed operation lock is not a private regular file")

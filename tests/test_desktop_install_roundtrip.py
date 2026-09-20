@@ -27,8 +27,14 @@ def test_desktop_install_confirm_writes_reviewed_files_once(  # pylint: disable=
         def native_owner(self):
             return executor._owner()
 
-        def install_plan(self, reference, *, update_mode=None):
-            return executor.reviewer.plan(reference, update_mode=update_mode)
+        def install_plan(
+            self, reference, *, update_mode=None, accept_warnings=False
+        ):
+            return executor.reviewer.plan(
+                reference,
+                update_mode=update_mode,
+                accept_warnings=accept_warnings,
+            )
 
         def install_apply(self, receipt, *, accept_partial=False, may_apply=None):
             return executor.apply(

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from installed_test_support import JsonState
-from native_test_support import native_invocation
+from native_test_support import native_invocation, owner
 from hermes_wisdom_plugin.native_review import callback_value
 from hermes_wisdom_plugin.native_runtime import NativeSurfaceRuntime
 
@@ -16,6 +16,7 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
     def __init__(self, root, service):
         self.posts = []
         self.edits = []
+        self.deletes = []
         self.tasks = []
         self.handler = None
         self.client = self
@@ -42,6 +43,10 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
 
     async def chat_update(self, **payload):
         self.edits.append(payload)
+        return {"ok": True}
+
+    async def chat_delete(self, **payload):
+        self.deletes.append(payload)
         return {"ok": True}
 
     async def flush(self):
@@ -98,6 +103,10 @@ class TelegramHarness(SlackHarness):
         self.posts.append(payload)
         return SimpleNamespace(message_id=123, chat_id=11)
 
+    async def delete_message(self, **payload):
+        self.deletes.append(payload)
+        return True
+
     async def click(self, record_id, action, **changes):
         from telegram.ext import ApplicationHandlerStop  # pylint: disable=import-outside-toplevel
         actor = changes.get("actor_id", 11)
@@ -116,3 +125,44 @@ class TelegramHarness(SlackHarness):
 
     async def _answer(self):
         return None
+
+
+def switch_owner_after_post(monkeypatch, ui, current_owner):
+    """Switch fixture ownership only after the provider has accepted a card."""
+    method_name = "chat_postMessage" if ui.caller.platform == "slack" else "send_message"
+    posted = getattr(ui, method_name)
+
+    async def switch(**payload):
+        response = await posted(**payload)
+        current_owner["value"] = owner(account_id="other")
+        return response
+
+    monkeypatch.setattr(ui, method_name, switch)
+
+
+async def assert_cancelled_review_is_inert(ui, service, identity, restore_owner):
+    """Prove a stale visible card stays unusable after ownership returns."""
+    restore_owner()
+    await ui.click(identity, "review")
+    assert not service.applied
+    assert ui.record(identity)["state"] == "cancelled"
+
+
+async def assert_owner_switch_after_post_is_cleaned(
+    monkeypatch, harness_type, root, service, expected_delete,
+):
+    """Exercise the shared post-await ownership race for one provider harness."""
+    current_owner = {"value": owner()}
+    monkeypatch.setattr(service, "native_owner", lambda: current_owner["value"])
+    ui = harness_type(root, service)
+    switch_owner_after_post(monkeypatch, ui, current_owner)
+    identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+    await ui.flush()
+
+    assert ui.deletes == [expected_delete]
+    assert ui.record(identity)["state"] == "cancelled"
+    assert ui.record(identity)["message_id"] == ""
+    assert ui.record(identity)["display_ready"] is False
+    await assert_cancelled_review_is_inert(
+        ui, service, identity, lambda: current_owner.update(value=owner())
+    )

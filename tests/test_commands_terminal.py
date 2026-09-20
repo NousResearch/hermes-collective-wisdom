@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -46,6 +47,16 @@ class Service:
             "professionalism_check": {"status": "unavailable"},
             "network_submission": False,
         }
+        if MODE == "files":
+            result["files"] = [
+                {"path": "SKILL.md", "mode": "file", "size": 5,
+                 "hash": "sha256:first", "content_utf8": "FIRST"},
+                {"path": "references/middle.md", "mode": "file", "size": 6,
+                 "hash": "sha256:middle", "content_utf8": "MIDDLE"},
+                {"path": "references/last.md", "mode": "file", "size": 17019,
+                 "hash": "sha256:last",
+                 "content_utf8": "LAST_START" + "x" * 17000 + "LAST_TAIL"},
+            ]
         if MODE == "share":
             result["security_check"] = {
                 "local_status": "warning_required", "summary": "Review warning."
@@ -56,6 +67,26 @@ class Service:
                 "description": "Synthetic warning detail.", "match": "RAW_PTY_SECRET",
             }]}
         return result
+    def prepared_inspect(self, draft_id):
+        return {
+            "draft_id": draft_id,
+            "author_description": "Synthetic PTY fixture",
+            "expected_hashes": {
+                "content": "sha256:content", "author_description": "sha256:description",
+                "package_manifest": "sha256:manifest",
+            },
+            "files": [
+                {"path": "SKILL.md", "content_utf8": "# Before\n"},
+                {"path": "references/full.md",
+                 "content_utf8": "FULL_START" + "y" * 17000 + "FULL_TAIL"},
+            ],
+        }
+    def prepared_save(self, draft_id, *, author_description, files, expected_hashes):
+        record("save:" + json.dumps({
+            "draft_id": draft_id, "author_description": author_description,
+            "files": files, "expected_hashes": expected_hashes,
+        }, sort_keys=True))
+        return self.prepared_inspect(draft_id)
     def prepared_review(self, draft_id, *, allow_model_review=False):
         result = self.suggest("fixture", allow_model_review=allow_model_review)
         result["draft_id"] = draft_id
@@ -79,7 +110,12 @@ class Service:
 
 parser = argparse.ArgumentParser(prog="hermes wisdom")
 build_parser(parser)
-argv = ["suggest", "fixture"] + (["--json"] if MODE == "json" else [])
+if MODE == "inspect":
+    argv = ["prepared", "inspect", "local:pty-draft", "--json"]
+elif MODE == "edit":
+    argv = ["prepared", "edit", "local:pty-draft"]
+else:
+    argv = ["suggest", "fixture"] + (["--json"] if MODE == "json" else [])
 raise SystemExit(run_cli(parser.parse_args(argv), Service()))
 '''
 
@@ -140,6 +176,203 @@ def test_real_subprocess_json_is_noninteractive_and_machine_parseable():
     assert payload["draft_id"] == "local:pty-draft"
     assert "Choose 1-4" not in completed.stdout
     assert completed.stderr == ""
+
+
+def test_real_subprocess_exact_export_preserves_long_file_tail_without_prompt():
+    """The documented JSON continuation exports bytes omitted by the terminal preview."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _COMMAND, "inspect"],
+        input="",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0
+    payload = json.loads(completed.stdout)
+    assert payload["files"][1]["content_utf8"].startswith("FULL_START")
+    assert payload["files"][1]["content_utf8"].endswith("FULL_TAIL")
+    assert "Choose 1-4" not in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_real_pty_reviews_first_middle_last_and_labels_truncated_preview():
+    """Every inventory position is reachable and long text points to exact export."""
+
+    master, slave = os.openpty()
+    process = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", _COMMAND, "files"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
+    )
+    os.close(slave)
+    output = bytearray()
+    file_answers = [b"1\n", b"2\n", b"3\n", b"\n"]
+    sent_menu = sent_exit = False
+    sent_files = 0
+    deadline = time.monotonic() + 10
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.extend(chunk)
+            rendered = output.decode("utf-8", errors="replace")
+            if rendered.count("Choose 1-4:") >= 1 and not sent_menu:
+                os.write(master, b"1\n")
+                sent_menu = True
+            while rendered.count("Inspect file number") > sent_files:
+                os.write(master, file_answers[sent_files])
+                sent_files += 1
+            if rendered.count("Choose 1-4:") >= 2 and not sent_exit:
+                os.write(master, b"4\n")
+                sent_exit = True
+            if process.poll() is not None:
+                break
+        assert process.wait(timeout=2) == 0
+    finally:
+        os.close(master)
+        if process.poll() is None:
+            process.kill()
+    rendered = output.decode("utf-8", errors="replace")
+    assert sent_menu and sent_files == len(file_answers) and sent_exit
+    assert "FIRST" in rendered
+    assert "MIDDLE" in rendered
+    assert "LAST_START" in rendered
+    assert "LAST_TAIL" not in rendered
+    assert "[preview truncated; use prepared inspect --json for exact export]" in rendered
+
+
+def test_real_pty_eof_and_interrupt_cancel_without_review_or_submit(tmp_path):
+    """Terminal cancellation exits distinctly and never crosses a consent boundary."""
+
+    for name, cancel in (("eof", b"\x04"), ("interrupt", None)):
+        call_log = tmp_path / f"{name}.log"
+        master, slave = os.openpty()
+        process = subprocess.Popen(  # pylint: disable=consider-using-with
+            [sys.executable, "-c", _COMMAND, "human"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+            env={**os.environ, "CALL_LOG": str(call_log)},
+        )
+        os.close(slave)
+        output = bytearray()
+        cancelled = False
+        deadline = time.monotonic() + 10
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+                if b"Choose 1-4:" in output and not cancelled:
+                    if cancel is None:
+                        process.send_signal(signal.SIGINT)
+                    else:
+                        os.write(master, cancel)
+                    cancelled = True
+                if process.poll() is not None:
+                    break
+            assert cancelled
+            assert process.wait(timeout=2) == 7
+        finally:
+            os.close(master)
+            if process.poll() is None:
+                process.kill()
+        assert b"Draft prepared locally" in output
+        assert not call_log.exists()
+
+
+def test_real_pty_editor_saves_disposable_copy_without_touching_other_files(tmp_path):
+    """The interactive editor saves one exact CAS-bound snapshot through the service."""
+
+    editor = tmp_path / "fixture-editor"
+    editor.write_text("#!/bin/sh\nprintf '# Edited\\n' > \"$1\"\n", encoding="utf-8")
+    editor.chmod(0o700)
+    call_log = tmp_path / "editor.log"
+    master, slave = os.openpty()
+    process = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", _COMMAND, "edit"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
+        env={**os.environ, "EDITOR": str(editor), "CALL_LOG": str(call_log)},
+    )
+    os.close(slave)
+    output = bytearray()
+    try:
+        while process.poll() is None:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master, 65536))
+                except OSError:
+                    break
+        assert process.wait(timeout=2) == 0
+    finally:
+        os.close(master)
+        if process.poll() is None:
+            process.kill()
+    saved = json.loads(call_log.read_text(encoding="utf-8").removeprefix("save:"))
+    assert saved["files"][0]["content_utf8"] == "# Edited\n"
+    assert saved["files"][1]["content_utf8"].endswith("FULL_TAIL")
+    assert b"Draft saved locally" in output
+
+
+def test_real_pty_enter_and_escape_do_not_approve_or_lose_draft(tmp_path):
+    """Empty/default and Escape are inert before an explicit keep-draft choice."""
+
+    call_log = tmp_path / "calls.log"
+    master, slave = os.openpty()
+    process = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", _COMMAND, "human"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
+        env={**os.environ, "CALL_LOG": str(call_log)},
+    )
+    os.close(slave)
+    output = bytearray()
+    answers = [b"\n", b"\x1b\n", b"4\n"]
+    sent = 0
+    deadline = time.monotonic() + 10
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master, 65536))
+                except OSError:
+                    break
+            while output.count(b"Choose 1-4:") > sent and sent < len(answers):
+                os.write(master, answers[sent])
+                sent += 1
+            if process.poll() is not None:
+                break
+        assert process.wait(timeout=2) == 0
+    finally:
+        os.close(master)
+        if process.poll() is None:
+            process.kill()
+    assert sent == len(answers)
+    assert output.count(b"Choose 1, 2, 3, or 4.") == 2
+    assert b"Draft kept" in output
+    assert not call_log.exists()
 
 
 def test_real_pty_warning_review_acknowledgement_and_final_consent(tmp_path):

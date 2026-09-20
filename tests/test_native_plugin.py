@@ -157,6 +157,7 @@ def test_register_is_lazy_and_owns_both_command_handles(tmp_path, monkeypatch) -
     ("install skill", ("begin_install_modes", ("skill",))),
     ("update skill", ("begin_update", ("skill",))),
     ("publish draft", ("begin_publication", ("draft",))),
+    ("suggest local-skill", ("begin_suggest", ("local-skill",))),
     ("browse query", ("begin_catalog", ("browse", "query"))),
     ('browse "incident handoff"', ("begin_catalog", ("browse", "incident handoff"))),
     ("settings", ("begin_settings", ())),
@@ -176,7 +177,7 @@ def test_admitted_slash_routes_only_explicit_native_actions(tmp_path, monkeypatc
     monkeypatch.setattr(runtime.native, 'consume_request', lambda _raw: object())
     for name in (
         'begin_install_modes', 'begin_update', 'begin_publication',
-        'begin_catalog', 'begin_settings', 'begin',
+        'begin_suggest', 'begin_catalog', 'begin_settings', 'begin',
     ):
         monkeypatch.setattr(
             runtime.native, name, lambda _invocation, *args, name=name: (name, args),

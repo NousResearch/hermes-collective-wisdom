@@ -2,8 +2,12 @@
 
 from pathlib import Path
 
+import pytest
+
+from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.package_application import (
     durable_replace,
+    install_package,
     replace_package,
     tree_hashes,
 )
@@ -33,3 +37,22 @@ def test_replace_resumes_after_old_rename_and_rechecks_staged_tree(tmp_path: Pat
     assert checks == [staging]
     assert tree_hashes(target) == new
     assert tree_hashes(recovery) == old
+
+
+def test_install_collision_preserves_existing_and_staged_trees(tmp_path: Path) -> None:
+    """I07/X07: a target collision must not overwrite or discard either tree."""
+    target = tmp_path / "managed"
+    staging = tmp_path / "staged"
+    target.mkdir()
+    staging.mkdir()
+    target.joinpath("SKILL.md").write_bytes(b"existing")
+    staging.joinpath("SKILL.md").write_bytes(b"reviewed")
+    existing = tree_hashes(target)
+    incoming = tree_hashes(staging)
+    assert existing is not None and incoming is not None
+
+    with pytest.raises(PackagePolicyError, match="target collision"):
+        install_package(staging, target, incoming, lambda _path: None)
+
+    assert tree_hashes(target) == existing
+    assert tree_hashes(staging) == incoming

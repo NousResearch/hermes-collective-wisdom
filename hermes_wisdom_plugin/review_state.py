@@ -63,15 +63,6 @@ class ReviewState:
         row = self._load()["records"].get(record_id)
         return copy.deepcopy(row) if isinstance(row, dict) else None
 
-    def replace(self, record_id: str, expected_state: str, record: dict[str, Any]) -> bool:
-        """Compare-and-set the lifecycle state under the domain writer lock."""
-        with self.change() as value:
-            current = value["records"].get(record_id)
-            if not isinstance(current, dict) or current.get("state") != expected_state:
-                return False
-            value["records"][record_id] = copy.deepcopy(record)
-            return True
-
     def compare_replace(self, expected: dict[str, Any], record: dict[str, Any]) -> bool:
         """Fence presentation changes against every concurrent state/plan change."""
         with self.change() as value:
