@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import json
 import os
@@ -1093,12 +1094,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         verified = reviewer.verify(plan)
         pages = []
         for path, mode, body in verified.files:
-            if mode != "file":
+            if mode not in {"file", "exec"}:
                 raise WisdomValidationError(f"{label} review contains an unsupported entry")
             try:
                 content = body.decode("utf-8")
             except UnicodeDecodeError:
-                content = "[Binary file; exact SHA-256 is shown in the package review.]"
+                content = "[Base64-encoded binary]\n" + base64.b64encode(body).decode("ascii")
             digest = next(
                 (
                     item.get("hash")

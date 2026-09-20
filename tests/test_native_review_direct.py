@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from installed_test_support import JsonState
+from native_test_support import inspect_for_confirmation
 from native_test_support import direct_owner as owner
 from hermes_wisdom_plugin.errors import (
     WisdomAuthError, WisdomConflict, WisdomValidationError,
@@ -46,6 +47,10 @@ class Service:
             "operation": "install", "owner": owner(), "skill_id": reference,
             "version": 2, "receipt": "receipt-1", "allowed": True,
         }
+
+    def native_install_inspect(self, receipt):
+        assert receipt in {"receipt-1", "partial-receipt", "blocked-receipt"}
+        return [{"path": "SKILL.md", "content": "offline fixture"}]
 
     def install_apply(self, receipt, *, accept_partial=False, may_apply=None):
         del accept_partial
@@ -83,6 +88,9 @@ def test_click_executes_only_current_exact_review_and_records_result(tmp_path: P
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
 
     result = controller.act(
         created["id"], "confirm", service, replace(invocation(), message_id="card-1")
@@ -100,6 +108,9 @@ def test_cancelled_review_revokes_inflight_effect_callback(tmp_path: Path, monke
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -300,6 +311,9 @@ def test_runtime_unload_revokes_an_inflight_slack_effect(tmp_path: Path, monkeyp
         )
         record = runtime.reviews.request_install(service, caller, "skill-1")
         runtime.reviews.bind_message(record["id"], caller, "card-1")
+        inspect_for_confirmation(
+            runtime.reviews, record["id"], service, replace(caller, message_id="card-1")
+        )
 
         def apply(receipt, *, accept_partial=False, may_apply):
             del accept_partial
@@ -341,6 +355,9 @@ def test_owner_switch_revokes_effect_authority(tmp_path: Path, monkeypatch):
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -372,6 +389,9 @@ def test_divergent_plan_owner_revokes_effect_authority(tmp_path: Path, monkeypat
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
 
     def apply(_receipt, *, accept_partial=False, may_apply):
         del accept_partial
@@ -396,6 +416,9 @@ def test_unknown_apply_outcome_is_not_replayable(tmp_path: Path, monkeypatch):
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -420,6 +443,9 @@ def test_second_confirmation_cannot_enter_an_applying_review(tmp_path: Path, mon
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
+    created = inspect_for_confirmation(
+        controller, created["id"], service, replace(invocation(), message_id="card-1")
+    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -581,6 +607,9 @@ def test_partial_install_requires_the_exact_native_acknowledgement(
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     record = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(record["id"], invocation(), "card-1")
+    record = inspect_for_confirmation(
+        controller, record["id"], service, replace(invocation(), message_id="card-1")
+    )
     clicked = replace(invocation(), message_id="card-1")
     view = controller.view(record)
 
@@ -605,6 +634,9 @@ def test_blocked_review_rejects_a_forged_confirm(tmp_path: Path, monkeypatch):
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     record = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(record["id"], invocation(), "card-1")
+    record = inspect_for_confirmation(
+        controller, record["id"], service, replace(invocation(), message_id="card-1")
+    )
 
     with pytest.raises(WisdomValidationError, match="action"):
         controller.act(

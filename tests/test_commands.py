@@ -1298,6 +1298,14 @@ class _NativeSuggestService(_Service):
         return super().publication_submit(receipt)
 
 
+def _act_displayed(controller, record_id, action, service, caller):
+    """Simulate the provider acknowledgement between native card transitions."""
+    result = controller.act(record_id, action, service, caller)
+    with controller.displaying(result):
+        pass
+    return controller.load(record_id)
+
+
 def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path, monkeypatch):
     runtime = CommandRuntime(
         tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
@@ -1354,14 +1362,16 @@ def test_native_suggest_prepare_inspect_keep_and_separate_share_confirmation(tmp
 
     controller.bind_message(prepared["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")
-    files = controller.act(prepared["id"], "suggest.files", service, clicked)
+    files = _act_displayed(controller, prepared["id"], "suggest.files", service, clicked)
     assert files["state"] == "pending"
     assert "SKILL.md" in controller.view(files).to_text()
-    back = controller.act(prepared["id"], "suggest.back", service, clicked)
-    checks = controller.act(prepared["id"], "suggest.checks", service, clicked)
+    back = _act_displayed(controller, prepared["id"], "suggest.back", service, clicked)
+    checks = _act_displayed(controller, prepared["id"], "suggest.checks", service, clicked)
     assert "shell-download" in controller.view(checks).to_text()
-    controller.act(prepared["id"], "suggest.back", service, clicked)
-    warning_review = controller.act(prepared["id"], "suggest.share", service, clicked)
+    _act_displayed(controller, prepared["id"], "suggest.back", service, clicked)
+    warning_review = _act_displayed(
+        controller, prepared["id"], "suggest.share", service, clicked
+    )
     assert back["plan"]["native_stage"] == "prepared"
     assert warning_review["plan"]["native_stage"] == "warnings"
     assert "shell-download" in controller.view(warning_review).to_text()
@@ -1369,7 +1379,7 @@ def test_native_suggest_prepare_inspect_keep_and_separate_share_confirmation(tmp
     assert [action.label for action in controller.view(warning_review).actions] == [
         "Acknowledge displayed warnings and continue", "Back", "Cancel",
     ]
-    exact = controller.act(prepared["id"], "suggest.ack", service, clicked)
+    exact = _act_displayed(controller, prepared["id"], "suggest.ack", service, clicked)
     assert exact["plan"]["native_stage"] == "sharing"
     assert ("prepared_review", "local:draft-1", False) in service.calls
     assert ("publication_review", "local:draft-1", True) in service.calls
@@ -1377,7 +1387,7 @@ def test_native_suggest_prepare_inspect_keep_and_separate_share_confirmation(tmp
     assert [action.label for action in controller.view(exact).actions] == [
         "Share this exact reviewed package", "Back", "Cancel",
     ]
-    with pytest.raises(WisdomValidationError, match="not recognized"):
+    with pytest.raises(WisdomValidationError, match="not offered"):
         controller.act(prepared["id"], "suggest.files", service, clicked)
     assert controller.load(prepared["id"])["plan"]["native_stage"] == "sharing"
 
@@ -1442,7 +1452,10 @@ def test_native_suggest_cancel_keep_wrong_route_expiry_and_changed_review_fail_c
     record = fresh.request_suggest(changed, caller, "local-skill")
     fresh.bind_message(record["id"], caller, "card-4")
     with pytest.raises(WisdomConflict, match="changed"):
-        fresh.act(record["id"], "suggest.share", changed, replace(caller, message_id="card-4"))
+        _act_displayed(
+            fresh, record["id"], "suggest.share", changed,
+            replace(caller, message_id="card-4"),
+        )
         fresh.act(record["id"], "suggest.ack", changed, replace(caller, message_id="card-4"))
     assert not any(call[0] == "publication_submit" for call in changed.calls)
 
@@ -1465,25 +1478,29 @@ def test_native_suggest_large_review_has_bounded_same_draft_continuation(tmp_pat
     record = controller.request_suggest(service, caller, "large-skill")
     controller.bind_message(record["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")
-    files = controller.act(record["id"], "suggest.files", service, clicked)
+    files = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
     first_page = controller.view(files)
     assert len(first_page.to_text()) <= 3500
     assert any(action.action == "suggest.files.next" for action in first_page.navigation_actions)
-    second_page = controller.act(record["id"], "suggest.files.next", service, clicked)
+    second_page = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
     while second_page["plan"]["native_page"] == 0:
-        second_page = controller.act(
-            record["id"], "suggest.files.next", service, clicked,
+        second_page = _act_displayed(
+            controller, record["id"], "suggest.files.next", service, clicked,
         )
     assert second_page["plan"]["native_page"] == 1
-    first_again = controller.act(record["id"], "suggest.files.prev", service, clicked)
+    first_again = _act_displayed(controller, record["id"], "suggest.files.prev", service, clicked)
     assert first_again["plan"]["native_page"] == 0
 
-    controller.act(record["id"], "suggest.share", service, clicked)
-    sharing = controller.act(record["id"], "suggest.ack", service, clicked)
+    _act_displayed(controller, record["id"], "suggest.back", service, clicked)
+    _act_displayed(controller, record["id"], "suggest.share", service, clicked)
+    sharing = _act_displayed(controller, record["id"], "suggest.ack", service, clicked)
     view = controller.view(sharing)
     assert not any(action.primary for action in view.actions)
     assert "hermes wisdom publication review local:draft-1" in view.notice
     assert "same prepared draft" in view.notice
+    with pytest.raises(WisdomValidationError, match="not offered"):
+        controller.act(record["id"], "suggest.confirm", service, clicked)
+    assert not any(call[0] == "publication_submit" for call in service.calls)
 
 
 def test_native_suggest_re_review_refreshes_exact_edited_draft(tmp_path):
@@ -1574,19 +1591,19 @@ def test_native_file_navigation_labels_parts_and_file_boundaries_truthfully(tmp_
     controller.bind_message(record["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")
 
-    current = controller.act(record["id"], "suggest.files", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
     assert [action.label for action in controller.view(current).navigation_actions] == [
         "Back", "Next part",
     ]
-    current = controller.act(record["id"], "suggest.files.next", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
     assert [action.label for action in controller.view(current).navigation_actions] == [
         "Previous part", "Back", "Next file",
     ]
-    current = controller.act(record["id"], "suggest.files.next", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
     assert [action.label for action in controller.view(current).navigation_actions] == [
         "Previous file", "Back",
     ]
-    current = controller.act(record["id"], "suggest.files.prev", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files.prev", service, clicked)
     assert [action.label for action in controller.view(current).navigation_actions] == [
         "Previous part", "Back", "Next file",
     ]
@@ -1612,13 +1629,13 @@ def test_native_file_preview_distinguishes_empty_opaque_and_sanitized_content(tm
     controller.bind_message(record["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")
 
-    current = controller.act(record["id"], "suggest.files", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
     assert "Empty UTF-8 file" in controller.view(current).to_text()
 
-    current = controller.act(record["id"], "suggest.files.next", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
     assert "Binary/opaque file" in controller.view(current).to_text()
 
-    current = controller.act(record["id"], "suggest.files.next", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files.next", service, clicked)
     rendered = controller.view(current).to_text()
     assert "Sanitized display" in rendered
     assert "control bytes were replaced" in rendered
@@ -1648,7 +1665,7 @@ def test_native_large_text_file_is_completely_reachable_without_terminal_handoff
     record = controller.request_suggest(service, caller, "large-skill")
     controller.bind_message(record["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")
-    current = controller.act(record["id"], "suggest.files", service, clicked)
+    current = _act_displayed(controller, record["id"], "suggest.files", service, clicked)
     observed = controller.view(current).to_text()
     assert "…" not in str(slack_blocks(controller.view(current), record["id"]))
 
@@ -1656,8 +1673,8 @@ def test_native_large_text_file_is_completely_reachable_without_terminal_handoff
         action.action == "suggest.files.next"
         for action in controller.view(current).navigation_actions
     ):
-        current = controller.act(
-            record["id"], "suggest.files.next", service, clicked,
+        current = _act_displayed(
+            controller, record["id"], "suggest.files.next", service, clicked,
         )
         observed += "\n" + controller.view(current).to_text()
         assert "…" not in str(slack_blocks(controller.view(current), record["id"]))

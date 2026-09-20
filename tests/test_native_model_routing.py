@@ -40,6 +40,10 @@ class Service:
             "version": 2, "receipt": "receipt-1", "allowed": True,
         }
 
+    def native_install_inspect(self, receipt):
+        assert receipt == "receipt-1"
+        return [{"path": "SKILL.md", "content": "offline fixture"}]
+
     def installed_setup_plan(self, skill_id, *, version, phase, index, command):
         return {
             "operation": "setup", "owner": dict(self.owner), "skill_id": skill_id,
@@ -167,6 +171,8 @@ def test_lifecycle_admission_reaches_registered_consent_and_real_native_review(t
         assert result["status"] == "queued"
         assert result["executed"] is False
         assert len(app.posts) == 1
+        assert "Exact package review" in app.posts[0]["text"]
+        assert "Agent explanation (not authorization)" in app.posts[0]["text"]
         assert not service.applied
         review_id = result["delivery"]["review_id"]
         assert native.reviews.load(review_id)["route"]["actor_id"] == "U_NATIVE"
@@ -175,6 +181,10 @@ def test_lifecycle_admission_reaches_registered_consent_and_real_native_review(t
         async def ack():
             return None
 
+        await app.handler(ack, {
+            "user": {"id": "U_NATIVE"}, "channel": {"id": "D1"},
+            "team": {"id": "W1"}, "message": {"ts": "card-1"},
+        }, {"value": callback_value(review_id, "review")})
         await app.handler(ack, {
             "user": {"id": "U_NATIVE", "name": "Shannon"},
             "channel": {"id": "D1"}, "team": {"id": "W1"},

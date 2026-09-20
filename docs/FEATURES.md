@@ -72,6 +72,14 @@ SQLite schema, migration, importer, compatibility store, or dual-write path.
 - Dashboard/full embedded parity, Agent/Gateway core changes, and a separate daemon
   are out of scope.
 
+## Reviewed native flow
+
+Private Slack/Telegram notices now open the existing actionable review flow. Sharing
+and install/update invitations separate read-only details from exact-content consent;
+complete review pages stay within provider limits without trimming approved objects.
+See [restoration scope and evidence](REVIEW_RESTORATION.md) for the per-item matrix,
+remaining limitations, and the explicit file-complexity tradeoff.
+
 ## Verification boundary
 
 Automated tests are offline and disposable. Live Gateway publication, installation,

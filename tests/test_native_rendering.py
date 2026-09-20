@@ -61,12 +61,12 @@ def test_effect_review_retains_exact_security_compatibility_and_file_facts():
     }
 
     text = project_view({
-        "state": "pending", "operation": "install", "plan": plan,
+        "state": "pending", "operation": "install", "plan": plan, "screen": "details",
     }).to_text()
 
     for exact_fact in (
         "receipt-exact", "sha256:content", "sha256:manifest",
-        "compatible_after_setup", "Accept partial: True", "ask",
+        'compatible_after_setup', '"accept_partial": true', "ask",
         "Review shell capability", "shell", "scripts/check.sh", "exec", "sha256:file",
     ):
         assert exact_fact in text
@@ -171,6 +171,7 @@ def test_native_approval_fallback_preserves_version_owner_expiry_and_permission(
             "operation": "install", "slug": "fixture", "version": 7,
             "receipt": "receipt-exact", "allowed": True, "files": [],
         },
+        "screen": "approval", "page": 0, "inspected_through": 0,
     }
 
     view = project_view(record)
@@ -178,7 +179,7 @@ def test_native_approval_fallback_preserves_version_owner_expiry_and_permission(
     slack = blocks(view, "record-1")
 
     for fact in (
-        "Version: 7", "Organization: org-1", "Owner account: owner-1",
+        '"version": 7', "Organization: org-1", "Owner account: owner-1",
         "Profile: work", "Review expires: 12345.5", "Approval permission: allowed",
     ):
         assert fact in fallback
@@ -224,6 +225,7 @@ def test_native_review_renders_persisted_owner_when_plan_owner_diverges():
                 "profile_name": "other",
             },
         },
+        "screen": "approval", "page": 0, "inspected_through": 0,
     })
 
     rendered = view.to_text()

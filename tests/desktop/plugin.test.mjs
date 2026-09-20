@@ -536,6 +536,31 @@ test('enrollment uses the exact disclosure and real Checkbox onCheckedChange sem
   await mounted.cleanup()
 })
 
+for (const [kind, diagnostic] of [
+  ['packaging', 'Local package contains a blocked entry'],
+  ['transport', 'The connection was interrupted']
+]) {
+  test(`${kind} preparation failure is accurate without a settings action or upload`, async () => {
+    const loaded = await loadPlugin((path, options, owner) => {
+      if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+      if (path === '/bootstrap') return bootstrap
+      if (path.startsWith('/catalog?')) return { skills: [] }
+      if (path === '/drafts/prepare') throw new Error(diagnostic)
+      throw new Error(`unexpected ${path}`)
+    })
+    const mounted = await renderPage(loaded)
+    await click(button(mounted, 'Contribute'))
+    await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+    await click(button(mounted, 'Prepare draft'))
+    const notification = loaded.calls.notify.at(-1)
+    assert.equal(notification?.message, 'Share preparation failed — nothing was uploaded or shared')
+    assert.equal(notification?.detail, diagnostic)
+    assert.equal(notification?.action, undefined)
+    assert.equal(loaded.calls.rest.some(([path]) => path.startsWith('/publication/')), false)
+    await mounted.cleanup()
+  })
+}
+
 test('publication inspects full bytes, renders checks/hashes/author copy, and reports moderated outcome accurately', async () => {
   const files = [
     { path: 'SKILL.md', content_utf8: '# Exact reviewed bytes' },

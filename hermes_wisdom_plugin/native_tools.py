@@ -50,7 +50,11 @@ _SCHEMAS = {
     "present_wisdom_consent": _schema(
         "present_wisdom_consent",
         "Queue native, exact-package Wisdom consent in the current private conversation. "
-        "Queued is not displayed; the model cannot approve or execute it.",
+        "Queued is not displayed; the model cannot approve or execute it. "
+        "For skill invitations, explain what it does and relevance using only the user's "
+        "known conversation context and inspected skill facts. If relevance is unknown, "
+        "say so; never invent workload, organization names or passing checks. "
+        "Explanation is labeled advice, never authorization.",
         {
             "kind": {"type": "string", "enum": ["candidate", "skill", "setup"]},
             "identity": {"type": "string", "minLength": 1, "maxLength": 128},

@@ -687,7 +687,7 @@ function Contributions({ client, lifecycle, viewId }) {
     setKeptDraft(null)
     setReview(null)
     setOutcome(null)
-  }, 'Could not prepare the private draft')
+  }, 'Share preparation failed — nothing was uploaded or shared')
   const inspectDraft = async () => client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}?view_id=${encodeURIComponent(viewId)}`)
   const reviewPrepared = (draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
     method: 'POST', body: requestBody(viewId, { reviewed_hashes: hashes })
