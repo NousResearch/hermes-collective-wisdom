@@ -104,7 +104,10 @@ class Service:
         if MODE != "share":
             raise AssertionError("cancel and JSON paths must not submit publication")
         record("submit:" + receipt)
-        return {"publication_state": "pending_moderation", "operation_id": "op-1"}
+        return {
+            "state": "done", "publication_state": "pending_moderation",
+            "operation_id": "op-1",
+        }
     def binding(self):
         return {"organization_id": "team-pty", "account_id": "member-pty"}
 

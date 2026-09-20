@@ -1245,6 +1245,12 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 "detail": detail, "retry_safe": False}
 
     def _done(self, operation: dict[str, Any]) -> dict[str, Any]:
+        if operation.get("publication_state") == "rejected":
+            return {
+                "operation_id": operation["id"], "state": "rejected",
+                "phase": "rejected", "detail": operation["rejection_detail"],
+                "code": operation["rejection_code"], "retry_safe": False,
+            }
         return {
             "operation_id": operation["id"], "state": "done",
             "publication_state": operation.get("publication_state"),
@@ -1257,6 +1263,19 @@ class PublicationService:  # pylint: disable=too-many-public-methods
 
     def _finish(self, operation_id: str, state: str) -> dict[str, Any]:
         return self._done(self.state.finish_publication(operation_id, state))
+
+    def _reject_submission(
+        self, operation_id: str, exc: WisdomValidationError,
+    ) -> dict[str, Any]:
+        code = str(exc.code or "")
+        if re.fullmatch(r"[a-z0-9_]{1,128}", code) is None:
+            code = "validation_rejected"
+        detail = "Gateway rejected the publication draft before creation (HTTP 422)."
+        operation = self.state.update_publication(
+            operation_id, status="done", phase="rejected", publication_state="rejected",
+            rejection_code=code, rejection_detail=detail,
+        )
+        return self._done(operation)
 
     def _record_remote(self, operation_id: str, remote: Any) -> dict[str, Any]:
         operation = self._operation(operation_id)
@@ -1304,12 +1323,25 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         _current(may_apply)
         try:
             remote = self.client.submit_draft(**operation["request"])
+        except WisdomValidationError as exc:
+            if exc.status == 422:
+                return operation, self._reject_submission(operation_id, exc)
+            return operation, self._uncertain(
+                operation_id, "draft_submission_unknown",
+                "Draft submission outcome is unknown; exact reconciliation is required.",
+            )
         except Exception:  # acknowledgement may follow a committed effect
             return operation, self._uncertain(
                 operation_id, "draft_submission_unknown",
                 "Draft submission outcome is unknown; exact reconciliation is required.",
             )
-        return self._record_remote(operation_id, remote), None
+        try:
+            return self._record_remote(operation_id, remote), None
+        except WisdomValidationError:
+            return operation, self._uncertain(
+                operation_id, "draft_submission_unknown",
+                "Draft submission acknowledgement was invalid; exact reconciliation is required.",
+            )
 
     def _submission(
         self, operation: dict[str, Any], may_apply: Callable[[], bool] | None,

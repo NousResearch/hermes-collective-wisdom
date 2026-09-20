@@ -90,6 +90,10 @@ def _parser():
 class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
     def __init__(self):
         self.calls = []
+        self.publication_result: dict[str, object] = {
+            "operation_id": "op-1", "state": "done",
+            "publication_state": "published",
+        }
         self.rows = [
             {
                 "id": f"skill-{number}",
@@ -234,7 +238,7 @@ class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-att
 
     def publication_submit(self, receipt):
         self.calls.append(("publication_submit", receipt))
-        return {"operation_id": "op-1", "publication_state": "published"}
+        return dict(self.publication_result)
 
     def publication_status(self, operation_id):
         self.calls.append(("publication_status", operation_id))
@@ -454,6 +458,71 @@ def test_interactive_suggest_warning_requires_exact_ack_and_confirmation(
     assert "SECRET_RAW_MATCH" not in output
     assert ("publication_review", "local:draft-1", True) in service.calls
     assert ("publication_submit", "wpub_review") in service.calls
+
+
+def test_interactive_suggest_uncertain_submission_is_nonzero_with_safe_recovery(
+    capsys, monkeypatch
+):
+    service = _Service()
+    service.publication_result = {
+        "operation_id": "op-uncertain",
+        "state": "uncertain",
+        "phase": "draft_submission_unknown",
+        "detail": "No unique exact owner draft is visible; nothing was retried.",
+        "retry_safe": False,
+    }
+    answers = iter(("3", "yes", "yes"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 8
+
+    output = capsys.readouterr().out
+    assert "State: uncertain" in output
+    assert "Phase: draft_submission_unknown" in output
+    assert "No unique exact owner draft is visible; nothing was retried." in output
+    assert "hermes wisdom publication status op-uncertain" in output
+    assert "hermes wisdom publication reopen op-uncertain" in output
+    outcome = output.split("Publication result", 1)[1]
+    assert "Files (0)" not in outcome
+    assert "Nothing has been uploaded" not in outcome
+
+
+def test_interactive_suggest_rejected_submission_uses_validation_exit(
+    capsys, monkeypatch
+):
+    service = _Service()
+    service.publication_result = {
+        "operation_id": "op-rejected", "state": "rejected", "phase": "rejected",
+        "detail": "Gateway rejected the publication draft before creation (HTTP 422).",
+        "code": "instruction_only_violation", "retry_safe": False,
+    }
+    answers = iter(("3", "yes", "yes"))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 6
+    output = capsys.readouterr().out
+    assert "State: rejected" in output
+    assert "Code: instruction_only_violation" in output
+    assert "Edit and re-review the local draft" in output
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(("state", "expected_exit"), [("rejected", 6), ("uncertain", 8)])
+def test_publication_submit_reports_unsuccessful_exit(capsys, as_json, state, expected_exit):
+    """Explicit receipt submission must not disguise failed effects as success."""
+    service = _Service()
+    service.publication_result = {"operation_id": "op-test", "state": state}
+    argv = ["publication", "submit", "wpub_review"] + (["--json"] if as_json else [])
+
+    assert run_cli(_parser().parse_args(argv), service) == expected_exit
+    output = capsys.readouterr().out
+    if as_json:
+        assert json.loads(output)["state"] == state
+    else:
+        assert f"State: {state}" in output
+    assert service.calls == [("publication_submit", "wpub_review")]
 
 
 def test_interactive_suggest_cancel_has_no_publication_effect(capsys, monkeypatch):

@@ -17,7 +17,7 @@ import stat
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .errors import (
     WisdomAuthError,
@@ -334,23 +334,16 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 args.skill, allow_model_review=bool(args.allow_model_review)
             )
             if not as_json:
-                _suggest_human(result, service)
-                return 0
+                publication_result = _suggest_human(result, service)
+                return _publication_result_exit(publication_result)
         elif command == "prepared":
             result = _prepared_cli(args, service)
             if args.prepared_action == "edit":
                 print("Draft saved locally.\n" + _human_render("prepared", result))
                 return 0
-        elif command == "install":
-            result = _install_cli(args, service)
-            if result is None:
-                return 7
-        elif command == "update":
-            result = _update_cli(args, service)
-            if result is None:
-                return 7
-        elif command == "uninstall":
-            result = _uninstall_cli(args, service)
+        elif command in {"install", "update", "uninstall"}:
+            action = {"install": _install_cli, "update": _update_cli, "uninstall": _uninstall_cli}
+            result = action[command](args, service)
             if result is None:
                 return 7
         elif command == "help":
@@ -363,6 +356,8 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             getattr(args, "_wisdom_parser").print_help()
             return 2
         _emit(result, as_json=as_json, command=command)
+        if (command, getattr(args, "publication_action", None)) == ("publication", "submit"):
+            return _publication_result_exit(cast(dict[str, Any], result))
         return 0
     except WisdomError as exc:
         _emit(
@@ -801,7 +796,7 @@ def _suggest_summary(prepared: object) -> str:
 def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
     # pylint: disable=too-many-return-statements,too-many-statements
     prepared: object, service: object
-) -> None:
+) -> dict[str, Any] | None:
     """Run a local review, warning acknowledgement, then distinct final consent."""
 
     data = prepared if isinstance(prepared, dict) else {}
@@ -815,7 +810,7 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
             "\nResume local review: hermes wisdom prepared review " + safe_id
             + "\nResume sharing review: hermes wisdom publication review " + safe_id
         )
-        return
+        return None
     while True:
         print(
             "\n1. Review files and warnings\n"
@@ -838,7 +833,7 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
                 "\nDraft kept. Resume with: hermes wisdom prepared review "
                 + shlex.quote(_without_controls(draft_id))
             )
-            return
+            return None
         if choice != "3":
             print("Choose 1, 2, 3, or 4.")
             continue
@@ -857,7 +852,7 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
                 "Draft kept: scanner warning details are unavailable; "
                 "acknowledgement is blocked."
             )
-            return
+            return None
         accepted = False
         if warnings:
             answer = input(
@@ -865,7 +860,7 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
             )
             if answer.strip().casefold() not in {"y", "yes"}:
                 print("Draft kept; warnings were not accepted.")
-                return
+                return None
             accepted = True
         review = service.publication_review(draft_id, accept_warnings=accepted)
         if not isinstance(review, dict):
@@ -876,11 +871,11 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
             if _has_reviewable_warnings(review):
                 if not _safe_scan_details(review.get("local_scan")):
                     print("Draft kept: updated warning details are unavailable.")
-                    return
+                    return None
                 answer = input("Acknowledge the updated scanner warnings? [y/N] ")
                 if answer.strip().casefold() not in {"y", "yes"}:
                     print("Draft kept; updated warnings were not accepted.")
-                    return
+                    return None
         owner = service.binding() if callable(getattr(service, "binding", None)) else {}
         exact_review = {**review, "owner": owner if isinstance(owner, dict) else {}}
         print("\n" + _render_action_review("publication", exact_review))
@@ -888,13 +883,27 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
             "y", "yes",
         }:
             print("Draft kept; final sharing consent was not given.")
-            return
+            return None
         receipt = review.get("receipt")
         if not isinstance(receipt, str) or not receipt:
             raise PackagePolicyError("publication review receipt is unavailable")
         result = service.publication_submit(receipt)
         print(_human_render("publication", result))
-        return
+        return result
+
+
+def _publication_result_exit(result: dict[str, Any] | None) -> int:
+    """Map an optional interactive publication handoff onto CLI exit semantics."""
+
+    if result is None:
+        return 0
+    if result.get("state") == "done" and result.get("publication_state") in {
+        "published", "pending_moderation",
+    }:
+        return 0
+    if result.get("state") == "rejected":
+        return WisdomValidationError.exit_code
+    return WisdomError.exit_code
 
 
 def _review_draft_files(data: dict[str, Any]) -> None:
@@ -953,9 +962,40 @@ def _human_render(  # pylint: disable=too-many-return-statements
             f"{shlex.quote(_without_controls(draft))} --json",
         ))
         return "\n".join(lines)
+    if command == "publication" and isinstance(data.get("operation_id"), str) and not data.get(
+        "receipt"
+    ):
+        return _render_publication_outcome(data)
     if command in {"publication", "install", "update", "installed-setup"}:
         return _render_action_review(command, value)
     return _render_read_command(command, value)
+
+
+def _render_publication_outcome(data: dict[str, Any]) -> str:
+    """Render operation state without inventing a package or upload outcome."""
+
+    operation_id = _text(data["operation_id"])
+    safe_operation = shlex.quote(_without_controls(operation_id))
+    state = _text(data.get("state") or "unknown")
+    lines = ["Publication result", f"Operation: {operation_id}", f"State: {state}"]
+    for key, label in (
+        ("phase", "Phase"), ("publication_state", "Publication state"),
+        ("remote_draft_id", "Remote draft"), ("code", "Code"), ("detail", "Detail"),
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            lines.append(f"{label}: {_text(value, limit=1024)}")
+    if state.casefold() == "uncertain":
+        lines.extend((
+            "Do not submit again; reconcile the recorded operation instead.",
+            f"Status: hermes wisdom publication status {safe_operation}",
+            f"Reopen: hermes wisdom publication reopen {safe_operation}",
+        ))
+    elif state.casefold() == "rejected":
+        lines.append(
+            "Edit and re-review the local draft before creating a fresh submission."
+        )
+    return "\n".join(lines)
 
 
 def _emit(
