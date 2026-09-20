@@ -50,6 +50,39 @@ def test_local_guard_failure_is_not_a_pass(
     assert result["local_status"] == local_status
 
 
+@pytest.mark.parametrize("opaque", [False, True])
+@pytest.mark.parametrize("in_description", [False, True])
+def test_synthetic_credentials_preserve_host_warning_review(opaque, in_description) -> None:
+    """Dummy examples clear credential rows, never the independent host guard."""
+    key = "sk-" + "ant-api03-testkey1234"
+    content = f'api_key="{key}"'
+    body = "Safe" if in_description else content
+    file = {"path": "example", **(
+        {"content_base64": base64.b64encode(body.encode()).decode()}
+        if opaque else {"content_utf8": body}
+    )}
+    result = prepared_security_check(
+        [file], content if in_description else "Safe",
+        {"guard": {"available": True, "allowed": False, "findings": [{"kind": "review"}]}},
+    )
+    rows = {row["key"]: row for row in result["checks"]}
+    assert all(rows[name]["status"] == "pass" for name in (
+        "private_keys", "live_credentials", "secret_assignments"
+    ))
+    assert result["local_status"] == "warning_required"
+    assert result["warning_acceptance_required"] is True
+    assert result["upload_allowed"] is False
+    assert rows["skills_guard"]["finding_count"] == 1
+    assert rows["organization_policy"]["status"] == "pending"
+
+
+def test_synthetic_classification_does_not_relax_display_redaction() -> None:
+    """The broad redactor stays conservative even for recognized dummy values."""
+    key = "sk-" + "ant-api03-testkey1234"
+    result = safe_scan_findings({"findings": [{"description": key}]})
+    assert result[0]["description"] == "[REDACTED]"
+
+
 def test_missing_host_guard_is_unavailable_not_pass() -> None:
     """Omitting the host-owned guard result fails closed."""
     result = prepared_security_check([], "Safe", {})

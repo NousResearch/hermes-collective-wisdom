@@ -11,9 +11,39 @@ import time
 
 import pytest
 
-_run = runpy.run_path(
+_launcher = runpy.run_path(
     str(Path(__file__).parents[1] / "scripts" / "run_receipt_mutations.py")
-)["_run"]
+)
+_run = _launcher["_run"]
+
+
+def test_sandbox_runs_real_receipt_baseline_before_mutation(tmp_path, monkeypatch):
+    """The selected tests and their local support must work outside the checkout."""
+    artifact = tmp_path / "campaign"
+    main = _launcher["main"]
+    globals_ = main.__globals__
+    real_run = globals_["subprocess"].run
+
+    def version_or_run(command, **kwargs):
+        if command[1:3] == ["-c", "import importlib.metadata as m; print(m.version('mutmut'))"]:
+            return globals_["subprocess"].CompletedProcess(command, 0, "3.8.0\n", "")
+        return real_run(command, **kwargs)
+
+    def run_until_mutation(command, **kwargs):
+        if command[1:4] == ["-m", "mutmut", "run"]:
+            raise RuntimeError("reached mutation after real baseline")
+        return _run(command, **kwargs)
+
+    monkeypatch.setattr(globals_["subprocess"], "run", version_or_run)
+    monkeypatch.setitem(globals_, "_run", run_until_mutation)
+    monkeypatch.setattr(sys, "argv", [
+        "run_receipt_mutations.py", "--tool-python", sys.executable,
+        "--artifact-dir", str(artifact),
+    ])
+    with pytest.raises(RuntimeError, match="reached mutation after real baseline"):
+        main()
+    assert "passed" in (artifact / "baseline.txt").read_text(encoding="utf-8")
+    assert str(artifact) in (artifact / "import-verification.txt").read_text(encoding="utf-8")
 
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process groups required")

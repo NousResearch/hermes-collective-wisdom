@@ -98,8 +98,8 @@ class RecordingPublicationClient:
         return {"state": "declined"}
 
 
-def publication(tmp_path: Path, *, mode: str = "open"):
-    prepared_reviewer, _source, binding = reviewer(tmp_path)
+def publication(tmp_path: Path, *, mode: str = "open", scan_allowed: bool = True):
+    prepared_reviewer, _source, binding = reviewer(tmp_path, allowed=scan_allowed)
     prepared = prepared_reviewer.prepare("reviewed-skill")
     client = RecordingPublicationClient(binding, mode=mode)
     service = PublicationService(
@@ -125,6 +125,90 @@ def test_one_confirmation_uses_server_policy_and_exact_review(tmp_path: Path, mo
     assert service.status(result["operation_id"])["state"] == "done"
 
 
+def test_replayed_publication_receipt_cannot_duplicate_remote_effects(tmp_path: Path):
+    """P06/X05: a consumed confirmation is not a second publication authority."""
+    service, prepared, client, _ = publication(tmp_path)
+    receipt = service.review(prepared["draft_id"])["receipt"]
+    first = service.submit(receipt)
+    calls_after_first = client.state.calls.copy()
+
+    with pytest.raises(WisdomConflict, match="missing or already used"):
+        service.submit(receipt)
+
+    assert service.status(first["operation_id"])["state"] == "done"
+    assert client.state.calls == calls_after_first
+
+
+def test_concurrent_receipt_consumption_returns_bounded_conflict(tmp_path: Path):
+    """P06/X05: an intervening exact submit cannot turn stale authority into a traceback."""
+    service, prepared, client, binding = publication(tmp_path)
+    receipt = service.review(prepared["draft_id"])["receipt"]
+    racer = PublicationService(
+        service.state, service.reviewer, client, lambda: dict(binding)
+    )
+    authorize = service._authorized  # pylint: disable=protected-access
+    winner = {}
+
+    def consume_after_authorization(value, may_apply):
+        authorized = authorize(value, may_apply)
+        winner["result"] = racer.submit(receipt)
+        return authorized
+
+    service._authorized = consume_after_authorization  # type: ignore[method-assign]  # pylint: disable=protected-access
+
+    with pytest.raises(WisdomConflict, match="missing or already used"):
+        service.submit(receipt)
+
+    assert service.status(winner["result"]["operation_id"])["state"] == "done"
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
+
+
+def test_synthetic_doc_credentials_reach_exact_publication_after_warning_review(tmp_path: Path):
+    prepared_reviewer, source, binding = reviewer(tmp_path, allowed=False)
+    key = "sk-" + "ant-api03-testkey1234"
+    source_file = source / "SKILL.md"
+    original = source_file.read_text() + f'\nExample: api_key="{key}"\n'
+    source_file.write_text(original)
+    prepared = prepared_reviewer.prepare("reviewed-skill")
+    client = RecordingPublicationClient(binding)
+    service = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, client, lambda: dict(binding)
+    )
+
+    assert prepared["security_check"]["local_status"] == "warning_required"
+    with pytest.raises(WisdomConflict, match="explicit acknowledgement"):
+        service.review(prepared["draft_id"])
+    review = service.review(prepared["draft_id"], accept_warnings=True)
+    assert review["warning_acceptance"]["content_hash"] == prepared["hashes"]["content"]
+    assert review["local_scan"] == prepared["local_scan"]
+    assert not client.state.calls
+    assert key in next(f["content_utf8"] for f in review["files"] if f["path"] == "SKILL.md")
+    assert source_file.read_text() == original
+
+    result = service.submit(review["receipt"])
+    assert result["publication_state"] == "published"
+    assert result["submitted_request"]["content_hash"] == prepared["hashes"]["content"]
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
+
+
+@pytest.mark.parametrize("label", ["api_key", "password"])
+def test_warning_acceptance_cannot_bypass_real_or_user_chosen_credentials(tmp_path: Path, label):
+    prepared_reviewer, source, binding = reviewer(tmp_path, allowed=False)
+    key = "sk-" + ("a" * 32 if label == "api_key" else "ant-api03-testkey1234")
+    source_file = source / "SKILL.md"
+    source_file.write_text(source_file.read_text() + f'\n{label}="{key}"\n')
+    prepared = prepared_reviewer.prepare("reviewed-skill")
+    client = RecordingPublicationClient(binding)
+    service = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, client, lambda: dict(binding)
+    )
+
+    assert prepared["security_check"]["local_status"] == "blocked"
+    with pytest.raises(WisdomConflict, match="must be removed"):
+        service.review(prepared["draft_id"], accept_warnings=True)
+    assert not client.state.calls
+
+
 def test_private_draft_requires_fresh_confirmation(tmp_path: Path):
     service, prepared, client, _ = publication(tmp_path, mode="moderated")
 
@@ -135,6 +219,21 @@ def test_private_draft_requires_fresh_confirmation(tmp_path: Path):
     final = service.submit(service.review(staged["operation_id"])["receipt"])
     assert final["publication_state"] == "pending_moderation"
     assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
+
+
+def test_private_draft_preserves_exact_warning_acceptance_for_final_review(tmp_path: Path):
+    service, prepared, _client, _ = publication(
+        tmp_path, mode="moderated", scan_allowed=False
+    )
+    initial = service.review(prepared["draft_id"], accept_warnings=True)
+
+    staged = service.submit_private_draft(initial["receipt"])
+    operation = service.state.publication(staged["operation_id"])
+    assert operation is not None
+    assert operation["warning_acceptance"] == initial["warning_acceptance"]
+
+    final = service.review(staged["operation_id"])
+    assert final["warning_acceptance"] == initial["warning_acceptance"]
 
 
 def test_submit_ack_loss_reconciles_exact_remote_without_duplicate(tmp_path: Path):

@@ -27,11 +27,13 @@ def _trim(value: object, limit: int) -> str:
 
 
 def _action_blocks(
-    actions: Iterable[Any], record_id: str, *, row: str
+    actions: Iterable[Any], record_id: str, *, row: str, allow_primary: bool = True,
 ) -> list[dict[str, Any]]:
     elements = []
     for index, action in enumerate(actions):
         if not action.action and not action.url:
+            continue
+        if action.primary and not allow_primary:
             continue
         button: dict[str, Any] = {
             "type": "button",
@@ -55,34 +57,57 @@ def _action_blocks(
             for offset in range(0, len(elements), 5)]
 
 
+def _section_is_lossless(value: object) -> bool:
+    escaped = (
+        str(value or "").replace("&", "&amp;")
+        .replace("<", "&lt;").replace(">", "&gt;").strip()
+    )
+    return slack_section_text(value) == escaped
+
+
 def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
     """Transplanted presentation-neutral WisdomView Block Kit shape."""
+    item_bodies = []
+    for item in view.items:
+        body = item.preamble + "\n\n" if item.preamble else ""
+        body += f"*{item.title}*"
+        if item.detail:
+            body += "\n" + item.detail
+        item_bodies.append(body)
+    approval_is_lossless = (
+        len(view.items) <= _MAX_ITEMS
+        and (not view.summary or _section_is_lossless(view.summary))
+        and all(_section_is_lossless(body) for body in item_bodies)
+        and (not view.notice or _section_is_lossless(f"_{view.notice}_"))
+    )
     rendered: list[dict[str, Any]] = [{
         "type": "header",
         "text": {"type": "plain_text", "text": _trim(view.title, 150), "emoji": True},
     }]
     rendered.extend(
-        _action_blocks(view.navigation_actions, record_id, row="navigation")
+        _action_blocks(
+            view.navigation_actions, record_id, row="navigation",
+            allow_primary=approval_is_lossless,
+        )
     )
     if view.summary:
         rendered.append({"type": "section", "text": {
             "type": "mrkdwn", "text": slack_section_text(view.summary),
         }})
-    for item_index, item in enumerate(view.items[:_MAX_ITEMS]):
-        body = ""
-        if item.preamble:
-            body = item.preamble + "\n\n"
-        body += f"*{item.title}*"
-        if item.detail:
-            body += "\n" + item.detail
+    for item_index, (item, body) in enumerate(zip(view.items[:_MAX_ITEMS], item_bodies)):
         rendered.append({"type": "section", "text": {
             "type": "mrkdwn", "text": slack_section_text(body),
         }})
-        rendered.extend(_action_blocks(item.actions, record_id, row=f"item_{item_index}"))
+        rendered.extend(_action_blocks(
+            item.actions, record_id, row=f"item_{item_index}",
+            allow_primary=approval_is_lossless,
+        ))
     if view.notice:
         rendered.append({"type": "context", "elements": [{"type": "mrkdwn",
             "text": slack_section_text(f"_{view.notice}_")}]})
-    rendered.extend(_action_blocks(view.actions, record_id, row="global"))
+    rendered.extend(_action_blocks(
+        view.actions, record_id, row="global", allow_primary=approval_is_lossless,
+    ))
     return rendered[:50]
 
 

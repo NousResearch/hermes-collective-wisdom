@@ -2,6 +2,7 @@
 # pylint: disable=missing-function-docstring
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from installed_test_support import JsonState
@@ -10,6 +11,7 @@ from hermes_wisdom_plugin.contract import author_description_hash
 from hermes_wisdom_plugin.local_state import QualificationState
 from hermes_wisdom_plugin.package import source_fingerprint
 from hermes_wisdom_plugin.publisher_evidence import publication_description
+from hermes_wisdom_plugin.runtime import InvocationService
 
 
 def record(store, skill, day, count=1, zone="UTC"):
@@ -74,3 +76,46 @@ def test_evidence_is_frozen_and_hash_bound_across_prepare_retry(tmp_path, monkey
     retried = value.prepare("reviewed-skill")
     assert retried["drafted_description"] == description
     assert retried["hashes"] == first["hashes"]
+
+
+def test_q11_notifications_and_inbox_read_current_candidate_without_external_effects(
+    tmp_path, monkeypatch,
+):
+    host = JsonState(tmp_path)
+    store = QualificationState(host, tmp_path)
+    binding = {
+        "profile_name": "fixture", "profile_home": str(tmp_path),
+        "account_id": "user-1", "organization_id": "org-1",
+        "base_url": "https://gateway.invalid", "installation_id": "install-1",
+    }
+    store.bind_owner(binding)
+    source = tmp_path / "skills" / "one"
+    source.mkdir(parents=True)
+    skill = store.register_skill(source, content_hash="sha256:current", source_kind="local")
+    event = store.emit_candidate(
+        skill_id=skill, content_hash="sha256:current", qualification="high_usage",
+        payload={"skill_name": "one", "local_reasons": {"consecutive_business_days": 7}},
+    )
+    service = InvocationService(tmp_path, ("fixture", tmp_path), state=host)
+    service._qualification = store  # pylint: disable=protected-access
+    service._installation_owner = lambda: binding  # pylint: disable=protected-access
+    service.check_owner = lambda: None
+    service.notification_mode = lambda: "agent"
+    service.installed.installations = lambda _owner: []
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("external effect")
+    service.client = SimpleNamespace(
+        feed=forbidden, upload=forbidden, publish=forbidden, complete_structured=forbidden,
+    )
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.native_review.NativeReviewController.pending",
+        lambda _self, _owner, invocation=None, limit=100: [],
+    )
+
+    notifications = service.notifications(mark_seen=True)
+    inbox = service.inbox()
+    assert notifications["more"] is False
+    assert [row["event_id"] for row in notifications["events"]] == [event]
+    assert [row["event_id"] for row in inbox["assessments"]] == [event]
+    assert store.local_event(event)["state"] == "unread"
+    assert service.client.feed is forbidden

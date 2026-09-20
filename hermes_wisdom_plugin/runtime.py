@@ -270,6 +270,9 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             }
             for row in self.local_state.candidates()
             if row.get("state") == "unread"
+            and (skill := self.local_state.local_skill(str(row.get("skill_id") or "")))
+            and skill.get("deleted_at") is None
+            and skill.get("current_hash") == row.get("content_hash")
         ]
 
     def notice_preferences(self, references: list[dict[str, Any]]) -> dict[str, Any]:
@@ -527,7 +530,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise WisdomError("Collective Wisdom candidate changed")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         result = {
-            "kind": "candidate", "event_id": str(event["id"]),
+            "kind": "candidate", "event_id": str(event["event_id"]),
             "content_hash": str(event["content_hash"]),
             "facts": {
                 "name": str(payload.get("skill_name") or event.get("skill_id") or "Local skill"),
@@ -1268,10 +1271,13 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         command, args = parsed
         if invocation is not None:
             target = " ".join(args)
+            if command == "suggest" and len(args) != 1:
+                return "Usage: /wisdom suggest <local-skill>"
             effect_review = {
                 "install": self.native.begin_install_modes,
                 "update": self.native.begin_update,
                 "publish": self.native.begin_publication,
+                "suggest": self.native.begin_suggest,
             }.get(command)
             if effect_review is not None:
                 return effect_review(invocation, target)

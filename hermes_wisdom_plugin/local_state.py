@@ -142,15 +142,18 @@ class QualificationState:
         ]
         return sum(counts), len(counts)
 
-    def record_refinement(
+    def record_refinement(  # pylint: disable=too-many-arguments
         self, skill_id: str, *, from_hash: str, to_hash: str,
-        classification: str, structural: dict[str, Any],
+        classification: str, structural: dict[str, Any], at: datetime | None = None,
     ) -> None:
+        observed = at or datetime.now(timezone.utc)
+        if observed.tzinfo is None:
+            raise ValueError("refinement timestamp must include a timezone")
         with self.change() as value:
             value["refinements"].append({
                 "skill_id": skill_id, "from_hash": from_hash, "to_hash": to_hash,
                 "classification": classification, "structural": copy.deepcopy(structural),
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": observed.astimezone(timezone.utc).isoformat(),
             })
 
     def meaningful_refinement_count(self, skill_id: str, *, since: str) -> int:
@@ -187,6 +190,7 @@ class QualificationState:
             to_hash=str(kwargs["to_hash"]),
             classification=str(kwargs["classification"]),
             structural=dict(kwargs["structural"]),
+            at=kwargs.get("observed_at"),
         )
         if kwargs.get("due_at"):
             self.schedule_stability(

@@ -379,6 +379,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
     def begin_publication(self, invocation: NativeInvocation, draft_id: str):
         return self._begin(invocation, lambda service: self.reviews.request_publication(service, invocation, draft_id))
 
+    def begin_suggest(self, invocation: NativeInvocation, skill_name: str):
+        return self._begin(
+            invocation,
+            lambda service: self.reviews.request_suggest(service, invocation, skill_name),
+        )
+
     def begin_catalog(self, invocation: NativeInvocation, command: str, target: str = ""):
         return self._begin(invocation, lambda service: self.reviews.request_catalog(service, invocation, command, target))
 

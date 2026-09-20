@@ -1061,6 +1061,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "draft_id": operation["local_draft_id"], "operation_id": operation["id"],
             "hashes": copy.deepcopy(operation["hashes"]), "receipt": receipt,
             "publication_mode": policy["publication_mode"], "policy_version": policy["version"],
+            "warning_acceptance": copy.deepcopy(operation.get("warning_acceptance")),
             "network_submission": False,
         }
 
@@ -1125,6 +1126,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         self._security(
             prepared, accept_warnings=False, expected=review.get("warning_acceptance")
         )
+        prepared["warning_acceptance"] = copy.deepcopy(review.get("warning_acceptance"))
         if prepared["hashes"] != review["hashes"] or source_fingerprint(
             Path(draft["source_path"])
         ) != draft["source_hash"]:
@@ -1177,7 +1179,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         candidate_assessment_id: str | None = None,
     ) -> dict[str, Any]:
         draft, prepared, owner, policy = self._authorized(receipt, may_apply)
-        existing_id = self.state.publication_review(receipt).get("operation_id")  # type: ignore[union-attr]
+        current_review = self.state.publication_review(receipt)
+        if current_review is None:
+            raise WisdomConflict("Publication review receipt is missing or already used")
+        existing_id = current_review.get("operation_id")
         lock_key = "publication:" + draft["skill_id"]
         with managed_operation_guard(self.state.root, lock_key):
             if existing_id:

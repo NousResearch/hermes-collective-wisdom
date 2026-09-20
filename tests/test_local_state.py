@@ -82,3 +82,85 @@ def test_seven_consecutive_business_day_loads_qualify_without_model(tmp_path: Pa
     candidates = local.candidates()
     assert len(candidates) == 1
     assert candidates[0]["qualification"] == "high_usage"
+
+
+def test_usage_retention_is_owner_timezone_scoped_and_file_backed(tmp_path: Path):
+    host = JsonState(tmp_path)
+    store = QualificationState(host, tmp_path)
+    store.bind_owner(owner(tmp_path))
+    skill = store.register_skill(
+        tmp_path / "skills" / "one", content_hash="one", source_kind="local",
+    )
+    store.record_usage_day(skill, "2026-08-01", timezone_name="UTC", retain_after="2026-08-01")
+    store.record_usage_day(skill, "2026-08-01", timezone_name="UTC", retain_after="2026-08-01")
+    store.record_usage_day(
+        skill, "2026-08-02", timezone_name="Australia/Brisbane", retain_after="2026-08-01",
+    )
+    store.record_usage_day(skill, "2026-09-04", timezone_name="UTC", retain_after="2026-08-02")
+
+    reopened = QualificationState(JsonState(tmp_path), tmp_path)
+    assert reopened.usage_summary(
+        skill, start="2026-08-01", end="2026-09-04", timezone_name="UTC",
+    ) == (1, 1)
+    assert reopened.usage_days(
+        skill, since="2026-08-01", timezone_name="Australia/Brisbane",
+    ) == ["2026-08-02"]
+
+
+def test_duplicate_candidate_keeps_first_evidence_and_event_identity(tmp_path: Path):
+    store = QualificationState(JsonState(tmp_path), tmp_path)
+    store.bind_owner(owner(tmp_path))
+    skill = store.register_skill(
+        tmp_path / "skills" / "one", content_hash="one", source_kind="local",
+    )
+    first = store.emit_candidate(
+        skill_id=skill, content_hash="one", qualification="high_usage",
+        payload={"skill_name": "one", "local_reasons": {"days": 7}},
+        session_id="session-1", task_id="task-1",
+    )
+    duplicate = store.emit_candidate(
+        skill_id=skill, content_hash="one", qualification="refinement",
+        payload={"skill_name": "forged"}, session_id="session-2", task_id="task-2",
+    )
+    assert duplicate == first
+    assert store.candidates() == [{
+        "event_id": first,
+        "kind": "wisdom.candidate",
+        "organization_id": "org-1",
+        "local_skill_id": skill,
+        "skill_id": skill,
+        "content_hash": "one",
+        "qualification": "high_usage",
+        "payload": {"skill_name": "one", "local_reasons": {"days": 7}},
+        "session_id": "session-1",
+        "task_id": "task-1",
+        "state": "unread",
+    }]
+
+
+def test_incomplete_owner_is_rejected_without_creating_state(tmp_path: Path):
+    host = JsonState(tmp_path)
+    store = QualificationState(host, tmp_path)
+    for incomplete in ({}, {"account_id": "user"}, {"organization_id": "org"}):
+        try:
+            store.bind_owner(incomplete)
+        except ValueError as exc:
+            assert "incomplete" in str(exc)
+        else:
+            raise AssertionError("incomplete owner was accepted")
+    assert not host.path.exists()
+
+
+def test_refinement_uses_injected_observation_clock(tmp_path: Path):
+    store = QualificationState(JsonState(tmp_path), tmp_path)
+    observed = datetime(2026, 8, 3, 9, tzinfo=timezone.utc)
+    store.record_refinement(
+        "skill", from_hash="before", to_hash="after", classification="meaningful",
+        structural={"added": ["references/check.md"]}, at=observed,
+    )
+    assert store.meaningful_refinement_count(
+        "skill", since=observed.isoformat(),
+    ) == 1
+    assert store.meaningful_refinement_count(
+        "skill", since=(observed + timedelta(microseconds=1)).isoformat(),
+    ) == 0

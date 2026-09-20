@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
+from review_test_support import prepared_inspection
 
 from hermes_wisdom_plugin.desktop_api import DesktopWorkflowApi, build_router
 from hermes_wisdom_plugin.errors import (
@@ -57,8 +58,8 @@ class Service:  # pylint: disable=too-many-public-methods
     def native_owner(self):
         return {**self.binding(), "installation_id": "installation-1"}
 
-    def install_plan(self, reference, *, update_mode=None):
-        self.calls.append(("install_plan", reference, update_mode))
+    def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
+        self.calls.append(("install_plan", reference, update_mode, accept_warnings))
         return {
             "operation": "install",
             "receipt": "wip_" + "a" * 32,
@@ -68,6 +69,7 @@ class Service:  # pylint: disable=too-many-public-methods
             "content_hash": "sha256:" + "1" * 64,
             "files": [{"path": "SKILL.md", "hash": "sha256:" + "2" * 64}],
             "allowed": True,
+            "warning_acceptance": {"accepted": accept_warnings},
         }
 
     def install_apply(self, receipt, *, accept_partial=False, may_apply=None):
@@ -94,6 +96,34 @@ class Service:  # pylint: disable=too-many-public-methods
     def notification_config(self):
         return {"notifications": {"delivery_mode": "agent"}}
 
+    def notification_settings(self, *, may_apply=None, include_mute_control=False):
+        assert may_apply is not None and may_apply() is True
+        control = {
+            "org_id": "org-1", "muted": False, "duration": None,
+            "muted_until": None, "forever": False, "revision": 7,
+        }
+        return {
+            "delivery_mode": "agent",
+            "mode_writable": True,
+            "mode_meanings": {
+                "agent": "Eligible recommendations may be assessed and delivered.",
+                "fixed": "Assessment and proactive delivery are off; manual review remains.",
+            },
+            "gateway_status": "available",
+            "gateway_mute": control,
+            "mute_control": control if include_mute_control else None,
+        }
+
+    def choose_notification_mute(self, control_id, duration, *, may_apply=None):
+        assert control_id == "7"
+        assert duration == "1_week"
+        assert may_apply is not None and may_apply() is True
+        return {
+            "org_id": "org-1", "muted": True, "duration": duration,
+            "muted_until": "2030-01-08T00:00:00Z", "forever": False,
+            "revision": 8,
+        }
+
     def inbox(self):
         return {"mode": "agent", "assessments": [], "interactions": [], "installed_setup": []}
 
@@ -113,6 +143,15 @@ class Service:  # pylint: disable=too-many-public-methods
         assert may_apply is not None and may_apply() is True
         return {"updated": True, "receipt": receipt}
 
+    def check_update(self, skill_id):
+        self.calls.append(("check_update", skill_id))
+        return {
+            "skill_id": skill_id,
+            "state": "update_available",
+            "installed_version": 1,
+            "latest_version": 2,
+        }
+
     def set_notification_mode(self, mode, *, expected_mode=None, may_apply=None):
         assert expected_mode == "agent"
         assert may_apply is not None and may_apply() is True
@@ -124,14 +163,46 @@ class Service:  # pylint: disable=too-many-public-methods
         return {"draft_id": "local:1", "skill_id": skill_name, "files": [], "hashes": {}}
 
     def prepared_inspect(self, draft_id):
+        return prepared_inspection(draft_id, "Useful")
+
+    def prepared_save(
+        self, draft_id, *, author_description, files, expected_hashes, may_apply=None
+    ):
+        assert may_apply is not None and may_apply() is True
+        self.calls.append((
+            "prepared_save", draft_id, author_description, files, expected_hashes,
+        ))
         return {
-            "draft_id": draft_id, "author_description": "Useful",
-            "files": [], "expected_hashes": {},
+            "draft_id": draft_id,
+            "drafted_description": author_description,
+            "files": files,
+            "hashes": {
+                "content": "sha256:new-content",
+                "author_description": "sha256:new-description",
+                "package_manifest": "sha256:new-manifest",
+            },
         }
 
-    def publication_review(self, draft_id, *, may_apply=None):
+    def prepared_review(
+        self, draft_id, *, allow_model_review=False, reviewed_hashes=None,
+        may_apply=None,
+    ):
+        assert allow_model_review is False
         assert may_apply is not None and may_apply() is True
-        return {"draft_id": draft_id, "receipt": "wpr_" + "c" * 32, "policy": "moderated"}
+        self.calls.append(("prepared_review", draft_id, reviewed_hashes))
+        return {
+            "draft_id": draft_id,
+            "drafted_description": "Edited",
+            "files": [{"path": "SKILL.md", "content_utf8": "# After\n"}],
+            "hashes": dict(reviewed_hashes),
+        }
+
+    def publication_review(self, draft_id, *, accept_warnings=False, may_apply=None):
+        assert may_apply is not None and may_apply() is True
+        return {
+            "draft_id": draft_id, "receipt": "wpr_" + "c" * 32,
+            "policy": "moderated", "accepted_warnings": accept_warnings,
+        }
 
     def publication_submit(self, receipt, *, may_apply=None):
         self.calls.append(("publication_submit", receipt))
@@ -192,6 +263,87 @@ def test_closing_view_revokes_outstanding_reviews(tmp_path):
 
     with pytest.raises(WisdomAuthError, match="no longer current"):
         api.install_confirm(service, view["view_id"], plan["receipt"])
+
+
+def test_organization_mute_control_is_bound_to_the_originating_live_view(tmp_path):
+    api = DesktopWorkflowApi()
+    service = Service(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    settings = api.notification_settings(service, view_id)
+    assert settings["mute_control"]["revision"] == 7
+
+    api.close_view(service, view_id)
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        api.choose_notification_mute(service, view_id, "7", "1_week")
+
+
+def test_update_check_is_read_only_and_bound_to_the_current_view(tmp_path):
+    api = DesktopWorkflowApi()
+    service = Service(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+
+    checked = api.check_update(service, view_id, "skill-1")
+
+    assert checked["state"] == "update_available"
+    assert checked["latest_version"] == 2
+    assert service.calls[-1] == ("check_update", "skill-1")
+    api.close_view(service, view_id)
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        api.check_update(service, view_id, "skill-1")
+
+
+def test_prepared_save_and_rereview_are_exact_view_bound_workflow_calls(tmp_path):
+    api = DesktopWorkflowApi()
+    service = Service(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    inspected = api.prepared_inspect(service, view_id, "local:1")
+    files = [
+        {"path": "SKILL.md", "content_utf8": "# After\n"},
+        {"path": "references/new.md", "content_utf8": "new\n"},
+    ]
+
+    saved = api.prepared_save(
+        service,
+        view_id,
+        "local:1",
+        author_description="Edited",
+        files=files,
+        expected_hashes=inspected["expected_hashes"],
+    )
+    reviewed = api.prepared_review(
+        service, view_id, "local:1", reviewed_hashes=saved["hashes"]
+    )
+
+    assert saved["files"] == files
+    assert reviewed["hashes"] == saved["hashes"]
+    assert service.calls[-2][0] == "prepared_save"
+    assert service.calls[-1] == ("prepared_review", "local:1", saved["hashes"])
+
+
+def test_closed_view_cannot_save_or_rereview_a_prepared_draft(tmp_path):
+    api = DesktopWorkflowApi()
+    service = Service(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    inspected = api.prepared_inspect(service, view_id, "local:1")
+    api.close_view(service, view_id)
+
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        api.prepared_save(
+            service,
+            view_id,
+            "local:1",
+            author_description="Nope",
+            files=inspected["files"],
+            expected_hashes=inspected["expected_hashes"],
+        )
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        api.prepared_review(
+            service,
+            view_id,
+            "local:1",
+            reviewed_hashes=inspected["expected_hashes"],
+        )
+    assert not any(call[0].startswith("prepared_") for call in service.calls)
 
 
 def test_desktop_notice_route_returns_best_effort_human_surface_payload(tmp_path):
@@ -442,6 +594,15 @@ def test_malformed_confirm_is_validation_error_not_internal_error(payload):
     assert result.status_code == 422
 
 
+def test_mute_route_rejects_unknown_duration_before_workflow_dispatch():
+    app = FastAPI()
+    app.include_router(build_router(lambda: None))
+    result = _request(app, "PATCH", "/settings/mute", json={
+        "view_id": "valid-view-id", "control_id": "7", "duration": "until_tuesday",
+    })
+    assert result.status_code == 422
+
+
 def test_service_factory_auth_failure_is_reported_as_auth_error():
     def unavailable():
         raise WisdomAuthError("Credentials unavailable")
@@ -567,7 +728,9 @@ def test_open_view_fails_closed_for_non_setup_native_owner_failures(tmp_path, fa
         DesktopWorkflowApi().open_view(FailingService(tmp_path))
 
 
-def test_router_covers_management_settings_enrolment_and_publication(tmp_path):
+def test_router_covers_management_settings_enrolment_and_publication(  # pylint: disable=too-many-locals
+    tmp_path,
+):
     service = Service(tmp_path / "a")
     workflow = DesktopWorkflowApi()
     app = FastAPI()
@@ -579,6 +742,18 @@ def test_router_covers_management_settings_enrolment_and_publication(tmp_path):
             return await http.request(method, path, **kwargs)
 
     view_id = asyncio.run(request("POST", "/wisdom/views")).json()["view_id"]
+    checked = asyncio.run(request(
+        "GET", "/wisdom/updates/skill-1", params={"view_id": view_id}
+    )).json()
+    assert checked["state"] == "update_available"
+    assert checked["latest_version"] == 2
+    assert asyncio.run(request(
+        "GET", "/wisdom/settings", params={"view_id": view_id}
+    )).json()["mute_control"]["revision"] == 7
+    assert asyncio.run(request(
+        "PATCH", "/wisdom/settings/mute",
+        json={"view_id": view_id, "control_id": "7", "duration": "1_week"},
+    )).json()["muted"] is True
     assert asyncio.run(request("GET", "/wisdom/catalog/skill-1")).json()["slug"] == "one"
     versions = asyncio.run(request("GET", "/wisdom/catalog/skill-1/versions")).json()
     assert versions["versions"][0]["version"] == 1
@@ -593,6 +768,25 @@ def test_router_covers_management_settings_enrolment_and_publication(tmp_path):
         "POST", "/wisdom/update/confirm",
         json={"view_id": view_id, "receipt": update["receipt"]},
     )).json()["updated"] is True
+
+    warning_install = asyncio.run(request(
+        "POST", "/wisdom/install/review",
+        json={
+            "view_id": view_id, "reference": "skill-1@v1",
+            "accept_warnings": True,
+        },
+    )).json()
+    assert warning_install["warning_acceptance"]["accepted"] is True
+    assert service.calls[-1] == ("install_plan", "skill-1@v1", None, True)
+
+    warning_update = asyncio.run(request(
+        "POST", "/wisdom/update/review",
+        json={
+            "view_id": view_id, "skill_id": "skill-1",
+            "accept_warnings": True,
+        },
+    )).json()
+    assert warning_update["accept_warnings"] is True
 
     removal = asyncio.run(request(
         "POST", "/wisdom/uninstall/review",
@@ -616,12 +810,37 @@ def test_router_covers_management_settings_enrolment_and_publication(tmp_path):
         "POST", "/wisdom/drafts/prepare",
         json={"view_id": view_id, "skill_name": "my-skill"},
     )).json()
-    inspected = asyncio.run(request("GET", f"/wisdom/drafts/{draft['draft_id']}")).json()
+    inspected = asyncio.run(request(
+        "GET", f"/wisdom/drafts/{draft['draft_id']}", params={"view_id": view_id}
+    )).json()
     assert inspected["author_description"] == "Useful"
+    saved = asyncio.run(request(
+        "PUT", f"/wisdom/drafts/{draft['draft_id']}",
+        json={
+            "view_id": view_id,
+            "author_description": "Edited",
+            "files": [
+                {"path": "SKILL.md", "content_utf8": "# After\n"},
+                {"path": "assets/renamed.bin", "content_base64": "AAE="},
+                {"path": "references/new.md", "content_utf8": "new\n"},
+            ],
+            "expected_hashes": inspected["expected_hashes"],
+        },
+    )).json()
+    assert saved["hashes"]["content"] == "sha256:new-content"
+    rereviewed = asyncio.run(request(
+        "POST", f"/wisdom/drafts/{draft['draft_id']}/review",
+        json={"view_id": view_id, "reviewed_hashes": saved["hashes"]},
+    )).json()
+    assert rereviewed["hashes"] == saved["hashes"]
     review = asyncio.run(request(
         "POST", "/wisdom/publication/review",
-        json={"view_id": view_id, "draft_id": draft["draft_id"]},
+        json={
+            "view_id": view_id, "draft_id": draft["draft_id"],
+            "accept_warnings": True,
+        },
     )).json()
+    assert review["accepted_warnings"] is True
     submitted = asyncio.run(request(
         "POST", "/wisdom/publication/confirm",
         json={"view_id": view_id, "receipt": review["receipt"]},

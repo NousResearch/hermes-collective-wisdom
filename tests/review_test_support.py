@@ -1,4 +1,4 @@
-"""Fresh owner and exact-package fixtures shared by install/update review tests."""
+"""Fresh owner and exact-package fixtures shared by workflow review tests."""
 # pylint: disable=missing-function-docstring
 
 import json
@@ -7,6 +7,23 @@ from types import SimpleNamespace
 from hermes_wisdom_plugin.contract import (
     ContentFile, HermesRequirement, SystemSpecification, derive_content_hash, sha256_address,
 )
+
+
+def prepared_inspection(draft_id, author_description):
+    """Return a fresh complete text/opaque draft and its editable hash snapshot."""
+    return {
+        "draft_id": draft_id,
+        "author_description": author_description,
+        "files": [
+            {"path": "SKILL.md", "content_utf8": "# Before\n"},
+            {"path": "assets/logo.bin", "content_base64": "AAE="},
+        ],
+        "expected_hashes": {
+            "content": "sha256:old-content",
+            "author_description": "sha256:old-description",
+            "package_manifest": "sha256:old-manifest",
+        },
+    }
 
 
 def _owner(**changes):
