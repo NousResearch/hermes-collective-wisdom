@@ -803,7 +803,7 @@ test('pending install outcome keeps operation identity and is never announced as
   await click(button(mounted, 'Install'))
   await click(button(mounted, 'Confirm install'))
   assert.match(mounted.container.textContent, /op-install-1/)
-  assert.match(mounted.container.textContent, /Do not repeat the mutation automatically/)
+  assert.match(mounted.container.textContent, /Check its status before trying again/)
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   await mounted.cleanup()
 })
@@ -1080,7 +1080,7 @@ test('changed scanner warning provenance requires a fresh acknowledgement', asyn
   await mounted.cleanup()
 })
 
-test('prepared editor saves and re-reviews exact add remove rename text and opaque files', async () => {
+test('prepared editor saves and re-reviews exact add remove rename text and opaque files', async t => {
   const oldHashes = { content: hash('1'), author_description: hash('2'), package_manifest: hash('3') }
   const newHashes = { content: hash('4'), author_description: hash('5'), package_manifest: hash('6') }
   const inspected = {
@@ -1106,6 +1106,7 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/bootstrap') return bootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path.startsWith('/candidates?')) return { candidates: [{ event_id: 'candidate-1', skill_name: 'another-skill' }] }
     if (path === '/drafts/prepare') return { draft_id: 'local:edit', skill_id: 'local-skill' }
     if (path === '/drafts/local%3Aedit?view_id=view-remote-a-A') return inspected
     if (path === '/drafts/local%3Aedit/review') {
@@ -1134,6 +1135,7 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
   await click(button(mounted, 'Prepare draft'))
   await click(button(mounted, 'Review and edit exact files'))
 
+  t.after(() => mounted.cleanup())
   const opaqueExport = mounted.container.querySelector('a[download="logo.bin"]')
   assert.equal(opaqueExport.getAttribute('href'), 'data:application/octet-stream;base64,AAH/')
   const draftExport = mounted.container.querySelector('a[download="wisdom-local-edit.json"]')
@@ -1142,7 +1144,7 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
 
   await enter(mounted.container.querySelector('textarea[aria-label="Author description"]'), 'Unsaved draft copy')
   assert.match(mounted.container.textContent, /Unsaved changes/)
-  for (const label of ['Continue to sharing review', 'Keep draft and exit', 'Review and edit exact files', 'Prepare draft']) {
+  for (const label of ['Continue to sharing review', 'Keep draft and exit', 'Review and edit exact files', 'Prepare draft', 'Share']) {
     assert.equal(button(mounted, label).disabled, true, `${label} must not bypass unsaved edits`)
     await click(button(mounted, label))
   }
@@ -1205,7 +1207,7 @@ test('hostile markup and control-like text stays inert in exact draft review', a
   await mounted.cleanup()
 })
 
-test('Activity uses revision-bound organization mute controls and truthful mode wording', async () => {
+test('Settings keeps simple notification controls without an Activity diagnostics tab', async t => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/bootstrap') return bootstrap
@@ -1229,12 +1231,78 @@ test('Activity uses revision-bound organization mute controls and truthful mode 
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Activity'))
-  assert.match(mounted.container.textContent, /Eligible recommendations may be assessed and delivered/)
-  assert.match(mounted.container.textContent, /organization-wide/)
+  t.after(mounted.cleanup)
+  assert.equal(button(mounted, 'Activity'), undefined)
+  assert.doesNotMatch(mounted.container.textContent, /Assessments|Unresolved operations/)
+  await click(button(mounted, 'Settings'))
+  assert.match(mounted.container.textContent, /Recommendations/)
+  assert.ok(button(mounted, 'On'))
+  assert.ok(button(mounted, 'Off'))
+  assert.match(mounted.container.textContent, /organization-wide/i)
   await click(button(mounted, 'Mute for 1 week'))
   assert.ok(loaded.calls.rest.some(([path]) => path === '/settings/mute'))
-  await mounted.cleanup()
+})
+
+test('Contribute lists share candidates and persists Not now through the backend', async t => {
+  let candidates = [
+    { event_id: 'candidate-1', skill_name: 'incident-helper', qualification: 'high_usage', local_reasons: { consecutive_business_days: 5 } },
+    { event_id: 'candidate-2', skill_name: 'release-helper', qualification: 'refinement', local_reasons: { meaningful_refinements: 3, stable_days: 14 } }
+  ]
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/candidates?view_id=view-remote-a-A') return { candidates }
+    if (path === '/candidates/candidate-1/prepare') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A' })
+      return { draft_id: 'local:candidate-1', skill_id: 'incident-helper' }
+    }
+    if (path === '/candidates/candidate-2/not-now') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A' })
+      candidates = candidates.filter(item => item.event_id !== 'candidate-2')
+      return { deferred: true, event_id: 'candidate-2' }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(mounted.cleanup)
+  await click(button(mounted, 'Contribute'))
+
+  assert.match(mounted.container.textContent, /Worth sharing with your team/)
+  assert.match(mounted.container.textContent, /incident-helper/)
+  assert.match(mounted.container.textContent, /used on 5 consecutive business days/)
+  const candidateRows = [...mounted.container.querySelectorAll('[data-testid^="share-candidate-"]')]
+  await click([...candidateRows[0].querySelectorAll('button')].find(item => item.textContent === 'Share'))
+  assert.match(mounted.container.textContent, /Private draft/)
+  assert.match(mounted.container.textContent, /Nothing has been uploaded/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/publication/confirm'), false)
+
+  await click([...candidateRows[1].querySelectorAll('button')].find(item => item.textContent === 'Not now'))
+  assert.ok(loaded.calls.rest.some(([path]) => path === '/candidates/candidate-2/not-now'))
+  assert.doesNotMatch(mounted.container.textContent, /release-helper/)
+})
+
+test('pending actions remain visible in their own view after reopening', async t => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap') return { ...bootstrap, status: { ...bootstrap.status, pending_operations: [
+      { operation_id: 'op-install', kind: 'install', stage: 'prepared', skill_id: 'opaque-install-id' },
+      { operation_id: 'op-share', kind: 'publication', phase: 'draft_submission_unknown', skill_id: 'opaque-share-id' }
+    ] } }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  await click(button(mounted, 'Installed'))
+  assert.match(mounted.container.textContent, /Install requires attention for this skill/)
+  assert.doesNotMatch(mounted.container.textContent, /op-share/)
+  assert.match(mounted.container.textContent, /hermes wisdom status --json/)
+  await click(button(mounted, 'Contribute'))
+  assert.match(mounted.container.textContent, /Publication requires attention for this draft/)
+  assert.doesNotMatch(mounted.container.textContent, /op-install/)
+  assert.ok([...mounted.container.querySelectorAll('h3')].every(node => !node.textContent.includes('opaque-')))
+  await click(button(mounted, 'Catalog'))
+  await click(button(mounted, 'Installed'))
+  assert.match(mounted.container.textContent, /Install requires attention/)
 })
 
 test('A-B-A profile changes suppress a late review and open a fresh generation', async () => {

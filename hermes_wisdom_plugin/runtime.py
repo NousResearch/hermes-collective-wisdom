@@ -577,6 +577,36 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise SharePackagingError()
         return draft_id
 
+    def defer_candidate(
+        self, event_id: str, *, may_apply: Callable[[], bool]
+    ) -> dict[str, Any]:
+        """Persist Not now for one exact candidate revision."""
+        _require_current(may_apply)
+        owner = self.native_owner()
+        inspected = self.native_candidate_inspect(event_id)
+        content_hash = inspected.get("content_hash")
+        if not isinstance(content_hash, str) or not content_hash:
+            raise WisdomValidationError("Collective Wisdom candidate is incomplete")
+        if self.client is None:
+            raise WisdomError("Collective Wisdom candidate deferral is unavailable")
+        policy = AgentLedPolicyResponse.model_validate(self.client.agent_led_policy())
+        if policy.org_id != owner["organization_id"] or self.native_owner() != owner:
+            raise WisdomAuthError("Collective Wisdom candidate owner changed")
+        _require_current(may_apply)
+        from .notices import suppression_key  # pylint: disable=import-outside-toplevel
+        result = self.client.suppress_recommendation(suppression_key({
+            "kind": "candidate", "content_hash": content_hash,
+        }))
+        if self.native_owner() != owner:
+            raise WisdomAuthError("Collective Wisdom candidate owner changed")
+        return {
+            "deferred": True,
+            "event_id": event_id,
+            "not_now_suppression_days": policy.not_now_suppression_days,
+            "preference_sync": "confirmed",
+            "suppress_until": result.suppress_until,
+        }
+
     def notification_settings(
         self, *, may_apply: Callable[[], bool], include_mute_control: bool = False
     ) -> dict[str, Any]:
