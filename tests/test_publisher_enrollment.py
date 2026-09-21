@@ -245,9 +245,14 @@ def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: P
 
 # This end-to-end journey intentionally retains all lifecycle assertions together.
 # pylint: disable=too-many-locals,too-many-statements
+@pytest.mark.parametrize(
+    ("system", "architecture"), [("Linux", "x86_64"), ("Darwin", "arm64")],
+)
 def test_author_v2_advances_same_source_then_teammate_v3_uses_managed_review(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, system: str, architecture: str,
 ):
+    monkeypatch.setattr("hermes_wisdom_plugin.package.platform.system", lambda: system)
+    monkeypatch.setattr("hermes_wisdom_plugin.package.platform.machine", lambda: architecture)
     prepared_reviewer, source, owner = reviewer(tmp_path)
     prepared_v1 = prepared_reviewer.prepare("reviewed-skill")
     draft_v1 = prepared_reviewer.store.draft(prepared_v1["draft_id"])
@@ -328,7 +333,7 @@ def test_author_v2_advances_same_source_then_teammate_v3_uses_managed_review(
     client.installation_rows[0]["latest_version"] = 3
     update_host = UpdateHost(Path(owner["profile_home"]))
     update_host.capabilities = lambda _specification: LocalCapabilities(
-        hermes_version="2.0.0", os="darwin", architecture="arm64",
+        hermes_version="2.0.0", os=system, architecture=architecture,
         runtime={"shell": True, "browser": False, "code": True, "sandbox": True},
     )
     update = UpdateReviewer(
