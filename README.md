@@ -70,6 +70,12 @@ hermes wisdom browse "incident"
 ```
 
 An empty catalog is normal if nobody in your organization has published a skill yet.
+Catalog rows and details also show owner/profile-local installation status: a managed
+installed version (and a newer catalog version when known), no local copy, an
+unmanaged same-name local copy, or unavailable inspection. This label is advisory;
+the installed version is the recorded revision, not a claim that local files are
+unchanged or setup is complete. Local edits are checked by the existing review flow;
+install, update, and removal still use their separately reviewed authority checks.
 
 ## Where to use it
 

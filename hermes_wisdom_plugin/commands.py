@@ -1107,6 +1107,7 @@ def _render_browse(rows: object, query: str, page: int) -> str:
                 "",
                 slug,
                 f"v{version or '?'} - {description}",
+                _installation_status_text(item),
                 _review_states(item),
                 f"Show: {_slash_command('show', slug)}",
             )
@@ -1126,6 +1127,14 @@ def _browse_navigation(query: str, page: int, has_next: bool) -> list[str]:
             lines.append("")
         lines.append(f"Next: {_paged_command('browse', query, page + 1)}")
     return lines
+
+
+def _installation_status_text(value: object) -> str:
+    data = value if isinstance(value, dict) else {}
+    status = data.get("installation_status")
+    if isinstance(status, dict) and isinstance(status.get("text"), str):
+        return status["text"]
+    return "Installation status unavailable"
 
 
 def _render_show(detail: object) -> str:
@@ -1154,6 +1163,7 @@ def _render_show(detail: object) -> str:
         "",
         description,
         f"Latest: v{max(version_numbers) if version_numbers else '?'}",
+        _installation_status_text(data),
         f"Requirements: {_requirements_summary(latest.get('system_spec'))}",
         _review_states(latest),
     ]
@@ -1185,7 +1195,10 @@ def _render_versions(  # pylint: disable=too-many-locals
     )
     start = (page - 1) * PAGE_SIZE
     selected = versions[start : start + PAGE_SIZE]
-    lines = [f"{slug} versions", "", f"Published versions - page {page}"]
+    lines = [
+        f"{slug} versions", "", _installation_status_text(data), "",
+        f"Published versions - page {page}",
+    ]
     base_url = _safe_url(data.get("portal_url"))
     for item in selected:
         number = int(item["version"])
