@@ -89,7 +89,14 @@ class RecordingPublicationClient:
         draft.updatedAt = "server-revision-3"
         if "publish" in self.state.fail_after_effect:
             raise TimeoutError("lost publish acknowledgement")
-        return {"state": draft.state, "proposal_id": 11}
+        return {
+            "state": draft.state,
+            "proposal_id": 11,
+            **(
+                {"skill_id": "published-skill-1", "version": 1}
+                if draft.state == "published" else {}
+            ),
+        }
 
     def decline(self, draft_id):
         self.state.calls["decline"] += 1
@@ -100,6 +107,16 @@ class RecordingPublicationClient:
         if "decline" in self.state.fail_after_effect:
             raise TimeoutError("lost decline acknowledgement")
         return {"state": "declined"}
+
+
+class UnexpectedEnrollment:
+    """Fail a test if a non-published path attempts managed enrollment."""
+
+    def link(self, *_args, **_kwargs):
+        raise AssertionError("non-published operation must not enroll")
+
+    def link_existing(self, *_args, **_kwargs):
+        raise AssertionError("non-published operation must not enroll")
 
 
 def publication(tmp_path: Path, *, mode: str = "open", scan_allowed: bool = True):
@@ -127,6 +144,105 @@ def test_one_confirmation_uses_server_policy_and_exact_review(tmp_path: Path, mo
     assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
     assert "publication_mode" not in result["submitted_request"]
     assert service.status(result["operation_id"])["state"] == "done"
+
+
+def test_published_result_links_exact_remote_identity_after_publication(tmp_path: Path):
+    service, prepared, _client, _ = publication(tmp_path)
+    linked = []
+
+    class Enrollment:
+        """Record enrollment input for exact-identity assertions."""
+
+        def link(self, operation, result, *, may_apply):
+            linked.append((operation, result, may_apply))
+            return {
+                "state": "managed",
+                "skill_id": result["skill_id"],
+                "version": result["version"],
+            }
+
+    service.enrollment = Enrollment()
+    result = service.submit(service.review(prepared["draft_id"])["receipt"])
+
+    assert result["publication_state"] == "published"
+    assert result["managed_enrollment"] == {
+        "state": "managed", "skill_id": "published-skill-1", "version": 1,
+    }
+    assert len(linked) == 1
+    operation, published, currentness = linked[0]
+    assert operation["id"] == result["operation_id"]
+    assert published == {
+        "state": "published", "proposal_id": 11,
+        "skill_id": "published-skill-1", "version": 1,
+    }
+    assert currentness is None
+
+
+@pytest.mark.parametrize(("skill_name", "argument"), [
+    ("reviewed-skill", "reviewed-skill"),
+    ("reviewed skill; inert", "'reviewed skill; inert'"),
+])
+def test_publication_success_reports_local_link_failure_without_leaking_exception(
+    tmp_path: Path, skill_name: str, argument: str,
+):
+    prepared_reviewer, source, binding = reviewer(tmp_path)
+    source.rename(source.with_name(skill_name))
+    prepared = prepared_reviewer.prepare(skill_name)
+    service = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, RecordingPublicationClient(binding),
+        lambda: dict(binding),
+    )
+
+    class Enrollment:
+        """Simulate a local enrollment failure after remote publication."""
+
+        def link(self, *_args, **_kwargs):
+            raise RuntimeError("secret transport detail")
+
+    service.enrollment = Enrollment()
+    result = service.submit(service.review(prepared["draft_id"])["receipt"])
+
+    assert result["publication_state"] == "published"
+    assert result["managed_enrollment"] == {
+        "state": "not_linked",
+        "detail": (
+            "Published successfully, but the original source is not linked to this version "
+            f"locally. Recover with: hermes wisdom publication enroll {argument}"
+        ),
+    }
+    assert "secret" not in str(result)
+    assert result["detail"] == result["managed_enrollment"]["detail"]
+    assert service.status(result["operation_id"])["detail"] == result["detail"]
+
+
+def test_moderation_completion_enrolls_only_after_published_reconciliation(tmp_path: Path):
+    service, prepared, client, _ = publication(tmp_path, mode="moderated")
+    calls = []
+
+    class Enrollment:
+        """Reject early links and record reconciliation enrollment."""
+
+        def link(self, *_args, **_kwargs):
+            raise AssertionError("pending moderation must not enroll")
+
+        def link_existing(self, operation, *, may_apply):
+            calls.append((operation["id"], may_apply))
+            return {
+                "state": "managed", "skill_id": "published-skill-1", "version": 1,
+            }
+
+    service.enrollment = Enrollment()
+    pending = service.submit(service.review(prepared["draft_id"])["receipt"])
+    assert pending["publication_state"] == "pending_moderation"
+    assert "managed_enrollment" not in pending
+    client.state.drafts["draft-1"].state = "published"
+
+    completed = service.reopen(pending["operation_id"])
+
+    assert completed["publication_state"] == "published"
+    assert completed["managed_enrollment"]["state"] == "managed"
+    assert calls == [(pending["operation_id"], None)]
+    assert client.state.calls["publish"] == 1
 
 
 def test_replayed_publication_receipt_cannot_duplicate_remote_effects(tmp_path: Path):
@@ -256,6 +372,7 @@ def test_submit_ack_loss_reconciles_exact_remote_without_duplicate(tmp_path: Pat
 
 def test_definitive_submit_422_is_terminal_and_allows_fresh_review(tmp_path: Path):
     service, prepared, client, _ = publication(tmp_path)
+    service.enrollment = UnexpectedEnrollment()
     client.state.submit_error = WisdomValidationError(
         "raw response detail must not be shown", status=422,
         code="instruction_only_violation",
@@ -273,6 +390,7 @@ def test_definitive_submit_422_is_terminal_and_allows_fresh_review(tmp_path: Pat
         "retry_safe": False,
     }
     assert service.status(rejected["operation_id"]) == rejected
+    assert "managed_enrollment" not in rejected
     assert client.state.calls == Counter(upload=1, submit=1)
     with pytest.raises(WisdomConflict, match="missing or already used"):
         service.submit(receipt)
@@ -300,10 +418,12 @@ def test_statusless_submit_validation_error_remains_uncertain(tmp_path: Path):
 
 def test_publish_ack_loss_reconciles_remote_without_republish(tmp_path: Path):
     service, prepared, client, binding = publication(tmp_path)
+    service.enrollment = UnexpectedEnrollment()
     client.state.fail_after_effect.add("publish")
 
     uncertain = service.submit(service.review(prepared["draft_id"])["receipt"])
     assert uncertain["phase"] == "publication_unknown"
+    assert "managed_enrollment" not in uncertain
     client.state.fail_after_effect.clear()
     restarted = PublicationService(service.state, service.reviewer, client, lambda: dict(binding))
 

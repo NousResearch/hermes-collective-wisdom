@@ -659,6 +659,13 @@ def _authority_projection(
 
 
 def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
+    result = record.get("result")
+    if (
+        record.get("state") == "completed" and isinstance(result, dict)
+        and result.get("publication_state") == "published"
+        and isinstance(result.get("detail"), str) and result["detail"]
+    ):
+        return NativeView("Publication result", _safe(result["detail"]), dismissed=True)
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",

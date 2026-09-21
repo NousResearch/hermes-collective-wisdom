@@ -427,6 +427,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Build the direct PluginState-backed publication service."""
 
         from .direct_services import PublicationService  # pylint: disable=import-outside-toplevel
+        from .install_host import InstallationHost  # pylint: disable=import-outside-toplevel
+        from .publisher_enrollment import PublisherEnrollment  # pylint: disable=import-outside-toplevel
 
         self._installation_owner()
         if self.client is None or self._direct_state is None:
@@ -436,6 +438,10 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             self._contribution_reviewer(),
             self.client,
             self._installation_owner,
+            PublisherEnrollment(
+                self._direct_state, self.installed, self.client,
+                InstallationHost(self.profile[1]), self._installation_owner,
+            ),
         )
 
     def suggest(
@@ -821,6 +827,17 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
         _require_current(may_apply)
         result = self._publication_service().reopen(operation_id, may_apply=may_apply)
+        self.check_owner()
+        _require_current(may_apply)
+        return result
+
+    def publication_enroll(
+        self, skill_name, *, may_apply: Callable[[], bool] | None = None,
+    ):
+        """Explicitly link an exact already-published author source."""
+
+        _require_current(may_apply)
+        result = self._publication_service().enroll(skill_name, may_apply=may_apply)
         self.check_owner()
         _require_current(may_apply)
         return result

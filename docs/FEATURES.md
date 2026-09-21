@@ -17,6 +17,9 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 - Prepare owner-private contribution drafts, edit and re-review their exact files and
   hashes, submit them according to server policy, inspect status, reopen conflicts,
   and decline private drafts.
+- After exact successful publication proof, register the unchanged author source in
+  place for managed teammate updates. Failed local registration remains separately
+  recoverable and never changes the remote publication result.
 - Use Desktop management pages and private Slack/Telegram `/wisdom` commands for
   explicit catalog, install, update, setup, publication, and settings reviews.
 

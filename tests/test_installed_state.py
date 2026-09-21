@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from host_probe_support import (
     isolated_host_environment,
     run_host_python,
 )
+
+from hermes_wisdom_plugin.errors import WisdomConflict
 
 
 HOST_REVISION = "bf51fee548ceaa28d2c299a41c0f65066c04c061"
@@ -194,3 +197,74 @@ def test_review_binding_is_owner_hash_bound_and_replay_safe(tmp_path: Path) -> N
     owner["account_id"] = "other"
     with pytest.raises(Exception, match="does not belong"):
         receipts.load(plan["receipt"], allow_started=True)
+
+
+def test_publisher_install_record_is_idempotent_and_cannot_clobber_id_or_path(tmp_path: Path):
+    from hermes_wisdom_plugin.installed_state import InstalledState
+
+    class JsonState:
+        path = tmp_path / "state.json"
+
+        def __init__(self) -> None:
+            self.value = None
+
+        def get(self, _key, default=None):
+            return copy.deepcopy(self.value) if self.value is not None else default
+
+        def set(self, _key, value):
+            self.value = copy.deepcopy(value)
+
+    store = InstalledState(JsonState(), tmp_path)
+    first = _install("skill-a")
+    first["target_path"] = "/fixture/skills/authored"
+
+    store.record_publisher_install(first)
+    store.record_publisher_install(first)
+    assert store.installation("skill-a") == first
+
+    with pytest.raises(Exception, match="skill id"):
+        store.record_publisher_install({**first, "target_path": "/fixture/skills/other"})
+    with pytest.raises(Exception, match="source target"):
+        store.record_publisher_install({
+            **first, "skill_id": "skill-b", "target_path": first["target_path"],
+        })
+
+
+def test_publisher_install_advance_is_full_record_compare_and_swap(tmp_path: Path):
+    from hermes_wisdom_plugin.installed_state import InstalledState
+
+    class JsonState:
+        path = tmp_path / "state.json"
+
+        def __init__(self) -> None:
+            self.value = None
+
+        def get(self, _key, default=None):
+            return copy.deepcopy(self.value) if self.value is not None else default
+
+        def set(self, _key, value):
+            self.value = copy.deepcopy(value)
+
+    store = InstalledState(JsonState(), tmp_path)
+    first = _install("skill-a")
+    first["target_path"] = "/fixture/skills/authored"
+    second = {
+        **first,
+        "version": 2,
+        "content_hash": "sha256:second",
+        "baseline": {"SKILL.md": "sha256:second"},
+    }
+    third = {
+        **second,
+        "version": 3,
+        "content_hash": "sha256:third",
+        "baseline": {"SKILL.md": "sha256:third"},
+    }
+    store.record_publisher_install(first)
+
+    store.record_publisher_install(second, previous=first)
+    assert store.installation("skill-a") == second
+
+    with pytest.raises(WisdomConflict, match="changed during managed enrollment"):
+        store.record_publisher_install(third, previous=first)
+    assert store.installation("skill-a") == second

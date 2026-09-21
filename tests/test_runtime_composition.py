@@ -112,6 +112,7 @@ def test_runtime_publication(tmp_path, monkeypatch, mode, expected):
 
     assert service.status()["configured"] is False
     assert service.setup(accept_disclosure=True)["configured"] is True
+    assert service._publication_service().enrollment is not None  # pylint: disable=protected-access
     local = service.suggest("reviewed-skill")
     review = service.publication_review(local["draft_id"])
     assert review["files"] == local["files"]

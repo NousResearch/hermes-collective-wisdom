@@ -13,12 +13,13 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from .contract import SystemSpecification, org_directory_name, parse_manifest_bytes
+from .contract import SystemSpecification, parse_manifest_bytes
 from .errors import WisdomAuthError, WisdomValidationError
 from .install_execution import (
-    _reject_existing_links, _reject_symlink_chain, _safe_segment, _tree_hashes,
+    _tree_hashes,
 )
 from .install_review import InstallReviewer
+from .managed_target import validate_managed_target
 from .package import PackagePolicyError
 
 _UPDATE_MODES = frozenset({"MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"})
@@ -78,20 +79,11 @@ def sensitive_expansion(
     return reasons
 
 
-def validate_update_target(host: Any, record: dict, owner: dict) -> Path:
-    """Require the canonical managed target before review or recovery access."""
-    root = Path(host.skills_root).expanduser().absolute()
-    target = Path(str(record.get("target_path") or ""))
-    expected = (
-        root / "_wisdom" / org_directory_name(owner["organization_id"])
-        / _safe_segment(record.get("slug"), "skill slug")
-    )
-    if target != expected:
-        raise PackagePolicyError("managed update target is invalid")
-    _reject_existing_links(root)
-    _reject_symlink_chain(root, target)
-    host.validate_target(target)
-    return target
+def validate_update_target(
+    host: Any, record: dict, owner: dict, *, require_tree: bool = True,
+) -> Path:
+    """Require canonical or exact publisher-source provenance before access."""
+    return validate_managed_target(host, record, owner, require_tree=require_tree)
 
 
 class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
@@ -115,13 +107,17 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
     def _owner(self) -> dict[str, Any]:
         return self.install_reviewer._owner_snapshot()  # pylint: disable=protected-access
 
-    def _installation(self, skill_id: str, owner: dict[str, Any]) -> dict[str, Any]:
+    def _installation(
+        self, skill_id: str, owner: dict[str, Any], *, require_tree: bool = True,
+    ) -> dict[str, Any]:
         installation = self.store.installation(skill_id, owner=owner)
         if not isinstance(installation, dict) or installation.get("state") != "active":
             raise PackagePolicyError("managed installation is not active for this enrolment")
         if installation.get("owner") != owner:
             raise WisdomAuthError("managed installation belongs to another enrolment")
-        validate_update_target(self.host, installation, owner)
+        validate_update_target(
+            self.host, installation, owner, require_tree=require_tree,
+        )
         return copy.deepcopy(installation)
 
     def _authority(self, skill_id: str, owner: dict[str, Any]) -> dict[str, Any] | None:
@@ -297,6 +293,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "previous_baseline": copy.deepcopy(installation["baseline"]),
             "previous_installation": installation,
             "target_path": str(target),
+            "target_provenance": copy.deepcopy(installation.get("target_provenance")),
             "local_snapshot": local_snapshot,
             "baseline": baseline,
             "authority": authority,
@@ -375,7 +372,9 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         skill_id = plan.get("skill_id")
         if not isinstance(skill_id, str) or not skill_id:
             raise WisdomValidationError("Invalid update review")
-        installation = self._installation(skill_id, owner)
+        installation = self._installation(
+            skill_id, owner, require_tree=recovery_phase is None,
+        )
         expected_previous = plan.get("previous_installation")
         target = Path(str(plan.get("target_path") or ""))
         self._verify_local_recovery_state(

@@ -11,7 +11,9 @@ from pathlib import Path
 import pytest
 
 from hermes_wisdom_plugin.compatibility import LocalCapabilities
-from hermes_wisdom_plugin.contract import canonical_json_bytes, parse_manifest_bytes
+from hermes_wisdom_plugin.contract import (
+    canonical_json_bytes, parse_manifest_bytes, sha256_address,
+)
 from hermes_wisdom_plugin.package import PackagePolicyError, verify_content_files
 from hermes_wisdom_plugin.setup_document import PREFIX, SETUP_PATH, SUFFIX
 from hermes_wisdom_plugin.direct_services import DirectState
@@ -146,6 +148,53 @@ def test_inspection_rejects_changed_unowned_or_unsettled_install(installed, tmp_
         inspect_installed_setup(
             installed_state, progress, host, owner, "skill-1", version=version
         )
+
+
+def test_inspection_rejects_record_redirected_to_unmanaged_source(installed):
+    from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
+
+    installed_state, progress, host, target = installed
+    row = installed_state.installation("skill-1", owner=OWNER)
+    assert row is not None
+    redirected = host.skills_root / "unmanaged" / "managed"
+    redirected.parent.mkdir(parents=True)
+    target.rename(redirected)
+    installed_state.record_install({**row, "target_path": str(redirected)})
+
+    with pytest.raises(PackagePolicyError, match="managed installation target"):
+        inspect_installed_setup(installed_state, progress, host, OWNER, "skill-1")
+
+
+def test_inspection_accepts_exact_publisher_source_provenance(installed):
+    from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
+
+    installed_state, progress, host, target = installed
+    row = installed_state.installation("skill-1", owner=OWNER)
+    assert row is not None
+    authored = host.skills_root / "authored" / "managed"
+    authored.parent.mkdir(parents=True)
+    target.rename(authored)
+    row.update({
+        "target_path": str(authored),
+        "target_provenance": {
+            "kind": "publisher_source", "owner": OWNER,
+            "source_path": str(authored), "source_hash": "sha256:" + "a" * 64,
+            "publication": {
+                "operation_id": "publication-1", "remote_draft_id": "draft-1",
+                "proposal_id": 1, "skill_id": "skill-1", "version": 1,
+                "content_hash": row["content_hash"],
+                "commit": "sha256:" + "b" * 64,
+                "manifest_hash": sha256_address(
+                    (authored / "skill.manifest.json").read_bytes()
+                ),
+            },
+        },
+    })
+    installed_state.record_install(row)
+
+    result = inspect_installed_setup(installed_state, progress, host, OWNER, "skill-1")
+    assert result["target_path"] == str(authored)
+    assert result["files_installed"] is True
 
 
 def test_missing_guidance_is_explicitly_unverified(installed):

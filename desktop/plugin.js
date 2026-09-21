@@ -890,7 +890,7 @@ function Contributions({ client, lifecycle, viewId }) {
     method: 'POST', body: requestBody(viewId, { receipt: current.receipt })
   }), result => {
     setReview(null)
-    if (result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state)) {
+    if (result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state) && result?.managed_enrollment?.state !== 'not_linked') {
       const message = result.publication_state === 'published' ? 'Publication completed' : 'Submitted for team moderation'
       host.notify({ kind: 'success', message })
     } else {

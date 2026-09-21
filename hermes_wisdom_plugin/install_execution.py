@@ -16,6 +16,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .package import PackagePolicyError
+from .managed_target import validate_managed_target
 from .package_application import (
     durable_replace as _durable_replace,
     install_package as _install_package,
@@ -45,7 +46,7 @@ def _operation_payload(operation: dict) -> dict:
 def _install_record(
     payload: dict, owner: dict, state: str = "active", *, mode: str | None = None
 ) -> dict:
-    return {
+    record = {
         "skill_id": payload["skill_id"], "org_id": owner["organization_id"],
         "slug": payload["slug"], "version": int(payload["version"]),
         "content_hash": payload["content_hash"], "baseline": dict(payload["baseline"]),
@@ -53,6 +54,10 @@ def _install_record(
         "update_mode": mode or payload.get("update_mode") or "MANUAL",
         "state": state, "owner": owner,
     }
+    for key in ("manifest_hash", "target_provenance"):
+        if key in payload:
+            record[key] = payload[key]
+    return record
 
 
 class InstallExecutor:
@@ -217,7 +222,11 @@ class InstallExecutor:
             "target_path": str(target),
             "baseline": dict(installation.get("baseline") or {}),
             "version": int(installation.get("version") or 0),
+            "content_hash": installation.get("content_hash"),
         }
+        for key in ("manifest_hash", "target_provenance"):
+            if key in installation:
+                payload[key] = installation[key]
         operation_id = self.store.begin("uninstall", skill_id, payload, stage="prepared")
         operation = self.store.operation(operation_id)
         if operation is None:
@@ -389,7 +398,7 @@ class InstallExecutor:
         stage = str(operation["stage"])
         target = Path(payload["target_path"])
         trash = self._trash_path(operation_id, payload["slug"])
-        self._validate_uninstall_paths(target, trash, owner, operation_id, payload["slug"])
+        self._validate_uninstall_paths(target, trash, owner, operation_id, payload)
         if stage != "prepared":
             return self._finish_uninstall_recovery(
                 stage, operation_id, payload, may_apply
@@ -604,12 +613,7 @@ class InstallExecutor:
         return root
 
     def _validated_record_target(self, record: dict, owner: dict) -> Path:
-        target = Path(str(record.get("target_path") or ""))
-        expected = self._target(owner, _safe_segment(record.get("slug"), "skill slug"))
-        if target != expected:
-            raise PackagePolicyError("managed installation target is invalid")
-        self.host.validate_target(target)
-        return target
+        return validate_managed_target(self.host, record, owner)
 
     def _validate_operation_paths(
         self,
@@ -628,12 +632,14 @@ class InstallExecutor:
 
 
     def _validate_uninstall_paths(
-        self, target: Path, trash: Path, owner: dict, operation_id: str, slug: str
+        self, target: Path, trash: Path, owner: dict, operation_id: str, payload: dict
     ) -> None:
-        expected_target = self._target(owner, _safe_segment(slug, "skill slug"))
+        expected_target = validate_managed_target(
+            self.host, payload, owner, require_tree=False,
+        )
+        slug = _safe_segment(payload.get("slug"), "skill slug")
         if target != expected_target or trash != self._trash_path(operation_id, slug):
             raise PackagePolicyError("uninstall recovery path is invalid")
-        self.host.validate_target(target)
 
 
 def _required_text(values: dict, key: str) -> str:
