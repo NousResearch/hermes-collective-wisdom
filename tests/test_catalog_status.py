@@ -30,6 +30,28 @@ def _record(owner, target, **overrides):
     return value
 
 
+def _publisher_record(owner, target, **overrides):
+    value = _record(
+        owner, target,
+        content_hash="sha256:" + "d" * 64,
+        manifest_hash="sha256:" + "b" * 64,
+        baseline=tree_hashes(target),
+    )
+    value["target_provenance"] = {
+        "kind": "publisher_source", "owner": owner,
+        "source_path": str(target), "source_hash": "sha256:" + "a" * 64,
+        "publication": {
+            "operation_id": "publication-1", "remote_draft_id": "draft-1",
+            "proposal_id": 1, "skill_id": value["skill_id"], "version": 1,
+            "content_hash": value["content_hash"],
+            "commit": "sha256:" + "c" * 64,
+            "manifest_hash": value["manifest_hash"],
+        },
+    }
+    value.update(overrides)
+    return value
+
+
 def _managed_target(profile, owner, slug="incident-handoff"):
     return profile / "skills" / "_wisdom" / org_directory_name(owner["organization_id"]) / slug
 
@@ -113,6 +135,27 @@ def test_local_edits_remain_installed_with_integrity_checked_separately(tmp_path
     assert catalog["installed_version"] == inspected["version"] == 1
     assert inspected["state"] == "active" and inspected["modified"] is True
     assert "modified" not in catalog and "ready_to_use" not in catalog
+
+
+def test_exact_publisher_source_record_is_managed_without_canonical_reinstall(tmp_path):
+    """Recognize a proven publisher source without requiring a canonical copy."""
+
+    profile = tmp_path / "profile"
+    owner = _owner(profile)
+    target = profile / "skills" / "authored" / "incident-handoff"
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("# Published source\n", encoding="utf-8")
+    store = installed_store(tmp_path / "state")
+    store.record_install(_publisher_record(owner, target))
+
+    status = CatalogInstallationStatus(store, owner, profile).for_skill(
+        "skill-1", "incident-handoff", 2,
+    )
+
+    assert status == {
+        "state": "installed", "text": "Installed v1 · update to v2 available",
+        "installed_version": 1, "latest_version": 2,
+    }
 
 
 def test_malformed_remote_slug_cannot_be_resolved_as_a_path(tmp_path, monkeypatch):

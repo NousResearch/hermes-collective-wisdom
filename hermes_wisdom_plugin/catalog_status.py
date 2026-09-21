@@ -7,9 +7,8 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-from .contract import org_directory_name
+from .managed_target import validate_managed_target
 from .package import PackagePolicyError
-from .package_application import reject_existing_links
 from .qualification import _eligible_path  # Reuse the profile-safe local skill resolver fence.
 
 
@@ -24,9 +23,12 @@ _STATUS_UNAVAILABLE = {
 class CatalogInstallationStatus:  # pylint: disable=too-few-public-methods
     """Project one owner-scoped aggregate into cheap catalog status labels."""
 
-    def __init__(self, installed: Any, owner: dict[str, str], profile_home: Path) -> None:
+    def __init__(
+        self, installed: Any, owner: dict[str, str], profile_home: Path, host: Any = None,
+    ) -> None:
         self.owner = dict(owner)
         self.skills_root = Path(profile_home).expanduser().absolute() / "skills"
+        self.host = host or _CatalogHost(self.skills_root)
         try:
             self._find_skill_dir = getattr(import_module("tools.skill_usage"), "_find_skill_dir")
         except (AttributeError, ImportError, RuntimeError):
@@ -73,26 +75,15 @@ class CatalogInstallationStatus:  # pylint: disable=too-few-public-methods
 
     def _record_target_available(self, record: dict[str, Any]) -> bool:
         try:
-            slug = _safe_segment(record.get("slug"))
-            assert slug is not None
-            expected = (
-                self.skills_root / "_wisdom"
-                / org_directory_name(self.owner["organization_id"]) / slug
+            target = validate_managed_target(
+                self.host, record, self.owner, require_tree=False,
             )
-            target = Path(str(record.get("target_path") or ""))
-            if target != expected:
-                return False
-            reject_existing_links(target)
-            baseline = record.get("baseline")
-            if not target.is_dir() or not isinstance(baseline, dict) or not baseline:
-                return False
-            for raw_path in baseline:
+            for raw_path in record["baseline"]:
                 relative = PurePosixPath(raw_path)
-                if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-                    return False
-                candidate = target.joinpath(*relative.parts)
-                reject_existing_links(candidate)
-                if not candidate.is_file():
+                if (
+                    relative.is_absolute() or not relative.parts or ".." in relative.parts
+                    or not target.joinpath(*relative.parts).is_file()
+                ):
                     return False
             return True
         except (KeyError, OSError, PackagePolicyError, RuntimeError, TypeError, ValueError):
@@ -135,3 +126,16 @@ def _safe_segment(value: object, *, fail: bool = True) -> str | None:
     if fail:
         raise ValueError("catalog skill slug is invalid")
     return None
+
+
+class _CatalogHost:  # pylint: disable=too-few-public-methods
+    """Fixture-safe lexical fallback; runtime supplies the actual host validator."""
+
+    def __init__(self, skills_root: Path) -> None:
+        self.skills_root = skills_root
+
+    def validate_target(self, target: Path) -> None:
+        """Require the fallback target to remain below the profile skills root."""
+
+        if target == self.skills_root or not target.is_relative_to(self.skills_root):
+            raise PackagePolicyError("install target must be contained by skills")

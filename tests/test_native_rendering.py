@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_wisdom_plugin.commands import _human_render
 from hermes_wisdom_plugin.native_review import (
     NativeAction, NativeItem, NativeView, project_view,
 )
@@ -39,6 +40,28 @@ def test_completed_review_has_no_effect_controls():
         [NativeItem("Skill", "Installed")], notice="State: completed", dismissed=True,
     )
     assert all(block.get("type") != "actions" for block in blocks(view, "record-1"))
+    assert keyboard(view, "record-1") is None
+
+
+@pytest.mark.parametrize("operation", ["publish", "suggest"])
+def test_published_but_unmanaged_recovery_is_visible_without_new_effect_controls(operation):
+    detail = (
+        "Published successfully, but the original source is not linked to this version locally. "
+        "Recover with: hermes wisdom publication enroll publication-op"
+    )
+    result = {
+        "operation_id": "publication-op", "state": "done", "publication_state": "published",
+        "managed_enrollment": {"state": "not_linked", "detail": detail}, "detail": detail,
+    }
+    view = project_view({
+        "state": "completed", "operation": operation,
+        "plan": {"draft_id": "draft-1", "slug": "shared-skill"}, "result": result,
+    })
+    assert detail in _human_render("publication", result)
+    assert detail in view.to_text()
+    assert detail in html.unescape(plain_html(view))
+    assert detail in str(blocks(view, "record-1"))
+    assert view.dismissed and not view.actions
     assert keyboard(view, "record-1") is None
 
 

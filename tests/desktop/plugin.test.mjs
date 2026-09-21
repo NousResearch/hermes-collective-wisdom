@@ -901,47 +901,66 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   await mounted.cleanup()
 })
 
-test('publication hash comparison ignores object key insertion order', async () => {
-  const expectedHashes = {
-    content: hash('3'),
-    author_description: hash('4'),
-    package_manifest: hash('5')
-  }
-  const reviewedHashes = {
-    package_manifest: hash('5'),
-    content: hash('3'),
-    author_description: hash('4')
-  }
-  const files = [{ path: 'SKILL.md', content_utf8: '# Exact reviewed bytes' }]
-  const loaded = await loadPlugin((path, options, owner) => {
-    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
-    if (path === '/bootstrap') return bootstrap
-    if (path.startsWith('/catalog?')) return { skills: [] }
-    if (path === '/drafts/prepare') return { draft_id: 'local:ordered', skill_id: 'local-skill' }
-    if (path === '/drafts/local%3Aordered?view_id=view-remote-a-A') return {
-      author_description: 'Exact author copy.', files, expected_hashes: expectedHashes
+for (const linked of [true, false]) {
+  test(`publication compares hashes semantically and shows enrollment outcome (managed=${linked})`, async () => {
+    const detail = 'Published successfully, but the original source is not linked to this version locally. Recover with: hermes wisdom publication enroll publication-op'
+    const expectedHashes = {
+      content: hash('3'),
+      author_description: hash('4'),
+      package_manifest: hash('5')
     }
-    if (path === '/drafts/local%3Aordered/review') return { drafted_description: 'Exact author copy.', files, hashes: expectedHashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
-    if (path === '/publication/review') return {
-      receipt: 'publication-receipt', draft_id: 'local:ordered', skill_id: 'local-skill',
-      hashes: reviewedHashes, description: 'Exact author copy.', files,
-      security_check: { upload_allowed: true, summary: 'Allowed.', findings: [] },
-      professionalism_check: { state: 'unavailable', summary: 'Unavailable.', findings: [] },
-      local_scan: { allowed: true, summary: 'Passed.', findings: [] },
-      publication_mode: 'open', policy_version: 'policy-1'
+    const reviewedHashes = {
+      package_manifest: hash('5'),
+      content: hash('3'),
+      author_description: hash('4')
     }
-    throw new Error(`unexpected ${path}`)
-  })
-  const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Contribute'))
-  await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
-  await click(button(mounted, 'Prepare draft'))
-  await click(button(mounted, 'Continue to sharing review'))
+    const files = [{ path: 'SKILL.md', content_utf8: '# Exact reviewed bytes' }]
+    const loaded = await loadPlugin((path, options, owner) => {
+      if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+      if (path === '/bootstrap') return bootstrap
+      if (path.startsWith('/catalog?')) return { skills: [] }
+      if (path === '/drafts/prepare') return { draft_id: 'local:ordered', skill_id: 'local-skill' }
+      if (path === '/drafts/local%3Aordered?view_id=view-remote-a-A') return {
+        author_description: 'Exact author copy.', files, expected_hashes: expectedHashes
+      }
+      if (path === '/drafts/local%3Aordered/review') return { drafted_description: 'Exact author copy.', files, hashes: expectedHashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
+      if (path === '/publication/review') return {
+        receipt: 'publication-receipt', draft_id: 'local:ordered', skill_id: 'local-skill',
+        hashes: reviewedHashes, description: 'Exact author copy.', files,
+        security_check: { upload_allowed: true, summary: 'Allowed.', findings: [] },
+        professionalism_check: { state: 'unavailable', summary: 'Unavailable.', findings: [] },
+        local_scan: { allowed: true, summary: 'Passed.', findings: [] },
+        publication_mode: 'open', policy_version: 'policy-1'
+      }
+      if (path === '/publication/confirm') return {
+        operation_id: 'publication-op', state: 'done', publication_state: 'published',
+        managed_enrollment: { state: linked ? 'managed' : 'not_linked' },
+        ...(linked ? {} : { detail })
+      }
+      throw new Error(`unexpected ${path}`)
+    })
+    const mounted = await renderPage(loaded)
+    await click(button(mounted, 'Contribute'))
+    await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+    await click(button(mounted, 'Prepare draft'))
+    await click(button(mounted, 'Continue to sharing review'))
 
-  assert.match(mounted.container.textContent, /ready to confirm/)
-  assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
-  await mounted.cleanup()
-})
+    assert.match(mounted.container.textContent, /ready to confirm/)
+    assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
+    await click(button(mounted, 'Share this exact reviewed package'))
+    if (linked) {
+      assert.equal(loaded.calls.notify.at(-1)?.message, 'Publication completed')
+      assert.doesNotMatch(mounted.container.textContent, /Publication requires attention/)
+    } else {
+      assert.equal(loaded.calls.notify.length, 0)
+      assert.match(mounted.container.textContent, /Publication requires attention/)
+      assert.ok(mounted.container.textContent.includes(detail))
+      assert.doesNotMatch(mounted.container.textContent, /did not report a completed successful outcome/)
+    }
+    assert.equal(loaded.calls.rest.filter(([path]) => path === '/publication/confirm').length, 1)
+    await mounted.cleanup()
+  })
+}
 
 test('publication without an explicit security upload gate fails closed', async () => {
   const hashes = { content: hash('3'), author_description: hash('4'), package_manifest: hash('5') }

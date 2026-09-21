@@ -214,8 +214,10 @@ rechecks owner/lease/authority before effects, accepts a server-clamped policy
 only after evidence of a committed target version, and quarantines target bytes
 after terminal authority rejection. Concurrent/unknown errors remain pending.
 Final acknowledgement retry cannot repeat the Gateway commit or file mutation.
-Review and recovery require the canonical owner/organization/slug managed path;
-redirected staging/archive ancestors are rejected before filesystem mutation.
+Review and recovery require either the canonical owner/organization/slug managed
+path or the exact immutable provenance of an unchanged author source enrolled after
+publication. Redirected targets and staging/archive ancestors are rejected before
+filesystem mutation.
 
 Replacement coverage lives in `test_update_review.py`,
 `test_update_execution.py`, `test_host_update_integration.py`, and the existing

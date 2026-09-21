@@ -14,7 +14,7 @@ import pytest
 from installed_test_support import installed_store
 from review_test_support import _content
 
-from hermes_wisdom_plugin.contract import org_directory_name
+from hermes_wisdom_plugin.contract import org_directory_name, sha256_address
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin import package_application
 from hermes_wisdom_plugin.package import PackagePolicyError
@@ -331,7 +331,7 @@ class RealClient(ReviewClient):
     def __init__(self):
         super().__init__()
         self.record_calls = []
-        self.record_error = None
+        self.record_error: str | None = None
         self.committed_mode = "MANUAL"
 
     def record_install(self, **values):
@@ -415,6 +415,68 @@ def test_real_reviewer_authority_loss_quarantines_pending_update(real_executor):
     assert result["rejected"] is True
     assert not target.exists()
     assert store.installation("skill-1")["state"] == "inactive"
+
+
+def test_publisher_origin_survives_apply_and_authorizes_next_review(tmp_path):
+    owner = {**OWNER, "profile_home": str(tmp_path / "profile")}
+    store = installed_store(tmp_path / "state")
+    host = ReviewHost(tmp_path / "profile")
+    client = RealClient()
+    target = host.skills_root / "authored" / "managed-skill"
+    target.mkdir(parents=True)
+    for name, _mode, body in client.files[1]:
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    baseline = {name: _hash(body) for name, _mode, body in client.files[1]}
+    manifest = next(body for name, _mode, body in client.files[1]
+                    if name == "skill.manifest.json")
+    origin = {
+        "kind": "publisher_source", "owner": owner, "source_path": str(target),
+        "source_hash": "sha256:" + "a" * 64,
+        "publication": {
+            "operation_id": "publication-1", "remote_draft_id": "draft-1",
+            "proposal_id": 1, "skill_id": "skill-1", "version": 1,
+            "content_hash": _content(client.files[1]).content_hash,
+            "commit": "sha256:" + "c" * 64,
+            "manifest_hash": sha256_address(manifest),
+        },
+    }
+    store.record_install({
+        "skill_id": "skill-1", "org_id": owner["organization_id"],
+        "slug": "managed-skill", "version": 1,
+        "content_hash": _content(client.files[1]).content_hash,
+        "manifest_hash": sha256_address(manifest), "baseline": baseline,
+        "target_path": str(target), "target_provenance": origin,
+        "update_mode": "MANUAL", "state": "active", "owner": owner,
+    })
+    receipts = UpdateReceipts(store, lambda: dict(owner))
+    reviewer = UpdateReviewer(client, store, receipts, host, lambda: dict(owner))
+    executor_value = UpdateExecutor(
+        client, store, receipts, reviewer, host, lambda: dict(owner)
+    )
+
+    v2_plan = reviewer.plan("skill-1")
+    client.record_error = "after"
+    pending = executor_value.apply(v2_plan["receipt"])
+    assert pending["pending"] is True
+    client.record_error = None
+    assert executor_value.apply(v2_plan["receipt"])["updated"] is True
+    assert len(client.record_calls) == 1
+    installed = store.installation("skill-1", owner=owner)
+    assert installed is not None
+    assert installed["target_path"] == str(target)
+    assert installed["target_provenance"] == origin
+    assert installed["target_provenance"]["publication"]["version"] == 1
+    assert installed["version"] == 2
+
+    client.files[3] = client._version_two()
+    client.files[3][0] = ("SKILL.md", "file", b"# Managed v3\n")
+    client.remote["latest_version"] = 3
+    v3_plan = reviewer.plan("skill-1")
+    assert v3_plan["from_version"] == 2 and v3_plan["version"] == 3
+    assert v3_plan["target_path"] == str(target)
+    assert v3_plan["target_provenance"] == origin
 
 
 def test_retry_binds_existing_operation_before_files_or_gateway(
