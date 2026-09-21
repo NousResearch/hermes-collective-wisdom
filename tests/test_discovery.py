@@ -95,6 +95,25 @@ def test_list_skills_preserves_wire_shape_and_checks_owner_before_and_after():
     assert checks == ["owner", "owner"]
 
 
+def test_local_status_overwrites_untrusted_remote_status():
+    client = _Client()
+    client.pages = [_page([_item(
+        latest_version=2,
+        installation_status={"state": "installed", "text": "remote claim"},
+    )])]
+    discovery = Discovery(
+        client, lambda: None, "https://portal.example", "org-1",
+        installation_status=lambda _skill_id, _slug, latest: {
+            "state": "not_installed", "text": "Not installed",
+            "installed_version": None, "latest_version": latest,
+        },
+    )
+
+    result = discovery.search_skills()
+
+    assert result[0]["installation_status"]["text"] == "Not installed"
+
+
 def test_owner_is_rechecked_when_client_raises():
     checks = []
     client = _Client()

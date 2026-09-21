@@ -366,6 +366,14 @@ def _requirements_summary(requirements: dict[str, Any]) -> str:
     return "; ".join(parts) or "declared (inspect JSON for structured details)"
 
 
+def _installation_status_text(value: object) -> str:
+    data = value if isinstance(value, dict) else {}
+    status = data.get("installation_status")
+    if isinstance(status, dict) and isinstance(status.get("text"), str):
+        return text(status["text"])
+    return "Installation status unavailable"
+
+
 def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     command: str | None, value: object
 ) -> str:
@@ -386,6 +394,7 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
             )
             description = text(row.get("author_description") or "No description")
             lines.append(f"  - {text(name)}{suffix}: {description}")
+            lines.append("    " + _installation_status_text(row))
         if not rows:
             lines.append("No matching shared skills.")
         return "\n".join(lines)
@@ -411,13 +420,19 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
             if isinstance(item, int) and not isinstance(item, bool) and item > 0
         ]
         lines.append(f"Latest: v{max(numbers) if numbers else '?'}")
+        lines.append(_installation_status_text(data))
         requirements = latest.get("system_spec")
         if isinstance(requirements, dict):
             lines.append("Requirements: " + _requirements_summary(requirements))
         return "\n".join(lines)
     if command == "versions":
-        rows = data.get("versions") if isinstance(data.get("versions"), list) else []
-        lines = ["Published versions", f"Results: {len(rows)}"]
+        raw_rows = data.get("versions")
+        rows = raw_rows if isinstance(raw_rows, list) else []
+        status_source = next((row for row in rows if isinstance(row, dict)), {})
+        lines = [
+            "Published versions", _installation_status_text(status_source),
+            f"Results: {len(rows)}",
+        ]
         valid = [row for row in rows if isinstance(row, dict)]
         valid.sort(
             key=lambda row: row.get("version")

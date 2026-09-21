@@ -567,6 +567,21 @@ def test_human_read_commands_render_substantive_rows(argv, expected, capsys):
     assert not output.lstrip().startswith(("{", "["))
 
 
+def test_standalone_catalog_status_is_visible_in_human_and_json_output(capsys):
+    service = _Service()
+    service.rows[0]["installation_status"] = {
+        "state": "installed", "text": "Installed v1 · update to v2 available",
+        "installed_version": 1, "latest_version": 2,
+    }
+
+    assert run_cli(_parser().parse_args(["list"]), service) == 0
+    assert "Installed v1 · update to v2 available" in capsys.readouterr().out
+
+    assert run_cli(_parser().parse_args(["list", "--json"]), service) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["skills"][0]["installation_status"]["state"] == "installed"
+
+
 def test_suggest_warning_without_safe_evidence_cannot_be_acknowledged(capsys, monkeypatch):
     service = _Service()
     original = service.suggest
@@ -1149,9 +1164,11 @@ def test_slash_browse_omits_account_local_install_and_private_check_details():
         "local_installation",
         "PRIVATE_SUMMARY",
         "PRIVATE_FINDING",
-        "Install",
     ):
         assert private not in output
+    assert "Installation status unavailable" in output
+    assert "Review install" not in output
+    assert "Install:" not in output
 
 
 def test_slash_browse_sanitizes_untrusted_text_and_navigation_controls():

@@ -1160,13 +1160,19 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self._open().require_setup()
 
     def _discovery(self):
+        from .catalog_status import (  # pylint: disable=import-outside-toplevel
+            CatalogInstallationStatus,
+        )
         from .discovery import Discovery  # pylint: disable=import-outside-toplevel
 
         self.require_setup()
+        owner = self._installation_owner()
+        local_status = CatalogInstallationStatus(self.installed, owner, self.profile[1])
         return Discovery(
             self.client, self.check_owner,
             portal_base_url=self.account.portal_base_url,
             organization_id=self.account.organization_id,
+            installation_status=local_status.for_skill,
         )
 
     def list_skills(self):
