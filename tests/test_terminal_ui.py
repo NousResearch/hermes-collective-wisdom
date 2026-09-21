@@ -109,7 +109,7 @@ New sensitive capabilities:
   - network
 Approval permission: blocked
 Approval status: blocked until the listed review actions are completed.
-Consequence: submits to organization moderation before publication.
+Consequence: Moderated: confirmation submits for team moderation.
 Nothing has been uploaded yet.
 Next: hermes wisdom publication submit 'receipt with '\"'\"' quote'"""
 
@@ -148,6 +148,42 @@ Verification: pending
 Approval permission: allowed
 Approval status: eligible for exact final confirmation.
 Next: hermes wisdom installed-setup apply 'setup receipt'"""
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("open", "Open: confirmation may publish directly."),
+        ("moderated", "Moderated: confirmation submits for team moderation."),
+        ("managed", "Managed: confirmation follows organization-managed Gateway handling."),
+        (
+            "future-policy",
+            "Gateway publication policy is unavailable or unrecognized; "
+            "no publication route is claimed.",
+        ),
+    ],
+)
+def test_publication_consequence_uses_authoritative_policy_modes(mode, expected):
+    """Only recognized authoritative modes claim a concrete publication route."""
+
+    output = render_action_review(
+        "publication", {"files": [], "publication_mode": mode}
+    )
+
+    assert "Consequence: " + expected in output
+
+
+def test_local_prepared_preview_does_not_invent_unchecked_moderation():
+    """Local preparation precedes the authoritative Gateway policy read."""
+
+    output = render_action_review(
+        "publication", {"files": [], "network_submission": False}
+    )
+
+    assert "Gateway publication policy has not been checked yet" in output
+    assert "moderation" not in output.casefold()
+    assert "publish directly" not in output.casefold()
+    assert "Nothing has been uploaded yet." in output
 
 
 @pytest.mark.parametrize(

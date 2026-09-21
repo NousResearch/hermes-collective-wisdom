@@ -14,6 +14,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from installed_test_support import JsonState
 from hermes_wisdom_plugin.runtime import CommandRuntime
@@ -57,7 +58,9 @@ def test_root_loader_uses_synthetic_namespace_relative_import() -> None:
         unload_native_plugin(module_name)
 
 
-def test_register_is_lazy_and_owns_both_command_handles(tmp_path, monkeypatch) -> None:
+def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-many-locals
+    tmp_path, monkeypatch
+) -> None:
     """Signed-out registration creates no local state or network clients."""
     module_name, plugin = load_native_plugin()
     try:
@@ -126,6 +129,11 @@ def test_register_is_lazy_and_owns_both_command_handles(tmp_path, monkeypatch) -
         assert set(entries["tools"]) == {
             "wisdom_inbox", "wisdom_inspect", "present_wisdom_consent",
         }
+        manifest = yaml.safe_load((PROJECT_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+        assert set(manifest["provides_hooks"]) == {
+            name for name, _callback in entries["hooks"]
+        }
+        assert set(manifest["provides_tools"]) == set(entries["tools"])
         assert all(
             definition["toolset"] == "skills"
             and callable(definition["handler"])

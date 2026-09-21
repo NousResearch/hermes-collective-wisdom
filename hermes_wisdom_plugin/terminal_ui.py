@@ -302,13 +302,22 @@ def _decision_lines(kind: str, data: dict[str, Any]) -> list[str]:
             "Consequence: writes the reviewed package files; setup commands are not run."
         )
     elif kind == "publication":
-        mode = text(data.get("publication_mode") or "server policy")
-        consequence = (
-            "publishes directly to the organization catalog"
-            if mode.casefold() == "direct"
-            else "submits to organization moderation before publication"
-        )
-        lines.append("Consequence: " + consequence + ".")
+        raw_mode = data.get("publication_mode")
+        mode = raw_mode.casefold() if isinstance(raw_mode, str) else ""
+        consequence = {
+            "open": "Open: confirmation may publish directly.",
+            "moderated": "Moderated: confirmation submits for team moderation.",
+            "managed": "Managed: confirmation follows organization-managed Gateway handling.",
+        }.get(mode)
+        if consequence is None:
+            consequence = (
+                "Gateway publication policy is unavailable or unrecognized; "
+                "no publication route is claimed."
+                if mode else
+                "Gateway publication policy has not been checked yet; "
+                "no publication route is claimed."
+            )
+        lines.append("Consequence: " + consequence)
         if data.get("network_submission") is False:
             lines.append("Nothing has been uploaded yet.")
     receipt = data.get("receipt")

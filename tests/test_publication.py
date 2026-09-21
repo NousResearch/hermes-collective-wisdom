@@ -13,7 +13,9 @@ import pytest
 from test_contribution_review import reviewer
 
 from hermes_wisdom_plugin.direct_services import PublicationService
-from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
+from hermes_wisdom_plugin.errors import (
+    WisdomAuthError, WisdomConflict, WisdomValidationError,
+)
 
 
 class RecordingPublicationClient:
@@ -22,7 +24,7 @@ class RecordingPublicationClient:
     def __init__(self, owner: dict[str, str], *, mode: str = "open") -> None:
         self.state = SimpleNamespace(
             owner=owner, mode=mode, policy_version=7, calls=Counter(), drafts={},
-            fail_after_effect=set(), uploaded_objects=None, head=None,
+            fail_after_effect=set(), submit_error=None, uploaded_objects=None, head=None,
         )
 
     def agent_led_policy(self):
@@ -40,6 +42,8 @@ class RecordingPublicationClient:
 
     def submit_draft(self, **payload):
         self.state.calls["submit"] += 1
+        if self.state.submit_error is not None:
+            raise self.state.submit_error
         draft = SimpleNamespace(
             id="draft-1", orgId=self.state.owner["organization_id"],
             ownerUserId=self.state.owner["account_id"], slug=payload["slug"],
@@ -248,6 +252,50 @@ def test_submit_ack_loss_reconciles_exact_remote_without_duplicate(tmp_path: Pat
     recovered = restarted.reopen(uncertain["operation_id"])
     assert recovered["publication_state"] == "published"
     assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
+
+
+def test_definitive_submit_422_is_terminal_and_allows_fresh_review(tmp_path: Path):
+    service, prepared, client, _ = publication(tmp_path)
+    client.state.submit_error = WisdomValidationError(
+        "raw response detail must not be shown", status=422,
+        code="instruction_only_violation",
+    )
+
+    receipt = service.review(prepared["draft_id"])["receipt"]
+    rejected = service.submit(receipt)
+
+    assert rejected == {
+        "operation_id": rejected["operation_id"],
+        "state": "rejected",
+        "phase": "rejected",
+        "detail": "Gateway rejected the publication draft before creation (HTTP 422).",
+        "code": "instruction_only_violation",
+        "retry_safe": False,
+    }
+    assert service.status(rejected["operation_id"]) == rejected
+    assert client.state.calls == Counter(upload=1, submit=1)
+    with pytest.raises(WisdomConflict, match="missing or already used"):
+        service.submit(receipt)
+
+    client.state.submit_error = None
+    completed = service.submit(service.review(prepared["draft_id"])["receipt"])
+    assert completed["publication_state"] == "published"
+    assert client.state.calls == Counter(upload=2, submit=2, approve=1, head=1, publish=1)
+
+
+def test_statusless_submit_validation_error_remains_uncertain(tmp_path: Path):
+    service, prepared, client, _ = publication(tmp_path)
+    client.state.submit_error = WisdomValidationError(
+        "Gateway acknowledgement failed schema validation"
+    )
+
+    uncertain = service.submit(service.review(prepared["draft_id"])["receipt"])
+
+    assert uncertain["state"] == "uncertain"
+    assert uncertain["phase"] == "draft_submission_unknown"
+    assert uncertain["retry_safe"] is False
+    assert service.status(uncertain["operation_id"])["state"] == "uncertain"
+    assert client.state.calls == Counter(upload=1, submit=1)
 
 
 def test_publish_ack_loss_reconciles_remote_without_republish(tmp_path: Path):
