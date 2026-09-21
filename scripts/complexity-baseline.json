@@ -17,7 +17,7 @@
     "hermes_wisdom_plugin/commands.py::run_cli": 23,
     "hermes_wisdom_plugin/commands.py::run_slash": 21,
     "hermes_wisdom_plugin/compatibility.py::evaluate": 18,
-    "hermes_wisdom_plugin/contribution_review.py::ContributionReviewer._source": 13,
+    "hermes_wisdom_plugin/contribution_review.py::ContributionReviewer.source": 13,
     "hermes_wisdom_plugin/contribution_review.py::ContributionReviewer.save_prepared": 18,
     "hermes_wisdom_plugin/desktop_api.py::build_router": 33,
     "hermes_wisdom_plugin/editorial.py::_round_trip_frontmatter": 11,

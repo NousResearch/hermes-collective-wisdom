@@ -178,8 +178,20 @@ def test_published_result_links_exact_remote_identity_after_publication(tmp_path
     assert currentness is None
 
 
-def test_publication_success_reports_local_link_failure_without_leaking_exception(tmp_path: Path):
-    service, prepared, _client, _ = publication(tmp_path)
+@pytest.mark.parametrize(("skill_name", "argument"), [
+    ("reviewed-skill", "reviewed-skill"),
+    ("reviewed skill; inert", "'reviewed skill; inert'"),
+])
+def test_publication_success_reports_local_link_failure_without_leaking_exception(
+    tmp_path: Path, skill_name: str, argument: str,
+):
+    prepared_reviewer, source, binding = reviewer(tmp_path)
+    source.rename(source.with_name(skill_name))
+    prepared = prepared_reviewer.prepare(skill_name)
+    service = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, RecordingPublicationClient(binding),
+        lambda: dict(binding),
+    )
 
     class Enrollment:
         """Simulate a local enrollment failure after remote publication."""
@@ -195,8 +207,7 @@ def test_publication_success_reports_local_link_failure_without_leaking_exceptio
         "state": "not_linked",
         "detail": (
             "Published successfully, but the original source is not linked to this version "
-            "locally. "
-            f"Recover with: hermes wisdom publication enroll {result['operation_id']}"
+            f"locally. Recover with: hermes wisdom publication enroll {argument}"
         ),
     }
     assert "secret" not in str(result)

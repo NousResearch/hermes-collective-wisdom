@@ -903,7 +903,7 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
 
 for (const linked of [true, false]) {
   test(`publication compares hashes semantically and shows enrollment outcome (managed=${linked})`, async () => {
-    const detail = 'Published successfully, but the original source is not linked to this version locally. Recover with: hermes wisdom publication enroll publication-op'
+    const detail = 'Published successfully, but the original source is not linked to this version locally. Recover with: hermes wisdom publication enroll local-skill'
     const expectedHashes = {
       content: hash('3'),
       author_description: hash('4'),

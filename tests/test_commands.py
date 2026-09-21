@@ -248,10 +248,11 @@ class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-att
         self.calls.append(("publication_reopen", operation_id))
         return {"operation_id": operation_id, "publication_state": "pending_moderation"}
 
-    def publication_enroll(self, operation_id):
-        self.calls.append(("publication_enroll", operation_id))
+    def publication_enroll(self, skill_name):
+        self.calls.append(("publication_enroll", skill_name))
         return {
-            "operation_id": operation_id, "state": "done", "publication_state": "published",
+            "operation_id": "internal-publication-operation", "state": "done",
+            "publication_state": "published",
             "managed_enrollment": {"state": "managed", "skill_id": "skill-1", "version": 1},
         }
 
@@ -532,17 +533,19 @@ def test_publication_submit_reports_unsuccessful_exit(capsys, as_json, state, ex
     assert service.calls == [("publication_submit", "wpub_review")]
 
 
-def test_publication_enroll_is_explicit_operation_bound_recovery(capsys):
+def test_publication_enroll_dispatches_local_skill_name(capsys):
     service = _Service()
+    args = _parser().parse_args(
+        ["publication", "enroll", "reviewed-skill", "--json"]
+    )
 
-    assert run_cli(
-        _parser().parse_args(["publication", "enroll", "op-published", "--json"]),
-        service,
-    ) == 0
+    assert args.skill_name == "reviewed-skill"
+    assert not hasattr(args, "operation_id")
+    assert run_cli(args, service) == 0
 
     result = json.loads(capsys.readouterr().out)
     assert result["managed_enrollment"]["state"] == "managed"
-    assert service.calls == [("publication_enroll", "op-published")]
+    assert service.calls == [("publication_enroll", "reviewed-skill")]
 
 
 def test_interactive_suggest_cancel_has_no_publication_effect(capsys, monkeypatch):

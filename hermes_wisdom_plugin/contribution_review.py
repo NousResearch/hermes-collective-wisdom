@@ -181,7 +181,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         if draft.get("owner") != expected:
             raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
 
-    def _source(self, skill_name: str) -> Path:
+    def source(self, skill_name: str) -> Path:
+        """Resolve one unique safe profile-local skill source by its local name."""
+
         if not isinstance(skill_name, str) or not skill_name.strip():
             raise WisdomNotFound("local skill not found")
         if skill_name != skill_name.strip() or "/" in skill_name or "\\" in skill_name:
@@ -570,7 +572,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         self._require_current(may_apply)
         expected_owner = self._owner()
         self._require_current(may_apply)
-        source = self._source(skill_name)
+        source = self.source(skill_name)
         source_hash = source_fingerprint(source)
         self._assert_owner(expected_owner, may_apply)
         self._require_current(may_apply)

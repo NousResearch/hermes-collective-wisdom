@@ -225,10 +225,12 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     for action_name, help_text in (
         ("status", "Inspect durable publication state without network retry"),
         ("reopen", "Reconcile an uncertain publication without duplicate submission"),
-        ("enroll", "Prove and register an exact already-published source for managed updates"),
         ("decline", "Decline or withdraw one known remote draft when safe"),
     ):
         publication_action(action_name, help_text).add_argument("operation_id")
+    publication_action(
+        "enroll", "Prove and register an exact already-published source for managed updates"
+    ).add_argument("skill_name")
     install = add("install", "Review or apply an exact managed skill installation")
     install.add_argument("reference", nargs="?", default="")
     install.add_argument("--plan", action="store_true", help="Create a review without installing")
@@ -526,7 +528,7 @@ def _publication_cli(args, service):
     if action == "reopen":
         return service.publication_reopen(args.operation_id)
     if action == "enroll":
-        return service.publication_enroll(args.operation_id)
+        return service.publication_enroll(args.skill_name)
     if action == "decline":
         return service.publication_decline(args.operation_id)
     raise PackagePolicyError("unsupported publication action")

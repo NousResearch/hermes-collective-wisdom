@@ -20,7 +20,9 @@ from test_update_review import Receipts as UpdateReceipts
 from hermes_wisdom_plugin.compatibility import LocalCapabilities
 from hermes_wisdom_plugin.contract import sha256_address
 from hermes_wisdom_plugin.direct_services import PublicationService
-from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomValidationError
+from hermes_wisdom_plugin.errors import (
+    WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+)
 from hermes_wisdom_plugin.package import (
     PackagePolicyError, read_validated_package_files, source_fingerprint,
 )
@@ -163,6 +165,30 @@ def _enrollment_fixture(tmp_path: Path):
     return enrollment, operation, published["publication_result"], installed, client, source, owner
 
 
+def _named_recovery_fixture(tmp_path: Path):
+    prepared_reviewer, source, owner = reviewer(tmp_path)
+    prepared = prepared_reviewer.prepare("reviewed-skill")
+    draft = prepared_reviewer.store.draft(prepared["draft_id"])
+    assert draft is not None
+    client = PublicationClient(
+        owner, read_validated_package_files(Path(draft["overlay_path"])),
+        draft["draft_commit"],
+    )
+    initial = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, client, lambda: dict(owner),
+    )
+    published = initial.submit(initial.review(prepared["draft_id"])["receipt"])
+    installed = installed_store(tmp_path / "installed-state")
+    enrollment = PublisherEnrollment(
+        prepared_reviewer.store, installed, client, Host(Path(owner["profile_home"])),
+        lambda: dict(owner),
+    )
+    recovered = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, client, lambda: dict(owner), enrollment,
+    )
+    return recovered, prepared_reviewer, published, installed, client, source, owner
+
+
 def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: Path):
     prepared_reviewer, source, owner = reviewer(tmp_path)
     prepared = prepared_reviewer.prepare("reviewed-skill")
@@ -271,8 +297,8 @@ def test_author_v2_advances_same_source_then_teammate_v3_uses_managed_review(
     assert installed.installation("published-skill-1", owner=owner) == record_v1
     publish_calls = client.state.calls["publish"]
     client.record_install = record_install
-    recovered_v2 = service.enroll(published_v2["operation_id"])
-    assert service.enroll(published_v2["operation_id"])["managed_enrollment"] == (
+    recovered_v2 = service.enroll("reviewed-skill")
+    assert service.enroll("reviewed-skill")["managed_enrollment"] == (
         recovered_v2["managed_enrollment"]
     )
     assert recovered_v2["managed_enrollment"]["version"] == 2
@@ -361,13 +387,108 @@ def test_explicit_enrollment_recovers_historical_published_operation_by_exact_re
         prepared_reviewer.store, prepared_reviewer, client, lambda: dict(owner), enrollment,
     )
 
-    result = recovered.enroll(published["operation_id"])
+    result = recovered.enroll("reviewed-skill")
 
     assert result["publication_state"] == "published"
     assert result["managed_enrollment"]["state"] == "managed"
     assert result["managed_enrollment"]["path"] == str(source)
     assert installed.installation("published-skill-1", owner=owner) is not None
     assert client.state.calls["publish"] == 1
+
+
+def test_named_enrollment_requires_retained_proof_for_current_source(tmp_path: Path):
+    recovered, _reviewer, _published, installed, client, source, owner = (
+        _named_recovery_fixture(tmp_path)
+    )
+    (source / "SKILL.md").write_text("# locally changed\n", encoding="utf-8")
+    before = tree_hashes(source)
+
+    with pytest.raises(WisdomNotFound, match="current local skill 'reviewed-skill'"):
+        recovered.enroll("reviewed-skill")
+
+    assert tree_hashes(source) == before
+    assert client.state.calls["publish"] == 1
+    assert not client.record_calls
+    assert installed.installation("published-skill-1", owner=owner) is None
+
+
+def test_named_enrollment_rejects_unknown_local_skill_without_effects(tmp_path: Path):
+    recovered, _reviewer, _published, installed, client, source, owner = (
+        _named_recovery_fixture(tmp_path)
+    )
+    before = tree_hashes(source)
+
+    with pytest.raises(WisdomNotFound, match="local skill not found"):
+        recovered.enroll("unknown-skill")
+
+    assert tree_hashes(source) == before
+    assert client.state.calls["publish"] == 1
+    assert not client.record_calls
+    assert installed.installation("published-skill-1", owner=owner) is None
+
+
+def test_named_enrollment_rejects_ambiguous_exact_publications(tmp_path: Path):
+    recovered, prepared_reviewer, published, installed, client, source, owner = (
+        _named_recovery_fixture(tmp_path)
+    )
+    operation = prepared_reviewer.store.publication(published["operation_id"])
+    assert operation is not None
+    distinct = copy.deepcopy(operation)
+    distinct.update({"id": "distinct-publication", "remote_draft_id": "distinct-draft"})
+    with prepared_reviewer.store.change() as state:
+        state["publications"][distinct["id"]] = distinct
+    before = tree_hashes(source)
+
+    with pytest.raises(WisdomConflict, match="Multiple retained publications.*reviewed-skill"):
+        recovered.enroll("reviewed-skill")
+
+    assert tree_hashes(source) == before
+    assert client.state.calls["publish"] == 1
+    assert not client.record_calls
+    assert installed.installation("published-skill-1", owner=owner) is None
+
+
+def test_named_enrollment_keeps_exact_remote_proof_checks(tmp_path: Path):
+    recovered, _reviewer, _published, installed, client, source, owner = (
+        _named_recovery_fixture(tmp_path)
+    )
+    original = client.version
+
+    def incorrect_version(skill_id, version):
+        detail = original(skill_id, version)
+        detail.version["content_hash"] = "sha256:" + "0" * 64
+        return detail
+
+    client.version = incorrect_version
+    before = tree_hashes(source)
+
+    with pytest.raises(WisdomValidationError, match="proof differs"):
+        recovered.enroll("reviewed-skill")
+
+    assert tree_hashes(source) == before
+    assert client.state.calls["publish"] == 1
+    assert not client.record_calls
+    assert installed.installation("published-skill-1", owner=owner) is None
+
+
+def test_named_enrollment_keeps_retained_proof_owner_isolated(tmp_path: Path):
+    recovered, prepared_reviewer, _published, installed, client, source, owner = (
+        _named_recovery_fixture(tmp_path)
+    )
+    other_owner = {**owner, "account_id": "other-member"}
+    recovered = PublicationService(
+        prepared_reviewer.store, prepared_reviewer, client,
+        lambda: dict(other_owner), recovered.enrollment,
+    )
+    before = tree_hashes(source)
+
+    with pytest.raises(WisdomNotFound, match="current local skill 'reviewed-skill'"):
+        recovered.enroll("reviewed-skill")
+
+    assert tree_hashes(source) == before
+    assert client.state.calls["publish"] == 1
+    assert not client.record_calls
+    assert installed.installation("published-skill-1", owner=owner) is None
 
 
 @pytest.mark.parametrize("field", [

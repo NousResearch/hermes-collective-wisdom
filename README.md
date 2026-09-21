@@ -153,7 +153,7 @@ After a publication is proven successful, Wisdom registers the unchanged origina
 source as a managed installation in place; it does not copy, move, reinstall, or run
 setup. Teammate versions then use the ordinary explicit update review and local-edit
 protections. If remote publication succeeds but local registration does not, recover
-the retained operation with `hermes wisdom publication enroll <operation-id>`. That
+the retained proof with `hermes wisdom publication enroll <local-skill-name>`. That
 command performs read-only catalog/detail/content discovery and, after exact proof,
 may register the installation with Gateway and local managed state. It never replays
 publication or overwrites the source during enrollment.
@@ -189,7 +189,7 @@ as unavailable, not passed.
 | List managed installations | `hermes wisdom installed --json` |
 | Check for an update | `hermes wisdom check <skill-id> --json` |
 | Review an update | `hermes wisdom update <skill-id> --plan --json` |
-| Recover management of an already-published original | `hermes wisdom publication enroll <operation-id> --json` |
+| Recover management of an already-published original | `hermes wisdom publication enroll <local-skill-name> --json` |
 | Inspect notification settings | `hermes wisdom settings --json` |
 | Mute proactive notifications for a week | `hermes wisdom mute 1w --json` |
 

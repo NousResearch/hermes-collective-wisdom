@@ -47,7 +47,7 @@ def test_completed_review_has_no_effect_controls():
 def test_published_but_unmanaged_recovery_is_visible_without_new_effect_controls(operation):
     detail = (
         "Published successfully, but the original source is not linked to this version locally. "
-        "Recover with: hermes wisdom publication enroll publication-op"
+        "Recover with: hermes wisdom publication enroll shared-skill"
     )
     result = {
         "operation_id": "publication-op", "state": "done", "publication_state": "published",

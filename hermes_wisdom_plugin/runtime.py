@@ -832,12 +832,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         return result
 
     def publication_enroll(
-        self, operation_id, *, may_apply: Callable[[], bool] | None = None,
+        self, skill_name, *, may_apply: Callable[[], bool] | None = None,
     ):
         """Explicitly link an exact already-published author source."""
 
         _require_current(may_apply)
-        result = self._publication_service().enroll(operation_id, may_apply=may_apply)
+        result = self._publication_service().enroll(skill_name, may_apply=may_apply)
         self.check_owner()
         _require_current(may_apply)
         return result

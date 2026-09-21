@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import re
+import shlex
 import time
 import unicodedata
 import uuid
@@ -391,6 +392,31 @@ class DirectState:
 
     def publication(self, operation_id: str) -> dict[str, Any] | None:
         return copy.deepcopy(self._load()["publications"].get(operation_id))
+
+    def published_for_source(
+        self, owner: dict[str, str], source: Path, source_hash: str,
+    ) -> list[dict[str, Any]]:
+        """Return retained published operations for one exact owner/source snapshot."""
+
+        state = self._load()
+        source_path = str(source)
+        matches = []
+        for row in state["publications"].values():
+            if (
+                row.get("owner") != owner
+                or row.get("status") != "done"
+                or row.get("publication_state") != "published"
+            ):
+                continue
+            draft = state["drafts"].get(row.get("local_draft_id"))
+            if (
+                isinstance(draft, dict)
+                and draft.get("owner") == owner
+                and draft.get("source_path") == source_path
+                and draft.get("source_hash") == source_hash
+            ):
+                matches.append(copy.deepcopy(row))
+        return matches
 
     def publication_for_draft(self, draft_id: str) -> dict[str, Any] | None:
         for row in self._load()["publications"].values():
@@ -1320,14 +1346,18 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             operation_id, managed_enrollment=linked,
         ))
 
-    @staticmethod
-    def _not_linked(operation_id: str) -> dict[str, str]:
+    def _not_linked(self, operation_id: str) -> dict[str, str]:
+        operation = self._operation(operation_id)
+        draft = self.state.draft(str(operation.get("local_draft_id") or ""))
+        skill_name = draft.get("slug") if isinstance(draft, dict) else None
+        if not isinstance(skill_name, str) or not skill_name:
+            skill_name = "<local-skill-name>"
         return {
             "state": "not_linked",
             "detail": (
                 "Published successfully, but the original source is not linked to this version "
                 "locally. "
-                f"Recover with: hermes wisdom publication enroll {operation_id}"
+                f"Recover with: hermes wisdom publication enroll {shlex.quote(skill_name)}"
             ),
         }
 
@@ -1575,13 +1605,28 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         }
 
     def enroll(
-        self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
+        self, skill_name: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Discover exact publication proof, then register its unchanged source."""
 
-        operation = self._operation(operation_id)
-        if operation.get("status") != "done" or operation.get("publication_state") != "published":
-            raise WisdomConflict("Only a published contribution can be enrolled as managed")
+        _current(may_apply)
+        owner = self._owner()
+        source = self.reviewer.source(skill_name)
+        source_hash = source_fingerprint(source)
+        _current(may_apply)
+        if self._owner() != owner:
+            raise WisdomAuthError("Collective Wisdom publication owner changed")
+        matches = self.state.published_for_source(owner, source, source_hash)
+        if not matches:
+            raise WisdomNotFound(
+                f"No retained published proof matches current local skill '{skill_name}'"
+            )
+        if len(matches) != 1:
+            raise WisdomConflict(
+                f"Multiple retained publications match current local skill '{skill_name}'"
+            )
+        operation = matches[0]
+        operation_id = str(operation["id"])
         if self.enrollment is None:
             raise WisdomConflict("Publisher managed enrollment is unavailable")
         linked = self.enrollment.link_existing(operation, may_apply=may_apply)
