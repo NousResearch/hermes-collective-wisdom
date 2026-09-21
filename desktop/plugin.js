@@ -3,6 +3,12 @@ import {
   Button,
   Checkbox,
   Codicon,
+  COMPOSER_AREAS,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
   EmptyState,
   host,
   Input,
@@ -17,7 +23,7 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const WISDOM_ROUTE = '/collective-wisdom'
@@ -32,6 +38,66 @@ const requestBody = (viewId, fields = {}) => ({ view_id: viewId, ...fields })
 const isObject = value => value != null && typeof value === 'object' && !Array.isArray(value)
 const isPositiveInt = value => Number.isInteger(value) && value > 0
 const isAuthError = error => error?.status === 401 || error?.statusCode === 401 || /\b401\b/.test(text(error?.message))
+
+const slashDialog = {
+  hosts: [],
+  listeners: new Set(),
+  revision: 0,
+  value: null,
+  emit() {
+    this.revision += 1
+    for (const listener of this.listeners) listener()
+  },
+  open(value) { this.value = value; this.emit() },
+  close(id) {
+    if (id == null || this.value?.id === id) {
+      this.value = null
+      this.emit()
+    }
+  },
+  subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) },
+  snapshot() { return this.revision }
+}
+
+function parseWisdomDiscovery(value) {
+  const match = text(value).trim().match(/^\/wisdom(?:\s+(.*))?$/i)
+  if (!match) return null
+  const args = text(match[1]).trim()
+  if (!args) return { query: '', skillId: null }
+  if (/^list$/i.test(args)) return { query: '', skillId: null }
+  const browse = args.match(/^browse(?:\s+(.+))?$/i)
+  if (browse && !text(browse[1]).trim().startsWith('--')) return { query: text(browse[1]).trim(), skillId: null }
+  const show = args.match(/^show\s+(\S+)$/i)
+  if (show) return { query: '', skillId: show[1] }
+  return null
+}
+
+function captureDialogOrigin() {
+  const owner = host.state.focusedSessionOwner?.get?.() || null
+  const active = {
+    connectionId: text(host.state.connectionId?.get?.()),
+    profile: text(host.state.profile?.get?.() || 'default')
+  }
+  const origin = {
+    connectionId: text(owner?.connectionId),
+    profile: text(owner?.profile),
+    runtimeSessionId: host.state.focusedSessionId?.get?.() ?? null,
+    storedSessionId: host.state.focusedStoredSessionId?.get?.() ?? null
+  }
+  const routable = Boolean(origin.connectionId && origin.profile &&
+    origin.connectionId === active.connectionId && origin.profile === active.profile)
+  return { active, origin, routable }
+}
+
+function dialogOriginIsCurrent(origin) {
+  const owner = host.state.focusedSessionOwner?.get?.()
+  return host.state.gateway?.get?.() === 'open' &&
+    text(host.state.connectionId?.get?.()) === origin.connectionId &&
+    text(host.state.profile?.get?.() || 'default') === origin.profile &&
+    text(owner?.connectionId) === origin.connectionId && text(owner?.profile) === origin.profile &&
+    (host.state.focusedSessionId?.get?.() ?? null) === origin.runtimeSessionId &&
+    (host.state.focusedStoredSessionId?.get?.() ?? null) === origin.storedSessionId
+}
 
 function Section({ children, description, title }) {
   return jsxs('section', { className: 'space-y-3', children: [
@@ -290,7 +356,7 @@ function ReviewAcknowledgements({ busy, kind, onChange, onReview, review, value 
   ] })
 }
 
-function ReviewPanel({ acknowledgements, busy, kind, onCancel, onConfirm, review }) {
+function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onConfirm, review }) {
   const problems = reviewProblems(review, kind, acknowledgements)
   const continuation = reviewContinuation(review, kind)
   const hashes = isObject(review?.hashes) ? review.hashes : {}
@@ -364,7 +430,7 @@ function ReviewPanel({ acknowledgements, busy, kind, onCancel, onConfirm, review
       continuation ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `Keep this review unconfirmed. Continue in the terminal with ${continuation} to inspect and explicitly provide any acknowledgement this bounded Desktop view cannot collect.` }) : null
     ] }) : null,
     jsxs('div', { className: 'flex justify-end gap-2', children: [
-      jsx(Button, { disabled: busy, onClick: onCancel, size: 'sm', type: 'button', variant: 'secondary', children: isPublication ? 'Keep draft; do not share' : 'Cancel' }),
+      jsx(Button, { disabled: busy, onClick: onCancel, size: 'sm', type: 'button', variant: 'secondary', children: cancelLabel || (isPublication ? 'Keep draft; do not share' : 'Cancel') }),
       jsx(Button, { disabled: busy || problems.length > 0, loading: busy, onClick: onConfirm, size: 'sm', type: 'button', children: isPublication ? 'Share this exact reviewed package' : `Confirm ${kind}` })
     ] })
   ] })
@@ -372,16 +438,22 @@ function ReviewPanel({ acknowledgements, busy, kind, onCancel, onConfirm, review
 
 function OperationOutcome({ kind, result }) {
   if (!result) return null
-  return jsxs('section', { 'aria-live': 'polite', className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: `${kind} requires attention` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: result.detail || result.error || 'The service did not report a completed successful outcome. Reload authoritative status before deciding what to do next.' }),
-    jsx(KeyValue, { name: 'operation', value: result.operation_id, mono: true }),
-    jsx(KeyValue, { name: 'state', value: result.state || (result.pending ? 'pending' : result.rejected ? 'rejected' : 'unknown') }),
-    jsx(KeyValue, { name: 'phase', value: result.phase }),
-    jsx(KeyValue, { name: 'skill', value: result.skill_id }),
-    jsx(KeyValue, { name: 'remote draft', value: result.remote_draft_id, mono: true }),
-    jsx(KeyValue, { name: 'retry safe', value: result.retry_safe }),
-    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Do not repeat the mutation automatically. Use Activity and authoritative status to recover this exact operation.' })
+  const subject = result.skill_name || result.slug || (kind === 'Publication' ? 'this draft' : 'this skill')
+  return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
+    jsx('h3', { className: 'text-xs font-semibold', children: `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: result.detail || result.error || 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
+    jsxs('details', { children: [
+      jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),
+      jsxs('div', { className: 'mt-2 space-y-1', children: [
+        jsx(KeyValue, { name: 'operation', value: result.operation_id, mono: true }),
+        jsx(KeyValue, { name: 'state', value: result.state || (result.pending ? 'pending' : result.rejected ? 'rejected' : 'unknown') }),
+        jsx(KeyValue, { name: 'phase', value: result.phase }),
+        jsx(KeyValue, { name: 'skill', value: result.skill_id }),
+        jsx(KeyValue, { name: 'remote draft', value: result.remote_draft_id, mono: true }),
+        jsx(KeyValue, { name: 'retry safe', value: result.retry_safe })
+      ] })
+    ] })
   ] })
 }
 
@@ -438,10 +510,36 @@ function queryOptions(key, queryFn, enabled = true) {
   }
 }
 
-function Catalog({ client, lifecycle, viewId }) {
+function catalogStatus(item) {
+  const status = item?.installation_status
+  if (isObject(status) && ['installed', 'not_installed', 'unmanaged_local', 'unavailable'].includes(status.state)) return status
+  return { state: 'unavailable', text: 'Installation status unavailable', installed_version: null, latest_version: versionOf(item) }
+}
+
+function catalogAction(item) {
+  const status = catalogStatus(item)
+  if (status.state === 'not_installed') return 'install'
+  if (status.state === 'installed' && isPositiveInt(status.latest_version) && isPositiveInt(status.installed_version) && status.latest_version > status.installed_version) return 'update'
+  return null
+}
+
+function describeCandidate(item) {
+  const reasons = isObject(item?.local_reasons) ? item.local_reasons : {}
+  if (item?.qualification === 'high_usage' && Number.isInteger(reasons.consecutive_business_days)) {
+    return `used on ${reasons.consecutive_business_days} consecutive business days`
+  }
+  const refinements = reasons.meaningful_refinements ?? reasons.edits
+  if (item?.qualification === 'refinement' && Number.isInteger(refinements) && Number.isInteger(reasons.stable_days)) {
+    return `refined ${refinements} times and stable for ${reasons.stable_days} days`
+  }
+  return 'qualified from local use and refinement signals'
+}
+
+function Catalog({ client, dialog = false, initialSearch = '', initialSelected = null, lifecycle, viewId }) {
   const queryClient = useQueryClient()
-  const [search, setSearch] = useState('')
-  const [selected, setSelected] = useState(null)
+  const [search, setSearch] = useState(initialSearch)
+  const [selected, setSelected] = useState(initialSelected)
+  const [page, setPage] = useState(0)
   const [review, setReview] = useState(null)
   const [acknowledgements, setAcknowledgements] = useState({ warnings: false, partial: false, sensitive: false })
   const [outcome, setOutcome] = useState(null)
@@ -451,61 +549,109 @@ function Catalog({ client, lifecycle, viewId }) {
   const prepare = useCurrentMutation(client, lifecycle, selection => {
     const item = selection.item || selection
     const version = selection.version || versionOf(item)
-    return client.rest('/install/review', { method: 'POST', body: requestBody(viewId, { reference: version ? `${item.id}@v${version}` : item.id, accept_warnings: false }) })
-  }, result => { setOutcome(null); setAcknowledgements({ warnings: false, partial: false, sensitive: false }); setReview(result) }, 'Could not prepare the install review')
+    const action = selection.action || catalogAction(item)
+    const pending = action === 'update'
+      ? client.rest('/update/review', { method: 'POST', body: requestBody(viewId, { skill_id: item.id, preserve_modified: true, accept_sensitive: false, accept_partial: false, accept_warnings: false }) })
+      : client.rest('/install/review', { method: 'POST', body: requestBody(viewId, { reference: version ? `${item.id}@v${version}` : item.id, accept_warnings: false }) })
+    return pending.then(result => ({ ...result, operation: action }))
+  }, (result, _token, _isCurrent) => {
+    setOutcome(null)
+    setAcknowledgements({ warnings: false, partial: false, sensitive: false })
+    setReview(result)
+  }, 'Could not prepare the package review')
   const reReview = useCurrentMutation(client, lifecycle, async current => {
-    const next = await client.rest('/install/review', {
-      method: 'POST',
-      body: requestBody(viewId, { reference: `${current.skill_id}@v${current.version}`, accept_warnings: acknowledgements.warnings })
+    const updating = current.operation === 'update'
+    const next = await client.rest(updating ? '/update/review' : '/install/review', {
+      method: 'POST', body: updating
+        ? requestBody(viewId, { skill_id: current.skill_id, preserve_modified: true, accept_sensitive: acknowledgements.sensitive, accept_partial: acknowledgements.partial, accept_warnings: acknowledgements.warnings })
+        : requestBody(viewId, { reference: `${current.skill_id}@v${current.version}`, accept_warnings: acknowledgements.warnings })
     })
     if (current.content_hash !== next.content_hash || current.manifest_hash !== next.manifest_hash || warningIdentity(current) !== warningIdentity(next)) {
       throw new Error('The exact package or scanner findings changed. Start a fresh review and acknowledge the new facts.')
     }
-    return next
-  }, setReview, 'Could not bind the install acknowledgements')
-  const confirm = useCurrentMutation(client, lifecycle, current => client.rest('/install/confirm', {
-    method: 'POST', body: requestBody(viewId, { receipt: current.receipt, accept_partial: acknowledgements.partial })
-  }), async (result, token, isCurrent) => {
+    return { ...next, operation: updating ? 'update' : 'install' }
+  }, setReview, 'Could not bind the package acknowledgements')
+  const confirm = useCurrentMutation(client, lifecycle, async current => ({ operation: current.operation, result: await client.rest(current.operation === 'update' ? '/update/confirm' : '/install/confirm', {
+    method: 'POST', body: current.operation === 'update'
+      ? requestBody(viewId, { receipt: current.receipt })
+      : requestBody(viewId, { receipt: current.receipt, accept_partial: acknowledgements.partial })
+  }) }), async (payload, token, isCurrent) => {
+    const { operation, result } = payload
     setReview(null)
-    if (result?.installed === true) {
+    if ((operation === 'install' && result?.installed === true) || (operation === 'update' && result?.updated === true)) {
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
       await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-      if (isCurrent(token)) host.notify({ kind: 'success', message: `Installed ${label(result)}` })
+      if (isCurrent(token)) host.notify({ kind: 'success', message: operation === 'update' ? 'Skill updated' : `Installed ${label(result)}` })
     } else {
-      setOutcome(result || { state: 'unknown' })
+      setOutcome({ operation, result: result || { state: 'unknown' } })
     }
-  }, 'Install was not applied')
+  }, 'The reviewed package action was not applied')
   const skills = Array.isArray(catalog.data?.skills) ? catalog.data.skills : []
   const chosen = skills.find(item => item.id === selected)
   const detailedSkill = detail.data?.skill || detail.data
+  const detailItem = selected ? {
+    ...(chosen || {}), ...(isObject(detailedSkill) ? detailedSkill : {}),
+    installation_status: detail.data?.installation_status || detailedSkill?.installation_status || chosen?.installation_status
+  } : null
+  const detailAction = catalogAction(detailItem)
+  const pageCount = Math.max(1, Math.ceil(skills.length / 5))
+  const visibleSkills = dialog ? skills.slice(page * 5, page * 5 + 5) : skills
+  useEffect(() => { setPage(0) }, [search])
+  useEffect(() => { if (page >= pageCount) setPage(pageCount - 1) }, [page, pageCount])
+
+  const back = () => {
+    if (review) setReview(null)
+    else setSelected(null)
+    setOutcome(null)
+  }
 
   return jsxs('div', { className: 'space-y-5', children: [
-    jsx(Input, { 'aria-label': 'Search shared skills', onChange: event => setSearch(event.target.value), placeholder: 'Search shared skills', type: 'search', value: search }),
+    (!dialog || (!selected && !review)) ? jsx(Input, { 'aria-label': 'Search shared skills', onChange: event => setSearch(event.target.value), placeholder: 'Search shared skills', type: 'search', value: search }) : null,
     catalog.error ? jsx(EmptyState, { title: 'Catalog unavailable', description: text(catalog.error?.message || catalog.error) }) : null,
     !catalog.isLoading && !catalog.error && skills.length === 0 ? jsx(EmptyState, { title: 'No shared skills', description: 'No published skills match this search.' }) : null,
-    jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: skills.map(item =>
+    (!dialog || (!selected && !review)) ? jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: visibleSkills.map(item => {
+      const status = catalogStatus(item)
+      const action = catalogAction(item)
+      return (
       jsxs('li', { 'data-testid': `catalog-skill-${item.id}`, className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
         jsxs('div', { className: 'min-w-0 flex-1', children: [
           jsx('div', { className: 'text-sm font-medium', children: label(item) }),
-          jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', style: { display: '-webkit-box', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }, children: item.author_description || 'No publisher description.' })
+          jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', style: { display: '-webkit-box', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }, children: item.author_description || 'No publisher description.' }),
+          jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(status.text || 'Installation status unavailable') }),
+          jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome?.result?.skill_id === item.id ? outcome.result : null })
         ] }),
         jsxs('div', { 'data-testid': `catalog-actions-${item.id}`, className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
           versionOf(item) ? jsx(Badge, { children: `v${versionOf(item)}` }) : null,
-          jsx(Button, { onClick: () => setSelected(item.id), size: 'sm', type: 'button', variant: 'secondary', children: 'Details' }),
-          jsx(Button, { disabled: prepare.isPending, onClick: () => prepare.mutate(item), size: 'sm', type: 'button', children: 'Install' })
+          jsx(Button, { onClick: () => setSelected(item.id), size: 'sm', type: 'button', variant: 'secondary', children: 'View' }),
+          action ? jsx(Button, { disabled: prepare.isPending, onClick: () => prepare.mutate({ item, action }), size: 'sm', type: 'button', children: action === 'update' ? 'Update' : 'Install' }) : null
         ] })
       ] }, item.id)
-    ) }),
-    selected ? jsxs(Section, { title: `Details — ${label(detailedSkill || chosen)}`, children: [
-      jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: detailedSkill?.author_description || detail.data?.latest_version_detail?.version?.author_description || chosen?.author_description || 'No description supplied.' }),
+      )
+    }) }) : null,
+    dialog && !selected && !review && skills.length > 5 ? jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
+      jsx(Button, { disabled: page === 0, onClick: () => setPage(value => value - 1), size: 'sm', type: 'button', variant: 'secondary', children: 'Previous' }),
+      jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: `${page + 1} / ${pageCount}` }),
+      jsx(Button, { disabled: page + 1 >= pageCount, onClick: () => setPage(value => value + 1), size: 'sm', type: 'button', variant: 'secondary', children: 'Next' })
+    ] }) : null,
+    selected && !review ? jsxs(Section, { title: `${dialog ? '' : 'Details — '}${label(detailItem)}`, children: [
+      jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: detailItem?.author_description || detail.data?.latest_version_detail?.version?.author_description || 'No description supplied.' }),
+      jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(catalogStatus(detailItem).text || 'Installation status unavailable') }),
       jsx('h3', { className: 'text-xs font-semibold', children: 'Version history' }),
       jsx('ul', { className: 'flex flex-wrap gap-2', children: (versions.data?.versions || []).map(item => jsx('li', { children: item.state && item.state !== 'published'
         ? jsx(Badge, { children: `v${item.version} · ${item.state}` })
-        : jsx(Button, { disabled: prepare.isPending, onClick: () => prepare.mutate({ item: detailedSkill || chosen, version: item.version }), size: 'sm', type: 'button', variant: 'secondary', children: `Install v${item.version}` })
-      }, `${item.version}-${item.state}`)) })
+        : detailAction === 'install'
+          ? jsx(Button, { disabled: prepare.isPending, onClick: () => prepare.mutate({ item: detailItem, version: item.version, action: 'install' }), size: 'sm', type: 'button', variant: 'secondary', children: `Install v${item.version}` })
+          : jsx(Badge, { children: `v${item.version}` })
+      }, `${item.version}-${item.state}`)) }),
+      jsxs('div', { className: 'flex justify-between gap-2', children: [
+        dialog ? jsx(Button, { onClick: back, size: 'sm', type: 'button', variant: 'secondary', children: 'Back' }) : null,
+        dialog && detailAction ? jsx(Button, { disabled: prepare.isPending, loading: prepare.isPending, onClick: () => prepare.mutate({ item: detailItem, action: detailAction }), size: 'sm', type: 'button', children: detailAction === 'update' ? 'Update' : 'Install' }) : null
+      ] })
     ] }) : null,
-    review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: 'install', onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
-    review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, kind: 'install', onCancel: () => setReview(null), onConfirm: () => confirm.mutate(review), review }) : null,
-    jsx(OperationOutcome, { kind: 'Install', result: outcome })
+    review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: review.operation, onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
+    review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, cancelLabel: dialog ? 'Back' : undefined, kind: review.operation, onCancel: back, onConfirm: () => confirm.mutate(review), review }) : null,
+    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
   ] })
 }
 
@@ -561,11 +707,21 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
     }
   }, 'The reviewed action was not completed')
   const installations = Array.isArray(bootstrap?.installations) ? bootstrap.installations : []
+  const decisions = installations.filter(item => checks[item.skill_id]?.result?.state === 'update_available')
   return jsxs('div', { className: 'space-y-4', children: [
     jsxs('label', { className: 'flex items-center gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': 'Preserve locally modified files', checked: preserve, onCheckedChange: value => setPreserve(value === true) }),
       'Preserve locally modified files when preparing updates'
     ] }),
+    decisions.length ? jsx(Section, { title: 'Updates needing your decision', description: 'Review the exact new version before choosing to update. Local edits are preserved when enabled above.', children:
+      jsx('ul', { className: 'space-y-2', children: decisions.map(item => {
+        const result = checks[item.skill_id].result
+        return jsxs('li', { className: 'flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
+          jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `${label(item)} v${item.version || '?'} → v${result.latest_version || '?'}` }),
+          jsx(Button, { disabled: update.isPending || (item.modified && !preserve), onClick: () => update.mutate(item), size: 'sm', type: 'button', children: 'Review update' })
+        ] }, item.skill_id)
+      }) })
+    }) : null,
     installations.length === 0 ? jsx(EmptyState, { title: 'Nothing installed', description: 'Install a shared skill from Catalog.' }) : null,
     jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: installations.map(item => {
       const checked = checks[item.skill_id]
@@ -584,29 +740,29 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
         jsxs('div', { className: 'min-w-0 flex-1', children: [
           jsx('div', { className: 'text-sm font-medium', children: label(item) }),
           jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
-          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus })
+          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus }),
+          jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome?.skill_id === item.skill_id ? outcome : null })
         ] }),
         jsxs('div', { className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
           jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Check for updates' }),
-          updateAvailable ? jsx(Button, { disabled: update.isPending || preservationBlocked, onClick: () => update.mutate(item), size: 'sm', type: 'button', children: 'Review update' }) : null,
           jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Uninstall' })
         ] })
       ] }, item.skill_id)
     }) }),
     review?.operation === 'update' ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: 'update', onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, kind: review.operation, onCancel: () => setReview(null), onConfirm: () => confirm.mutate(review), review }) : null,
-    jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome })
+    jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome && !installations.some(item => item.skill_id === outcome.skill_id) ? outcome : null })
   ] })
 }
 
-function ActivitySettings({ bootstrap, client, lifecycle, viewId }) {
+function Settings({ bootstrap, client, lifecycle, viewId }) {
   const queryClient = useQueryClient()
   const settings = useQuery(queryOptions(
     ['settings', lifecycle.key],
     () => client.rest(`/settings?view_id=${encodeURIComponent(viewId)}`)
   ))
   const current = settings.data || {}
-  const mode = current.delivery_mode || bootstrap?.settings?.notifications?.delivery_mode || bootstrap?.activity?.mode || 'agent'
+  const mode = current.delivery_mode || bootstrap?.settings?.notifications?.delivery_mode || 'agent'
   const setMode = useCurrentMutation(client, lifecycle, next => client.rest('/settings/mode', {
     method: 'PATCH', body: requestBody(viewId, { mode: next, expected_mode: mode })
   }), async (_result, token, isCurrent) => {
@@ -614,57 +770,48 @@ function ActivitySettings({ bootstrap, client, lifecycle, viewId }) {
       queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] }),
       queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
     ])
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Notification mode updated' })
-  }, 'Notification mode was not changed')
+    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Recommendation setting updated' })
+  }, 'Recommendation setting was not changed')
   const mute = useCurrentMutation(client, lifecycle, duration => client.rest('/settings/mute', {
     method: 'PATCH',
     body: requestBody(viewId, { control_id: String(current.mute_control.revision), duration })
   }), async (_result, token, isCurrent) => {
     await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Organization notification mute updated' })
-  }, 'Organization notification mute was not changed')
-  const pending = bootstrap?.status?.pending_operations || []
+    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Organization-wide mute updated' })
+  }, 'Organization-wide mute was not changed')
   const muteState = current.gateway_mute
   const muteControl = current.mute_control
-  const modeDescription = current.mode_meanings?.[mode] || (mode === 'fixed'
-    ? 'Assessment and proactive delivery are off; manual review remains.'
-    : 'Eligible recommendations may be assessed and delivered.')
   return jsxs('div', { className: 'space-y-6', children: [
-    jsx(Section, { title: 'Delivery mode', description: modeDescription, children:
-      jsxs('div', { className: 'flex gap-2', children: ['agent', 'fixed'].map(value => jsx(Button, { disabled: current.mode_writable === false || value === mode || setMode.isPending, onClick: () => setMode.mutate(value), size: 'sm', type: 'button', variant: value === mode ? 'secondary' : 'ghost', children: value }, value)) })
+    jsx(Section, { title: 'Recommendations', description: mode === 'fixed'
+      ? 'Off: proactive Wisdom recommendations are paused. You can still browse and review skills here.'
+      : 'On: Wisdom may show useful skill and update recommendations.', children:
+      jsxs('div', { className: 'flex gap-2', children: [
+        jsx(Button, { disabled: current.mode_writable === false || mode === 'agent' || setMode.isPending, onClick: () => setMode.mutate('agent'), size: 'sm', type: 'button', variant: mode === 'agent' ? 'secondary' : 'ghost', children: 'On' }),
+        jsx(Button, { disabled: current.mode_writable === false || mode === 'fixed' || setMode.isPending, onClick: () => setMode.mutate('fixed'), size: 'sm', type: 'button', variant: mode === 'fixed' ? 'secondary' : 'ghost', children: 'Off' })
+      ] })
     }),
-    jsx(Section, { title: 'Organization notification mute', description: 'This organization-wide preference affects proactive Wisdom notifications for other members too. Manual catalog and review remain available.', children: settings.error
-      ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Organization mute unavailable: ${text(settings.error?.message || settings.error)}` })
+    jsx(Section, { title: 'Mute recommendations for everyone', description: 'This is organization-wide: it pauses proactive Wisdom notifications for everyone in your organization. Manual browsing and reviews stay available.', children: settings.error
+      ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Organization-wide mute unavailable: ${text(settings.error?.message || settings.error)}` })
       : !settings.data
-        ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading organization mute…' })
+        ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading current mute setting…' })
         : jsxs('div', { className: 'space-y-3', children: [
-            jsx(KeyValue, { name: 'organization', value: muteState?.org_id }),
-            jsx(KeyValue, { name: 'status', value: muteState?.muted ? 'muted' : 'not muted' }),
-            jsx(KeyValue, { name: 'duration', value: muteState?.duration }),
-            jsx(KeyValue, { name: 'muted until', value: muteState?.muted_until }),
+            jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: muteState?.muted
+              ? `Recommendations are muted${muteState?.muted_until ? ` until ${muteState.muted_until}` : ''}.`
+              : 'Recommendations are not muted for your organization.' }),
             muteControl ? jsxs('div', { className: 'flex flex-wrap gap-2', children: [
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_day'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 day' }),
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_week'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 week' }),
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('30_days'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 30 days' }),
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('forever'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute indefinitely' }),
               jsx(Button, { disabled: mute.isPending || muteState?.muted !== true, onClick: () => mute.mutate(null), size: 'sm', type: 'button', variant: 'secondary', children: 'Unmute' })
-            ] }) : jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'The Gateway did not provide a current revision-bound mute control. No change can be made here.' })
+            ] }) : jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'This Gateway does not currently allow changing the organization-wide mute here.' })
           ] })
-    }),
-    jsx(Section, { title: 'Unresolved operations', description: 'These identities are recovery handles, not successful outcomes.', children: pending.length
-      ? jsx('ul', { className: 'space-y-2', children: pending.map(item => jsxs('li', { className: 'rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-          jsx(KeyValue, { name: 'operation', value: item.operation_id, mono: true }), jsx(KeyValue, { name: 'kind', value: item.kind }), jsx(KeyValue, { name: 'phase', value: item.phase }), jsx(KeyValue, { name: 'skill', value: item.skill_id })
-        ] }, item.operation_id)) })
-      : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'No unresolved operation reported.' })
-    }),
-    jsx(Section, { title: 'Assessments', children: (bootstrap?.activity?.assessments || []).length
-      ? jsx('ul', { className: 'space-y-2', children: bootstrap.activity.assessments.map((item, index) => jsx('li', { className: 'text-xs', children: item.available === false ? `Unavailable: ${item.unavailable_reason || 'No reason supplied'}` : (item.summary || item.reason || 'Assessment available') }, item.id || index)) })
-      : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'No owner-bound assessment is currently available.' })
     })
   ] })
 }
 
 function Contributions({ client, lifecycle, viewId }) {
+  const queryClient = useQueryClient()
   const [skillName, setSkillName] = useState('')
   const [draft, setDraft] = useState(null)
   const [preparedReview, setPreparedReview] = useState(null)
@@ -676,9 +823,11 @@ function Contributions({ client, lifecycle, viewId }) {
   const [keptDraft, setKeptDraft] = useState(null)
   const [review, setReview] = useState(null)
   const [outcome, setOutcome] = useState(null)
-  const prepare = useCurrentMutation(client, lifecycle, () => client.rest('/drafts/prepare', {
-    method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
-  }), value => {
+  const candidates = useQuery(queryOptions(
+    ['candidates', lifecycle.key],
+    () => client.rest(`/candidates?view_id=${encodeURIComponent(viewId)}`)
+  ))
+  const acceptDraft = value => {
     setDraft(value)
     setPreparedReview(null)
     setEditor(null)
@@ -687,7 +836,18 @@ function Contributions({ client, lifecycle, viewId }) {
     setKeptDraft(null)
     setReview(null)
     setOutcome(null)
-  }, 'Share preparation failed — nothing was uploaded or shared')
+  }
+  const prepareCandidate = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/prepare`, {
+    method: 'POST', body: requestBody(viewId)
+  }), acceptDraft, 'Could not prepare a private draft — nothing was uploaded or shared')
+  const notNow = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/not-now`, {
+    method: 'POST', body: requestBody(viewId)
+  }), async () => {
+    await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'candidates', lifecycle.key] })
+  }, 'Could not save Not now')
+  const prepare = useCurrentMutation(client, lifecycle, () => client.rest('/drafts/prepare', {
+    method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
+  }), acceptDraft, 'Share preparation failed — nothing was uploaded or shared')
   const inspectDraft = async () => client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}?view_id=${encodeURIComponent(viewId)}`)
   const reviewPrepared = (draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
     method: 'POST', body: requestBody(viewId, { reviewed_hashes: hashes })
@@ -763,7 +923,7 @@ function Contributions({ client, lifecycle, viewId }) {
     method: 'POST', body: requestBody(viewId, { receipt: current.receipt })
   }), result => {
     setReview(null)
-    if (result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state)) {
+    if (result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state) && result?.managed_enrollment?.state !== 'not_linked') {
       const message = result.publication_state === 'published' ? 'Publication completed' : 'Submitted for team moderation'
       host.notify({ kind: 'success', message })
     } else {
@@ -772,7 +932,8 @@ function Contributions({ client, lifecycle, viewId }) {
   }, 'Publication was not completed')
   const warningRequired = hasReviewableWarnings(preparedReview)
   const warningFindings = safeWarningFindings(preparedReview)
-  const busy = prepare.isPending || inspect.isPending || save.isPending || publicationReview.isPending || publish.isPending
+  const busy = prepare.isPending || prepareCandidate.isPending || notNow.isPending || inspect.isPending || save.isPending || publicationReview.isPending || publish.isPending
+  const shareCandidates = Array.isArray(candidates.data?.candidates) ? candidates.data.candidates : []
   const keepDraft = () => {
     if (dirty || busy) return
     setKeptDraft(draft?.draft_id || review?.draft_id)
@@ -784,6 +945,21 @@ function Contributions({ client, lifecycle, viewId }) {
     setWarningAccepted(false)
   }
   return jsxs('div', { className: 'space-y-5', children: [
+    shareCandidates.length ? jsx(Section, { title: 'Worth sharing with your team', description: 'These suggestions come from local use and refinement signals. Share only prepares a private draft for your review.', children:
+      jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: shareCandidates.map(item =>
+        jsxs('li', { 'data-testid': `share-candidate-${item.event_id}`, className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
+          jsxs('div', { className: 'min-w-0', children: [
+            jsx('div', { className: 'text-sm font-medium', children: item.skill_name || item.skill_id || 'Local skill' }),
+            jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: describeCandidate(item) })
+          ] }),
+          jsxs('div', { className: 'flex flex-wrap justify-end gap-2', children: [
+            jsx(Button, { disabled: busy || dirty, onClick: () => { if (!dirty) prepareCandidate.mutate(item) }, size: 'sm', type: 'button', children: 'Share' }),
+            jsx(Button, { disabled: busy, onClick: () => notNow.mutate(item), size: 'sm', type: 'button', variant: 'ghost', children: 'Not now' })
+          ] })
+        ] }, item.event_id)
+      ) })
+    }) : null,
+    candidates.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Sharing suggestions unavailable: ${text(candidates.error?.message || candidates.error)}` }) : null,
     jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: 'Preparing is local and private. Confirmation is enabled only after full exact bytes, author copy, hashes, checks, and Gateway policy are inspectable.' }),
     jsxs('div', { className: 'flex gap-2', children: [
       jsx(Input, { 'aria-label': 'Local skill name', onChange: event => setSkillName(event.target.value), placeholder: 'Local skill name', value: skillName }),
@@ -853,6 +1029,81 @@ function Enrollment({ client, lifecycle, viewId }) {
   })
 }
 
+function WisdomDialogCatalog({ client, request }) {
+  const activeConnectionId = useValue(host.state.connectionId) || ''
+  const activeProfile = useValue(host.state.profile) || 'default'
+  const focusedOwner = useValue(host.state.focusedSessionOwner)
+  const focusedSessionId = useValue(host.state.focusedSessionId)
+  const focusedStoredSessionId = useValue(host.state.focusedStoredSessionId)
+  const gateway = useValue(host.state.gateway) || 'unknown'
+  const tracker = useRef({ generation: request.id, mounted: true }).current
+  tracker.mounted = true
+  const current = client.active() && slashDialog.value?.id === request.id && gateway === 'open' &&
+    activeConnectionId === request.origin.connectionId && activeProfile === request.origin.profile &&
+    focusedOwner?.connectionId === request.origin.connectionId && focusedOwner?.profile === request.origin.profile &&
+    focusedSessionId === request.origin.runtimeSessionId && focusedStoredSessionId === request.origin.storedSessionId
+  const lifecycle = {
+    connectionId: request.origin.connectionId,
+    profile: request.origin.profile,
+    generation: request.id,
+    key: `dialog:${request.id}`,
+    mounted: () => tracker.mounted && slashDialog.value?.id === request.id
+  }
+  const boundClient = {
+    active: () => client.active() && slashDialog.value?.id === request.id && dialogOriginIsCurrent(request.origin),
+    rest: (...args) => client.rest(...args)
+  }
+  const view = useQuery(queryOptions(['dialog-view', lifecycle.key], () => boundClient.rest('/views', { method: 'POST' }), current))
+
+  useEffect(() => () => { tracker.mounted = false }, [tracker])
+  useEffect(() => {
+    if (!current) {
+      tracker.mounted = false
+      slashDialog.close(request.id)
+    }
+  }, [current, request.id, tracker])
+
+  if (!current) return null
+  if (view.error) return jsx(EmptyState, { title: 'Shared skills unavailable', description: text(view.error?.message || view.error) })
+  if (!view.data) return jsx('p', { className: 'text-sm text-(--ui-text-tertiary)', children: 'Loading Shared skills…' })
+  return jsx(Catalog, {
+    client: boundClient,
+    dialog: true,
+    initialSearch: request.query,
+    initialSelected: request.skillId,
+    lifecycle,
+    viewId: view.data.view_id
+  })
+}
+
+function WisdomDialogHost({ client }) {
+  useSyncExternalStore(listener => slashDialog.subscribe(listener), () => slashDialog.snapshot(), () => slashDialog.snapshot())
+  const token = useRef(Symbol('wisdom-dialog-host')).current
+  useEffect(() => {
+    slashDialog.hosts.push(token)
+    slashDialog.emit()
+    return () => {
+      slashDialog.hosts = slashDialog.hosts.filter(item => item !== token)
+      slashDialog.emit()
+    }
+  }, [token])
+  const request = slashDialog.value
+  if (slashDialog.hosts[0] !== token || !request) return null
+  return jsx(Dialog, {
+    open: true,
+    onOpenChange: open => { if (!open) slashDialog.close(request.id) },
+    children: jsxs(DialogContent, { className: 'max-w-[48rem] text-(--ui-text-primary)', children: [
+      jsxs(DialogHeader, { children: [
+        jsx(DialogTitle, { children: 'Shared skills' }),
+        jsx(DialogDescription, { className: 'text-(--ui-text-tertiary)', children: 'Review the exact package, warnings and prerequisites before confirming. Installing does not authorize setup.' })
+      ] }),
+      jsx('div', { className: 'max-h-[min(70vh,44rem)] overflow-y-auto border-t border-(--ui-stroke-secondary) pt-4', children: request.error
+        ? jsx(EmptyState, { title: 'Shared skills unavailable', description: request.error })
+        : jsx(WisdomDialogCatalog, { client, request }) })
+    ] })
+  })
+}
+
 function WisdomPage({ client }) {
   const connectionId = useValue(host.state.connectionId) || ''
   const profile = useValue(host.state.profile) || 'default'
@@ -885,27 +1136,43 @@ function WisdomPage({ client }) {
     content = jsx(Enrollment, { client, lifecycle, viewId: view.data.view_id })
   } else if (tab === 'installed') {
     content = jsx(Installed, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
-  } else if (tab === 'activity') {
-    content = jsx(ActivitySettings, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
+  } else if (tab === 'settings') {
+    content = jsx(Settings, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
   } else if (tab === 'contribute') {
     content = jsx(Contributions, { client, lifecycle, viewId: view.data.view_id })
   } else {
     content = jsx(Catalog, { client, lifecycle, viewId: view.data.view_id })
   }
 
-  const tabs = [['catalog', 'Catalog'], ['installed', 'Installed'], ['activity', 'Activity'], ['contribute', 'Contribute']]
+  if (available && !bootstrap.error && !view.error && view.data && bootstrap.data?.status?.configured === true && ['installed', 'contribute'].includes(tab)) {
+    const pending = (bootstrap.data.status.pending_operations || []).filter(row =>
+      tab === 'contribute' ? row.kind === 'publication' : row.kind !== 'publication')
+    content = jsxs('div', { className: 'space-y-4', children: [
+      ...pending.map(row => jsx(OperationOutcome, {
+        kind: ({ publication: 'Publication', install: 'Install', update: 'Update', wisdom_setup: 'Setup' })[row.kind] || 'Action',
+        result: { ...row, phase: row.phase || row.stage,
+          detail: 'An earlier action has not finished. Open a terminal and run hermes wisdom status --json to check its current state before trying again.' }
+      }, row.operation_id)),
+      content
+    ] })
+  }
+
+  const tabs = [['catalog', 'Catalog'], ['installed', 'Installed'], ['contribute', 'Contribute']]
   return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
     jsxs('header', { className: 'shrink-0 space-y-3 border-b border-(--ui-stroke-secondary) px-5 py-4', children: [
-      jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: [
-        jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h1', { className: 'text-base font-semibold', children: 'Collective Wisdom' }),
-        jsx(Badge, { children: `connection ${connectionId || 'unavailable'}` }), jsx(Badge, { children: `profile ${profile}` }), jsx(Badge, { children: `generation ${lifecycle.generation}` }), jsx(Badge, { children: `gateway ${gateway}` })
+      jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
+        jsxs('div', { className: 'flex items-center gap-2', children: [jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h1', { className: 'text-base font-semibold', children: 'Collective Wisdom' })] }),
+        jsx(Button, { onClick: () => setTab('settings'), size: 'sm', type: 'button', variant: tab === 'settings' ? 'secondary' : 'ghost', children: 'Settings' })
       ] }),
       jsx('nav', { 'aria-label': 'Collective Wisdom sections', className: 'flex flex-wrap gap-1', children: tabs.map(([value, title]) =>
         jsx(Button, { onClick: () => setTab(value), size: 'sm', type: 'button', variant: tab === value ? 'secondary' : 'ghost', children: title }, value)
       ) })
     ] }),
     jsx(ScrollArea, { className: 'min-h-0 flex-1', children: jsxs('main', { className: 'mx-auto w-full max-w-4xl space-y-5 p-5', children: [
-      jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Every review belongs to the displayed connection, profile, and generation. Reconnects and context changes require a new review. No mutation is retried automatically.' }),
+      jsxs('details', { children: [
+        jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-quaternary)', children: 'Connection details' }),
+        jsx('p', { className: 'mt-2 text-xs text-(--ui-text-tertiary)', children: `connection ${connectionId || 'unavailable'} · profile ${profile} · generation ${lifecycle.generation} · gateway ${gateway}` })
+      ] }),
       jsx(Separator, {}), content
     ] }) })
   ] })
@@ -940,11 +1207,34 @@ export default {
       }
       })
       : () => undefined
-    ctx.onDispose(() => { active = false; stopEvents?.() })
+    const openDiscovery = draft => {
+      if (!active) return draft
+      const parsed = parseWisdomDiscovery(draft?.text)
+      if (!parsed) return draft
+      const captured = captureDialogOrigin()
+      const id = slashDialog.revision + 1
+      const route = captured.origin.connectionId && captured.origin.profile
+        ? `connection ${captured.origin.connectionId}, profile ${captured.origin.profile}`
+        : 'the focused chat owner'
+      slashDialog.open({
+        ...parsed,
+        id,
+        origin: captured.origin,
+        error: captured.routable
+          ? null
+          : `Hermes Desktop cannot safely route this dialog to ${route} because plugin REST currently follows connection ${captured.active.connectionId || 'unavailable'}, profile ${captured.active.profile}. No request was made. Switch the active profile to the focused chat or use the normal command outside this dialog.`
+      })
+      // Composer middleware cancellation preserves/restores this command in the
+      // draft on the current Desktop host. Opening is idempotent and starts no turn.
+      return null
+    }
+    ctx.onDispose(() => { active = false; slashDialog.close(); stopEvents?.() })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: WISDOM_ROUTE }, render: () => jsx(WisdomPage, { client }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'library', label: 'Wisdom', path: WISDOM_ROUTE } },
-      { id: 'open', area: PALETTE_AREA, data: { id: 'collective-wisdom.open', label: 'Collective Wisdom: Open', keywords: ['wisdom', 'skills', 'catalog', 'install', 'contribute'], run: () => host.navigate(WISDOM_ROUTE) } }
+      { id: 'open', area: PALETTE_AREA, data: { id: 'collective-wisdom.open', label: 'Collective Wisdom: Open', keywords: ['wisdom', 'skills', 'catalog', 'install', 'contribute'], run: () => host.navigate(WISDOM_ROUTE) } },
+      { id: 'slash-dialog', area: COMPOSER_AREAS.top, render: () => jsx(WisdomDialogHost, { client }) },
+      { id: 'slash-middleware', area: COMPOSER_AREAS.middleware, order: 40, data: { handler: openDiscovery } }
     ])
   }
 }

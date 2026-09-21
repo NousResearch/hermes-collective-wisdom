@@ -17,6 +17,9 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 - Prepare owner-private contribution drafts, edit and re-review their exact files and
   hashes, submit them according to server policy, inspect status, reopen conflicts,
   and decline private drafts.
+- After exact successful publication proof, register the unchanged author source in
+  place for managed teammate updates. Failed local registration remains separately
+  recoverable and never changes the remote publication result.
 - Use Desktop management pages and private Slack/Telegram `/wisdom` commands for
   explicit catalog, install, update, setup, publication, and settings reviews.
 
@@ -65,8 +68,9 @@ SQLite schema, migration, importer, compatibility store, or dual-write path.
 - Terminal commands are the complete explicit workflow and recovery surface.
 - Slack and Telegram support private `/wisdom` commands and actor/route-bound review
   callbacks. Group-sensitive effects are rejected.
-- Desktop uses its supported turn event, plugin REST namespace, notification API, and
-  existing Collective Wisdom page.
+- Desktop uses its supported turn event, plugin REST namespace, notification API,
+  and Collective Wisdom page. Discovery slash commands open an SDK dialog through
+  composer middleware, reusing the same catalog and exact package review components.
 - Plain CLI/TUI chat and unsupported/non-gateway clients do not receive proactive
   notices.
 - Dashboard/full embedded parity, Agent/Gateway core changes, and a separate daemon

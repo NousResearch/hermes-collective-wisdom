@@ -27,6 +27,7 @@ class Discovery:
         check_owner: Callable[[], object],
         portal_base_url: str,
         organization_id: str,
+        installation_status: Callable[[object, object, object], dict[str, Any]] | None = None,
     ) -> None:
         required_client_methods = ("list_skills", "skill", "version")
         if any(not callable(getattr(client, name, None)) for name in required_client_methods):
@@ -41,6 +42,19 @@ class Discovery:
         self._check_owner = check_owner
         self.portal_base_url = portal_base_url.rstrip("/")
         self.organization_id = organization_id
+        self._installation_status = installation_status
+
+    def _enrich(
+        self, item: dict[str, Any], *, latest_version: object = None,
+    ) -> dict[str, Any]:
+        if self._installation_status is None:
+            return item
+        return {
+            **item,
+            "installation_status": self._installation_status(
+                item.get("id") or item.get("skill_id"), item.get("slug"), latest_version,
+            ),
+        }
 
     def _response(self, operation: Callable[[], Any]) -> Any:
         """Check the bound owner on both sides of every client operation."""
@@ -55,7 +69,12 @@ class Discovery:
         """Return the first authoritative discovery page."""
 
         response = self._response(self.client.list_skills)
-        return response.model_dump(mode="json")
+        result = response.model_dump(mode="json")
+        result["skills"] = [
+            self._enrich(item, latest_version=item.get("latest_version"))
+            for item in result.get("skills", []) if isinstance(item, dict)
+        ]
+        return result
 
     def search_skills(self, query: str | None = None) -> list[dict[str, Any]]:
         """Search authoritative discovery pages without inventing authority."""
@@ -69,7 +88,11 @@ class Discovery:
                     cursor=current_cursor
                 )
             )
-            skills.extend(item.model_dump(mode="json") for item in response.skills)
+            skills.extend(
+                self._enrich(value, latest_version=value.get("latest_version"))
+                for item in response.skills
+                if isinstance((value := item.model_dump(mode="json")), dict)
+            )
             cursor = response.next_cursor
             if not cursor:
                 break
@@ -130,6 +153,11 @@ class Discovery:
                 lambda: self.client.version(skill_id, max(versions))
             )
             result["latest_version_detail"] = latest.model_dump(mode="json")
+        skill = result.get("skill")
+        if isinstance(skill, dict) and self._installation_status is not None:
+            result["installation_status"] = self._installation_status(
+                skill.get("id"), skill.get("slug"), max(versions) if versions else None,
+            )
         result["portal_url"] = self._portal_skill_url(skill_id)
         return result
 
@@ -138,7 +166,21 @@ class Discovery:
 
         skill_id = _reference(skill_id)
         detail = self._response(lambda: self.client.skill(skill_id))
-        return list(detail.versions)
+        result = detail.model_dump(mode="json")
+        skill = result.get("skill") if isinstance(result, dict) else {}
+        published = [
+            item.get("version") for item in detail.versions
+            if _is_published_positive_version(item)
+        ]
+        latest = max(published) if published else None
+        status = (
+            self._installation_status(skill.get("id"), skill.get("slug"), latest)
+            if self._installation_status is not None and isinstance(skill, dict) else None
+        )
+        return [
+            {**item, "installation_status": status} if status is not None else item
+            for item in detail.versions
+        ]
 
     def version(self, skill_id: str, version: int) -> dict[str, Any]:
         """Return one exact positive published version with identity checks."""

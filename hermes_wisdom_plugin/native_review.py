@@ -214,6 +214,7 @@ def _catalog_rows(data: Any) -> list[dict[str, Any]]:
         if isinstance(latest, dict):
             version = latest.get("version")
             combined.update(version if isinstance(version, dict) else latest)
+        combined["installation_status"] = data.get("installation_status")
         combined["portal_url"] = data.get("portal_url")
         return [combined]
     return [data]
@@ -234,6 +235,11 @@ def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
             facts.append(f"Version: v{_safe(version)}")
         if detail:
             facts.append(_safe(detail))
+        installation_status = row.get("installation_status")
+        facts.append(
+            _safe(installation_status.get("text"))
+            if isinstance(installation_status, dict) else "Installation status unavailable"
+        )
         for label, key in (("Status", "state"), ("Author", "created_by_display_name")):
             if row.get(key):
                 facts.append(f"{label}: {_safe(row[key])}")
@@ -653,6 +659,13 @@ def _authority_projection(
 
 
 def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
+    result = record.get("result")
+    if (
+        record.get("state") == "completed" and isinstance(result, dict)
+        and result.get("publication_state") == "published"
+        and isinstance(result.get("detail"), str) and result["detail"]
+    ):
+        return NativeView("Publication result", _safe(result["detail"]), dismissed=True)
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",

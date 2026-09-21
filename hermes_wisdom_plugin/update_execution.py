@@ -324,7 +324,9 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         root = Path(self.host.skills_root).expanduser().absolute()
         staging = root / ".hub" / "collective-wisdom" / operation_id
         archive = root / ".archive" / "collective-wisdom-updates" / operation_id
-        validate_update_target(self.host, payload, payload["owner"])
+        validate_update_target(
+            self.host, payload, payload["owner"], require_tree=False,
+        )
         for path in (staging, archive):
             _reject_symlink_chain(root, path)
         _within(staging, root / ".hub" / "collective-wisdom", "update staging path")

@@ -55,6 +55,18 @@ function Textarea(props) {
   return React.createElement(Primitive, { ...props, as: 'textarea' })
 }
 
+function Dialog({ children, onOpenChange, open }) {
+  if (!open) return null
+  return React.createElement('div', {
+    onKeyDown: event => { if (event.key === 'Escape') onOpenChange?.(false) },
+    role: 'dialog'
+  }, children)
+}
+
+function DialogPart({ children, ...props }) {
+  return React.createElement('div', props, children)
+}
+
 // Faithful to the Radix callback contract used by the real SDK component.
 function Checkbox({ checked, onCheckedChange, ...props }) {
   assert.equal('onChange' in props, false, 'SDK Checkbox must not receive a native onChange handler')
@@ -73,8 +85,13 @@ async function loadPlugin(restHandler, initial = {}) {
   const profile = atom(initial.profile || 'A')
   const connectionId = atom(initial.connectionId || 'remote-a')
   const gateway = atom(initial.gateway || 'open')
+  const focusedSessionId = atom(initial.focusedSessionId ?? 'runtime-1')
+  const focusedStoredSessionId = atom(initial.focusedStoredSessionId ?? 'stored-1')
+  const focusedSessionOwner = atom(initial.focusedSessionOwner === undefined
+    ? { connectionId: connectionId.get(), profile: profile.get() }
+    : initial.focusedSessionOwner)
   const host = {
-    state: { connectionId, gateway, profile },
+    state: { connectionId, focusedSessionId, focusedSessionOwner, focusedStoredSessionId, gateway, profile },
     onEvent(type, callback) { events.push([type, callback]); return () => events.splice(events.findIndex(row => row[1] === callback), 1) },
     navigate(path) { calls.navigate.push(path) },
     notify(payload) { calls.notify.push(payload) },
@@ -85,6 +102,13 @@ async function loadPlugin(restHandler, initial = {}) {
     Button,
     Checkbox,
     Codicon: props => React.createElement(Primitive, { ...props, as: 'span' }),
+    COMPOSER_AREAS: { middleware: 'composer.middleware', top: 'composer.top' },
+    Dialog,
+    DialogContent: DialogPart,
+    DialogDescription: DialogPart,
+    DialogFooter: DialogPart,
+    DialogHeader: DialogPart,
+    DialogTitle: ({ children, ...props }) => React.createElement('h2', props, children),
     EmptyState: ({ title, description }) => React.createElement('section', {}, React.createElement('h2', {}, title), React.createElement('p', {}, description)),
     Input,
     PALETTE_AREA: 'palette',
@@ -110,9 +134,9 @@ async function loadPlugin(restHandler, initial = {}) {
   })
   await module.evaluate()
 
-  let dispose = () => undefined
+  const disposers = []
   const ctx = {
-    onDispose(callback) { dispose = callback },
+    onDispose(callback) { disposers.push(callback) },
     registerMany(contributions) { calls.registrations.push(...contributions); return () => undefined },
     async rest(path, options = {}) {
       const owner = { connectionId: connectionId.get(), gateway: gateway.get(), profile: profile.get() }
@@ -122,7 +146,18 @@ async function loadPlugin(restHandler, initial = {}) {
   }
   const plugin = module.namespace.default
   plugin.register(ctx)
-  return { calls, connectionId, dispose, emit: async event => { for (const [type, callback] of [...events]) if (type === '*' || type === event.type) await callback(event) }, gateway, plugin, profile }
+  return {
+    calls,
+    connectionId,
+    dispose() { for (const callback of disposers.splice(0)) callback() },
+    emit: async event => { for (const [type, callback] of [...events]) if (type === '*' || type === event.type) await callback(event) },
+    focusedSessionId,
+    focusedSessionOwner,
+    focusedStoredSessionId,
+    gateway,
+    plugin,
+    profile
+  }
 }
 
 test('completed turns request one best-effort notice and use native notifications', async () => {
@@ -159,6 +194,38 @@ async function renderPage(loaded) {
       container.remove()
     }
   }
+}
+
+async function renderComposerContribution(loaded) {
+  const container = document.createElement('div')
+  document.body.append(container)
+  const contribution = loaded.calls.registrations.find(item => item.area === 'composer.top')
+  assert.ok(contribution, 'composer dialog host should be registered')
+  const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0, retry: false }, mutations: { gcTime: 0, retry: false } } })
+  const root = createRoot(container)
+  await act(async () => { root.render(React.createElement(QueryClientProvider, { client }, contribution.render())) })
+  await settle()
+  return {
+    container,
+    async cleanup() {
+      await act(async () => root.unmount())
+      client.clear()
+      container.remove()
+    }
+  }
+}
+
+const composerMiddleware = loaded => {
+  const contribution = loaded.calls.registrations.find(item => item.area === 'composer.middleware')
+  assert.ok(contribution?.data?.handler, 'composer middleware should be registered')
+  return contribution.data.handler
+}
+
+async function submitComposer(loaded, draft) {
+  let result
+  await act(async () => { result = await composerMiddleware(loaded)(draft) })
+  await settle()
+  return result
 }
 
 async function settle(ms = 25) {
@@ -226,13 +293,242 @@ function updateReview(overrides = {}) {
 function baseHandler(path, options, owner) {
   if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}`, profile: owner.profile }
   if (path === '/bootstrap') return bootstrap
-  if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2 }] }
-  if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version_detail: { version: { version: 2 } } }
+  if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2, installation_status: { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 } }] }
+  if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version_detail: { version: { version: 2 } }, installation_status: { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 } }
   if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }, { version: 1, state: 'withdrawn' }] }
   throw new Error(`unexpected REST ${options.method || 'GET'} ${path}`)
 }
 
 const button = (mounted, name) => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+
+test('desktop slash dialog browses, views, reviews, and confirms an exact install', async () => {
+  let catalogReads = 0
+  let detailReads = 0
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) {
+      catalogReads += 1
+      return {
+        skills: [{
+          id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2,
+          installation_status: { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 }
+        }]
+      }
+    }
+    if (path === '/catalog/skill-1') {
+      detailReads += 1
+      return {
+        id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2,
+        installation_status: detailReads > 1
+          ? { state: 'installed', text: 'Installed v2', installed_version: 2, latest_version: 2 }
+          : { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 }
+      }
+    }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/install/review') return installReview()
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', version: 2 }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  const draft = { text: '/wisdom browse useful' }
+
+  assert.equal(await submitComposer(loaded, draft), null)
+  await settle()
+  assert.match(mounted.container.textContent, /Shared skills/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/review'), false)
+  assert.ok(button(mounted, 'View'))
+  assert.ok(button(mounted, 'Install'), 'catalog rows expose the existing Install review action')
+
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Useful skill/)
+  assert.ok(button(mounted, 'Back'))
+  await click(button(mounted, 'Install'))
+  assert.match(mounted.container.textContent, /install review/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/confirm'), false)
+  await click(button(mounted, 'Confirm install'))
+
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.ok(catalogReads >= 2, 'successful install should refresh visible catalog status')
+  assert.ok(detailReads >= 2, 'successful install should refresh the visible detail status')
+  assert.match(mounted.container.textContent, /Installed v2/)
+  await mounted.cleanup()
+})
+
+for (const updated of [true, false]) test(`desktop slash dialog handles ${updated ? 'completed' : 'pending'} checked updates`, async () => {
+  const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/update/review') {
+      assert.deepEqual(structuredClone(options.body), {
+        view_id: 'view-remote-a-A', skill_id: 'skill-1', preserve_modified: true,
+        accept_sensitive: false, accept_partial: false, accept_warnings: false
+      })
+      return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' } })
+    }
+    if (path === '/update/confirm') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', receipt: 'update-receipt' })
+      return updated
+        ? { updated: true, skill_id: 'skill-1', version: 2 }
+        : { updated: false, pending: true, operation_id: 'pending-update', skill_id: 'skill-1' }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
+
+  assert.match(mounted.container.textContent, /Installed v1 · Update available v2/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  await click(button(mounted, 'Update'))
+  assert.match(mounted.container.textContent, /update review/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/update/confirm'), false)
+  await click(button(mounted, 'Confirm update'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/confirm').length, 1)
+  if (!updated) {
+    assert.match(mounted.container.textContent, /Update requires attention/)
+    assert.doesNotMatch(mounted.container.textContent, /Install requires attention/)
+    assert.match(mounted.container.textContent, /pending-update/)
+    assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  }
+  await mounted.cleanup()
+})
+
+test('desktop slash dialog paginates with approved controls and blocks unmanaged or unavailable installs', async () => {
+  const skills = Array.from({ length: 7 }, (_, index) => ({
+    id: `skill-${index + 1}`,
+    slug: `skill-${index + 1}`,
+    latest_version: 1,
+    installation_status: index === 5
+      ? { state: 'unmanaged_local', text: 'Local same-name skill is unmanaged', installed_version: null, latest_version: 1 }
+      : index === 6 ? undefined : { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 1 }
+  }))
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path.startsWith('/catalog?')) return { skills }
+    if (path === '/catalog/skill-6') return skills[5]
+    if (path === '/catalog/skill-6/versions') return { versions: [{ version: 1, state: 'published' }] }
+    if (path === '/catalog/skill-7') return skills[6]
+    if (path === '/catalog/skill-7/versions') return { versions: [{ version: 1, state: 'published' }] }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+
+  assert.ok(button(mounted, 'Previous').disabled)
+  await click(button(mounted, 'Next'))
+  assert.match(mounted.container.textContent, /skill-6/)
+  assert.equal(button(mounted, 'Next').disabled, true)
+  assert.equal(button(mounted, 'Previous').disabled, false)
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Local same-name skill is unmanaged/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  assert.equal(button(mounted, 'Update'), undefined)
+  await click(button(mounted, 'Back'))
+  const unavailableRow = mounted.container.querySelector('[data-testid="catalog-skill-skill-7"]')
+  await click([...unavailableRow.querySelectorAll('button')].find(item => item.textContent === 'View'))
+  assert.match(mounted.container.textContent, /Installation status unavailable/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  assert.equal(button(mounted, 'Update'), undefined)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('catalog page shows unavailable status without offering an install fallback', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2 }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2 }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  assert.match(mounted.container.textContent, /Installation status unavailable/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  await click(button(mounted, 'View'))
+  assert.equal(button(mounted, 'Install v2'), undefined)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('composer middleware passes unrelated input through and only opens supported discovery commands', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  const mounted = await renderComposerContribution(loaded)
+  const ordinary = { text: 'hello' }
+  const unrelatedSlash = { text: '/help' }
+  const unsupportedWisdom = { text: '/wisdom status' }
+
+  assert.equal(await submitComposer(loaded, ordinary), ordinary)
+  assert.equal(await submitComposer(loaded, unrelatedSlash), unrelatedSlash)
+  assert.equal(await submitComposer(loaded, unsupportedWisdom), unsupportedWisdom)
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  assert.equal(loaded.calls.rest.length, 0)
+  await mounted.cleanup()
+})
+
+test('slash dialog refuses a focused owner the REST SDK cannot route without sending the command', async () => {
+  const loaded = await loadPlugin(baseHandler, {
+    focusedSessionOwner: { connectionId: 'remote-b', profile: 'B' }
+  })
+  const mounted = await renderComposerContribution(loaded)
+
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+  await settle()
+  assert.match(mounted.container.textContent, /cannot safely route/i)
+  assert.match(mounted.container.textContent, /remote-b.*profile B/i)
+  assert.equal(loaded.calls.rest.length, 0)
+  await mounted.cleanup()
+})
+
+test('slash dialog invalidates on focus changes, ignores stale replies, and tears down cleanly', async () => {
+  let resolveCatalog
+  const delayedCatalog = new Promise(resolve => { resolveCatalog = resolve })
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path.startsWith('/catalog?')) return delayedCatalog
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+  assert.ok(mounted.container.querySelector('[role="dialog"]'))
+  await act(async () => loaded.focusedStoredSessionId.set('stored-2'))
+  await settle()
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  resolveCatalog({ skills: [{ id: 'stale', slug: 'stale-result' }] })
+  await settle()
+  assert.doesNotMatch(mounted.container.textContent, /stale-result/)
+
+  await act(async () => loaded.focusedStoredSessionId.set('stored-1'))
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+  const dialog = mounted.container.querySelector('[role="dialog"]')
+  assert.ok(dialog)
+  await act(async () => dialog.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' })))
+  await settle()
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+
+  await act(async () => loaded.dispose())
+  assert.equal((await submitComposer(loaded, { text: '/wisdom' })).text, '/wisdom')
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  await mounted.cleanup()
+})
+
+test('slash dialog uses theme-aware SDK classes in light and dark themes', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  const mounted = await renderComposerContribution(loaded)
+  for (const theme of ['light', 'dark']) {
+    document.documentElement.dataset.theme = theme
+    assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+    await settle()
+    const dialog = mounted.container.querySelector('[role="dialog"]')
+    assert.ok(dialog)
+    assert.match(dialog.innerHTML, /--ui-text-primary/)
+    assert.match(dialog.innerHTML, /--ui-stroke-secondary/)
+    assert.doesNotMatch(dialog.innerHTML, /#[0-9a-f]{3,8}|rgb\(|color:\s*(?:black|white)/i)
+    await act(async () => dialog.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' })))
+    await settle()
+  }
+  delete document.documentElement.dataset.theme
+  await mounted.cleanup()
+})
 
 test('registers the native page and performs catalog search, details, exact install review, and confirmation', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
@@ -247,14 +543,14 @@ test('registers the native page and performs catalog search, details, exact inst
     return baseHandler(path, options, owner)
   })
   assert.equal(loaded.plugin.defaultEnabled, false)
-  assert.deepEqual(loaded.calls.registrations.map(item => item.area), ['routes', 'sidebar.nav', 'palette'])
+  assert.deepEqual(loaded.calls.registrations.map(item => item.area), ['routes', 'sidebar.nav', 'palette', 'composer.top', 'composer.middleware'])
   const mounted = await renderPage(loaded)
 
   assert.match(mounted.container.textContent, /connection remote-a/)
   assert.match(mounted.container.textContent, /profile A/)
   await enter(mounted.container.querySelector('input[aria-label="Search shared skills"]'), 'useful')
   assert.ok(loaded.calls.rest.some(([path]) => path === '/catalog?q=useful'))
-  await click(button(mounted, 'Details'))
+  await click(button(mounted, 'View'))
   assert.match(mounted.container.textContent, /Version history/)
   assert.match(mounted.container.textContent, /withdrawn/)
 
@@ -274,7 +570,7 @@ test('registers the native page and performs catalog search, details, exact inst
 test('catalog keeps native Install visible beside long descriptions at narrow widths', async () => {
   const longDescription = 'A very long publisher description '.repeat(80)
   const loaded = await loadPlugin((path, options, owner) => {
-    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: longDescription, latest_version: 2 }] }
+    if (path.startsWith('/catalog?')) return { skills: [{ ...baseHandler(path, options, owner).skills[0], author_description: longDescription }] }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
@@ -283,7 +579,7 @@ test('catalog keeps native Install visible beside long descriptions at narrow wi
   const actions = row.querySelector('[data-testid="catalog-actions-skill-1"]')
 
   assert.ok(button(mounted, 'Install'))
-  assert.ok(button(mounted, 'Details'))
+  assert.ok(button(mounted, 'View'))
   assert.equal(row.style.gridTemplateColumns, 'minmax(0, 1fr) auto')
   assert.equal(actions.style.flexWrap, 'wrap')
   assert.equal(row.querySelector('p').style.overflowWrap, 'anywhere')
@@ -366,7 +662,7 @@ test('catalog version history selects an exact published version for install rev
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Details'))
+  await click(button(mounted, 'View'))
   await click(button(mounted, 'Install v1'))
   assert.match(mounted.container.textContent, /install-v1/)
   await mounted.cleanup()
@@ -507,7 +803,7 @@ test('pending install outcome keeps operation identity and is never announced as
   await click(button(mounted, 'Install'))
   await click(button(mounted, 'Confirm install'))
   assert.match(mounted.container.textContent, /op-install-1/)
-  assert.match(mounted.container.textContent, /Do not repeat the mutation automatically/)
+  assert.match(mounted.container.textContent, /Check its status before trying again/)
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   await mounted.cleanup()
 })
@@ -605,47 +901,66 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   await mounted.cleanup()
 })
 
-test('publication hash comparison ignores object key insertion order', async () => {
-  const expectedHashes = {
-    content: hash('3'),
-    author_description: hash('4'),
-    package_manifest: hash('5')
-  }
-  const reviewedHashes = {
-    package_manifest: hash('5'),
-    content: hash('3'),
-    author_description: hash('4')
-  }
-  const files = [{ path: 'SKILL.md', content_utf8: '# Exact reviewed bytes' }]
-  const loaded = await loadPlugin((path, options, owner) => {
-    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
-    if (path === '/bootstrap') return bootstrap
-    if (path.startsWith('/catalog?')) return { skills: [] }
-    if (path === '/drafts/prepare') return { draft_id: 'local:ordered', skill_id: 'local-skill' }
-    if (path === '/drafts/local%3Aordered?view_id=view-remote-a-A') return {
-      author_description: 'Exact author copy.', files, expected_hashes: expectedHashes
+for (const linked of [true, false]) {
+  test(`publication compares hashes semantically and shows enrollment outcome (managed=${linked})`, async () => {
+    const detail = 'Published successfully, but the original source is not linked to this version locally. Recover with: hermes wisdom publication enroll local-skill'
+    const expectedHashes = {
+      content: hash('3'),
+      author_description: hash('4'),
+      package_manifest: hash('5')
     }
-    if (path === '/drafts/local%3Aordered/review') return { drafted_description: 'Exact author copy.', files, hashes: expectedHashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
-    if (path === '/publication/review') return {
-      receipt: 'publication-receipt', draft_id: 'local:ordered', skill_id: 'local-skill',
-      hashes: reviewedHashes, description: 'Exact author copy.', files,
-      security_check: { upload_allowed: true, summary: 'Allowed.', findings: [] },
-      professionalism_check: { state: 'unavailable', summary: 'Unavailable.', findings: [] },
-      local_scan: { allowed: true, summary: 'Passed.', findings: [] },
-      publication_mode: 'open', policy_version: 'policy-1'
+    const reviewedHashes = {
+      package_manifest: hash('5'),
+      content: hash('3'),
+      author_description: hash('4')
     }
-    throw new Error(`unexpected ${path}`)
-  })
-  const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Contribute'))
-  await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
-  await click(button(mounted, 'Prepare draft'))
-  await click(button(mounted, 'Continue to sharing review'))
+    const files = [{ path: 'SKILL.md', content_utf8: '# Exact reviewed bytes' }]
+    const loaded = await loadPlugin((path, options, owner) => {
+      if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+      if (path === '/bootstrap') return bootstrap
+      if (path.startsWith('/catalog?')) return { skills: [] }
+      if (path === '/drafts/prepare') return { draft_id: 'local:ordered', skill_id: 'local-skill' }
+      if (path === '/drafts/local%3Aordered?view_id=view-remote-a-A') return {
+        author_description: 'Exact author copy.', files, expected_hashes: expectedHashes
+      }
+      if (path === '/drafts/local%3Aordered/review') return { drafted_description: 'Exact author copy.', files, hashes: expectedHashes, local_scan: { allowed: true, findings: [] }, security_check: { upload_allowed: true, local_status: 'pass', findings: [] }, professionalism_check: { state: 'unavailable' } }
+      if (path === '/publication/review') return {
+        receipt: 'publication-receipt', draft_id: 'local:ordered', skill_id: 'local-skill',
+        hashes: reviewedHashes, description: 'Exact author copy.', files,
+        security_check: { upload_allowed: true, summary: 'Allowed.', findings: [] },
+        professionalism_check: { state: 'unavailable', summary: 'Unavailable.', findings: [] },
+        local_scan: { allowed: true, summary: 'Passed.', findings: [] },
+        publication_mode: 'open', policy_version: 'policy-1'
+      }
+      if (path === '/publication/confirm') return {
+        operation_id: 'publication-op', state: 'done', publication_state: 'published',
+        managed_enrollment: { state: linked ? 'managed' : 'not_linked' },
+        ...(linked ? {} : { detail })
+      }
+      throw new Error(`unexpected ${path}`)
+    })
+    const mounted = await renderPage(loaded)
+    await click(button(mounted, 'Contribute'))
+    await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
+    await click(button(mounted, 'Prepare draft'))
+    await click(button(mounted, 'Continue to sharing review'))
 
-  assert.match(mounted.container.textContent, /ready to confirm/)
-  assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
-  await mounted.cleanup()
-})
+    assert.match(mounted.container.textContent, /ready to confirm/)
+    assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
+    await click(button(mounted, 'Share this exact reviewed package'))
+    if (linked) {
+      assert.equal(loaded.calls.notify.at(-1)?.message, 'Publication completed')
+      assert.doesNotMatch(mounted.container.textContent, /Publication requires attention/)
+    } else {
+      assert.equal(loaded.calls.notify.length, 0)
+      assert.match(mounted.container.textContent, /Publication requires attention/)
+      assert.ok(mounted.container.textContent.includes(detail))
+      assert.doesNotMatch(mounted.container.textContent, /did not report a completed successful outcome/)
+    }
+    assert.equal(loaded.calls.rest.filter(([path]) => path === '/publication/confirm').length, 1)
+    await mounted.cleanup()
+  })
+}
 
 test('publication without an explicit security upload gate fails closed', async () => {
   const hashes = { content: hash('3'), author_description: hash('4'), package_manifest: hash('5') }
@@ -765,7 +1080,7 @@ test('changed scanner warning provenance requires a fresh acknowledgement', asyn
   await mounted.cleanup()
 })
 
-test('prepared editor saves and re-reviews exact add remove rename text and opaque files', async () => {
+test('prepared editor saves and re-reviews exact add remove rename text and opaque files', async t => {
   const oldHashes = { content: hash('1'), author_description: hash('2'), package_manifest: hash('3') }
   const newHashes = { content: hash('4'), author_description: hash('5'), package_manifest: hash('6') }
   const inspected = {
@@ -791,6 +1106,7 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/bootstrap') return bootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path.startsWith('/candidates?')) return { candidates: [{ event_id: 'candidate-1', skill_name: 'another-skill' }] }
     if (path === '/drafts/prepare') return { draft_id: 'local:edit', skill_id: 'local-skill' }
     if (path === '/drafts/local%3Aedit?view_id=view-remote-a-A') return inspected
     if (path === '/drafts/local%3Aedit/review') {
@@ -819,6 +1135,7 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
   await click(button(mounted, 'Prepare draft'))
   await click(button(mounted, 'Review and edit exact files'))
 
+  t.after(() => mounted.cleanup())
   const opaqueExport = mounted.container.querySelector('a[download="logo.bin"]')
   assert.equal(opaqueExport.getAttribute('href'), 'data:application/octet-stream;base64,AAH/')
   const draftExport = mounted.container.querySelector('a[download="wisdom-local-edit.json"]')
@@ -827,7 +1144,7 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
 
   await enter(mounted.container.querySelector('textarea[aria-label="Author description"]'), 'Unsaved draft copy')
   assert.match(mounted.container.textContent, /Unsaved changes/)
-  for (const label of ['Continue to sharing review', 'Keep draft and exit', 'Review and edit exact files', 'Prepare draft']) {
+  for (const label of ['Continue to sharing review', 'Keep draft and exit', 'Review and edit exact files', 'Prepare draft', 'Share']) {
     assert.equal(button(mounted, label).disabled, true, `${label} must not bypass unsaved edits`)
     await click(button(mounted, label))
   }
@@ -890,7 +1207,7 @@ test('hostile markup and control-like text stays inert in exact draft review', a
   await mounted.cleanup()
 })
 
-test('Activity uses revision-bound organization mute controls and truthful mode wording', async () => {
+test('Settings keeps simple notification controls without an Activity diagnostics tab', async t => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/bootstrap') return bootstrap
@@ -914,12 +1231,78 @@ test('Activity uses revision-bound organization mute controls and truthful mode 
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Activity'))
-  assert.match(mounted.container.textContent, /Eligible recommendations may be assessed and delivered/)
-  assert.match(mounted.container.textContent, /organization-wide/)
+  t.after(mounted.cleanup)
+  assert.equal(button(mounted, 'Activity'), undefined)
+  assert.doesNotMatch(mounted.container.textContent, /Assessments|Unresolved operations/)
+  await click(button(mounted, 'Settings'))
+  assert.match(mounted.container.textContent, /Recommendations/)
+  assert.ok(button(mounted, 'On'))
+  assert.ok(button(mounted, 'Off'))
+  assert.match(mounted.container.textContent, /organization-wide/i)
   await click(button(mounted, 'Mute for 1 week'))
   assert.ok(loaded.calls.rest.some(([path]) => path === '/settings/mute'))
-  await mounted.cleanup()
+})
+
+test('Contribute lists share candidates and persists Not now through the backend', async t => {
+  let candidates = [
+    { event_id: 'candidate-1', skill_name: 'incident-helper', qualification: 'high_usage', local_reasons: { consecutive_business_days: 5 } },
+    { event_id: 'candidate-2', skill_name: 'release-helper', qualification: 'refinement', local_reasons: { meaningful_refinements: 3, stable_days: 14 } }
+  ]
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/candidates?view_id=view-remote-a-A') return { candidates }
+    if (path === '/candidates/candidate-1/prepare') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A' })
+      return { draft_id: 'local:candidate-1', skill_id: 'incident-helper' }
+    }
+    if (path === '/candidates/candidate-2/not-now') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A' })
+      candidates = candidates.filter(item => item.event_id !== 'candidate-2')
+      return { deferred: true, event_id: 'candidate-2' }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(mounted.cleanup)
+  await click(button(mounted, 'Contribute'))
+
+  assert.match(mounted.container.textContent, /Worth sharing with your team/)
+  assert.match(mounted.container.textContent, /incident-helper/)
+  assert.match(mounted.container.textContent, /used on 5 consecutive business days/)
+  const candidateRows = [...mounted.container.querySelectorAll('[data-testid^="share-candidate-"]')]
+  await click([...candidateRows[0].querySelectorAll('button')].find(item => item.textContent === 'Share'))
+  assert.match(mounted.container.textContent, /Private draft/)
+  assert.match(mounted.container.textContent, /Nothing has been uploaded/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/publication/confirm'), false)
+
+  await click([...candidateRows[1].querySelectorAll('button')].find(item => item.textContent === 'Not now'))
+  assert.ok(loaded.calls.rest.some(([path]) => path === '/candidates/candidate-2/not-now'))
+  assert.doesNotMatch(mounted.container.textContent, /release-helper/)
+})
+
+test('pending actions remain visible in their own view after reopening', async t => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap') return { ...bootstrap, status: { ...bootstrap.status, pending_operations: [
+      { operation_id: 'op-install', kind: 'install', stage: 'prepared', skill_id: 'opaque-install-id' },
+      { operation_id: 'op-share', kind: 'publication', phase: 'draft_submission_unknown', skill_id: 'opaque-share-id' }
+    ] } }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  await click(button(mounted, 'Installed'))
+  assert.match(mounted.container.textContent, /Install requires attention for this skill/)
+  assert.doesNotMatch(mounted.container.textContent, /op-share/)
+  assert.match(mounted.container.textContent, /hermes wisdom status --json/)
+  await click(button(mounted, 'Contribute'))
+  assert.match(mounted.container.textContent, /Publication requires attention for this draft/)
+  assert.doesNotMatch(mounted.container.textContent, /op-install/)
+  assert.ok([...mounted.container.querySelectorAll('h3')].every(node => !node.textContent.includes('opaque-')))
+  await click(button(mounted, 'Catalog'))
+  await click(button(mounted, 'Installed'))
+  assert.match(mounted.container.textContent, /Install requires attention/)
 })
 
 test('A-B-A profile changes suppress a late review and open a fresh generation', async () => {

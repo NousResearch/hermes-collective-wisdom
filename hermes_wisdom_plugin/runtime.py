@@ -427,6 +427,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Build the direct PluginState-backed publication service."""
 
         from .direct_services import PublicationService  # pylint: disable=import-outside-toplevel
+        from .install_host import InstallationHost  # pylint: disable=import-outside-toplevel
+        from .publisher_enrollment import PublisherEnrollment  # pylint: disable=import-outside-toplevel
 
         self._installation_owner()
         if self.client is None or self._direct_state is None:
@@ -436,6 +438,10 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             self._contribution_reviewer(),
             self.client,
             self._installation_owner,
+            PublisherEnrollment(
+                self._direct_state, self.installed, self.client,
+                InstallationHost(self.profile[1]), self._installation_owner,
+            ),
         )
 
     def suggest(
@@ -570,6 +576,36 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         if not draft_id:
             raise SharePackagingError()
         return draft_id
+
+    def defer_candidate(
+        self, event_id: str, *, may_apply: Callable[[], bool]
+    ) -> dict[str, Any]:
+        """Persist Not now for one exact candidate revision."""
+        _require_current(may_apply)
+        owner = self.native_owner()
+        inspected = self.native_candidate_inspect(event_id)
+        content_hash = inspected.get("content_hash")
+        if not isinstance(content_hash, str) or not content_hash:
+            raise WisdomValidationError("Collective Wisdom candidate is incomplete")
+        if self.client is None:
+            raise WisdomError("Collective Wisdom candidate deferral is unavailable")
+        policy = AgentLedPolicyResponse.model_validate(self.client.agent_led_policy())
+        if policy.org_id != owner["organization_id"] or self.native_owner() != owner:
+            raise WisdomAuthError("Collective Wisdom candidate owner changed")
+        _require_current(may_apply)
+        from .notices import suppression_key  # pylint: disable=import-outside-toplevel
+        result = self.client.suppress_recommendation(suppression_key({
+            "kind": "candidate", "content_hash": content_hash,
+        }))
+        if self.native_owner() != owner:
+            raise WisdomAuthError("Collective Wisdom candidate owner changed")
+        return {
+            "deferred": True,
+            "event_id": event_id,
+            "not_now_suppression_days": policy.not_now_suppression_days,
+            "preference_sync": "confirmed",
+            "suppress_until": result.suppress_until,
+        }
 
     def notification_settings(
         self, *, may_apply: Callable[[], bool], include_mute_control: bool = False
@@ -821,6 +857,17 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
         _require_current(may_apply)
         result = self._publication_service().reopen(operation_id, may_apply=may_apply)
+        self.check_owner()
+        _require_current(may_apply)
+        return result
+
+    def publication_enroll(
+        self, skill_name, *, may_apply: Callable[[], bool] | None = None,
+    ):
+        """Explicitly link an exact already-published author source."""
+
+        _require_current(may_apply)
+        result = self._publication_service().enroll(skill_name, may_apply=may_apply)
         self.check_owner()
         _require_current(may_apply)
         return result
@@ -1160,13 +1207,19 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self._open().require_setup()
 
     def _discovery(self):
+        from .catalog_status import (  # pylint: disable=import-outside-toplevel
+            CatalogInstallationStatus,
+        )
         from .discovery import Discovery  # pylint: disable=import-outside-toplevel
 
         self.require_setup()
+        owner = self._installation_owner()
+        local_status = CatalogInstallationStatus(self.installed, owner, self.profile[1])
         return Discovery(
             self.client, self.check_owner,
             portal_base_url=self.account.portal_base_url,
             organization_id=self.account.organization_id,
+            installation_status=local_status.for_skill,
         )
 
     def list_skills(self):

@@ -12,6 +12,7 @@ from typing import Any
 
 from .compatibility import evaluate
 from .contract import parse_manifest_bytes
+from .managed_target import validate_managed_target
 from .package import (
     MAX_METADATA_BYTES,
     MAX_TREE_BYTES,
@@ -128,7 +129,7 @@ def _installed_files(  # pylint: disable=too-many-locals,too-many-branches,too-m
 
 
 def _require_committed(
-    installed: Any, owner: dict, skill_id: str, version: int | None
+    installed: Any, host: Any, owner: dict, skill_id: str, version: int | None
 ) -> dict:
     installation = installed.installation(skill_id, owner=owner)
     if not installation or installation.get("state") != "active":
@@ -139,6 +140,7 @@ def _require_committed(
         raise PackagePolicyError(
             "installed version changed; inspect the current version before setup"
         )
+    validate_managed_target(host, installation, owner, require_tree=False)
     for item in installed.pending_operations(skill_id):
         if item["kind"] in {"install", "update", "uninstall"}:
             raise PackagePolicyError(
@@ -158,7 +160,7 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
 ) -> dict[str, Any]:
     """Inspect installed bytes and prerequisite presence without execution."""
 
-    installation = _require_committed(installed, owner, skill_id, version)
+    installation = _require_committed(installed, host, owner, skill_id, version)
     try:
         files = _installed_files(installation, host)
         manifest = parse_manifest_bytes(files["skill.manifest.json"])
@@ -218,7 +220,7 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
             result["state"] = "setup_required" if needs_setup else "verification_required"
     result["setup_progress"] = setup_progress(progress, owner, result)
     _derive_readiness(result)
-    if _require_committed(installed, owner, skill_id, version) != installation:
+    if _require_committed(installed, host, owner, skill_id, version) != installation:
         raise PackagePolicyError(
             "installation changed during setup inspection; inspect again"
         )

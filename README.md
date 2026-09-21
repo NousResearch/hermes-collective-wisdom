@@ -70,6 +70,12 @@ hermes wisdom browse "incident"
 ```
 
 An empty catalog is normal if nobody in your organization has published a skill yet.
+Catalog rows and details also show owner/profile-local installation status: a managed
+installed version (and a newer catalog version when known), no local copy, an
+unmanaged same-name local copy, or unavailable inspection. This label is advisory;
+the installed version is the recorded revision, not a claim that local files are
+unchanged or setup is complete. Local edits are checked by the existing review flow;
+install, update, and removal still use their separately reviewed authority checks.
 
 ## Where to use it
 
@@ -85,6 +91,14 @@ An empty catalog is normal if nobody in your organization has published a skill 
   Catalog, Installed, Activity & Settings, and Contributions call the existing
   workflows on the selected host/profile. Review exact versions, checks, and
   files before confirming an install, update, removal, or submission.
+
+In Desktop chat, `/wisdom`, `/wisdom list`, `/wisdom browse [query]`, and
+`/wisdom show <skill-id>` open the same catalog/review workflow in a themed dialog.
+View, Install, and eligible Update controls never apply a package before explicit
+confirmation. Other Wisdom commands keep their normal route. The current Desktop
+middleware API leaves the submitted command in the composer; closing the dialog
+does not send it. A focused-chat/active-profile mismatch refuses requests rather
+than silently switching owners.
 
 The Desktop page also offers explicit enrollment after disclosure. At completed
 turns it may poll a bounded feed and show a direct best-effort notification. A
@@ -135,6 +149,15 @@ original skill. Review the description, files, generated compatibility manifest,
 and security findings. See the [sharing workflow](docs/WORKFLOWS.md#private-contribution-preparation-terminal)
 for editing and the separate publication review/submission steps.
 
+After a publication is proven successful, Wisdom registers the unchanged original
+source as a managed installation in place; it does not copy, move, reinstall, or run
+setup. Teammate versions then use the ordinary explicit update review and local-edit
+protections. If remote publication succeeds but local registration does not, recover
+the retained proof with `hermes wisdom publication enroll <local-skill-name>`. That
+command performs read-only catalog/detail/content discovery and, after exact proof,
+may register the installation with Gateway and local managed state. It never replays
+publication or overwrites the source during enrollment.
+
 On an interactive terminal, choose to inspect files and warnings, edit the draft,
 continue to sharing review, or keep it for later. Sharing requires a separate
 final confirmation. `--json` selects noninteractive machine output instead; it
@@ -166,6 +189,7 @@ as unavailable, not passed.
 | List managed installations | `hermes wisdom installed --json` |
 | Check for an update | `hermes wisdom check <skill-id> --json` |
 | Review an update | `hermes wisdom update <skill-id> --plan --json` |
+| Recover management of an already-published original | `hermes wisdom publication enroll <local-skill-name> --json` |
 | Inspect notification settings | `hermes wisdom settings --json` |
 | Mute proactive notifications for a week | `hermes wisdom mute 1w --json` |
 

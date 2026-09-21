@@ -143,7 +143,7 @@ class _Review:
     expires_at: float
 
 
-class DesktopWorkflowApi:
+class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
     """Map UI gestures to the shared workflow without duplicating its kernels."""
 
     def __init__(
@@ -445,6 +445,56 @@ class DesktopWorkflowApi:
             may_apply=lambda: self.current(service, view_id),
         )
 
+    def candidates(self, service: Any, view_id: str) -> dict[str, Any]:
+        """Read current local candidates without granting publication authority."""
+        self._require_view(service, view_id)
+        rows = service.notice_candidates()
+        references = [{
+            "kind": "candidate", "content_hash": row["content_hash"],
+            "notice_key": row["event_id"],
+        } for row in rows]
+        preferences = service.notice_preferences(references) if references else {}
+        suppressed = preferences.get("suppressed") or {}
+        self._require_view(service, view_id)
+        return {
+            "candidates": [
+                {
+                    **row,
+                    "local_reasons": (
+                        row.get("payload", {}).get("local_reasons", {})
+                        if isinstance(row.get("payload"), dict)
+                        else {}
+                    ),
+                }
+                for row in rows if not suppressed.get(row["event_id"])
+            ]
+        }
+
+    def prepare_candidate(
+        self, service: Any, view_id: str, event_id: str
+    ) -> dict[str, Any]:
+        """Prepare the candidate's current local skill as a private draft."""
+        self._require_view(service, view_id)
+        inspected = service.native_candidate_inspect(event_id)
+        self._require_view(service, view_id)
+        skill_name = str((inspected.get("facts") or {}).get("name") or "")
+        if not skill_name:
+            raise WisdomValidationError("Collective Wisdom candidate is incomplete")
+        return service.suggest(
+            skill_name,
+            allow_model_review=False,
+            may_apply=lambda: self.current(service, view_id),
+        )
+
+    def defer_candidate(
+        self, service: Any, view_id: str, event_id: str
+    ) -> dict[str, Any]:
+        """Persist Not now through the existing exact candidate suppression."""
+        self._require_view(service, view_id)
+        return service.defer_candidate(
+            event_id, may_apply=lambda: self.current(service, view_id)
+        )
+
     def prepared_inspect(self, service: Any, view_id: str, draft_id: str):
         """Read complete inert draft bytes only for the originating live view."""
         self._require_view(service, view_id)
@@ -565,6 +615,26 @@ class DesktopWorkflowApi:
         with self._lock:
             self._reviews.pop(review_id, None)
         return result
+
+
+def _add_candidate_routes(router, api, invoke):
+    from fastapi import Query  # pylint: disable=import-outside-toplevel
+
+    @router.get("/candidates")
+    def candidates(view_id: str = Query(min_length=8, max_length=128)):
+        return invoke(lambda service: api.candidates(service, view_id))
+
+    @router.post("/candidates/{event_id}/prepare")
+    def candidate_prepare(event_id: str, body: ViewBody):
+        return invoke(lambda service: api.prepare_candidate(
+            service, body.view_id, event_id
+        ))
+
+    @router.post("/candidates/{event_id}/not-now")
+    def candidate_not_now(event_id: str, body: ViewBody):
+        return invoke(lambda service: api.defer_candidate(
+            service, body.view_id, event_id
+        ))
 
 
 def build_router(  # pylint: disable=too-many-locals
@@ -777,6 +847,8 @@ def build_router(  # pylint: disable=too-many-locals
         return invoke(lambda service: api.prepare_draft(
             service, body.view_id, body.skill_name
         ))
+
+    _add_candidate_routes(router, api, invoke)
 
     @router.get("/drafts/{draft_id}")
     def draft_inspect(

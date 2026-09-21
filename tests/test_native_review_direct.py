@@ -136,6 +136,10 @@ def test_native_catalog_renders_actual_results(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(service, "search_skills", lambda _query: [{
         "id": "skill-1", "slug": "incident-triage",
         "author_description": "Diagnose incident failures", "latest_version": 2,
+        "installation_status": {
+            "state": "installed", "text": "Installed v1 · update to v2 available",
+            "installed_version": 1, "latest_version": 2,
+        },
     }], raising=False)
 
     record = controller.request_catalog(service, invocation(), "browse", "incident")
@@ -145,6 +149,7 @@ def test_native_catalog_renders_actual_results(tmp_path: Path, monkeypatch):
     assert "incident-triage" in text
     assert "Diagnose incident failures" in text
     assert "v2" in text
+    assert "Installed v1 · update to v2 available" in text
     assert view.items[0].actions[0].label == "Review install"
 
     controller.bind_message(record["id"], invocation(), "card-1")

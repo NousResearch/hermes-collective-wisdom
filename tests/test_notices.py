@@ -366,6 +366,53 @@ def test_candidate_suppression_identity_is_bound_to_exact_content_hash():
     assert suppression_key(reference) == expected
 
 
+def test_candidate_not_now_uses_exact_existing_suppression_policy():
+    owner = {"account_id": "alice", "organization_id": "org"}
+    calls = []
+    service: Any = InvocationService.__new__(InvocationService)
+    service.native_owner = lambda: owner
+    service.native_candidate_inspect = lambda event_id: {
+        "event_id": event_id, "content_hash": "sha256:revision-b"
+    }
+    service.client = SimpleNamespace(
+        agent_led_policy=lambda: {
+            "org_id": "org",
+            "usage_evidence_window_days": 30,
+            "min_aggregate_invocations": 5,
+            "consecutive_day_usage_counts": True,
+            "repeated_edits_count": True,
+            "max_recommendations_per_user_per_week": 3,
+            "publication_mode": "moderated",
+            "install_popularity_threshold": 10,
+            "manager_review_email_cadence": "daily",
+            "not_now_suppression_days": 14,
+            "version": 1,
+            "updated_by_user_id": None,
+            "notification_defaults": {
+                "teammate_published": True,
+                "update_available": True,
+                "skill_ready_to_share": True,
+            },
+        },
+        suppress_recommendation=lambda key: calls.append(key) or SimpleNamespace(
+            suppress_until="later"
+        ),
+    )
+
+    result = service.defer_candidate("candidate-1", may_apply=lambda: True)
+
+    assert calls == [suppression_key({
+        "kind": "candidate", "content_hash": "sha256:revision-b"
+    })]
+    assert result == {
+        "deferred": True,
+        "event_id": "candidate-1",
+        "not_now_suppression_days": 14,
+        "preference_sync": "confirmed",
+        "suppress_until": "later",
+    }
+
+
 def test_suppressing_candidate_notice_keeps_manual_candidate_review_available(tmp_path: Path):
     host = JsonState(tmp_path)
     local = QualificationState(host, tmp_path)

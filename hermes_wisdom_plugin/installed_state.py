@@ -102,6 +102,43 @@ class InstalledState:
         with self._change() as value:
             value["installations"][skill_id] = item
 
+    def record_publisher_install(
+        self, values: dict[str, Any], *, previous: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically link or compare-and-swap one exact publisher source record."""
+
+        item = _copy(values)
+        expected = _copy(previous)
+        skill_id = item.get("skill_id")
+        target = item.get("target_path")
+        if (
+            not isinstance(skill_id, str) or not skill_id
+            or not isinstance(target, str) or not target
+            or not isinstance(item.get("baseline"), dict)
+        ):
+            raise ValueError("managed publisher installation is invalid")
+        item["owner"] = _owner(item.get("owner"))
+        if expected is not None:
+            expected["owner"] = _owner(expected.get("owner"))
+        with self._change() as value:
+            existing = value["installations"].get(skill_id)
+            if existing == item:
+                return
+            if existing is not None and (expected is None or existing != expected):
+                if expected is not None:
+                    raise WisdomConflict("published skill changed during managed enrollment")
+                raise WisdomConflict("published skill id already has a managed installation")
+            if existing is None and expected is not None:
+                raise WisdomConflict("published skill changed during managed enrollment")
+            if any(
+                row.get("state") == "active" and row.get("target_path") == target
+                and row.get("skill_id") != skill_id
+                for row in value["installations"].values()
+                if isinstance(row, dict)
+            ):
+                raise WisdomConflict("publisher source target already belongs to a managed skill")
+            value["installations"][skill_id] = item
+
     def installations(self, owner: dict[str, str] | None = None) -> list[dict[str, Any]]:
         expected = _owner(owner, optional=True)
         return sorted(

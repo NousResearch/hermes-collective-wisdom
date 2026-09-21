@@ -25,6 +25,7 @@ from review_test_support import prepared_inspection
 from hermes_wisdom_plugin.commands import (
     MAX_PREPARED_PAYLOAD_BYTES,
     PAGE_SIZE,
+    _human_render,
     build_parser,
     parse_slash,
     run_cli,
@@ -247,6 +248,25 @@ class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-att
     def publication_reopen(self, operation_id):
         self.calls.append(("publication_reopen", operation_id))
         return {"operation_id": operation_id, "publication_state": "pending_moderation"}
+
+    def publication_enroll(self, skill_name):
+        self.calls.append(("publication_enroll", skill_name))
+        return {
+            "operation_id": "internal-publication-operation", "state": "done",
+            "publication_state": "published",
+            "managed_enrollment": {
+                "state": "managed", "skill_id": "skill-1", "version": 2,
+                "effective_update_mode": "MANUAL",
+                "detail": (
+                    "reviewed-skill is now Managed v2. "
+                    "Update mode: MANUAL (manual/review required)."
+                ),
+            },
+            "detail": (
+                "reviewed-skill is now Managed v2. "
+                "Update mode: MANUAL (manual/review required)."
+            ),
+        }
 
     def publication_decline(self, operation_id):
         self.calls.append(("publication_decline", operation_id))
@@ -525,6 +545,62 @@ def test_publication_submit_reports_unsuccessful_exit(capsys, as_json, state, ex
     assert service.calls == [("publication_submit", "wpub_review")]
 
 
+def test_publication_enroll_dispatches_local_skill_name(capsys):
+    service = _Service()
+    args = _parser().parse_args(
+        ["publication", "enroll", "reviewed-skill", "--json"]
+    )
+
+    assert args.skill_name == "reviewed-skill"
+    assert not hasattr(args, "operation_id")
+    assert run_cli(args, service) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["operation_id"] == "internal-publication-operation"
+    assert result["managed_enrollment"]["skill_id"] == "skill-1"
+    assert result["managed_enrollment"]["state"] == "managed"
+    assert result["managed_enrollment"]["effective_update_mode"] == "MANUAL"
+    assert service.calls == [("publication_enroll", "reviewed-skill")]
+
+
+def test_publication_enroll_human_output_leads_with_managed_outcome(capsys):
+    service = _Service()
+
+    assert run_cli(
+        _parser().parse_args(["publication", "enroll", "reviewed-skill"]), service
+    ) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:2] == [
+        "Publication result",
+        "reviewed-skill is now Managed v2. Update mode: MANUAL (manual/review required).",
+    ]
+    assert "Operation: internal-publication-operation" not in lines
+    assert not any(line.startswith("Remote draft:") for line in lines)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "operation_id": "op-pending", "state": "done",
+            "publication_state": "pending_moderation",
+        },
+        {
+            "operation_id": "op-unlinked", "state": "done",
+            "publication_state": "published",
+            "detail": "Published successfully, but the original source is not linked locally.",
+            "managed_enrollment": {"state": "not_linked"},
+        },
+        {"operation_id": "op-uncertain", "state": "uncertain"},
+        {"operation_id": "op-rejected", "state": "rejected"},
+    ],
+    ids=["pending-moderation", "not-linked", "uncertain", "rejected"],
+)
+def test_publication_nonmanaged_outcomes_never_claim_managed_success(result):
+    assert "Managed v" not in _human_render("publication", result)
+
+
 def test_interactive_suggest_cancel_has_no_publication_effect(capsys, monkeypatch):
     service = _Service()
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
@@ -565,6 +641,21 @@ def test_human_read_commands_render_substantive_rows(argv, expected, capsys):
     assert expected in output
     assert output.count("\n") > 1
     assert not output.lstrip().startswith(("{", "["))
+
+
+def test_standalone_catalog_status_is_visible_in_human_and_json_output(capsys):
+    service = _Service()
+    service.rows[0]["installation_status"] = {
+        "state": "installed", "text": "Installed v1 · update to v2 available",
+        "installed_version": 1, "latest_version": 2,
+    }
+
+    assert run_cli(_parser().parse_args(["list"]), service) == 0
+    assert "Installed v1 · update to v2 available" in capsys.readouterr().out
+
+    assert run_cli(_parser().parse_args(["list", "--json"]), service) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["skills"][0]["installation_status"]["state"] == "installed"
 
 
 def test_suggest_warning_without_safe_evidence_cannot_be_acknowledged(capsys, monkeypatch):
@@ -1149,9 +1240,11 @@ def test_slash_browse_omits_account_local_install_and_private_check_details():
         "local_installation",
         "PRIVATE_SUMMARY",
         "PRIVATE_FINDING",
-        "Install",
     ):
         assert private not in output
+    assert "Installation status unavailable" in output
+    assert "Review install" not in output
+    assert "Install:" not in output
 
 
 def test_slash_browse_sanitizes_untrusted_text_and_navigation_controls():

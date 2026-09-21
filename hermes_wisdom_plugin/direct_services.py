@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import re
+import shlex
 import time
 import unicodedata
 import uuid
@@ -392,6 +393,31 @@ class DirectState:
     def publication(self, operation_id: str) -> dict[str, Any] | None:
         return copy.deepcopy(self._load()["publications"].get(operation_id))
 
+    def published_for_source(
+        self, owner: dict[str, str], source: Path, source_hash: str,
+    ) -> list[dict[str, Any]]:
+        """Return retained published operations for one exact owner/source snapshot."""
+
+        state = self._load()
+        source_path = str(source)
+        matches = []
+        for row in state["publications"].values():
+            if (
+                row.get("owner") != owner
+                or row.get("status") != "done"
+                or row.get("publication_state") != "published"
+            ):
+                continue
+            draft = state["drafts"].get(row.get("local_draft_id"))
+            if (
+                isinstance(draft, dict)
+                and draft.get("owner") == owner
+                and draft.get("source_path") == source_path
+                and draft.get("source_hash") == source_hash
+            ):
+                matches.append(copy.deepcopy(row))
+        return matches
+
     def publication_for_draft(self, draft_id: str) -> dict[str, Any] | None:
         for row in self._load()["publications"].values():
             if row.get("local_draft_id") == draft_id:
@@ -443,7 +469,10 @@ class DirectState:
             terminal = {
                 "published", "pending_moderation", "changes_requested", "declined", "invalidated"
             }
-            if previous in terminal and previous != state:
+            if (
+                previous in terminal and previous != state
+                and not (previous == "pending_moderation" and state == "published")
+            ):
                 raise WisdomConflict("Publication terminal state cannot move backwards")
             row.update({
                 "status": "done", "phase": state, "publication_state": state,
@@ -935,12 +964,14 @@ class PublicationService:  # pylint: disable=too-many-public-methods
     def __init__(
         self, state: DirectState, reviewer: Any, client: Any,
         owner: Callable[[], dict[str, str]],
+        enrollment: Any | None = None,
     ) -> None:
         self.state = state
         self.store = state  # inspectable domain authority, not a relational compatibility facade
         self.reviewer = reviewer
         self.client = client
         self.owner_provider = owner
+        self.enrollment = enrollment
 
     def _owner(self) -> dict[str, str]:
         owner = self.owner_provider()
@@ -1251,7 +1282,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 "phase": "rejected", "detail": operation["rejection_detail"],
                 "code": operation["rejection_code"], "retry_safe": False,
             }
-        return {
+        result = {
             "operation_id": operation["id"], "state": "done",
             "publication_state": operation.get("publication_state"),
             "remote_draft_id": operation.get("remote_draft_id"),
@@ -1260,9 +1291,75 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 if key != "professionalism_review"
             },
         }
+        if isinstance(operation.get("publication_result"), dict):
+            result["publication_result"] = copy.deepcopy(operation["publication_result"])
+        if isinstance(operation.get("managed_enrollment"), dict):
+            result["managed_enrollment"] = copy.deepcopy(operation["managed_enrollment"])
+            if isinstance(operation["managed_enrollment"].get("detail"), str):
+                result["detail"] = operation["managed_enrollment"]["detail"]
+        return result
 
-    def _finish(self, operation_id: str, state: str) -> dict[str, Any]:
+    def _finish(
+        self, operation_id: str, state: str, *, publication_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if publication_result is not None:
+            self.state.update_publication(
+                operation_id, publication_result=copy.deepcopy(publication_result)
+            )
         return self._done(self.state.finish_publication(operation_id, state))
+
+    def _finish_published(
+        self, operation_id: str, result: dict[str, Any],
+        may_apply: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        completed = self._finish(
+            operation_id, "published", publication_result=result,
+        )
+        if self.enrollment is None:
+            return completed
+        try:
+            linked = self.enrollment.link(
+                self._operation(operation_id), copy.deepcopy(result), may_apply=may_apply,
+            )
+        except Exception:  # publication success must remain truthful
+            linked = self._not_linked(operation_id)
+        operation = self.state.update_publication(
+            operation_id, managed_enrollment=linked,
+        )
+        return self._done(operation)
+
+    def _finish_reconciled_published(
+        self, operation_id: str, may_apply: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        """Finish a GET-observed publication, then explicitly register its exact source."""
+
+        completed = self._finish(operation_id, "published")
+        if self.enrollment is None:
+            return completed
+        try:
+            linked = self.enrollment.link_existing(
+                self._operation(operation_id), may_apply=may_apply,
+            )
+        except Exception:  # remote publication remains successful and must not be replayed
+            linked = self._not_linked(operation_id)
+        return self._done(self.state.update_publication(
+            operation_id, managed_enrollment=linked,
+        ))
+
+    def _not_linked(self, operation_id: str) -> dict[str, str]:
+        operation = self._operation(operation_id)
+        draft = self.state.draft(str(operation.get("local_draft_id") or ""))
+        skill_name = draft.get("slug") if isinstance(draft, dict) else None
+        if not isinstance(skill_name, str) or not skill_name:
+            skill_name = "<local-skill-name>"
+        return {
+            "state": "not_linked",
+            "detail": (
+                "Published successfully, but the original source is not linked to this version "
+                "locally. "
+                f"Recover with: hermes wisdom publication enroll {shlex.quote(skill_name)}"
+            ),
+        }
 
     def _reject_submission(
         self, operation_id: str, exc: WisdomValidationError,
@@ -1389,7 +1486,12 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             remote = self._remote(operation, may_apply)
             remote_state = str(_value(remote, "state"))
             if remote_state in self.TERMINAL:
-                return operation, self._finish(operation_id, remote_state)
+                result = (
+                    self._finish_reconciled_published(operation_id, may_apply)
+                    if remote_state == "published"
+                    else self._finish(operation_id, remote_state)
+                )
+                return operation, result
             operation = self.state.update_publication(
                 operation_id, remote_state=remote_state,
                 remote_revision=str(_value(remote, "updatedAt")),
@@ -1461,7 +1563,9 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 "Publication acknowledgement was lost; status will reconcile without resubmitting.",
             )
         state = str((result or {}).get("state") or "")
-        if state in {"published", "pending_moderation"}:
+        if state == "published":
+            return self._finish_published(operation_id, result, may_apply)
+        if state == "pending_moderation":
             return self._finish(operation_id, state)
         self.state.update_publication(operation_id, phase="server_pending")
         return self._uncertain(
@@ -1500,6 +1604,51 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "retry_safe": phase in {"intent", "objects_uploaded"},
         }
 
+    def enroll(
+        self, skill_name: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Discover exact publication proof, then register its unchanged source."""
+
+        _current(may_apply)
+        owner = self._owner()
+        source = self.reviewer.source(skill_name)
+        source_hash = source_fingerprint(source)
+        _current(may_apply)
+        if self._owner() != owner:
+            raise WisdomAuthError("Collective Wisdom publication owner changed")
+        matches = self.state.published_for_source(owner, source, source_hash)
+        if not matches:
+            raise WisdomNotFound(
+                f"No retained published proof matches current local skill '{skill_name}'"
+            )
+        if len(matches) != 1:
+            raise WisdomConflict(
+                f"Multiple retained publications match current local skill '{skill_name}'"
+            )
+        operation = matches[0]
+        operation_id = str(operation["id"])
+        if self.enrollment is None:
+            raise WisdomConflict("Publisher managed enrollment is unavailable")
+        linked = self.enrollment.link_existing(operation, may_apply=may_apply)
+        return self._done(self.state.update_publication(
+            operation_id, managed_enrollment=linked,
+        ))
+
+    def _reconcile_completed(
+        self, operation_id: str, operation: dict[str, Any],
+        may_apply: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        """Reconcile a completed operation without replaying its remote effect."""
+
+        if not operation.get("remote_draft_id"):
+            return self._done(operation)
+        remote_state = str(_value(self._remote(operation, may_apply), "state"))
+        if remote_state == operation.get("publication_state"):
+            return self._done(operation)
+        if remote_state == "published":
+            return self._finish_reconciled_published(operation_id, may_apply)
+        return self._finish(operation_id, remote_state)
+
     def reopen(
         self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
@@ -1508,17 +1657,13 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         with managed_operation_guard(self.state.root, lock_key):
             operation = self._operation(operation_id)
             if operation["status"] == "done":
-                if not operation.get("remote_draft_id"):
-                    return self._done(operation)
-                remote = self._remote(operation, may_apply)
-                state = str(_value(remote, "state"))
-                return self._finish(operation_id, state) if state != operation.get(
-                    "publication_state"
-                ) else self._done(operation)
+                return self._reconcile_completed(operation_id, operation, may_apply)
             if operation["phase"] in {"approval_unknown", "publication_unknown", "decline_unknown"}:
                 remote = self._remote(operation, may_apply)
                 remote_state = str(_value(remote, "state"))
                 if remote_state in self.TERMINAL:
+                    if remote_state == "published":
+                        return self._finish_reconciled_published(operation_id, may_apply)
                     return self._finish(operation_id, remote_state)
                 if operation["phase"] == "approval_unknown" and remote_state == "owner_approved":
                     self.state.update_publication(

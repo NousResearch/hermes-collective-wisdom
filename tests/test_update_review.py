@@ -51,8 +51,10 @@ class Client:
                 "id": "skill-1", "slug": "managed-skill", "state": "active",
                 "takedown_generation": self.remote["takedown_generation"],
             },
-            versions=[{"version": 1, "state": "published"},
-                      {"version": 2, "state": "published"}],
+            versions=[
+                {"version": version, "state": "published"}
+                for version in sorted(self.files)
+            ],
         )
 
     def version(self, skill_id, version):
@@ -185,6 +187,40 @@ def test_update_rejects_record_redirected_to_unmanaged_skill(tmp_path, operation
 
     assert (unrelated / "SKILL.md").read_bytes() == original
     assert value.client.calls == []
+
+
+def test_publisher_source_update_uses_original_path_and_blocks_later_local_edits(tmp_path):
+    reviewer, store, canonical = _reviewer(tmp_path)
+    target = reviewer.host.skills_root / "authored" / "managed-skill"
+    target.parent.mkdir(parents=True)
+    canonical.rename(target)
+    store.record.update({
+        "target_path": str(target),
+        "manifest_hash": "sha256:" + "b" * 64,
+    })
+    store.record["target_provenance"] = {
+        "kind": "publisher_source", "owner": store.record["owner"],
+        "source_path": str(target), "source_hash": "sha256:" + "a" * 64,
+        "publication": {
+            "operation_id": "publication-1", "remote_draft_id": "draft-1",
+            "proposal_id": 1, "skill_id": "skill-1", "version": 1,
+            "content_hash": store.record["content_hash"],
+            "commit": "sha256:" + "c" * 64,
+            "manifest_hash": store.record["manifest_hash"],
+        },
+    }
+
+    clean = reviewer.plan("skill-1")
+    assert clean["target_path"] == str(target)
+    assert clean["target_provenance"] == store.record["target_provenance"]
+    assert clean["modified"] is False
+
+    (target / "SKILL.md").write_text("# Changed after publication\n", encoding="utf-8")
+    blocked = reviewer.plan("skill-1")
+    assert blocked["target_path"] == str(target)
+    assert blocked["modified"] is True
+    assert blocked["allowed"] is False
+    assert blocked["preservation"] == {"action": "block", "destination": None}
 
 
 def test_plan_binds_prior_authority_incoming_bytes_and_clean_local_snapshot(tmp_path):

@@ -483,6 +483,36 @@ def test_uninstall_preserves_modified_tree_and_retry_does_not_delete_recreated_t
     assert (target / "SKILL.md").read_text() == "# recreated\n"
 
 
+def test_uninstall_archives_exact_publisher_source_target(executor):
+    value, store, _client, _receipts, _current = executor
+    installed = value.apply("receipt-1")
+    canonical = Path(installed["path"])
+    target = value.host.skills_root / "authored" / "managed-skill"
+    target.parent.mkdir(parents=True)
+    canonical.rename(target)
+    record = store.records["skill-1"]
+    record.update({
+        "target_path": str(target), "manifest_hash": "sha256:" + "b" * 64,
+    })
+    record["target_provenance"] = {
+        "kind": "publisher_source", "owner": OWNER,
+        "source_path": str(target), "source_hash": "sha256:" + "a" * 64,
+        "publication": {
+            "operation_id": "publication-1", "remote_draft_id": "draft-1",
+            "proposal_id": 1, "skill_id": "skill-1", "version": record["version"],
+            "content_hash": "sha256:" + "d" * 64,
+            "commit": "sha256:" + "c" * 64,
+            "manifest_hash": record["manifest_hash"],
+        },
+    }
+
+    result = value.uninstall("skill-1")
+
+    assert result["uninstalled"] is True
+    assert not target.exists()
+    assert (Path(result["recoverable_path"]) / "SKILL.md").read_bytes() == FILES[0][2]
+
+
 def test_explicit_uninstall_retry_redeletes_after_authoritative_presence(executor):
     value, _store, client, _receipts, _current = executor
     value.apply("receipt-1")

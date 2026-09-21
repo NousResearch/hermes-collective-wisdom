@@ -96,6 +96,7 @@ hermes wisdom publication review <draft-id> --json
 hermes wisdom publication submit <publication-receipt> --json
 hermes wisdom publication status <operation-id> --json
 hermes wisdom publication reopen <operation-id> --json
+hermes wisdom publication enroll <local-skill-name> --json
 hermes wisdom publication decline <operation-id> --json
 ```
 
@@ -105,6 +106,10 @@ or moderated publication. Confirmed conflicts require explicit re-review. For a
 genuinely uncertain write, the plugin keeps only the small evidence needed to avoid a
 duplicate submission and reconciles authoritative status before another effect.
 Current Share authorization timing is unchanged.
+
+Enrollment recovery resolves the exact current local source by name and requires a
+unique retained published proof for that source fingerprint and owner. It neither
+republishes nor selects an older historical operation.
 
 Optional editorial/model review is not security certification and is never publication
 consent. Package scripts are not executed during preparation or review.

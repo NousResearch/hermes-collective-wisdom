@@ -228,6 +228,9 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         ("decline", "Decline or withdraw one known remote draft when safe"),
     ):
         publication_action(action_name, help_text).add_argument("operation_id")
+    publication_action(
+        "enroll", "Prove and register an exact already-published source for managed updates"
+    ).add_argument("skill_name")
     install = add("install", "Review or apply an exact managed skill installation")
     install.add_argument("reference", nargs="?", default="")
     install.add_argument("--plan", action="store_true", help="Create a review without installing")
@@ -524,6 +527,8 @@ def _publication_cli(args, service):
         return service.publication_status(args.operation_id)
     if action == "reopen":
         return service.publication_reopen(args.operation_id)
+    if action == "enroll":
+        return service.publication_enroll(args.skill_name)
     if action == "decline":
         return service.publication_decline(args.operation_id)
     raise PackagePolicyError("unsupported publication action")
@@ -977,11 +982,26 @@ def _render_publication_outcome(data: dict[str, Any]) -> str:
     operation_id = _text(data["operation_id"])
     safe_operation = shlex.quote(_without_controls(operation_id))
     state = _text(data.get("state") or "unknown")
-    lines = ["Publication result", f"Operation: {operation_id}", f"State: {state}"]
+    detail = data.get("detail")
+    enrollment = data.get("managed_enrollment")
+    managed_success = (
+        state.casefold() == "done"
+        and data.get("publication_state") == "published"
+        and isinstance(enrollment, dict)
+        and enrollment.get("state") == "managed"
+    )
+    lines = ["Publication result"]
+    if isinstance(detail, str) and detail:
+        lines.append(_text(detail, limit=1024))
+    if not managed_success:
+        lines.append(f"Operation: {operation_id}")
+    lines.append(f"State: {state}")
     for key, label in (
         ("phase", "Phase"), ("publication_state", "Publication state"),
-        ("remote_draft_id", "Remote draft"), ("code", "Code"), ("detail", "Detail"),
+        ("remote_draft_id", "Remote draft"), ("code", "Code"),
     ):
+        if managed_success and key == "remote_draft_id":
+            continue
         value = data.get(key)
         if isinstance(value, str) and value:
             lines.append(f"{label}: {_text(value, limit=1024)}")
@@ -1107,6 +1127,7 @@ def _render_browse(rows: object, query: str, page: int) -> str:
                 "",
                 slug,
                 f"v{version or '?'} - {description}",
+                _installation_status_text(item),
                 _review_states(item),
                 f"Show: {_slash_command('show', slug)}",
             )
@@ -1126,6 +1147,14 @@ def _browse_navigation(query: str, page: int, has_next: bool) -> list[str]:
             lines.append("")
         lines.append(f"Next: {_paged_command('browse', query, page + 1)}")
     return lines
+
+
+def _installation_status_text(value: object) -> str:
+    data = value if isinstance(value, dict) else {}
+    status = data.get("installation_status")
+    if isinstance(status, dict) and isinstance(status.get("text"), str):
+        return status["text"]
+    return "Installation status unavailable"
 
 
 def _render_show(detail: object) -> str:
@@ -1154,6 +1183,7 @@ def _render_show(detail: object) -> str:
         "",
         description,
         f"Latest: v{max(version_numbers) if version_numbers else '?'}",
+        _installation_status_text(data),
         f"Requirements: {_requirements_summary(latest.get('system_spec'))}",
         _review_states(latest),
     ]
@@ -1185,7 +1215,10 @@ def _render_versions(  # pylint: disable=too-many-locals
     )
     start = (page - 1) * PAGE_SIZE
     selected = versions[start : start + PAGE_SIZE]
-    lines = [f"{slug} versions", "", f"Published versions - page {page}"]
+    lines = [
+        f"{slug} versions", "", _installation_status_text(data), "",
+        f"Published versions - page {page}",
+    ]
     base_url = _safe_url(data.get("portal_url"))
     for item in selected:
         number = int(item["version"])
