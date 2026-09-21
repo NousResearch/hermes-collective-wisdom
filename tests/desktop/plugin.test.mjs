@@ -55,6 +55,18 @@ function Textarea(props) {
   return React.createElement(Primitive, { ...props, as: 'textarea' })
 }
 
+function Dialog({ children, onOpenChange, open }) {
+  if (!open) return null
+  return React.createElement('div', {
+    onKeyDown: event => { if (event.key === 'Escape') onOpenChange?.(false) },
+    role: 'dialog'
+  }, children)
+}
+
+function DialogPart({ children, ...props }) {
+  return React.createElement('div', props, children)
+}
+
 // Faithful to the Radix callback contract used by the real SDK component.
 function Checkbox({ checked, onCheckedChange, ...props }) {
   assert.equal('onChange' in props, false, 'SDK Checkbox must not receive a native onChange handler')
@@ -73,8 +85,13 @@ async function loadPlugin(restHandler, initial = {}) {
   const profile = atom(initial.profile || 'A')
   const connectionId = atom(initial.connectionId || 'remote-a')
   const gateway = atom(initial.gateway || 'open')
+  const focusedSessionId = atom(initial.focusedSessionId ?? 'runtime-1')
+  const focusedStoredSessionId = atom(initial.focusedStoredSessionId ?? 'stored-1')
+  const focusedSessionOwner = atom(initial.focusedSessionOwner === undefined
+    ? { connectionId: connectionId.get(), profile: profile.get() }
+    : initial.focusedSessionOwner)
   const host = {
-    state: { connectionId, gateway, profile },
+    state: { connectionId, focusedSessionId, focusedSessionOwner, focusedStoredSessionId, gateway, profile },
     onEvent(type, callback) { events.push([type, callback]); return () => events.splice(events.findIndex(row => row[1] === callback), 1) },
     navigate(path) { calls.navigate.push(path) },
     notify(payload) { calls.notify.push(payload) },
@@ -85,6 +102,13 @@ async function loadPlugin(restHandler, initial = {}) {
     Button,
     Checkbox,
     Codicon: props => React.createElement(Primitive, { ...props, as: 'span' }),
+    COMPOSER_AREAS: { middleware: 'composer.middleware', top: 'composer.top' },
+    Dialog,
+    DialogContent: DialogPart,
+    DialogDescription: DialogPart,
+    DialogFooter: DialogPart,
+    DialogHeader: DialogPart,
+    DialogTitle: ({ children, ...props }) => React.createElement('h2', props, children),
     EmptyState: ({ title, description }) => React.createElement('section', {}, React.createElement('h2', {}, title), React.createElement('p', {}, description)),
     Input,
     PALETTE_AREA: 'palette',
@@ -110,9 +134,9 @@ async function loadPlugin(restHandler, initial = {}) {
   })
   await module.evaluate()
 
-  let dispose = () => undefined
+  const disposers = []
   const ctx = {
-    onDispose(callback) { dispose = callback },
+    onDispose(callback) { disposers.push(callback) },
     registerMany(contributions) { calls.registrations.push(...contributions); return () => undefined },
     async rest(path, options = {}) {
       const owner = { connectionId: connectionId.get(), gateway: gateway.get(), profile: profile.get() }
@@ -122,7 +146,18 @@ async function loadPlugin(restHandler, initial = {}) {
   }
   const plugin = module.namespace.default
   plugin.register(ctx)
-  return { calls, connectionId, dispose, emit: async event => { for (const [type, callback] of [...events]) if (type === '*' || type === event.type) await callback(event) }, gateway, plugin, profile }
+  return {
+    calls,
+    connectionId,
+    dispose() { for (const callback of disposers.splice(0)) callback() },
+    emit: async event => { for (const [type, callback] of [...events]) if (type === '*' || type === event.type) await callback(event) },
+    focusedSessionId,
+    focusedSessionOwner,
+    focusedStoredSessionId,
+    gateway,
+    plugin,
+    profile
+  }
 }
 
 test('completed turns request one best-effort notice and use native notifications', async () => {
@@ -159,6 +194,38 @@ async function renderPage(loaded) {
       container.remove()
     }
   }
+}
+
+async function renderComposerContribution(loaded) {
+  const container = document.createElement('div')
+  document.body.append(container)
+  const contribution = loaded.calls.registrations.find(item => item.area === 'composer.top')
+  assert.ok(contribution, 'composer dialog host should be registered')
+  const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0, retry: false }, mutations: { gcTime: 0, retry: false } } })
+  const root = createRoot(container)
+  await act(async () => { root.render(React.createElement(QueryClientProvider, { client }, contribution.render())) })
+  await settle()
+  return {
+    container,
+    async cleanup() {
+      await act(async () => root.unmount())
+      client.clear()
+      container.remove()
+    }
+  }
+}
+
+const composerMiddleware = loaded => {
+  const contribution = loaded.calls.registrations.find(item => item.area === 'composer.middleware')
+  assert.ok(contribution?.data?.handler, 'composer middleware should be registered')
+  return contribution.data.handler
+}
+
+async function submitComposer(loaded, draft) {
+  let result
+  await act(async () => { result = await composerMiddleware(loaded)(draft) })
+  await settle()
+  return result
 }
 
 async function settle(ms = 25) {
@@ -226,13 +293,242 @@ function updateReview(overrides = {}) {
 function baseHandler(path, options, owner) {
   if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}`, profile: owner.profile }
   if (path === '/bootstrap') return bootstrap
-  if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2 }] }
-  if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version_detail: { version: { version: 2 } } }
+  if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2, installation_status: { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 } }] }
+  if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version_detail: { version: { version: 2 } }, installation_status: { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 } }
   if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }, { version: 1, state: 'withdrawn' }] }
   throw new Error(`unexpected REST ${options.method || 'GET'} ${path}`)
 }
 
 const button = (mounted, name) => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+
+test('desktop slash dialog browses, views, reviews, and confirms an exact install', async () => {
+  let catalogReads = 0
+  let detailReads = 0
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) {
+      catalogReads += 1
+      return {
+        skills: [{
+          id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2,
+          installation_status: { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 }
+        }]
+      }
+    }
+    if (path === '/catalog/skill-1') {
+      detailReads += 1
+      return {
+        id: 'skill-1', slug: 'one', author_description: 'Useful skill', latest_version: 2,
+        installation_status: detailReads > 1
+          ? { state: 'installed', text: 'Installed v2', installed_version: 2, latest_version: 2 }
+          : { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 2 }
+      }
+    }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/install/review') return installReview()
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', version: 2 }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  const draft = { text: '/wisdom browse useful' }
+
+  assert.equal(await submitComposer(loaded, draft), null)
+  await settle()
+  assert.match(mounted.container.textContent, /Shared skills/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/review'), false)
+  assert.ok(button(mounted, 'View'))
+  assert.ok(button(mounted, 'Install'), 'catalog rows expose the existing Install review action')
+
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Useful skill/)
+  assert.ok(button(mounted, 'Back'))
+  await click(button(mounted, 'Install'))
+  assert.match(mounted.container.textContent, /install review/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/confirm'), false)
+  await click(button(mounted, 'Confirm install'))
+
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.ok(catalogReads >= 2, 'successful install should refresh visible catalog status')
+  assert.ok(detailReads >= 2, 'successful install should refresh the visible detail status')
+  assert.match(mounted.container.textContent, /Installed v2/)
+  await mounted.cleanup()
+})
+
+for (const updated of [true, false]) test(`desktop slash dialog handles ${updated ? 'completed' : 'pending'} checked updates`, async () => {
+  const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/update/review') {
+      assert.deepEqual(structuredClone(options.body), {
+        view_id: 'view-remote-a-A', skill_id: 'skill-1', preserve_modified: true,
+        accept_sensitive: false, accept_partial: false, accept_warnings: false
+      })
+      return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' } })
+    }
+    if (path === '/update/confirm') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', receipt: 'update-receipt' })
+      return updated
+        ? { updated: true, skill_id: 'skill-1', version: 2 }
+        : { updated: false, pending: true, operation_id: 'pending-update', skill_id: 'skill-1' }
+    }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
+
+  assert.match(mounted.container.textContent, /Installed v1 · Update available v2/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  await click(button(mounted, 'Update'))
+  assert.match(mounted.container.textContent, /update review/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/update/confirm'), false)
+  await click(button(mounted, 'Confirm update'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/confirm').length, 1)
+  if (!updated) {
+    assert.match(mounted.container.textContent, /Update requires attention/)
+    assert.doesNotMatch(mounted.container.textContent, /Install requires attention/)
+    assert.match(mounted.container.textContent, /pending-update/)
+    assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  }
+  await mounted.cleanup()
+})
+
+test('desktop slash dialog paginates with approved controls and blocks unmanaged or unavailable installs', async () => {
+  const skills = Array.from({ length: 7 }, (_, index) => ({
+    id: `skill-${index + 1}`,
+    slug: `skill-${index + 1}`,
+    latest_version: 1,
+    installation_status: index === 5
+      ? { state: 'unmanaged_local', text: 'Local same-name skill is unmanaged', installed_version: null, latest_version: 1 }
+      : index === 6 ? undefined : { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 1 }
+  }))
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path.startsWith('/catalog?')) return { skills }
+    if (path === '/catalog/skill-6') return skills[5]
+    if (path === '/catalog/skill-6/versions') return { versions: [{ version: 1, state: 'published' }] }
+    if (path === '/catalog/skill-7') return skills[6]
+    if (path === '/catalog/skill-7/versions') return { versions: [{ version: 1, state: 'published' }] }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+
+  assert.ok(button(mounted, 'Previous').disabled)
+  await click(button(mounted, 'Next'))
+  assert.match(mounted.container.textContent, /skill-6/)
+  assert.equal(button(mounted, 'Next').disabled, true)
+  assert.equal(button(mounted, 'Previous').disabled, false)
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Local same-name skill is unmanaged/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  assert.equal(button(mounted, 'Update'), undefined)
+  await click(button(mounted, 'Back'))
+  const unavailableRow = mounted.container.querySelector('[data-testid="catalog-skill-skill-7"]')
+  await click([...unavailableRow.querySelectorAll('button')].find(item => item.textContent === 'View'))
+  assert.match(mounted.container.textContent, /Installation status unavailable/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  assert.equal(button(mounted, 'Update'), undefined)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('catalog page shows unavailable status without offering an install fallback', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2 }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2 }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  assert.match(mounted.container.textContent, /Installation status unavailable/)
+  assert.equal(button(mounted, 'Install'), undefined)
+  await click(button(mounted, 'View'))
+  assert.equal(button(mounted, 'Install v2'), undefined)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('composer middleware passes unrelated input through and only opens supported discovery commands', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  const mounted = await renderComposerContribution(loaded)
+  const ordinary = { text: 'hello' }
+  const unrelatedSlash = { text: '/help' }
+  const unsupportedWisdom = { text: '/wisdom status' }
+
+  assert.equal(await submitComposer(loaded, ordinary), ordinary)
+  assert.equal(await submitComposer(loaded, unrelatedSlash), unrelatedSlash)
+  assert.equal(await submitComposer(loaded, unsupportedWisdom), unsupportedWisdom)
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  assert.equal(loaded.calls.rest.length, 0)
+  await mounted.cleanup()
+})
+
+test('slash dialog refuses a focused owner the REST SDK cannot route without sending the command', async () => {
+  const loaded = await loadPlugin(baseHandler, {
+    focusedSessionOwner: { connectionId: 'remote-b', profile: 'B' }
+  })
+  const mounted = await renderComposerContribution(loaded)
+
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+  await settle()
+  assert.match(mounted.container.textContent, /cannot safely route/i)
+  assert.match(mounted.container.textContent, /remote-b.*profile B/i)
+  assert.equal(loaded.calls.rest.length, 0)
+  await mounted.cleanup()
+})
+
+test('slash dialog invalidates on focus changes, ignores stale replies, and tears down cleanly', async () => {
+  let resolveCatalog
+  const delayedCatalog = new Promise(resolve => { resolveCatalog = resolve })
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path.startsWith('/catalog?')) return delayedCatalog
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+  assert.ok(mounted.container.querySelector('[role="dialog"]'))
+  await act(async () => loaded.focusedStoredSessionId.set('stored-2'))
+  await settle()
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  resolveCatalog({ skills: [{ id: 'stale', slug: 'stale-result' }] })
+  await settle()
+  assert.doesNotMatch(mounted.container.textContent, /stale-result/)
+
+  await act(async () => loaded.focusedStoredSessionId.set('stored-1'))
+  assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+  const dialog = mounted.container.querySelector('[role="dialog"]')
+  assert.ok(dialog)
+  await act(async () => dialog.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' })))
+  await settle()
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+
+  await act(async () => loaded.dispose())
+  assert.equal((await submitComposer(loaded, { text: '/wisdom' })).text, '/wisdom')
+  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  await mounted.cleanup()
+})
+
+test('slash dialog uses theme-aware SDK classes in light and dark themes', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  const mounted = await renderComposerContribution(loaded)
+  for (const theme of ['light', 'dark']) {
+    document.documentElement.dataset.theme = theme
+    assert.equal(await submitComposer(loaded, { text: '/wisdom' }), null)
+    await settle()
+    const dialog = mounted.container.querySelector('[role="dialog"]')
+    assert.ok(dialog)
+    assert.match(dialog.innerHTML, /--ui-text-primary/)
+    assert.match(dialog.innerHTML, /--ui-stroke-secondary/)
+    assert.doesNotMatch(dialog.innerHTML, /#[0-9a-f]{3,8}|rgb\(|color:\s*(?:black|white)/i)
+    await act(async () => dialog.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' })))
+    await settle()
+  }
+  delete document.documentElement.dataset.theme
+  await mounted.cleanup()
+})
 
 test('registers the native page and performs catalog search, details, exact install review, and confirmation', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
@@ -247,14 +543,14 @@ test('registers the native page and performs catalog search, details, exact inst
     return baseHandler(path, options, owner)
   })
   assert.equal(loaded.plugin.defaultEnabled, false)
-  assert.deepEqual(loaded.calls.registrations.map(item => item.area), ['routes', 'sidebar.nav', 'palette'])
+  assert.deepEqual(loaded.calls.registrations.map(item => item.area), ['routes', 'sidebar.nav', 'palette', 'composer.top', 'composer.middleware'])
   const mounted = await renderPage(loaded)
 
   assert.match(mounted.container.textContent, /connection remote-a/)
   assert.match(mounted.container.textContent, /profile A/)
   await enter(mounted.container.querySelector('input[aria-label="Search shared skills"]'), 'useful')
   assert.ok(loaded.calls.rest.some(([path]) => path === '/catalog?q=useful'))
-  await click(button(mounted, 'Details'))
+  await click(button(mounted, 'View'))
   assert.match(mounted.container.textContent, /Version history/)
   assert.match(mounted.container.textContent, /withdrawn/)
 
@@ -274,7 +570,7 @@ test('registers the native page and performs catalog search, details, exact inst
 test('catalog keeps native Install visible beside long descriptions at narrow widths', async () => {
   const longDescription = 'A very long publisher description '.repeat(80)
   const loaded = await loadPlugin((path, options, owner) => {
-    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', author_description: longDescription, latest_version: 2 }] }
+    if (path.startsWith('/catalog?')) return { skills: [{ ...baseHandler(path, options, owner).skills[0], author_description: longDescription }] }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
@@ -283,7 +579,7 @@ test('catalog keeps native Install visible beside long descriptions at narrow wi
   const actions = row.querySelector('[data-testid="catalog-actions-skill-1"]')
 
   assert.ok(button(mounted, 'Install'))
-  assert.ok(button(mounted, 'Details'))
+  assert.ok(button(mounted, 'View'))
   assert.equal(row.style.gridTemplateColumns, 'minmax(0, 1fr) auto')
   assert.equal(actions.style.flexWrap, 'wrap')
   assert.equal(row.querySelector('p').style.overflowWrap, 'anywhere')
@@ -366,7 +662,7 @@ test('catalog version history selects an exact published version for install rev
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
-  await click(button(mounted, 'Details'))
+  await click(button(mounted, 'View'))
   await click(button(mounted, 'Install v1'))
   assert.match(mounted.container.textContent, /install-v1/)
   await mounted.cleanup()

@@ -92,6 +92,14 @@ install, update, and removal still use their separately reviewed authority check
   workflows on the selected host/profile. Review exact versions, checks, and
   files before confirming an install, update, removal, or submission.
 
+In Desktop chat, `/wisdom`, `/wisdom list`, `/wisdom browse [query]`, and
+`/wisdom show <skill-id>` open the same catalog/review workflow in a themed dialog.
+View, Install, and eligible Update controls never apply a package before explicit
+confirmation. Other Wisdom commands keep their normal route. The current Desktop
+middleware API leaves the submitted command in the composer; closing the dialog
+does not send it. A focused-chat/active-profile mismatch refuses requests rather
+than silently switching owners.
+
 The Desktop page also offers explicit enrollment after disclosure. At completed
 turns it may poll a bounded feed and show a direct best-effort notification. A
 missed or failed notification is not queued or retried, and opening one starts a
