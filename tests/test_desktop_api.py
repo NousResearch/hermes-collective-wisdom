@@ -127,6 +127,37 @@ class Service:  # pylint: disable=too-many-public-methods
     def inbox(self):
         return {"mode": "agent", "assessments": [], "interactions": [], "installed_setup": []}
 
+    def notice_candidates(self):
+        return [{
+            "event_id": "candidate-1", "skill_id": "local-skill",
+            "skill_name": "local-skill", "qualification": "high_usage",
+            "content_hash": "sha256:" + "9" * 64,
+            "payload": {"local_reasons": {"consecutive_business_days": 5}},
+        }]
+
+    def notice_preferences(self, references):
+        assert references == [{
+            "kind": "candidate", "content_hash": "sha256:" + "9" * 64,
+            "notice_key": "candidate-1",
+        }]
+        return {"suppressed": {"candidate-1": "later"} if (
+            "defer_candidate", "candidate-1"
+        ) in self.calls else {}}
+
+    def native_candidate_inspect(self, event_id):
+        assert event_id == "candidate-1"
+        return {
+            "event_id": event_id,
+            "facts": {"name": "local-skill", "qualification": "high_usage"},
+            "networked": False,
+        }
+
+    def defer_candidate(self, event_id, *, may_apply=None):
+        assert event_id == "candidate-1"
+        assert may_apply is not None and may_apply() is True
+        self.calls.append(("defer_candidate", event_id))
+        return {"deferred": True, "event_id": event_id}
+
     def show(self, skill_id):
         return {"id": skill_id, "slug": "one", "latest_version_detail": {"version": {"version": 1}}}
 
@@ -318,6 +349,25 @@ def test_prepared_save_and_rereview_are_exact_view_bound_workflow_calls(tmp_path
     assert reviewed["hashes"] == saved["hashes"]
     assert service.calls[-2][0] == "prepared_save"
     assert service.calls[-1] == ("prepared_review", "local:1", saved["hashes"])
+
+
+def test_candidate_share_and_not_now_reuse_owner_bound_local_workflows(tmp_path):
+    api = DesktopWorkflowApi()
+    service = Service(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+
+    candidates = api.candidates(service, view_id)
+    prepared = api.prepare_candidate(service, view_id, "candidate-1")
+    deferred = api.defer_candidate(service, view_id, "candidate-1")
+
+    assert candidates["candidates"][0]["skill_name"] == "local-skill"
+    assert prepared["draft_id"] == "local:1"
+    assert prepared["skill_id"] == "local-skill"
+    assert deferred == {"deferred": True, "event_id": "candidate-1"}
+    assert service.calls[-1] == ("defer_candidate", "candidate-1")
+    reopened = api.open_view(service)["view_id"]
+    assert api.candidates(service, reopened) == {"candidates": []}
+    assert service.notice_candidates()  # Manual preparation is still available.
 
 
 def test_closed_view_cannot_save_or_rereview_a_prepared_draft(tmp_path):

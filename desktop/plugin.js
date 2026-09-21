@@ -438,16 +438,22 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
 
 function OperationOutcome({ kind, result }) {
   if (!result) return null
-  return jsxs('section', { 'aria-live': 'polite', className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: `${kind} requires attention` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: result.detail || result.error || 'The service did not report a completed successful outcome. Reload authoritative status before deciding what to do next.' }),
-    jsx(KeyValue, { name: 'operation', value: result.operation_id, mono: true }),
-    jsx(KeyValue, { name: 'state', value: result.state || (result.pending ? 'pending' : result.rejected ? 'rejected' : 'unknown') }),
-    jsx(KeyValue, { name: 'phase', value: result.phase }),
-    jsx(KeyValue, { name: 'skill', value: result.skill_id }),
-    jsx(KeyValue, { name: 'remote draft', value: result.remote_draft_id, mono: true }),
-    jsx(KeyValue, { name: 'retry safe', value: result.retry_safe }),
-    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Do not repeat the mutation automatically. Use Activity and authoritative status to recover this exact operation.' })
+  const subject = result.skill_name || result.slug || (kind === 'Publication' ? 'this draft' : 'this skill')
+  return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
+    jsx('h3', { className: 'text-xs font-semibold', children: `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: result.detail || result.error || 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
+    jsxs('details', { children: [
+      jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),
+      jsxs('div', { className: 'mt-2 space-y-1', children: [
+        jsx(KeyValue, { name: 'operation', value: result.operation_id, mono: true }),
+        jsx(KeyValue, { name: 'state', value: result.state || (result.pending ? 'pending' : result.rejected ? 'rejected' : 'unknown') }),
+        jsx(KeyValue, { name: 'phase', value: result.phase }),
+        jsx(KeyValue, { name: 'skill', value: result.skill_id }),
+        jsx(KeyValue, { name: 'remote draft', value: result.remote_draft_id, mono: true }),
+        jsx(KeyValue, { name: 'retry safe', value: result.retry_safe })
+      ] })
+    ] })
   ] })
 }
 
@@ -515,6 +521,18 @@ function catalogAction(item) {
   if (status.state === 'not_installed') return 'install'
   if (status.state === 'installed' && isPositiveInt(status.latest_version) && isPositiveInt(status.installed_version) && status.latest_version > status.installed_version) return 'update'
   return null
+}
+
+function describeCandidate(item) {
+  const reasons = isObject(item?.local_reasons) ? item.local_reasons : {}
+  if (item?.qualification === 'high_usage' && Number.isInteger(reasons.consecutive_business_days)) {
+    return `used on ${reasons.consecutive_business_days} consecutive business days`
+  }
+  const refinements = reasons.meaningful_refinements ?? reasons.edits
+  if (item?.qualification === 'refinement' && Number.isInteger(refinements) && Number.isInteger(reasons.stable_days)) {
+    return `refined ${refinements} times and stable for ${reasons.stable_days} days`
+  }
+  return 'qualified from local use and refinement signals'
 }
 
 function Catalog({ client, dialog = false, initialSearch = '', initialSelected = null, lifecycle, viewId }) {
@@ -600,7 +618,8 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
         jsxs('div', { className: 'min-w-0 flex-1', children: [
           jsx('div', { className: 'text-sm font-medium', children: label(item) }),
           jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', style: { display: '-webkit-box', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }, children: item.author_description || 'No publisher description.' }),
-          jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(status.text || 'Installation status unavailable') })
+          jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(status.text || 'Installation status unavailable') }),
+          jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome?.result?.skill_id === item.id ? outcome.result : null })
         ] }),
         jsxs('div', { 'data-testid': `catalog-actions-${item.id}`, className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
           versionOf(item) ? jsx(Badge, { children: `v${versionOf(item)}` }) : null,
@@ -632,7 +651,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     ] }) : null,
     review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: review.operation, onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, cancelLabel: dialog ? 'Back' : undefined, kind: review.operation, onCancel: back, onConfirm: () => confirm.mutate(review), review }) : null,
-    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome?.result })
+    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
   ] })
 }
 
@@ -688,11 +707,21 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
     }
   }, 'The reviewed action was not completed')
   const installations = Array.isArray(bootstrap?.installations) ? bootstrap.installations : []
+  const decisions = installations.filter(item => checks[item.skill_id]?.result?.state === 'update_available')
   return jsxs('div', { className: 'space-y-4', children: [
     jsxs('label', { className: 'flex items-center gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': 'Preserve locally modified files', checked: preserve, onCheckedChange: value => setPreserve(value === true) }),
       'Preserve locally modified files when preparing updates'
     ] }),
+    decisions.length ? jsx(Section, { title: 'Updates needing your decision', description: 'Review the exact new version before choosing to update. Local edits are preserved when enabled above.', children:
+      jsx('ul', { className: 'space-y-2', children: decisions.map(item => {
+        const result = checks[item.skill_id].result
+        return jsxs('li', { className: 'flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
+          jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `${label(item)} v${item.version || '?'} → v${result.latest_version || '?'}` }),
+          jsx(Button, { disabled: update.isPending || (item.modified && !preserve), onClick: () => update.mutate(item), size: 'sm', type: 'button', children: 'Review update' })
+        ] }, item.skill_id)
+      }) })
+    }) : null,
     installations.length === 0 ? jsx(EmptyState, { title: 'Nothing installed', description: 'Install a shared skill from Catalog.' }) : null,
     jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: installations.map(item => {
       const checked = checks[item.skill_id]
@@ -711,29 +740,29 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
         jsxs('div', { className: 'min-w-0 flex-1', children: [
           jsx('div', { className: 'text-sm font-medium', children: label(item) }),
           jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
-          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus })
+          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus }),
+          jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome?.skill_id === item.skill_id ? outcome : null })
         ] }),
         jsxs('div', { className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
           jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Check for updates' }),
-          updateAvailable ? jsx(Button, { disabled: update.isPending || preservationBlocked, onClick: () => update.mutate(item), size: 'sm', type: 'button', children: 'Review update' }) : null,
           jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Uninstall' })
         ] })
       ] }, item.skill_id)
     }) }),
     review?.operation === 'update' ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: 'update', onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, kind: review.operation, onCancel: () => setReview(null), onConfirm: () => confirm.mutate(review), review }) : null,
-    jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome })
+    jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome && !installations.some(item => item.skill_id === outcome.skill_id) ? outcome : null })
   ] })
 }
 
-function ActivitySettings({ bootstrap, client, lifecycle, viewId }) {
+function Settings({ bootstrap, client, lifecycle, viewId }) {
   const queryClient = useQueryClient()
   const settings = useQuery(queryOptions(
     ['settings', lifecycle.key],
     () => client.rest(`/settings?view_id=${encodeURIComponent(viewId)}`)
   ))
   const current = settings.data || {}
-  const mode = current.delivery_mode || bootstrap?.settings?.notifications?.delivery_mode || bootstrap?.activity?.mode || 'agent'
+  const mode = current.delivery_mode || bootstrap?.settings?.notifications?.delivery_mode || 'agent'
   const setMode = useCurrentMutation(client, lifecycle, next => client.rest('/settings/mode', {
     method: 'PATCH', body: requestBody(viewId, { mode: next, expected_mode: mode })
   }), async (_result, token, isCurrent) => {
@@ -741,57 +770,48 @@ function ActivitySettings({ bootstrap, client, lifecycle, viewId }) {
       queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] }),
       queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
     ])
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Notification mode updated' })
-  }, 'Notification mode was not changed')
+    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Recommendation setting updated' })
+  }, 'Recommendation setting was not changed')
   const mute = useCurrentMutation(client, lifecycle, duration => client.rest('/settings/mute', {
     method: 'PATCH',
     body: requestBody(viewId, { control_id: String(current.mute_control.revision), duration })
   }), async (_result, token, isCurrent) => {
     await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Organization notification mute updated' })
-  }, 'Organization notification mute was not changed')
-  const pending = bootstrap?.status?.pending_operations || []
+    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Organization-wide mute updated' })
+  }, 'Organization-wide mute was not changed')
   const muteState = current.gateway_mute
   const muteControl = current.mute_control
-  const modeDescription = current.mode_meanings?.[mode] || (mode === 'fixed'
-    ? 'Assessment and proactive delivery are off; manual review remains.'
-    : 'Eligible recommendations may be assessed and delivered.')
   return jsxs('div', { className: 'space-y-6', children: [
-    jsx(Section, { title: 'Delivery mode', description: modeDescription, children:
-      jsxs('div', { className: 'flex gap-2', children: ['agent', 'fixed'].map(value => jsx(Button, { disabled: current.mode_writable === false || value === mode || setMode.isPending, onClick: () => setMode.mutate(value), size: 'sm', type: 'button', variant: value === mode ? 'secondary' : 'ghost', children: value }, value)) })
+    jsx(Section, { title: 'Recommendations', description: mode === 'fixed'
+      ? 'Off: proactive Wisdom recommendations are paused. You can still browse and review skills here.'
+      : 'On: Wisdom may show useful skill and update recommendations.', children:
+      jsxs('div', { className: 'flex gap-2', children: [
+        jsx(Button, { disabled: current.mode_writable === false || mode === 'agent' || setMode.isPending, onClick: () => setMode.mutate('agent'), size: 'sm', type: 'button', variant: mode === 'agent' ? 'secondary' : 'ghost', children: 'On' }),
+        jsx(Button, { disabled: current.mode_writable === false || mode === 'fixed' || setMode.isPending, onClick: () => setMode.mutate('fixed'), size: 'sm', type: 'button', variant: mode === 'fixed' ? 'secondary' : 'ghost', children: 'Off' })
+      ] })
     }),
-    jsx(Section, { title: 'Organization notification mute', description: 'This organization-wide preference affects proactive Wisdom notifications for other members too. Manual catalog and review remain available.', children: settings.error
-      ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Organization mute unavailable: ${text(settings.error?.message || settings.error)}` })
+    jsx(Section, { title: 'Mute recommendations for everyone', description: 'This is organization-wide: it pauses proactive Wisdom notifications for everyone in your organization. Manual browsing and reviews stay available.', children: settings.error
+      ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Organization-wide mute unavailable: ${text(settings.error?.message || settings.error)}` })
       : !settings.data
-        ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading organization mute…' })
+        ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading current mute setting…' })
         : jsxs('div', { className: 'space-y-3', children: [
-            jsx(KeyValue, { name: 'organization', value: muteState?.org_id }),
-            jsx(KeyValue, { name: 'status', value: muteState?.muted ? 'muted' : 'not muted' }),
-            jsx(KeyValue, { name: 'duration', value: muteState?.duration }),
-            jsx(KeyValue, { name: 'muted until', value: muteState?.muted_until }),
+            jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: muteState?.muted
+              ? `Recommendations are muted${muteState?.muted_until ? ` until ${muteState.muted_until}` : ''}.`
+              : 'Recommendations are not muted for your organization.' }),
             muteControl ? jsxs('div', { className: 'flex flex-wrap gap-2', children: [
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_day'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 day' }),
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_week'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 week' }),
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('30_days'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 30 days' }),
               jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('forever'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute indefinitely' }),
               jsx(Button, { disabled: mute.isPending || muteState?.muted !== true, onClick: () => mute.mutate(null), size: 'sm', type: 'button', variant: 'secondary', children: 'Unmute' })
-            ] }) : jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'The Gateway did not provide a current revision-bound mute control. No change can be made here.' })
+            ] }) : jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'This Gateway does not currently allow changing the organization-wide mute here.' })
           ] })
-    }),
-    jsx(Section, { title: 'Unresolved operations', description: 'These identities are recovery handles, not successful outcomes.', children: pending.length
-      ? jsx('ul', { className: 'space-y-2', children: pending.map(item => jsxs('li', { className: 'rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-          jsx(KeyValue, { name: 'operation', value: item.operation_id, mono: true }), jsx(KeyValue, { name: 'kind', value: item.kind }), jsx(KeyValue, { name: 'phase', value: item.phase }), jsx(KeyValue, { name: 'skill', value: item.skill_id })
-        ] }, item.operation_id)) })
-      : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'No unresolved operation reported.' })
-    }),
-    jsx(Section, { title: 'Assessments', children: (bootstrap?.activity?.assessments || []).length
-      ? jsx('ul', { className: 'space-y-2', children: bootstrap.activity.assessments.map((item, index) => jsx('li', { className: 'text-xs', children: item.available === false ? `Unavailable: ${item.unavailable_reason || 'No reason supplied'}` : (item.summary || item.reason || 'Assessment available') }, item.id || index)) })
-      : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'No owner-bound assessment is currently available.' })
     })
   ] })
 }
 
 function Contributions({ client, lifecycle, viewId }) {
+  const queryClient = useQueryClient()
   const [skillName, setSkillName] = useState('')
   const [draft, setDraft] = useState(null)
   const [preparedReview, setPreparedReview] = useState(null)
@@ -803,9 +823,11 @@ function Contributions({ client, lifecycle, viewId }) {
   const [keptDraft, setKeptDraft] = useState(null)
   const [review, setReview] = useState(null)
   const [outcome, setOutcome] = useState(null)
-  const prepare = useCurrentMutation(client, lifecycle, () => client.rest('/drafts/prepare', {
-    method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
-  }), value => {
+  const candidates = useQuery(queryOptions(
+    ['candidates', lifecycle.key],
+    () => client.rest(`/candidates?view_id=${encodeURIComponent(viewId)}`)
+  ))
+  const acceptDraft = value => {
     setDraft(value)
     setPreparedReview(null)
     setEditor(null)
@@ -814,7 +836,18 @@ function Contributions({ client, lifecycle, viewId }) {
     setKeptDraft(null)
     setReview(null)
     setOutcome(null)
-  }, 'Share preparation failed — nothing was uploaded or shared')
+  }
+  const prepareCandidate = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/prepare`, {
+    method: 'POST', body: requestBody(viewId)
+  }), acceptDraft, 'Could not prepare a private draft — nothing was uploaded or shared')
+  const notNow = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/not-now`, {
+    method: 'POST', body: requestBody(viewId)
+  }), async () => {
+    await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'candidates', lifecycle.key] })
+  }, 'Could not save Not now')
+  const prepare = useCurrentMutation(client, lifecycle, () => client.rest('/drafts/prepare', {
+    method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
+  }), acceptDraft, 'Share preparation failed — nothing was uploaded or shared')
   const inspectDraft = async () => client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}?view_id=${encodeURIComponent(viewId)}`)
   const reviewPrepared = (draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
     method: 'POST', body: requestBody(viewId, { reviewed_hashes: hashes })
@@ -899,7 +932,8 @@ function Contributions({ client, lifecycle, viewId }) {
   }, 'Publication was not completed')
   const warningRequired = hasReviewableWarnings(preparedReview)
   const warningFindings = safeWarningFindings(preparedReview)
-  const busy = prepare.isPending || inspect.isPending || save.isPending || publicationReview.isPending || publish.isPending
+  const busy = prepare.isPending || prepareCandidate.isPending || notNow.isPending || inspect.isPending || save.isPending || publicationReview.isPending || publish.isPending
+  const shareCandidates = Array.isArray(candidates.data?.candidates) ? candidates.data.candidates : []
   const keepDraft = () => {
     if (dirty || busy) return
     setKeptDraft(draft?.draft_id || review?.draft_id)
@@ -911,6 +945,21 @@ function Contributions({ client, lifecycle, viewId }) {
     setWarningAccepted(false)
   }
   return jsxs('div', { className: 'space-y-5', children: [
+    shareCandidates.length ? jsx(Section, { title: 'Worth sharing with your team', description: 'These suggestions come from local use and refinement signals. Share only prepares a private draft for your review.', children:
+      jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: shareCandidates.map(item =>
+        jsxs('li', { 'data-testid': `share-candidate-${item.event_id}`, className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
+          jsxs('div', { className: 'min-w-0', children: [
+            jsx('div', { className: 'text-sm font-medium', children: item.skill_name || item.skill_id || 'Local skill' }),
+            jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: describeCandidate(item) })
+          ] }),
+          jsxs('div', { className: 'flex flex-wrap justify-end gap-2', children: [
+            jsx(Button, { disabled: busy || dirty, onClick: () => { if (!dirty) prepareCandidate.mutate(item) }, size: 'sm', type: 'button', children: 'Share' }),
+            jsx(Button, { disabled: busy, onClick: () => notNow.mutate(item), size: 'sm', type: 'button', variant: 'ghost', children: 'Not now' })
+          ] })
+        ] }, item.event_id)
+      ) })
+    }) : null,
+    candidates.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Sharing suggestions unavailable: ${text(candidates.error?.message || candidates.error)}` }) : null,
     jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: 'Preparing is local and private. Confirmation is enabled only after full exact bytes, author copy, hashes, checks, and Gateway policy are inspectable.' }),
     jsxs('div', { className: 'flex gap-2', children: [
       jsx(Input, { 'aria-label': 'Local skill name', onChange: event => setSkillName(event.target.value), placeholder: 'Local skill name', value: skillName }),
@@ -1087,27 +1136,43 @@ function WisdomPage({ client }) {
     content = jsx(Enrollment, { client, lifecycle, viewId: view.data.view_id })
   } else if (tab === 'installed') {
     content = jsx(Installed, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
-  } else if (tab === 'activity') {
-    content = jsx(ActivitySettings, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
+  } else if (tab === 'settings') {
+    content = jsx(Settings, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
   } else if (tab === 'contribute') {
     content = jsx(Contributions, { client, lifecycle, viewId: view.data.view_id })
   } else {
     content = jsx(Catalog, { client, lifecycle, viewId: view.data.view_id })
   }
 
-  const tabs = [['catalog', 'Catalog'], ['installed', 'Installed'], ['activity', 'Activity'], ['contribute', 'Contribute']]
+  if (available && !bootstrap.error && !view.error && view.data && bootstrap.data?.status?.configured === true && ['installed', 'contribute'].includes(tab)) {
+    const pending = (bootstrap.data.status.pending_operations || []).filter(row =>
+      tab === 'contribute' ? row.kind === 'publication' : row.kind !== 'publication')
+    content = jsxs('div', { className: 'space-y-4', children: [
+      ...pending.map(row => jsx(OperationOutcome, {
+        kind: ({ publication: 'Publication', install: 'Install', update: 'Update', wisdom_setup: 'Setup' })[row.kind] || 'Action',
+        result: { ...row, phase: row.phase || row.stage,
+          detail: 'An earlier action has not finished. Open a terminal and run hermes wisdom status --json to check its current state before trying again.' }
+      }, row.operation_id)),
+      content
+    ] })
+  }
+
+  const tabs = [['catalog', 'Catalog'], ['installed', 'Installed'], ['contribute', 'Contribute']]
   return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
     jsxs('header', { className: 'shrink-0 space-y-3 border-b border-(--ui-stroke-secondary) px-5 py-4', children: [
-      jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: [
-        jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h1', { className: 'text-base font-semibold', children: 'Collective Wisdom' }),
-        jsx(Badge, { children: `connection ${connectionId || 'unavailable'}` }), jsx(Badge, { children: `profile ${profile}` }), jsx(Badge, { children: `generation ${lifecycle.generation}` }), jsx(Badge, { children: `gateway ${gateway}` })
+      jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
+        jsxs('div', { className: 'flex items-center gap-2', children: [jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h1', { className: 'text-base font-semibold', children: 'Collective Wisdom' })] }),
+        jsx(Button, { onClick: () => setTab('settings'), size: 'sm', type: 'button', variant: tab === 'settings' ? 'secondary' : 'ghost', children: 'Settings' })
       ] }),
       jsx('nav', { 'aria-label': 'Collective Wisdom sections', className: 'flex flex-wrap gap-1', children: tabs.map(([value, title]) =>
         jsx(Button, { onClick: () => setTab(value), size: 'sm', type: 'button', variant: tab === value ? 'secondary' : 'ghost', children: title }, value)
       ) })
     ] }),
     jsx(ScrollArea, { className: 'min-h-0 flex-1', children: jsxs('main', { className: 'mx-auto w-full max-w-4xl space-y-5 p-5', children: [
-      jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Every review belongs to the displayed connection, profile, and generation. Reconnects and context changes require a new review. No mutation is retried automatically.' }),
+      jsxs('details', { children: [
+        jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-quaternary)', children: 'Connection details' }),
+        jsx('p', { className: 'mt-2 text-xs text-(--ui-text-tertiary)', children: `connection ${connectionId || 'unavailable'} · profile ${profile} · generation ${lifecycle.generation} · gateway ${gateway}` })
+      ] }),
       jsx(Separator, {}), content
     ] }) })
   ] })
