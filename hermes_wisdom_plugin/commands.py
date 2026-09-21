@@ -982,11 +982,26 @@ def _render_publication_outcome(data: dict[str, Any]) -> str:
     operation_id = _text(data["operation_id"])
     safe_operation = shlex.quote(_without_controls(operation_id))
     state = _text(data.get("state") or "unknown")
-    lines = ["Publication result", f"Operation: {operation_id}", f"State: {state}"]
+    detail = data.get("detail")
+    enrollment = data.get("managed_enrollment")
+    managed_success = (
+        state.casefold() == "done"
+        and data.get("publication_state") == "published"
+        and isinstance(enrollment, dict)
+        and enrollment.get("state") == "managed"
+    )
+    lines = ["Publication result"]
+    if isinstance(detail, str) and detail:
+        lines.append(_text(detail, limit=1024))
+    if not managed_success:
+        lines.append(f"Operation: {operation_id}")
+    lines.append(f"State: {state}")
     for key, label in (
         ("phase", "Phase"), ("publication_state", "Publication state"),
-        ("remote_draft_id", "Remote draft"), ("code", "Code"), ("detail", "Detail"),
+        ("remote_draft_id", "Remote draft"), ("code", "Code"),
     ):
+        if managed_success and key == "remote_draft_id":
+            continue
         value = data.get(key)
         if isinstance(value, str) and value:
             lines.append(f"{label}: {_text(value, limit=1024)}")

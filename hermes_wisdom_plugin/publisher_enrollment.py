@@ -102,6 +102,11 @@ class PublisherEnrollment:  # pylint: disable=too-few-public-methods
             "state": "managed", "skill_id": proof["skill_id"],
             "version": proof["version"], "path": str(source),
             "effective_update_mode": mode,
+            "detail": (
+                f"{draft['slug']} is now Managed v{proof['version']}. "
+                f"Update mode: {mode}"
+                + (" (manual/review required)." if mode == "MANUAL" else ".")
+            ),
         }
 
     def link_existing(self, operation, *, may_apply=None) -> dict[str, Any]:

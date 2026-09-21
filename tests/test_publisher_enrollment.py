@@ -213,7 +213,12 @@ def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: P
     assert result["managed_enrollment"] == {
         "state": "managed", "skill_id": "published-skill-1", "version": 1,
         "path": str(source), "effective_update_mode": "MANUAL",
+        "detail": (
+            "reviewed-skill is now Managed v1. "
+            "Update mode: MANUAL (manual/review required)."
+        ),
     }
+    assert result["detail"] == result["managed_enrollment"]["detail"]
     assert tree_hashes(source) == before
     record = installed.installation("published-skill-1", owner=owner)
     assert record is not None
