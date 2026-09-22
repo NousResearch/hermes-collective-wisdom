@@ -955,9 +955,19 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     def check_update(self, skill_id):
         """Read authoritative named-skill update state without starting work."""
 
-        result = self._update_services()[0].check(skill_id)
+        resolved_id, slug = self._resolve_update_reference(skill_id)
+        result = self._update_services()[0].check(resolved_id, slug=slug)
         self.check_owner()
         return result
+
+    def _resolve_update_reference(self, reference):
+        detail = self.resolve_skill(reference)
+        skill = detail.get("skill") if isinstance(detail, dict) else None
+        skill_id = skill.get("id") if isinstance(skill, dict) else None
+        slug = skill.get("slug") if isinstance(skill, dict) else None
+        if not isinstance(skill_id, str) or not skill_id or not isinstance(slug, str) or not slug:
+            raise WisdomValidationError("Wisdom update reference is invalid")
+        return skill_id, slug
 
     def update_plan(
         self,
@@ -970,8 +980,10 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     ):
         """Create an exact update receipt with all exceptional actions bound."""
 
+        resolved_id, slug = self._resolve_update_reference(skill_id)
         result = self._update_services()[0].plan(
-            skill_id,
+            resolved_id,
+            slug=slug,
             preserve_modified=preserve_modified,
             accept_sensitive=accept_sensitive,
             accept_partial=accept_partial,

@@ -145,6 +145,41 @@ def test_manual_success_commits_exact_bytes_and_complete_result(executor):
     assert len(client.record_calls) == 1
 
 
+def test_unmanaged_local_update_registers_only_after_reviewed_replacement(executor):
+    value, store, client, receipts, plan, target, owner = executor
+    store.deactivate_install("skill-1")
+    previous = {
+        **plan["previous_installation"], "version": None, "content_hash": None,
+        "target_provenance": {
+            "kind": "local_source", "owner": owner, "source_path": str(target),
+        },
+    }
+    payload = {
+        key: val for key, val in plan.items()
+        if key not in {"receipt", "operation", "owner", "created_at", "expires_at"}
+    }
+    manual = receipts.create({
+        **payload, "from_version": None, "previous_content_hash": None,
+        "previous_installation": previous,
+        "target_provenance": previous["target_provenance"],
+        "local_baseline": "unknown",
+        "preservation": {
+            "action": "preserve_unmanaged_copy",
+            "destination": str(value.host.skills_root / "managed-skill-local-before-v2-fixed"),
+        },
+    })
+    client.remote_version = None
+
+    result = value.apply(manual["receipt"])
+
+    assert result["updated"] is True and result["from_version"] is None
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+    assert len(client.record_calls) == 1
+    installed = store.installation("skill-1", owner=owner)
+    assert installed["version"] == 2
+    assert installed["target_provenance"] == previous["target_provenance"]
+
+
 def test_changed_scan_before_swap_preserves_original(executor):
     value, store, client, _receipts, plan, target, _owner = executor
     calls = 0
@@ -375,6 +410,124 @@ def real_executor(tmp_path):
     return executor_value, store, client, receipts, plan, target
 
 
+class UnregisteredClient(RealClient):
+    """Published packages remain readable without an installation registration."""
+
+    registered = False
+
+    def installations(self, installation_id):
+        return super().installations(installation_id) if self.registered else []
+
+    def record_install(self, **values):
+        try:
+            return super().record_install(**values)
+        finally:
+            if self.remote["installed_version"] == values["version"]:
+                self.registered = True
+
+
+def _unregistered_update(real_executor, *, tracked):
+    value, store, _client, receipts, _plan, target = real_executor
+    client = UnregisteredClient()
+    value.client = value.reviewer.client = value.reviewer.install_reviewer.client = client
+    if not tracked:
+        store.deactivate_install("skill-1")
+        local = value.host.skills_root / "authored" / "managed-skill"
+        local.parent.mkdir(parents=True)
+        target.rename(local)
+        target = local
+        value.reviewer.skill_resolver = lambda _name: target
+    return value, store, client, receipts, target
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_manual_update_without_gateway_registration_then_next_version(real_executor, tracked):
+    value, store, client, _receipts, target = _unregistered_update(
+        real_executor, tracked=tracked,
+    )
+    checked = value.reviewer.check("skill-1", slug="managed-skill")
+    assert checked["latest_version"] == 2
+    plan = value.reviewer.plan(
+        "skill-1", slug="managed-skill", preserve_modified=not tracked,
+    )
+    assert not client.registered and not client.record_calls
+    result = value.apply(plan["receipt"])
+    assert result["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v2\n"
+    assert store.installation("skill-1")["version"] == 2
+    checked = value.reviewer.check("skill-1", slug="managed-skill")
+    assert checked["state"] == "current" and checked["installed_version"] == 2
+    with pytest.raises(PackagePolicyError, match="already current"):
+        value.reviewer.plan("skill-1", slug="managed-skill")
+    assert len(client.record_calls) == 1
+    client.files[3] = client._version_two()
+    client.files[3][0] = ("SKILL.md", "file", b"# Managed v3\n")
+    client.remote["latest_version"] = 3
+    next_plan = value.reviewer.plan("skill-1", slug="managed-skill")
+    assert next_plan["from_version"] == 2 and next_plan["allowed"] is True
+    assert value.apply(next_plan["receipt"])["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v3\n"
+    assert len(client.record_calls) == 2
+
+
+@pytest.mark.parametrize("boundary", ["old_preserved", "files_committed"])
+def test_unregistered_local_update_recovers_filesystem_boundaries(
+    real_executor, monkeypatch, boundary,
+):
+    value, _store, client, _receipts, target = _unregistered_update(
+        real_executor, tracked=False,
+    )
+    plan = value.reviewer.plan("skill-1", slug="managed-skill", preserve_modified=True)
+    replace = package_application.durable_replace
+
+    def interrupt(source, destination):
+        replace(source, destination)
+        if (boundary == "old_preserved" and source == target) or (
+            boundary == "files_committed" and destination == target
+        ):
+            raise OSError("interrupted filesystem boundary")
+
+    monkeypatch.setattr(package_application, "durable_replace", interrupt)
+    with pytest.raises(OSError, match="interrupted filesystem boundary"):
+        value.apply(plan["receipt"])
+    monkeypatch.undo()
+    result = value.apply(plan["receipt"])
+    assert result["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v2\n"
+    assert Path(result["preserved_copy"]).joinpath("SKILL.md").read_bytes() == b"# Managed\n"
+    assert len(client.record_calls) == 1
+
+
+def test_rejected_local_adoption_restores_original_path(real_executor, monkeypatch):
+    value, store, client, _receipts, local = _unregistered_update(
+        real_executor, tracked=False,
+    )
+    original = (local / "SKILL.md").read_text()
+    plan = value.reviewer.plan("skill-1", slug="managed-skill", preserve_modified=True)
+
+    def reject(**_values):
+        raise WisdomConflict("skill_taken_down", status=409, code="skill_taken_down")
+
+    monkeypatch.setattr(client, "record_install", reject)
+    with pytest.raises(WisdomConflict, match="skill_taken_down"):
+        value.apply(plan["receipt"])
+    assert (local / "SKILL.md").read_text() == original
+    assert store.installation("skill-1")["state"] == "inactive"
+    outcome = value.apply(plan["receipt"])
+    assert outcome["rejected"] is True
+    assert (local / "SKILL.md").read_text() == original
+
+
+def test_manual_review_survives_removed_gateway_registration(real_executor, monkeypatch):
+    value, store, client, _receipts, plan, target = real_executor
+    monkeypatch.setattr(client, "installations", lambda _installation_id: [])
+    result = value.apply(plan["receipt"])
+    assert result["updated"] is True
+    assert target.joinpath("SKILL.md").read_bytes() == b"# Managed v2\n"
+    assert store.installation("skill-1")["version"] == 2
+    assert len(client.record_calls) == 1
+
+
 def test_real_reviewer_denies_changed_local_bytes(real_executor):
     value, store, client, _receipts, plan, target = real_executor
     target.joinpath("SKILL.md").write_bytes(b"changed after review")
@@ -404,11 +557,11 @@ def test_real_reviewer_recovers_lost_remote_response_with_clamped_policy(real_ex
     assert len(client.record_calls) == 1
 
 
-def test_real_reviewer_authority_loss_quarantines_pending_update(real_executor):
+def test_real_reviewer_takedown_quarantines_pending_update(real_executor):
     value, store, client, _receipts, plan, target = real_executor
     client.record_error = "before"
     assert value.apply(plan["receipt"])["pending"] is True
-    client.remote = None
+    client.remote["skill_state"] = "taken_down"
 
     result = value.apply(plan["receipt"])
 

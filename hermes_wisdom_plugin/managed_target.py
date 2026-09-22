@@ -10,6 +10,7 @@ from .package import PackagePolicyError, source_fingerprint
 from .package_application import reject_existing_links, reject_symlink_chain, within
 
 _PUBLISHER_KIND = "publisher_source"
+_LOCAL_KIND = "local_source"
 
 
 def validate_managed_target(
@@ -32,6 +33,11 @@ def validate_managed_target(
         expected = root / "_wisdom" / org_directory_name(owner["organization_id"]) / slug
         if target != expected:
             raise PackagePolicyError("managed installation target is invalid")
+    elif isinstance(provenance, dict) and provenance.get("kind") == _LOCAL_KIND:
+        _validate_local_provenance(provenance, owner, target)
+        within(target, root, "local skill target")
+        if target == root or target.parts[:len(root.parts)] != root.parts:
+            raise PackagePolicyError("local skill target is invalid")
     else:
         _validate_publisher_provenance(record, provenance, owner, target)
         within(target, root, "publisher source target")
@@ -47,6 +53,14 @@ def validate_managed_target(
     if require_tree:
         source_fingerprint(target)
     return target
+
+
+def local_provenance(*, owner: dict[str, str], source_path: Path) -> dict[str, Any]:
+    """Bind an explicitly reviewed local source without claiming a published baseline."""
+
+    return {
+        "kind": _LOCAL_KIND, "owner": dict(owner), "source_path": str(source_path),
+    }
 
 
 def publisher_provenance(
@@ -120,6 +134,16 @@ def _validate_baseline(baseline: dict[Any, Any]) -> None:
         raw = digest.removeprefix("exec:")
         if not _sha256(raw):
             raise PackagePolicyError("managed installation baseline is invalid")
+
+
+def _validate_local_provenance(provenance, owner, target) -> None:
+    if (
+        set(provenance) != {"kind", "owner", "source_path"}
+        or provenance.get("kind") != _LOCAL_KIND
+        or provenance.get("owner") != owner
+        or provenance.get("source_path") != str(target)
+    ):
+        raise PackagePolicyError("local skill provenance is invalid")
 
 
 def _safe_segment(value: object, label: str) -> str:
