@@ -20,7 +20,8 @@ from .native_inspection import inspection_pages, sharing_checks
 from .review_state import ReviewState
 from .terminal_ui import (
     has_reviewable_warnings, render_action_review, render_file_preview,
-    render_findings, review_identity, safe_scan_details, without_controls,
+    render_findings, render_operation_outcome, review_identity, safe_scan_details,
+    without_controls,
 )
 
 SLACK_SECTION_LIMIT = 2900
@@ -246,7 +247,7 @@ def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
         actions = []
         skill_id = row.get("id") or row.get("skill_id")
         if skill_id:
-            actions.append(NativeAction("Review install", f"catalog.install.{index}"))
+            actions.append(NativeAction("Install", f"catalog.install.{index}", primary=True))
         if row.get("portal_url"):
             actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
         items.append(NativeItem(title, "\n".join(facts) or "Published skill", actions))
@@ -284,6 +285,34 @@ def _requires_partial_acknowledgement(plan: dict[str, Any]) -> bool:
         isinstance(policy, dict)
         and policy.get("compatibility_requires_confirmation") is True
         and policy.get("accepted_partial") is not True
+    )
+
+
+def _fresh_package_plan(record: dict[str, Any], action: str, service: Any) -> dict:
+    """Refresh the displayed package exactly and retain its owner/version binding."""
+    old = record["plan"]
+    if action == "install":
+        skill_id = str(old.get("skill_id") or "")
+        version = old.get("version")
+        reference = f"{skill_id}@v{version}" if skill_id and isinstance(version, int) else skill_id
+        fresh = service.install_plan(reference)
+    else:
+        fresh = service.update_plan(str(old.get("skill_id") or ""))
+    if not isinstance(fresh, dict) or fresh.get("operation") != action:
+        raise WisdomValidationError(f"native {action} review is invalid")
+    for key in ("skill_id", "version", "content_hash", "manifest_hash"):
+        if old.get(key) is not None and fresh.get(key) != old.get(key):
+            raise WisdomConflict("The displayed package changed; open it again")
+    if not _plan_owner_matches({**record, "plan": fresh}):
+        raise WisdomAuthError("Collective Wisdom review owner changed")
+    return fresh
+
+
+def _package_needs_acknowledgement(plan: dict[str, Any]) -> bool:
+    return (
+        plan.get("allowed") is not True
+        or has_reviewable_warnings(plan)
+        or _requires_partial_acknowledgement(plan)
     )
 
 
@@ -443,7 +472,7 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
         actions=[
             NativeAction("View Details", "details"), NativeAction("Not Now", "cancel"),
             NativeAction("Mute Skill Recommendations", "settings"),
-            NativeAction("Update Skill" if updating else "Install Skill", "review"),
+            NativeAction("Update" if updating else "Install", verb, primary=True),
         ],
     )
 
@@ -728,6 +757,12 @@ def _effect_view(
     details.extend(_fact_lines(plan))
     item = NativeItem(summary, "\n".join(details) or "Review the exact action in Collective Wisdom.")
     if state != "pending":
+        result = record.get("result")
+        operation = str(record.get("operation") or "")
+        if operation in {"install", "update", "uninstall"} and isinstance(result, dict):
+            name = plan.get("slug") or plan.get("skill_name")
+            terse = render_operation_outcome(operation, result, skill_name=name)
+            return NativeView(terse, "", dismissed=True)
         return NativeView(title, summary, [item], notice=f"State: {state}", dismissed=True)
     operation = str(record.get("operation") or "")
     actions = [NativeAction("Cancel", "cancel", destructive=True)]
@@ -918,7 +953,7 @@ class NativeReviewController:
         return project_view(record)
 
     def _select_catalog(
-        self, action: str, record: dict[str, Any], service: Any,
+        self, action: str, record: dict[str, Any],
     ) -> dict[str, Any]:
         try:
             index = int(action.rsplit(".", 1)[-1])
@@ -929,10 +964,10 @@ class NativeReviewController:
         version = row.get("version", row.get("latest_version"))
         if not skill_id:
             raise WisdomValidationError("Catalog selection is no longer available")
-        reference = f"{skill_id}@v{version}" if isinstance(version, int) else skill_id
-        plan = service.install_plan(reference)
-        if plan.get("operation") != "install":
-            raise WisdomValidationError("native install review is invalid")
+        plan = {
+            "operation": "install", "skill_id": skill_id, "version": version,
+            "slug": row.get("slug") or row.get("name") or row.get("skill_name"),
+        }
         result = {
             **record, "operation": "install", "plan": copy.deepcopy(plan),
             "updated_at": self.clock(), "display_ready": False,
@@ -1094,12 +1129,49 @@ class NativeReviewController:
             return self._act_special(
                 record_id, action, record, service, invocation, authority,
             )
+        if action in {"install", "update"} and action == record.get("operation"):
+            return self._one_click_package(record, action, service, invocation, authority)
         navigated = self._navigation_action(record, action, service, invocation, authority)
         if navigated is not None:
             return navigated
         _validate_review_action(record, action)
 
         return self._apply(record, action, service, invocation, authority)
+
+    def _one_click_package(
+        self, record: dict[str, Any], action: str, service: Any,
+        invocation: NativeInvocation, authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Prepare and spend a fresh exact receipt inside the explicit click."""
+        claimed = {
+            **record, "state": "preparing", "display_ready": False,
+            "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(record, claimed):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        try:
+            fresh = _fresh_package_plan(record, action, service)
+            inspect = getattr(service, f"native_{action}_inspect")
+            files = inspect(fresh["receipt"])
+            ready = {
+                **record, "plan": copy.deepcopy(fresh),
+                "package_files": copy.deepcopy(files),
+                "inspection_receipt": fresh.get("receipt"),
+                "updated_at": self.clock(), "display_ready": False,
+            }
+            if _package_needs_acknowledgement(fresh):
+                ready.update(screen="approval", page=0, inspected_through=0)
+                if not self.state.compare_replace(claimed, ready):
+                    raise WisdomConflict("Collective Wisdom review changed; open it again")
+                return copy.deepcopy(ready)
+            if not authority() or not _owner_matches(record, service, invocation):
+                raise WisdomAuthError("Collective Wisdom review owner changed")
+            if not self.state.compare_replace(claimed, ready):
+                raise WisdomConflict("Collective Wisdom review changed; open it again")
+            return self._apply(ready, "confirm", service, invocation, authority)
+        except Exception:
+            self.state.compare_replace(claimed, record)
+            raise
 
     def _apply(
         self, record: dict[str, Any], action: str, service: Any,
@@ -1145,7 +1217,10 @@ class NativeReviewController:
                 record_id, action, record, service, invocation, authority=authority,
             )
         if operation == "catalog" and action.startswith("catalog.install."):
-            return self._select_catalog(action, record, service)
+            selected = self._select_catalog(action, record)
+            return self._one_click_package(
+                selected, "install", service, invocation, authority,
+            )
         raise WisdomValidationError("Collective Wisdom action was not recognized")
 
     def _sharing_review(

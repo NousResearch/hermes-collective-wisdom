@@ -91,7 +91,6 @@ class DirectState:
             "setup_progress": {},
             "notices": {
                 "cursor": None,
-                "next_poll_at": 0.0,
                 "has_more": False,
                 "offered": {},
             },
@@ -161,14 +160,6 @@ class DirectState:
 
     def notice_state(self) -> dict[str, Any]:
         return copy.deepcopy(self._load()["notices"])
-
-    def begin_notice_poll(self, now: float, *, interval: float) -> bool:
-        with self.change() as value:
-            notices = value["notices"]
-            if float(notices["next_poll_at"]) > now:
-                return False
-            notices["next_poll_at"] = now + interval
-            return True
 
     def finish_notice_poll(
         self, *, identity: dict[str, Any] | None, cursor: str | None,

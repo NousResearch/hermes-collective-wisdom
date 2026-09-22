@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from importlib import import_module
+import logging
 import re
 import threading
 import time
@@ -18,8 +19,14 @@ from .native_review import NativeReviewController, parse_callback
 from .review_state import ReviewState
 
 
+logger = logging.getLogger(__name__)
+
+
 def _message_id(response: Any, *, platform: str, chat_id: str) -> str:
     """Extract the exact posted message identity from real Slack/Telegram SDK shapes."""
+    # Slack SDK responses expose their payload through .data, not .ts attributes.
+    if platform == "slack" and isinstance(getattr(response, "data", None), dict):
+        response = response.data
     if isinstance(response, dict):
         result = response.get("result")
         payload: dict[str, Any] = result if isinstance(result, dict) else response
@@ -313,7 +320,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 await self._post_review(
                     invocation, record, route_authority=route_authority,
                 )
-            except Exception:  # pylint: disable=broad-exception-caught
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Collective Wisdom native notice failed (%s)", type(exc).__name__,
+                )
                 continue  # A missed notice must not fail the owning turn.
 
     def _notice_review(self, service: Any, invocation: NativeInvocation, row: dict[str, Any]):
@@ -381,7 +391,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                         channel=invocation.chat_id, ts=invocation.message_id,
                         text=view.to_text(), blocks=blocks(view, record_id),
                     )
-            except Exception:  # pylint: disable=broad-exception-caught
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Collective Wisdom Slack callback failed (%s)", type(exc).__name__,
+                )
                 return
 
         native.action(re.compile(r"^wisdom_native_[a-z0-9_]+_\d+$"))(callback)

@@ -49,9 +49,11 @@ class Service:
         return {"state": "pending_moderation"}
 
     def install_plan(self, reference, **_kwargs):
+        skill_id = reference.split("@v", 1)[0]
         return {
-            "operation": "install", "skill_id": reference, "receipt": "exact-receipt",
-            "allowed": True, "description": "Triage incidents", "version": 2,
+            "operation": "install", "skill_id": skill_id, "slug": "incident",
+            "receipt": "exact-receipt", "allowed": True,
+            "description": "Triage incidents", "version": 2,
         }
 
     def native_install_inspect(self, receipt):
@@ -64,6 +66,11 @@ class Service:
         assert may_apply()
         self.applied.append(receipt)
         return {"installed": True}
+
+    def update_apply(self, receipt, *, may_apply, **_kwargs):
+        assert may_apply()
+        self.applied.append(receipt)
+        return {"updated": True}
 
 
 def test_registered_dismissal_preserves_body_and_revokes_consent(tmp_path):
@@ -250,7 +257,7 @@ def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch)
     asyncio.run(scenario())
 
 
-def test_install_invitation_leads_to_exact_review_not_implicit_consent(tmp_path):
+def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
     async def scenario():
         service = Service()
         ui = SlackHarness(tmp_path, service)
@@ -261,7 +268,7 @@ def test_install_invitation_leads_to_exact_review_not_implicit_consent(tmp_path)
         assert "your organization" in view.title
         assert "Would you like to install this skill?" in view.to_text()
         assert [a.label for a in view.actions] == [
-            "View Details", "Not Now", "Mute Skill Recommendations", "Install Skill",
+            "View Details", "Not Now", "Mute Skill Recommendations", "Install",
         ]
         assert "Triage incidents" in view.to_text()
         await ui.click(identity, "confirm")
@@ -270,32 +277,23 @@ def test_install_invitation_leads_to_exact_review_not_implicit_consent(tmp_path)
         assert ui.view(identity).actions[-1].label == "Looks good."
         await ui.click(identity, "back")
         assert not service.applied
-        await ui.click(identity, "review")
-        while True:
-            action = next((a for a in ui.view(identity).actions if a.label == "Next"), None)
-            if action is None:
-                break
-            await ui.click(identity, action.action)
-        assert not service.applied
-        await ui.click(identity, "confirm")
+        await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
+        assert ui.view(identity).to_text() == "✅ incident installed"
     asyncio.run(scenario())
 
 
-def test_failed_provider_edit_cannot_leave_unseen_confirmation_usable(tmp_path, monkeypatch):
+def test_forged_review_and_confirm_actions_have_no_effect(tmp_path):
     async def scenario():
         service = Service()
         ui = SlackHarness(tmp_path, service)
         response = ui.runtime.begin(ui.caller, "incident")
         await ui.flush()
         identity = response["review_id"]
-        async def failed_edit(**_kwargs):
-            raise ConnectionError("provider refused edit")
-        monkeypatch.setattr(ui, "chat_update", failed_edit)
         await ui.click(identity, "review")
         await ui.click(identity, "confirm")
         assert not service.applied
-        assert ui.record(identity)["state"] == "failed"
+        assert ui.record(identity)["state"] == "pending"
     asyncio.run(scenario())
 
 
@@ -306,22 +304,21 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
         response = ui.runtime.begin(ui.caller, "incident")
         await ui.flush()
         identity = response["review_id"]
-        await ui.click(identity, "review")
         async def failed_edit(**_kwargs):
             raise ConnectionError("provider refused result edit")
         monkeypatch.setattr(ui, "chat_update", failed_edit)
-        await ui.click(identity, "confirm")
+        await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
         assert ui.record(identity)["state"] == "completed"
-        await ui.click(identity, "confirm")
+        await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("category,label", [
     ("skill_ready_to_share", "Share My Skill"),
-    ("new_skill", "Install Skill"),
-    ("update_available", "Update Skill"),
+    ("new_skill", "Install"),
+    ("update_available", "Update"),
 ])
 def test_eligible_notice_reuses_actionable_native_candidate_flow(
     tmp_path, monkeypatch, category, label,
@@ -342,11 +339,18 @@ def test_eligible_notice_reuses_actionable_native_candidate_flow(
                     for element in block.get("elements", []) if element.get("type") == "button"]
         value = next(button["value"] for button in controls if button["text"]["text"] == label)
         identity = value.rsplit(":", 1)[-1]
-        await ui.click(identity, "share" if category == "skill_ready_to_share" else "review")
+        action = {
+            "skill_ready_to_share": "share", "new_skill": "install",
+            "update_available": "update",
+        }[category]
+        await ui.click(identity, action)
         assert ui.record(identity)["operation"] == {
             "skill_ready_to_share": "publish", "new_skill": "install", "update_available": "update",
         }[category]
-        assert not service.applied
+        if category == "skill_ready_to_share":
+            assert not service.applied
+        else:
+            assert service.applied == ["exact-receipt"]
     asyncio.run(scenario())
 
 

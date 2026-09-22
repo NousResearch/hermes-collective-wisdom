@@ -65,6 +65,20 @@ def test_published_but_unmanaged_recovery_is_visible_without_new_effect_controls
     assert keyboard(view, "record-1") is None
 
 
+@pytest.mark.parametrize("flag", ["pending", "rejected"])
+def test_contradictory_success_is_not_presented_as_installed(flag):
+    result = {"installed": True, flag: True, "slug": "incident-triage"}
+    view = project_view({
+        "state": "completed", "operation": "install",
+        "plan": {"slug": "incident-triage"}, "result": result,
+    })
+    for rendered in (view.to_text(), _human_render("install", result)):
+        assert rendered == f"incident-triage: {flag}"
+    assert flag in html.unescape(plain_html(view))
+    assert flag in str(blocks(view, "record-1"))
+    assert not view.actions
+
+
 def test_effect_review_retains_exact_security_compatibility_and_file_facts():
     plan = {
         "operation": "install", "slug": "incident-triage", "version": 2,
@@ -208,6 +222,45 @@ def test_native_approval_fallback_preserves_version_owner_expiry_and_permission(
         assert fact in fallback
         assert fact in str(slack)
     assert "wi:agent:confirm:record-1" in str(keyboard(view, "record-1"))
+
+
+def test_native_install_offer_is_one_click_with_read_only_details():
+    record = {
+        "state": "pending", "operation": "install", "expires_at": 12345.5,
+        "owner": {
+            "organization_id": "org-1", "account_id": "owner-1",
+            "profile_name": "work",
+        },
+        "plan": {
+            "operation": "install", "slug": "incident-triage", "version": 7,
+            "receipt": "receipt-exact", "allowed": True,
+            "compatibility": {"outcome": "compatible"},
+            "local_scan": {"allowed": True, "findings": []},
+        },
+    }
+
+    view = project_view(record)
+    rendered = view.to_text()
+
+    assert "incident-triage" in rendered
+    assert "receipt-exact" not in rendered
+    assert '"package_files"' not in rendered
+    assert any(action.action == "details" for action in view.actions)
+    assert any(action.action == "install" and action.primary for action in view.actions)
+    assert all(action.action != "confirm" for action in view.actions)
+
+
+def test_native_completed_install_uses_plan_name_when_result_only_has_id():
+    view = project_view({
+        "state": "completed", "operation": "install",
+        "plan": {"slug": "incident-triage", "skill_id": "uuid-value", "version": 2},
+        "result": {"installed": True, "skill_id": "uuid-value", "version": 2},
+    })
+
+    assert view.title == "✅ incident-triage installed"
+    assert not view.summary
+    assert "uuid-value" not in view.to_text()
+    assert view.dismissed and not view.actions
 
 
 def test_entity_heavy_owner_loss_removes_slack_and_telegram_approval():

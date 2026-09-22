@@ -44,7 +44,8 @@ class Service:
     def install_plan(self, reference, *, update_mode=None):
         del update_mode
         return {
-            "operation": "install", "owner": owner(), "skill_id": reference,
+            "operation": "install", "owner": owner(),
+            "skill_id": reference.split("@v", 1)[0],
             "version": 2, "receipt": "receipt-1", "allowed": True,
         }
 
@@ -88,12 +89,9 @@ def test_click_executes_only_current_exact_review_and_records_result(tmp_path: P
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
-    created = inspect_for_confirmation(
-        controller, created["id"], service, replace(invocation(), message_id="card-1")
-    )
 
     result = controller.act(
-        created["id"], "confirm", service, replace(invocation(), message_id="card-1")
+        created["id"], "install", service, replace(invocation(), message_id="card-1")
     )
 
     assert service.applied == ["receipt-1"]
@@ -102,15 +100,45 @@ def test_click_executes_only_current_exact_review_and_records_result(tmp_path: P
     assert controller.pending(owner()) == []
 
 
+def test_install_click_refreshes_exact_visible_version_and_applies_once(tmp_path: Path):
+    class OneClickService(Service):
+        def __init__(self):
+            super().__init__()
+            self.plans = []
+
+        def install_plan(self, reference, *, update_mode=None):
+            self.plans.append(reference)
+            plan = super().install_plan(reference, update_mode=update_mode)
+            plan.update({"skill_id": "skill-1", "slug": "incident-triage"})
+            plan["receipt"] = f"receipt-{len(self.plans)}"
+            return plan
+
+        def native_install_inspect(self, receipt):
+            assert receipt == "receipt-2"
+            return [{"path": "SKILL.md", "content": "offline fixture"}]
+
+    service = OneClickService()
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    created = controller.request_install(service, invocation(), "skill-1@v2")
+    controller.bind_message(created["id"], invocation(), "card-1")
+    clicked = replace(invocation(), message_id="card-1")
+
+    result = controller.act(created["id"], "install", service, clicked)
+
+    assert service.plans == ["skill-1@v2", "skill-1@v2"]
+    assert service.applied == ["receipt-2"]
+    assert result["state"] == "completed"
+    assert controller.view(result).to_text() == "✅ incident-triage installed"
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(created["id"], "install", service, clicked)
+
+
 def test_cancelled_review_revokes_inflight_effect_callback(tmp_path: Path, monkeypatch):
     """Cancellation after confirm admission still revokes the effect boundary."""
     service = Service()
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
-    created = inspect_for_confirmation(
-        controller, created["id"], service, replace(invocation(), message_id="card-1")
-    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -123,7 +151,7 @@ def test_cancelled_review_revokes_inflight_effect_callback(tmp_path: Path, monke
 
     monkeypatch.setattr(service, "install_apply", apply)
     with pytest.raises((WisdomAuthError, WisdomConflict)):
-        controller.act(created["id"], "confirm", service, clicked)
+        controller.act(created["id"], "install", service, clicked)
 
     assert not service.applied
     assert controller.load(created["id"])["state"] == "cancelled"
@@ -142,6 +170,14 @@ def test_native_catalog_renders_actual_results(tmp_path: Path, monkeypatch):
         },
     }], raising=False)
 
+    preparations = []
+    original_plan = service.install_plan
+
+    def prepare_once(reference, **kwargs):
+        preparations.append(reference)
+        return original_plan(reference, **kwargs)
+
+    monkeypatch.setattr(service, "install_plan", prepare_once)
     record = controller.request_catalog(service, invocation(), "browse", "incident")
     view = controller.view(record)
     text = view.to_text()
@@ -150,17 +186,18 @@ def test_native_catalog_renders_actual_results(tmp_path: Path, monkeypatch):
     assert "Diagnose incident failures" in text
     assert "v2" in text
     assert "Installed v1 · update to v2 available" in text
-    assert view.items[0].actions[0].label == "Review install"
+    assert view.items[0].actions[0].label == "Install"
 
     controller.bind_message(record["id"], invocation(), "card-1")
-    review = controller.act(
+    result = controller.act(
         record["id"], "catalog.install.0", service,
         replace(invocation(), message_id="card-1"),
     )
 
-    assert review["operation"] == "install"
-    assert review["plan"]["skill_id"] == "skill-1@v2"
-    assert not service.applied
+    assert result["operation"] == "install"
+    assert result["result"]["installed"] is True
+    assert service.applied == ["receipt-1"]
+    assert preparations == ["skill-1@v2"]
 
 
 def test_review_action_requires_the_bound_original_card(tmp_path: Path):
@@ -172,7 +209,7 @@ def test_review_action_requires_the_bound_original_card(tmp_path: Path):
 
     with pytest.raises(WisdomAuthError, match="no longer current"):
         controller.act(
-            created["id"], "confirm", service,
+            created["id"], "install", service,
             replace(invocation(), message_id="card-2"),
         )
 
@@ -272,7 +309,7 @@ def test_telegram_callback_adapter_rejects_a_stale_original_card(tmp_path: Path)
 
     callback = telegram_callback(adapter, query, record)
     with pytest.raises(WisdomAuthError, match="no longer current"):
-        controller.act(record["id"], "confirm", service, callback)
+        controller.act(record["id"], "install", service, callback)
 
     assert not service.applied
 
@@ -316,9 +353,6 @@ def test_runtime_unload_revokes_an_inflight_slack_effect(tmp_path: Path, monkeyp
         )
         record = runtime.reviews.request_install(service, caller, "skill-1")
         runtime.reviews.bind_message(record["id"], caller, "card-1")
-        inspect_for_confirmation(
-            runtime.reviews, record["id"], service, replace(caller, message_id="card-1")
-        )
 
         def apply(receipt, *, accept_partial=False, may_apply):
             del accept_partial
@@ -340,7 +374,7 @@ def test_runtime_unload_revokes_an_inflight_slack_effect(tmp_path: Path, monkeyp
 
         assert app.handler is not None
         await app.handler(
-            ack, body, {"value": callback_value(record["id"], "confirm")}
+            ack, body, {"value": callback_value(record["id"], "install")}
         )
 
         assert not service.applied
@@ -360,9 +394,6 @@ def test_owner_switch_revokes_effect_authority(tmp_path: Path, monkeypatch):
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
-    created = inspect_for_confirmation(
-        controller, created["id"], service, replace(invocation(), message_id="card-1")
-    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -375,7 +406,7 @@ def test_owner_switch_revokes_effect_authority(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(service, "install_apply", apply)
     with pytest.raises(WisdomAuthError, match="owner changed"):
-        controller.act(created["id"], "confirm", service, clicked)
+        controller.act(created["id"], "install", service, clicked)
 
     assert not service.applied
     assert controller.load(created["id"])["state"] == "uncertain"
@@ -394,9 +425,6 @@ def test_divergent_plan_owner_revokes_effect_authority(tmp_path: Path, monkeypat
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
-    created = inspect_for_confirmation(
-        controller, created["id"], service, replace(invocation(), message_id="card-1")
-    )
 
     def apply(_receipt, *, accept_partial=False, may_apply):
         del accept_partial
@@ -405,14 +433,15 @@ def test_divergent_plan_owner_revokes_effect_authority(tmp_path: Path, monkeypat
         pytest.fail("divergent plan owner reached the install effect")
 
     monkeypatch.setattr(service, "install_apply", apply)
-    with pytest.raises(WisdomAuthError, match="plan owner changed"):
+    with pytest.raises(WisdomAuthError, match="review owner changed"):
         controller.act(
-            created["id"], "confirm", service,
+            created["id"], "install", service,
             replace(invocation(), message_id="card-1"),
         )
 
     assert not service.applied
-    assert controller.load(created["id"])["state"] == "uncertain"
+    # Owner mismatch is detected before any effect, so the original offer remains pending.
+    assert controller.load(created["id"])["state"] == "pending"
 
 
 def test_unknown_apply_outcome_is_not_replayable(tmp_path: Path, monkeypatch):
@@ -421,9 +450,6 @@ def test_unknown_apply_outcome_is_not_replayable(tmp_path: Path, monkeypatch):
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
-    created = inspect_for_confirmation(
-        controller, created["id"], service, replace(invocation(), message_id="card-1")
-    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
@@ -434,9 +460,9 @@ def test_unknown_apply_outcome_is_not_replayable(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(service, "install_apply", apply)
     with pytest.raises(TimeoutError, match="acknowledgement"):
-        controller.act(created["id"], "confirm", service, clicked)
+        controller.act(created["id"], "install", service, clicked)
     with pytest.raises(WisdomAuthError, match="no longer current"):
-        controller.act(created["id"], "confirm", service, clicked)
+        controller.act(created["id"], "install", service, clicked)
 
     assert service.applied == ["receipt-1"]
     assert controller.load(created["id"])["state"] == "uncertain"
@@ -448,21 +474,18 @@ def test_second_confirmation_cannot_enter_an_applying_review(tmp_path: Path, mon
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
     created = controller.request_install(service, invocation(), "skill-1")
     controller.bind_message(created["id"], invocation(), "card-1")
-    created = inspect_for_confirmation(
-        controller, created["id"], service, replace(invocation(), message_id="card-1")
-    )
     clicked = replace(invocation(), message_id="card-1")
 
     def apply(receipt, *, accept_partial=False, may_apply):
         del accept_partial
         with pytest.raises(WisdomAuthError, match="no longer current"):
-            controller.act(created["id"], "confirm", service, clicked)
+            controller.act(created["id"], "install", service, clicked)
         assert may_apply()
         service.applied.append(receipt)
         return {"installed": True}
 
     monkeypatch.setattr(service, "install_apply", apply)
-    result = controller.act(created["id"], "confirm", service, clicked)
+    result = controller.act(created["id"], "install", service, clicked)
 
     assert result["state"] == "completed"
     assert service.applied == ["receipt-1"]
@@ -578,7 +601,7 @@ def test_expired_native_review_cannot_apply(tmp_path: Path):
 
     with pytest.raises(WisdomAuthError, match="expired"):
         controller.act(
-            record["id"], "confirm", service,
+            record["id"], "install", service,
             replace(invocation(), message_id="card-1"),
         )
 
@@ -618,10 +641,10 @@ def test_partial_install_requires_the_exact_native_acknowledgement(
     clicked = replace(invocation(), message_id="card-1")
     view = controller.view(record)
 
-    assert "confirm" not in [action.action for action in view.actions]
+    assert "install" not in [action.action for action in view.actions]
     assert "confirm.partial" in [action.action for action in view.actions]
     with pytest.raises(WisdomValidationError, match="action"):
-        controller.act(record["id"], "confirm", service, clicked)
+        controller.act(record["id"], "install", service, clicked)
     result = controller.act(record["id"], "confirm.partial", service, clicked)
 
     assert result["state"] == "completed"
@@ -645,7 +668,7 @@ def test_blocked_review_rejects_a_forged_confirm(tmp_path: Path, monkeypatch):
 
     with pytest.raises(WisdomValidationError, match="action"):
         controller.act(
-            record["id"], "confirm", service,
+            record["id"], "install", service,
             replace(invocation(), message_id="card-1"),
         )
 
