@@ -297,14 +297,11 @@ class DirectState:
     def prepared_draft(
         self, skill_id: str, source_hash: str, owner: dict[str, Any]
     ) -> dict[str, Any] | None:
-        source_matches = [
+        matches = [
             row for row in self._load()["drafts"].values()
             if row.get("skill_id") == skill_id and row.get("source_hash") == source_hash
-            and row.get("state") != "declined"
+            and row.get("state") != "declined" and row.get("owner") == owner
         ]
-        if any(row.get("owner") != owner for row in source_matches):
-            raise WisdomAuthError("Collective Wisdom draft owner changed")
-        matches = [row for row in source_matches if row.get("owner") == owner]
         return copy.deepcopy(max(matches, key=lambda row: row["updated_at"])) if matches else None
 
     def save_draft(self, record: dict[str, Any]) -> None:

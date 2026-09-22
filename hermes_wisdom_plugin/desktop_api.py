@@ -31,6 +31,7 @@ _PRE_ENROLLMENT_CODES = frozenset({
     "setup_required",
     "not_configured",
     "registration_incomplete",
+    "owner_changed",
 })
 
 

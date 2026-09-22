@@ -708,6 +708,7 @@ def test_enrollment_displays_existing_shared_disclosure():
         WisdomValidationError("Setup required", code="setup_required"),
         WisdomConflict("Setup required", code="not_configured"),
         WisdomConflict("Setup required", code="registration_incomplete"),
+        WisdomConflict("Setup required", code="owner_changed"),
     ],
 )
 def test_enrollment_identity_creation_does_not_turn_success_into_stale_error(
@@ -729,8 +730,16 @@ def test_enrollment_identity_creation_does_not_turn_success_into_stale_error(
 
     service = EnrollingService(tmp_path)
     workflow = DesktopWorkflowApi()
+    service.enrolled = True
+    old_view_id = workflow.open_view(service)["view_id"]
+    service.account = "account-b"
+    service.enrolled = False
     view_id = workflow.open_view(service)["view_id"]
+    assert workflow.current(service, old_view_id) is False
+    with pytest.raises(WisdomAuthError):
+        workflow.enroll(service, old_view_id, accepted=True)
     assert workflow.enroll(service, view_id, accepted=True)["configured"] is True
+    assert workflow.current(service, old_view_id) is False
     # Enrollment does not silently upgrade old controls to the new identity.
     assert workflow.current(service, view_id) is False
 
@@ -766,7 +775,7 @@ def test_enrolled_view_becomes_noncurrent_on_native_auth_failure(tmp_path):
     [
         WisdomValidationError("local state is corrupt", code="invalid_local_state"),
         WisdomValidationError("arbitrary validation failure"),
-        WisdomConflict("owner changed", code="owner_changed"),
+        WisdomConflict("unknown conflict", code="unknown_conflict"),
     ],
 )
 def test_open_view_fails_closed_for_non_setup_native_owner_failures(tmp_path, failure):

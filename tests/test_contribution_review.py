@@ -807,6 +807,26 @@ def test_reopened_overlay_rejects_unsafe_files(tmp_path: Path, entry_kind: str):
         value.prepare("reviewed-skill")
 
 
+@pytest.mark.parametrize("field", [
+    "account_id", "organization_id", "base_url", "installation_id",
+])
+def test_new_owner_prepares_same_source_without_reusing_prior_draft(tmp_path: Path, field):
+    value, source, binding = reviewer(tmp_path)
+    original = (source / "SKILL.md").read_bytes()
+    first = value.prepare("reviewed-skill")
+    retained = value.store.draft(first["draft_id"])
+    binding[field] += "-other"
+
+    second = value.prepare("reviewed-skill")
+
+    assert second["draft_id"] != first["draft_id"]
+    assert value.store.draft(first["draft_id"]) == retained
+    assert value.prepare("reviewed-skill")["draft_id"] == second["draft_id"]
+    assert (source / "SKILL.md").read_bytes() == original
+    with pytest.raises(WisdomAuthError, match="draft owner changed"):
+        value.reopen(first["draft_id"])
+
+
 def test_owner_change_is_denied_before_persisting_or_reviewing(tmp_path: Path):
     value, _source, binding = reviewer(tmp_path)
     calls = 0
@@ -837,7 +857,7 @@ def test_reopening_draft_requires_its_persisted_full_owner_before_model_disclosu
 
     binding["account_id"] = "other-member"
     with pytest.raises(WisdomAuthError, match="owner"):
-        value.prepare("reviewed-skill", allow_model_review=True)
+        value.reopen(first["draft_id"], allow_model_review=True)
 
     assert not llm.calls
 

@@ -199,14 +199,7 @@ def test_setup_switches_owner_without_relabeling_retained_records(tmp_path: Path
 
     account, _client, state, enrollment = service(tmp_path)
     first = enrollment.setup(True)
-    old_owner = {
-        "profile_name": account.profile_name,
-        "profile_home": account.profile_home,
-        "account_id": account.account_id,
-        "organization_id": account.organization_id,
-        "base_url": account.base_url,
-        "installation_id": first["installation_id"],
-    }
+    old_owner = enrollment.owner()
     state.save_draft({
         "id": "draft-old", "owner": old_owner, "skill_id": "local-skill",
         "source_hash": "sha256:old", "state": "prepared",
