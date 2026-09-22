@@ -687,6 +687,40 @@ class WisdomClient:
             json_body=payload, publish=True,
         ).draft
 
+    def revise_draft(  # pylint: disable=too-many-arguments
+        self,
+        draft_id: str,
+        *,
+        commit: str,
+        content_hash: str,
+        description: str,
+        description_hash: str,
+        manifest_hash: str,
+        expected_content_hash: str,
+        expected_description_hash: str,
+        expected_manifest_hash: str,
+        professionalism_review: dict[str, Any] | None = None,
+    ) -> Draft:
+        """Create or recover one idempotent, newly vetted draft successor."""
+
+        payload: dict[str, Any] = {
+            "draft_commit": commit,
+            "content_hash": content_hash,
+            "author_description": description,
+            "expected_content_hash": expected_content_hash,
+            "expected_author_description_hash": expected_description_hash,
+            "expected_package_manifest_hash": expected_manifest_hash,
+        }
+        if professionalism_review is not None:
+            payload["professionalism_review"] = professionalism_review
+        revised = self._request(
+            f"drafts/{_quoted_identifier(draft_id, 'draft_id')}/revise",
+            model=DraftResponse, method="POST", json_body=payload, publish=True,
+        ).draft
+        # These are response bindings, not request fields in the Gateway contract.
+        del description_hash, manifest_hash
+        return revised
+
     def list_drafts(self) -> list[Draft]:
         """List current caller's owner-private drafts for exact reconciliation."""
 

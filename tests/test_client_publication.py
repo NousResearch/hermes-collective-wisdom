@@ -117,6 +117,53 @@ def test_publication_calls_use_pinned_paths_shapes_and_publish_scope():
     assert session.calls[-2][2]["json"]["base_commit"] == "sha256:" + "9" * 64
 
 
+def test_revision_uses_gateway_idempotent_successor_contract():
+    calls = []
+    successor = draft_body()
+    successor["id"] = "draft-2"
+    successor["supersedesDraftId"] = "draft-1"
+    session = Session(Response(201, {"draft": successor}))
+    value = WisdomClient(
+        credentials(calls, "read"), "org-1", session=session,
+        publish_credential_provider=credentials(calls, "publish"),
+    )
+
+    revised = value.revise_draft(
+        "draft-1",
+        commit="sha256:" + "1" * 64,
+        content_hash="sha256:" + "2" * 64,
+        description="Description.",
+        description_hash="sha256:" + "3" * 64,
+        manifest_hash="sha256:" + "4" * 64,
+        professionalism_review={"status": "pass"},
+        expected_content_hash="sha256:" + "2" * 64,
+        expected_description_hash="sha256:" + "3" * 64,
+        expected_manifest_hash="sha256:" + "4" * 64,
+    )
+
+    assert revised.supersedesDraftId == "draft-1"
+    assert calls == ["publish"]
+    assert session.calls == [(
+        "POST", "https://gateway.example/v1/sync/wisdom/drafts/draft-1/revise",
+        {
+            "headers": session.calls[0][2]["headers"],
+            "params": None,
+            "timeout": 30.0,
+            "stream": True,
+            "allow_redirects": False,
+            "json": {
+                "draft_commit": "sha256:" + "1" * 64,
+                "content_hash": "sha256:" + "2" * 64,
+                "author_description": "Description.",
+                "professionalism_review": {"status": "pass"},
+                "expected_content_hash": "sha256:" + "2" * 64,
+                "expected_author_description_hash": "sha256:" + "3" * 64,
+                "expected_package_manifest_hash": "sha256:" + "4" * 64,
+            },
+        },
+    )]
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [

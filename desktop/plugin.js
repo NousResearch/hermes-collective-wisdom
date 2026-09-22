@@ -132,7 +132,7 @@ function FindingList({ empty = 'No findings reported.', items }) {
     ? jsx('ul', { className: 'list-disc space-y-1 pl-5 text-xs text-(--ui-text-secondary)', children: values.map((item, index) => {
         if (!isObject(item)) return jsx('li', { children: text(item) }, `${index}-${text(item)}`)
         const provenance = [item.severity, item.category, item.path && `${item.path}${item.line ? `:${item.line}` : ''}`].filter(Boolean).join(' · ')
-        const message = text(item.message || item.summary || 'Unspecified finding')
+        const message = text(item.message || item.summary || item.detail || 'Unspecified finding')
         return jsx('li', { children: provenance ? `${provenance} — ${message}` : message }, `${index}-${text(item.path || message)}`)
       }) })
     : jsx('p', { className: 'text-xs text-(--ui-text-quaternary)', children: empty })
@@ -141,7 +141,7 @@ function FindingList({ empty = 'No findings reported.', items }) {
 function CheckSummary({ check, title, authority = 'Check' }) {
   const value = isObject(check) ? check : null
   const decision = value?.upload_allowed ?? value?.allowed ?? value?.passed ?? null
-  const status = decision === true ? 'passed' : decision === false ? 'blocked' : 'unavailable'
+  const status = decision === true ? 'passed' : decision === false ? 'blocked' : text(value?.status || value?.verdict || value?.state || 'unavailable')
   const findings = Array.isArray(value?.findings) ? value.findings : []
   return jsxs('section', { className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
     jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
@@ -402,6 +402,7 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
     isPublication ? jsx(CheckSummary, { title: 'Local package scanner', check: review?.local_scan, authority: 'Local scan' }) : null,
     isPublication ? jsx(CheckSummary, { title: 'Local security and upload gate', check: review?.security_check, authority: 'Local security' }) : null,
     isPublication ? jsx(CheckSummary, { title: 'Professionalism review', check: review?.professionalism_check, authority: 'Assessment' }) : null,
+    isPublication && isObject(review?.server_checks) ? jsx(CheckSummary, { title: 'Gateway security scan', check: review.server_checks.security_check || review.server_checks.scan, authority: 'Gateway' }) : null,
     kind === 'update' ? jsxs('section', { className: 'space-y-2', children: [
       jsx('h4', { className: 'text-xs font-semibold', children: 'Update policy and sensitive changes' }),
       jsx(KeyValue, { name: 'local modified', value: review?.modified }),

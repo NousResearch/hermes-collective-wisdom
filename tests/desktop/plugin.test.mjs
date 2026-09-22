@@ -877,6 +877,8 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
       security_check: { upload_allowed: true, summary: 'Exact local security gate allows upload.', findings: [] },
       professionalism_check: { state: 'unavailable', summary: 'Optional model review unavailable.', findings: [] },
       local_scan: { allowed: true, summary: 'Host scan passed.', findings: [] },
+      server_checks: { security_check: { status: 'advisory', verdict: 'advisory', summary: 'Gateway advisory.', findings: [{ severity: 'advisory', category: 'secret_assignment', path: 'SKILL.md', detail: 'Review Gateway finding.' }] } },
+      warning_acceptance: { accepted: true },
       publication_mode: 'moderated', policy_version: 'policy-9', notice: 'Nothing has been uploaded.'
     }
     if (path === '/publication/confirm') return { operation_id: 'publication-op', state: 'done', publication_state: 'pending_moderation', remote_draft_id: 'remote-1' }
@@ -892,6 +894,9 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   assert.match(mounted.container.textContent, /# Exact reviewed bytes/)
   assert.match(mounted.container.textContent, new RegExp(hash('3')))
   assert.match(mounted.container.textContent, /Local security: passed/)
+  assert.match(mounted.container.textContent, /Gateway security scan/)
+  assert.match(mounted.container.textContent, /Gateway: advisory/)
+  assert.match(mounted.container.textContent, /Review Gateway finding/)
   assert.match(mounted.container.textContent, /Assessment: unavailable/)
   assert.match(mounted.container.textContent, /Moderated: confirmation submits for team moderation/)
   assert.equal(mounted.container.querySelector('a[download="logo.bin"]').getAttribute('href'), 'data:application/octet-stream;base64,AAH/')

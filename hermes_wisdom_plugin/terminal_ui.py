@@ -101,7 +101,7 @@ def render_findings(value: object) -> str:
     if not details:
         if has_reviewable_warnings(data):
             return "Scanner warnings: warning details are unavailable; acknowledgement is blocked."
-        return "Scanner warnings: none reported."
+        return "Local scanner warnings: none reported."
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for finding in details:
         key = (
@@ -239,6 +239,12 @@ def _review_check_lines(data: dict[str, Any]) -> list[str]:
             if isinstance(check, dict):
                 state = check.get("status") or check.get("state") or "available"
                 lines.append(f"  - {text(name)}: {text(state)}")
+                if isinstance(check.get("findings"), list) and check["findings"]:
+                    lines.append(render_findings({"findings": [
+                        {**finding, "description": finding.get("description")
+                         or finding.get("detail") or finding.get("message")}
+                        for finding in check["findings"] if isinstance(finding, dict)
+                    ]}))
     lines.append(render_findings(data))
     policy = data.get("policy") if isinstance(data.get("policy"), dict) else {}
     acceptance = policy.get("warning_acceptance")
