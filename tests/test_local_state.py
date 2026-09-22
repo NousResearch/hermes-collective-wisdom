@@ -20,7 +20,9 @@ def owner(root: Path):
     }
 
 
-def test_qualification_records_persist_and_switching_owner_clears_candidates(tmp_path: Path):
+def test_qualification_records_persist_and_switching_owner_archives_inactive_records(
+    tmp_path: Path,
+):
     state = JsonState(tmp_path)
     first = QualificationState(state, tmp_path)
     first.bind_owner(owner(tmp_path))
@@ -44,6 +46,22 @@ def test_qualification_records_persist_and_switching_owner_clears_candidates(tmp
     changed = {**owner(tmp_path), "account_id": "user-2"}
     reopened.bind_owner(changed)
     assert reopened.candidates() == []
+    saved = state.get("wisdom-qualification")
+    assert saved is not None
+    inactive = saved["inactive"]
+    assert len(inactive) == 1
+    assert inactive[0]["owner"] == owner(tmp_path)
+    assert inactive[0]["usage"][skill_id] == {"UTC|2026-09-18": 1}
+    assert inactive[0]["candidates"][skill_id + ":sha256:a"]["event_id"] == event_id
+
+    reopened.bind_owner(owner(tmp_path))
+    assert reopened.candidates() == []
+    assert reopened.usage_days(skill_id, since="2026-09-01", timezone_name="UTC") == []
+    saved = state.get("wisdom-qualification")
+    assert saved is not None
+    assert [record["owner"] for record in saved["inactive"]] == [
+        owner(tmp_path), changed,
+    ]
 
 
 def test_qualification_state_rejects_profile_path_switch(tmp_path: Path):
