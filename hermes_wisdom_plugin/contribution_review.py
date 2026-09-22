@@ -46,6 +46,27 @@ from .publisher_evidence import evidence_block, publication_description
 OwnerProvider = Callable[[], dict[str, str]]
 
 
+def exact_review_files(overlay: Path) -> tuple[list[dict[str, Any]], str]:
+    """Render exact package bytes for a review without making them durable state."""
+
+    raw = read_validated_package_files(overlay)
+    entries = []
+    for relative, mode, body in raw:
+        entry = {
+            "path": relative,
+            "mode": mode,
+            "content_base64": base64.b64encode(body).decode("ascii"),
+        }
+        try:
+            entry["content_utf8"] = body.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        entries.append(entry)
+    records, content_hash = verify_content_files(raw)
+    hashes = {record.path: record.hash for record in records}
+    return [{**entry, "hash": hashes[entry["path"]]} for entry in entries], content_hash
+
+
 def _remove_unreferenced_edit(
     store: Any, draft_id: str, edit_root: Path
 ) -> None:
@@ -212,25 +233,6 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomNotFound("local skill not found")
         return safe[0]
 
-    @staticmethod
-    def _files(overlay: Path) -> tuple[list[dict[str, Any]], str]:
-        raw = read_validated_package_files(overlay)
-        entries = []
-        for relative, mode, body in raw:
-            entry = {
-                "path": relative,
-                "mode": mode,
-                "content_base64": base64.b64encode(body).decode("ascii"),
-            }
-            try:
-                entry["content_utf8"] = body.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
-            entries.append(entry)
-        records, content_hash = verify_content_files(raw)
-        hashes = {record.path: record.hash for record in records}
-        return [{**entry, "hash": hashes[entry["path"]]} for entry in entries], content_hash
-
     def _result(  # pylint: disable=too-many-locals
         self,
         draft: dict[str, Any],
@@ -242,7 +244,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
     ) -> dict[str, Any]:
         self._require_current(may_apply)
         overlay = Path(str(draft["overlay_path"]))
-        files, content_hash = self._files(overlay)
+        files, content_hash = exact_review_files(overlay)
         if content_hash != draft["content_hash"]:
             raise WisdomConflict(
                 "this source already has an edited draft; review that draft instead"
@@ -277,7 +279,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         )
         self._assert_owner(expected_owner, may_apply)
         # A model response is only an assessment. Re-read exact bytes before returning it.
-        _files_after, hash_after = self._files(overlay)
+        _files_after, hash_after = exact_review_files(overlay)
         if hash_after != draft["content_hash"]:
             raise WisdomConflict("prepared package changed during review")
         return {
@@ -405,7 +407,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomConflict("prepared draft changed; inspect it again before saving")
 
         overlay = Path(str(local["overlay_path"]))
-        _, actual_content_hash = self._files(overlay)
+        _, actual_content_hash = exact_review_files(overlay)
         _manifest, manifest_bytes = load_manifest(overlay / "skill.manifest.json")
         if (
             actual_content_hash != hashes["content"]

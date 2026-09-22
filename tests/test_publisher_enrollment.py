@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from hermes_wisdom_plugin.package import (
 from hermes_wisdom_plugin.package_application import tree_hashes
 from hermes_wisdom_plugin.publisher_enrollment import PublisherEnrollment
 from hermes_wisdom_plugin.update_review import UpdateReviewer
+from hermes_wisdom_plugin.wire import build_commit
 
 
 class Host:
@@ -119,9 +121,12 @@ class PublicationClient(RecordingPublicationClient):  # pylint: disable=too-many
             commit=commit, content_hash=content.content_hash,
         ), list(files)
 
-    def publish(self, *args, **kwargs):
-        result = super().publish(*args, **kwargs)
+    def publish(self, draft_id, **kwargs):
+        result = super().publish(draft_id, **kwargs)
         if result["state"] == "published":
+            self.add_version(
+                self.current_version, self.files, self.state.drafts[draft_id].draftCommit,
+            )
             result["version"] = self.current_version
         return result
 
@@ -189,7 +194,12 @@ def _named_recovery_fixture(tmp_path: Path):
     return recovered, prepared_reviewer, published, installed, client, source, owner
 
 
-def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: Path):
+def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: Path, monkeypatch):
+    # Preparation and publication need not construct their commits in the same second.
+    monkeypatch.setattr(
+        "hermes_wisdom_plugin.package.build_commit",
+        partial(build_commit, ts="2026-01-01T00:00:00Z"),
+    )
     prepared_reviewer, source, owner = reviewer(tmp_path)
     prepared = prepared_reviewer.prepare("reviewed-skill")
     draft = prepared_reviewer.store.draft(prepared["draft_id"])
@@ -219,6 +229,7 @@ def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: P
         ),
     }
     assert result["detail"] == result["managed_enrollment"]["detail"]
+    assert result["submitted_request"]["commit"] != draft["draft_commit"]
     assert tree_hashes(source) == before
     record = installed.installation("published-skill-1", owner=owner)
     assert record is not None

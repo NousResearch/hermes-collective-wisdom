@@ -205,13 +205,17 @@ def test_publish_requires_explicit_valid_base_commit_argument():
         )
 
 
-def test_private_object_upload_uses_owner_scoped_raw_multipart_and_is_idempotent_shape():
+@pytest.mark.parametrize("timeout, upload_timeout", [(10, 120), (180, 180)])
+def test_private_object_upload_uses_owner_scoped_raw_multipart_and_is_idempotent_shape(
+    timeout, upload_timeout,
+):
     calls = []
     session = Session(Response(201, {"objects": []}))
     value = WisdomClient(
         credentials(calls, "read"),
         "org-1",
         session=session,
+        timeout=timeout,
         publish_credential_provider=credentials(calls, "publish"),
     )
     objects = ObjectSet()
@@ -225,4 +229,9 @@ def test_private_object_upload_uses_owner_scoped_raw_multipart_and_is_idempotent
         (digest, ("blob", b"exact bytes", "application/octet-stream"))
     ]
     assert options["params"] is None
+    assert options["timeout"] == (timeout, upload_timeout)
     assert calls == ["publish"]
+
+    session.response = Response(200, {"drafts": []})
+    assert value.list_drafts() == []
+    assert session.calls[-1][2]["timeout"] == timeout

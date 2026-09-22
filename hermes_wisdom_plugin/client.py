@@ -551,7 +551,11 @@ class WisdomClient:
                     "Accept": "application/json",
                 },
                 params=params,
-                timeout=self.timeout,
+                # Bulk object persistence needs longer than ordinary API reads.
+                timeout=(
+                    (self.timeout, max(self.timeout, 120.0))
+                    if files is not None else self.timeout
+                ),
                 stream=True,
                 allow_redirects=False,
                 **request_options,

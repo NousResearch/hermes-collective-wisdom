@@ -5,17 +5,41 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from test_contribution_review import reviewer
+from installed_test_support import JsonState
+from test_contribution_review import Host, make_skill, owner as contribution_owner, reviewer
 
-from hermes_wisdom_plugin.direct_services import PublicationService
+from hermes_wisdom_plugin.contribution_review import ContributionReviewer
+from hermes_wisdom_plugin.direct_services import DirectState, PublicationService
 from hermes_wisdom_plugin.errors import (
     WisdomAuthError, WisdomConflict, WisdomValidationError,
 )
+from hermes_wisdom_plugin.local_state import QualificationState
+
+
+class QuotaJsonState(JsonState):
+    """File-backed state with the stock host's aggregate JSON quota."""
+
+    quota_bytes = 10 * 1024 * 1024
+
+    def set(self, key, value) -> None:
+        current = (
+            json.loads(self.path.read_text(encoding="utf-8"))
+            if self.path.is_file() else {}
+        )
+        current[key] = value
+        encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8")
+        if len(encoded) > self.quota_bytes:
+            raise ValueError(
+                f"Plugin state quota exceeded: {len(encoded)} bytes is greater "
+                f"than the {self.quota_bytes}-byte per-plugin quota"
+            )
+        super().set(key, value)
 
 
 class RecordingPublicationClient:
@@ -24,7 +48,8 @@ class RecordingPublicationClient:
     def __init__(self, owner: dict[str, str], *, mode: str = "open") -> None:
         self.state = SimpleNamespace(
             owner=owner, mode=mode, policy_version=7, calls=Counter(), drafts={},
-            fail_after_effect=set(), submit_error=None, uploaded_objects=None, head=None,
+            fail_after_effect=set(), submit_error=None, upload_error=None,
+            uploaded_objects=None, head=None,
         )
 
     def agent_led_policy(self):
@@ -35,6 +60,8 @@ class RecordingPublicationClient:
         )
 
     def upload_private_objects(self, objects):
+        if self.state.upload_error is not None:
+            raise self.state.upload_error
         assert objects
         self.state.calls["upload"] += 1
         self.state.uploaded_objects = dict(objects)
@@ -127,6 +154,91 @@ def publication(tmp_path: Path, *, mode: str = "open", scan_allowed: bool = True
         prepared_reviewer.store, prepared_reviewer, client, lambda: dict(binding)
     )
     return service, prepared, client, binding
+
+
+def test_large_private_publication_stays_within_host_state_quota_and_rereviews_exactly(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+):
+    profile = tmp_path / "profile"
+    source = make_skill(profile)
+    for index in range(449):
+        path = source / "references" / f"entry-{index:03d}.txt"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("x" * 10_000, encoding="utf-8")
+    executable = source / "references" / "entry-000.txt"
+    executable.chmod(0o700)
+    binding = contribution_owner(profile)
+    state_backend = QuotaJsonState(tmp_path / "state")
+    state = DirectState(state_backend, tmp_path / "state")
+    prepared_reviewer = ContributionReviewer(
+        state,
+        Host(profile / "skills"),
+        lambda: dict(binding),
+        source_store=QualificationState(state_backend, tmp_path / "state"),
+    )
+    prepared = prepared_reviewer.prepare("reviewed-skill")
+    client = RecordingPublicationClient(binding, mode="moderated")
+    service = PublicationService(
+        state, prepared_reviewer, client, lambda: dict(binding)
+    )
+
+    staged = service.submit_private_draft(
+        service.review(prepared["draft_id"])["receipt"]
+    )
+    restarted = PublicationService(
+        DirectState(state_backend, tmp_path / "state"),
+        prepared_reviewer,
+        client,
+        lambda: dict(binding),
+    )
+    rereview = restarted.review(staged["operation_id"])
+
+    assert len(prepared["files"]) == 451
+    assert rereview["files"] == prepared["files"]
+    assert next(item for item in rereview["files"] if item["path"].endswith("000.txt"))[
+        "mode"
+    ] == "exec"
+    assert state_backend.path.stat().st_size < state_backend.quota_bytes
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+
+def test_interrupted_intent_keeps_its_exact_snapshot_when_draft_is_edited(tmp_path: Path):
+    service, prepared, client, binding = publication(tmp_path, mode="moderated")
+    client.state.upload_error = OSError("offline before upload")
+    with pytest.raises(OSError, match="offline before upload"):
+        service.submit_private_draft(service.review(prepared["draft_id"])["receipt"])
+    operation = service.state.publication_for_draft(prepared["draft_id"])
+    assert operation is not None
+    assert operation["phase"] == "intent"
+
+    editable = service.reviewer.inspect_prepared(prepared["draft_id"])
+    skill = next(item for item in editable["files"] if item["path"] == "SKILL.md")
+    skill["content_utf8"] += "\n# Later edit\n"
+    edited = service.reviewer.save_prepared(
+        prepared["draft_id"],
+        author_description=editable["author_description"],
+        files=editable["files"],
+        expected_hashes=editable["expected_hashes"],
+    )
+    assert edited["hashes"]["content"] != prepared["hashes"]["content"]
+
+    client.state.upload_error = None
+    restarted = PublicationService(
+        service.state, service.reviewer, client, lambda: dict(binding)
+    )
+    resumed = restarted.reopen(operation["id"])
+    rereview = restarted.review(resumed["operation_id"])
+
+    assert resumed["phase"] == "policy_review_required"
+    assert rereview["files"] == prepared["files"]
+    assert rereview["hashes"] == prepared["hashes"]
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+    snapshot_skill = Path(operation["prepared_package"]["overlay_path"]) / "SKILL.md"
+    snapshot_skill.unlink()
+    with pytest.raises(WisdomConflict, match="snapshot is missing or changed"):
+        restarted.submit(rereview["receipt"])
+    assert client.state.calls == Counter(upload=1, submit=1)
 
 
 @pytest.mark.parametrize(
