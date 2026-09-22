@@ -80,6 +80,7 @@ class DirectState:
         return {
             "version": 1,
             "identity": None,
+            "enrollment_history": [],
             "drafts": {},
             "professionalism": {},
             "publication_reviews": {},
@@ -107,6 +108,9 @@ class DirectState:
         if value is None:
             return self._empty()
         if not isinstance(value, dict) or value.get("version") != 1:
+            raise RuntimeError("Collective Wisdom direct state is invalid")
+        value.setdefault("enrollment_history", [])
+        if not isinstance(value["enrollment_history"], list):
             raise RuntimeError("Collective Wisdom direct state is invalid")
         for key in (
             "drafts", "professionalism", "publication_reviews", "publications", "setup_reviews",
@@ -140,6 +144,8 @@ class DirectState:
     def set_identity(self, record: dict[str, Any]) -> None:
         with self.change() as value:
             if value["identity"] != record:
+                if isinstance(value["identity"], dict):
+                    value["enrollment_history"].append(copy.deepcopy(value["identity"]))
                 value["notices"] = self._empty()["notices"]
             value["identity"] = copy.deepcopy(record)
 
@@ -291,14 +297,11 @@ class DirectState:
     def prepared_draft(
         self, skill_id: str, source_hash: str, owner: dict[str, Any]
     ) -> dict[str, Any] | None:
-        source_matches = [
+        matches = [
             row for row in self._load()["drafts"].values()
             if row.get("skill_id") == skill_id and row.get("source_hash") == source_hash
-            and row.get("state") != "declined"
+            and row.get("state") != "declined" and row.get("owner") == owner
         ]
-        if any(row.get("owner") != owner for row in source_matches):
-            raise WisdomAuthError("Collective Wisdom draft owner changed")
-        matches = [row for row in source_matches if row.get("owner") == owner]
         return copy.deepcopy(max(matches, key=lambda row: row["updated_at"])) if matches else None
 
     def save_draft(self, record: dict[str, Any]) -> None:
@@ -522,9 +525,11 @@ class EnrollmentService:
     def _previous(self, owner: dict[str, str]) -> tuple[dict[str, Any] | None, bool]:
         previous = self.state.identity()
         same_owner = bool(previous and previous.get("owner") == owner)
-        if previous and not same_owner:
-            raise WisdomConflict("Collective Wisdom enrollment owner changed")
         return previous, same_owner
+
+    def _assert_owner(self, owner: dict[str, str]) -> None:
+        if self._authorize() != owner:
+            raise WisdomAuthError("Collective Wisdom account changed during setup")
 
     def setup(
         self, accept_disclosure: bool, *, may_apply: Callable[[], bool] | None = None,
@@ -555,7 +560,9 @@ class EnrollmentService:
             ),
             "attempt_id": attempt_id,
             "state": "registering",
-            "conflict_rotated": bool(previous and previous.get("conflict_rotated")),
+            "conflict_rotated": bool(
+                same_owner and previous and previous.get("conflict_rotated")
+            ),
         }
         self.state.set_identity(record)
         _current(may_apply)
@@ -566,31 +573,33 @@ class EnrollmentService:
         if "wisdom" not in features:
             raise WisdomAuthError("Gateway does not advertise Collective Wisdom")
         _current(may_apply)
+        self._assert_owner(owner)
+        self.state.compare_identity(attempt_id, record)
         try:
             registered = _model_dict(
                 self.client.register_identity(record["installation_id"]),
                 "installation identity response",
             )
         except WisdomConflict as exc:
-            if exc.code != "identity_conflict" or previous and previous.get("conflict_rotated"):
+            if exc.code != "identity_conflict" or record.get("conflict_rotated"):
                 raise
             _current(may_apply)
             record = {**record, "installation_id": "hwi_" + uuid.uuid4().hex,
                       "conflict_rotated": True}
             self.state.compare_identity(attempt_id, record)
+            self._assert_owner(owner)
             registered = _model_dict(
                 self.client.register_identity(record["installation_id"]),
                 "installation identity response",
             )
         _current(may_apply)
+        self._assert_owner(owner)
         if registered.get("installation_id") != record["installation_id"] or registered.get(
             "state"
         ) != "active":
             raise WisdomValidationError(
                 "Gateway did not activate the reserved installation identity"
             )
-        if self._authorize() != owner:
-            raise WisdomAuthError("Collective Wisdom account changed during setup")
         active = {**record, "state": "active", "capabilities": {"features": features},
                   "activated_at": _now()}
         self.state.compare_identity(attempt_id, active)

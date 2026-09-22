@@ -27,6 +27,7 @@ def _empty() -> dict[str, Any]:
         "refinements": [],
         "stability": {},
         "candidates": {},
+        "inactive": [],
     }
 
 
@@ -55,6 +56,9 @@ class QualificationState:
             return _empty()
         if not isinstance(value, dict) or value.get("version") != 1:
             raise RuntimeError("Collective Wisdom qualification state is invalid")
+        value.setdefault("inactive", [])
+        if not isinstance(value["inactive"], list):
+            raise RuntimeError("Collective Wisdom qualification state is invalid")
         return value
 
     # pylint: disable=duplicate-code
@@ -78,6 +82,14 @@ class QualificationState:
             if value["owner"] != owner:
                 fresh = _empty()
                 fresh["owner"] = copy.deepcopy(owner)
+                fresh["inactive"] = copy.deepcopy(value["inactive"])
+                if value["owner"] is not None:
+                    fresh["inactive"].append({
+                        key: copy.deepcopy(value[key])
+                        for key in (
+                            "owner", "skills", "usage", "refinements", "stability", "candidates"
+                        )
+                    })
                 value.clear()
                 value.update(fresh)
 

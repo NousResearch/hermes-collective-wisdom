@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from installed_test_support import JsonState
 from test_installed_setup import OWNER, installed  # pylint: disable=unused-import
 
-from hermes_wisdom_plugin.errors import WisdomValidationError
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomValidationError
 
 
 class Capability(BaseModel):
@@ -53,6 +53,19 @@ class Client:
 
     def register_identity(self, installation_id):
         self.calls.append(("register", installation_id))
+        return Identity(installation_id=installation_id, state="active")
+
+
+class ConflictOnceClient(Client):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conflicted = False
+
+    def register_identity(self, installation_id):
+        self.calls.append(("register", installation_id))
+        if not self.conflicted:
+            self.conflicted = True
+            raise WisdomConflict("fixture identity conflict", code="identity_conflict")
         return Identity(installation_id=installation_id, state="active")
 
 
@@ -179,6 +192,133 @@ def test_enrollment_persists_intent_before_network_and_activates_same_identity(
     assert "not-persisted" not in repr(state.identity())
 
 
+# The scenario intentionally covers each retained owner-bound state domain.
+# pylint: disable-next=too-many-locals
+def test_setup_switches_owner_without_relabeling_retained_records(tmp_path: Path) -> None:
+    from hermes_wisdom_plugin.installed_state import InstalledState
+
+    account, _client, state, enrollment = service(tmp_path)
+    first = enrollment.setup(True)
+    old_owner = enrollment.owner()
+    state.save_draft({
+        "id": "draft-old", "owner": old_owner, "skill_id": "local-skill",
+        "source_hash": "sha256:old", "state": "prepared",
+    })
+    state.save_setup_review("setup-review-old", {"owner": old_owner})
+    setup_operation_id = state.begin_setup("setup-review-old", {
+        "skill_id": "setup-old", "receipt": "setup-review-old", "owner": old_owner,
+    })
+    publication_receipt = state.save_publication_review({"draft_id": "draft-old"})
+    publication_operation_id = state.begin_publication(publication_receipt, {
+        "local_draft_id": "draft-old", "owner": old_owner, "skill_id": "local-skill",
+    })
+    installed = InstalledState(state.state, tmp_path)
+    installed.record_install({
+        "skill_id": "managed-old", "slug": "managed-old", "version": 1,
+        "content_hash": "sha256:managed", "baseline": {}, "target_path": "/tmp/old",
+        "update_mode": "MANUAL", "state": "active", "owner": old_owner,
+    })
+
+    account.account_id = "user-2"
+    account.organization_id = "org-2"
+    account.base_url = "https://gateway.staging.invalid"
+    switched = enrollment.setup(True)
+
+    assert switched["configured"] is True
+    assert switched["installation_id"] != first["installation_id"]
+    saved = state.read()
+    assert saved["drafts"]["draft-old"]["owner"] == old_owner
+    assert len(saved["enrollment_history"]) == 1
+    assert saved["enrollment_history"][0]["owner"] == {
+        "profile_name": old_owner["profile_name"],
+        "profile_home": old_owner["profile_home"],
+        "account_id": old_owner["account_id"],
+        "organization_id": old_owner["organization_id"],
+        "base_url": old_owner["base_url"],
+    }
+    assert saved["enrollment_history"][0]["installation_id"] == first["installation_id"]
+    assert saved["setup_operations"][setup_operation_id]["owner"] == old_owner
+    assert saved["publications"][publication_operation_id]["owner"] == old_owner
+    assert installed.installation("managed-old")["owner"] == old_owner
+
+
+# Three independently bound services model interleaved setup invocations.
+# pylint: disable-next=too-many-locals
+def test_setup_rejects_stale_a_b_a_response_before_registration(tmp_path: Path) -> None:
+    from hermes_wisdom_plugin.direct_services import EnrollmentService
+
+    account_a1, client_a1, state, enrollment_a1 = service(tmp_path)
+    account_b = Account()
+    account_b.account_id = "user-2"
+    account_b.organization_id = "org-2"
+    client_b = Client()
+    enrollment_b = EnrollmentService(state, account_b, client_b)
+    account_a2 = Account()
+    client_a2 = Client()
+    enrollment_a2 = EnrollmentService(state, account_a2, client_a2)
+    original_capability = client_a1.capability
+
+    def switch_away_and_back():
+        enrollment_b.setup(True)
+        enrollment_a2.setup(True)
+        return original_capability()
+
+    client_a1.capability = switch_away_and_back
+
+    with pytest.raises(WisdomConflict, match="superseded"):
+        enrollment_a1.setup(True)
+
+    assert client_a1.calls == [("capability", None)]
+    active = state.identity()
+    assert active is not None
+    assert active["owner"]["account_id"] == account_a1.account_id
+    installation_ids = {
+        active["installation_id"],
+        *(row["installation_id"] for row in state.read()["enrollment_history"]),
+    }
+    assert len(installation_ids) == 3
+
+
+def test_setup_stops_when_account_changes_during_capability_read(tmp_path: Path) -> None:
+    account, client, _state, enrollment = service(tmp_path)
+    original_capability = client.capability
+
+    def capability_then_switch():
+        result = original_capability()
+        account.account_id = "user-2"
+        return result
+
+    client.capability = capability_then_switch
+
+    with pytest.raises(WisdomAuthError, match="account changed during setup"):
+        enrollment.setup(True)
+    assert client.calls == [("capability", None)]
+
+
+def test_owner_switch_gets_an_independent_identity_conflict_retry(tmp_path: Path) -> None:
+    from hermes_wisdom_plugin.direct_services import DirectState, EnrollmentService
+
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    first_account = Account()
+    first_client = ConflictOnceClient()
+    first = EnrollmentService(state, first_account, first_client).setup(True)
+    first_identity = state.identity()
+    assert first_identity is not None
+    assert first_identity["conflict_rotated"] is True
+
+    second_account = Account()
+    second_account.account_id = "user-2"
+    second_account.organization_id = "org-2"
+    second_client = ConflictOnceClient()
+    switched = EnrollmentService(state, second_account, second_client).setup(True)
+
+    assert switched["configured"] is True
+    assert switched["installation_id"] != first["installation_id"]
+    assert [name for name, _value in second_client.calls] == [
+        "capability", "register", "register",
+    ]
+
+
 def test_direct_state_serializes_overlapping_process_writers(tmp_path: Path) -> None:
     context = multiprocessing.get_context("spawn")
     workers = [context.Process(target=_write_reviews, args=(str(tmp_path), prefix))
@@ -290,7 +430,6 @@ def test_setup_expiry_denies_new_effects_but_preserves_started_result(
     installed, started, expire_during_inspection,
 ):
     from hermes_wisdom_plugin.direct_services import DirectState, SetupService
-    from hermes_wisdom_plugin.errors import WisdomConflict
 
     installed_state, progress, inspection_host, _target = installed
     execution = SetupExecutionHost()
