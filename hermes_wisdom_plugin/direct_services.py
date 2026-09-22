@@ -91,7 +91,6 @@ class DirectState:
             "setup_progress": {},
             "notices": {
                 "cursor": None,
-                "next_poll_at": 0.0,
                 "has_more": False,
                 "offered": {},
             },
@@ -161,14 +160,6 @@ class DirectState:
 
     def notice_state(self) -> dict[str, Any]:
         return copy.deepcopy(self._load()["notices"])
-
-    def begin_notice_poll(self, now: float, *, interval: float) -> bool:
-        with self.change() as value:
-            notices = value["notices"]
-            if float(notices["next_poll_at"]) > now:
-                return False
-            notices["next_poll_at"] = now + interval
-            return True
 
     def finish_notice_poll(
         self, *, identity: dict[str, Any] | None, cursor: str | None,
@@ -1680,12 +1671,8 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             return operation, self.status(operation_id)
         return self._approve_ready(operation)
 
-    def _approve_ready(
-        self, operation: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        operation_id = operation["id"]
-        if operation.get("remote_state") != "ready":
-            return operation, None
+    def _require_approval_scan(self, operation: dict[str, Any]) -> None:
+        """Require a known verdict and exact acknowledgement of Gateway advisories."""
         verdict = operation.get("remote_scan_verdict")
         acceptance = operation.get("gateway_warning_acceptance")
         advisory_accepted = (
@@ -1697,9 +1684,17 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             verdict == "advisory" and not advisory_accepted
         ):
             self.state.update_publication(
-                operation_id, phase="policy_review_required", resume_phase="submitted"
+                operation["id"], phase="policy_review_required", resume_phase="submitted"
             )
             raise WisdomValidationError("Gateway scan verdict requires a fresh review")
+
+    def _approve_ready(
+        self, operation: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        operation_id = operation["id"]
+        if operation.get("remote_state") != "ready":
+            return operation, None
+        self._require_approval_scan(operation)
         if operation["phase"] == "approval_unknown":
             return operation, self._uncertain(
                 operation_id, "approval_unknown",

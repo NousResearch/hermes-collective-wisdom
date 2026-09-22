@@ -432,9 +432,16 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
     ] }) : null,
     jsxs('div', { className: 'flex justify-end gap-2', children: [
       jsx(Button, { disabled: busy, onClick: onCancel, size: 'sm', type: 'button', variant: 'secondary', children: cancelLabel || (isPublication ? 'Keep draft; do not share' : 'Cancel') }),
-      jsx(Button, { disabled: busy || problems.length > 0, loading: busy, onClick: onConfirm, size: 'sm', type: 'button', children: isPublication ? 'Share this exact reviewed package' : `Confirm ${kind}` })
+      jsx(Button, { disabled: busy || problems.length > 0, loading: busy, onClick: onConfirm, size: 'sm', type: 'button', children: isPublication ? 'Share this exact reviewed package' : kind === 'uninstall' ? 'Remove' : `Acknowledge and ${kind}` })
     ] })
   ] })
+}
+
+function operationSucceeded(kind, result, name) {
+  const key = { install: 'installed', update: 'updated', uninstall: 'uninstalled' }[kind]
+  return typeof name === 'string' && name.trim().length > 0 && result?.[key] === true &&
+    result.pending !== true && result.rejected !== true && !result.error &&
+    [undefined, null, 'completed', 'done', 'inactive'].includes(result.state)
 }
 
 function OperationOutcome({ kind, result }) {
@@ -475,17 +482,29 @@ function lifecycleFor(identity, gateway, manualGeneration, tracker) {
 
 function useCurrentMutation(client, lifecycle, operation, onSuccess, failureMessage, onFailure) {
   const currentRef = useRef(lifecycle)
+  const activeRef = useRef(false)
+  const mountedRef = useRef(true)
   currentRef.current = lifecycle
-  const isCurrent = token => client.active() && token.mounted() && currentRef.current.key === token.key &&
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const isCurrent = token => mountedRef.current && client.active() && token.mounted() && currentRef.current.key === token.key &&
     host.state.connectionId.get() === token.connectionId && host.state.profile.get() === token.profile
   return useMutation({
     retry: false,
     mutationFn: async variables => {
       const token = lifecycle
       if (!isCurrent(token)) throw Object.assign(new Error('This review is no longer current.'), { stale: true })
-      const result = await operation(variables, token)
-      if (!isCurrent(token)) throw Object.assign(new Error('This review is no longer current.'), { stale: true })
-      return { result, token }
+      if (activeRef.current) throw Object.assign(new Error('This action is already in progress.'), { stale: true })
+      activeRef.current = true
+      try {
+        const result = await operation(variables, token, isCurrent)
+        if (!isCurrent(token)) throw Object.assign(new Error('This review is no longer current.'), { stale: true })
+        return { result, token }
+      } finally {
+        activeRef.current = false
+      }
     },
     onSuccess: async payload => {
       if (isCurrent(payload.token)) await onSuccess(payload.result, payload.token, isCurrent)
@@ -547,18 +566,39 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   const catalog = useQuery(queryOptions(['catalog', lifecycle.key, search], () => client.rest(`/catalog?q=${encodeURIComponent(search.trim())}`)))
   const detail = useQuery(queryOptions(['detail', lifecycle.key, selected], () => client.rest(`/catalog/${encodeURIComponent(selected)}`), Boolean(selected)))
   const versions = useQuery(queryOptions(['versions', lifecycle.key, selected], () => client.rest(`/catalog/${encodeURIComponent(selected)}/versions`), Boolean(selected)))
-  const prepare = useCurrentMutation(client, lifecycle, selection => {
+  const prepare = useCurrentMutation(client, lifecycle, async (selection, token, isCurrent) => {
     const item = selection.item || selection
     const version = selection.version || versionOf(item)
     const action = selection.action || catalogAction(item)
-    const pending = action === 'update'
+    const prepared = await (action === 'update'
       ? client.rest('/update/review', { method: 'POST', body: requestBody(viewId, { skill_id: item.id, preserve_modified: true, accept_sensitive: false, accept_partial: false, accept_warnings: false }) })
-      : client.rest('/install/review', { method: 'POST', body: requestBody(viewId, { reference: version ? `${item.id}@v${version}` : item.id, accept_warnings: false }) })
-    return pending.then(result => ({ ...result, operation: action }))
-  }, (result, _token, _isCurrent) => {
+      : client.rest('/install/review', { method: 'POST', body: requestBody(viewId, { reference: version ? `${item.id}@v${version}` : item.id, accept_warnings: false }) }))
+    const review = { ...prepared, operation: action }
+    if (!isCurrent(token)) throw Object.assign(new Error('This review is no longer current.'), { stale: true })
+    if (reviewProblems(review, action).length) return { review }
+    const result = await client.rest(action === 'update' ? '/update/confirm' : '/install/confirm', {
+      method: 'POST', body: action === 'update'
+        ? requestBody(viewId, { receipt: review.receipt })
+        : requestBody(viewId, { receipt: review.receipt, accept_partial: false })
+    })
+    return { operation: action, result: { ...result, skill_name: review.slug || review.skill_name || item.slug || item.skill_name || item.name } }
+  }, async (payload, token, isCurrent) => {
     setOutcome(null)
     setAcknowledgements({ warnings: false, partial: false, sensitive: false })
-    setReview(result)
+    if (payload.review) {
+      setReview(payload.review)
+      return
+    }
+    const { operation, result } = payload
+    setReview(null)
+    if (operationSucceeded(operation, result, result?.skill_name)) {
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
+      await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
+      if (isCurrent(token)) host.notify({ kind: 'success', message: operation === 'update' ? `✅ ${result.skill_name} updated` : `✅ ${result.skill_name} installed` })
+    } else {
+      setOutcome({ operation, result: result || { state: 'unknown' } })
+    }
   }, 'Could not prepare the package review')
   const reReview = useCurrentMutation(client, lifecycle, async current => {
     const updating = current.operation === 'update'
@@ -572,18 +612,25 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     }
     return { ...next, operation: updating ? 'update' : 'install' }
   }, setReview, 'Could not bind the package acknowledgements')
-  const confirm = useCurrentMutation(client, lifecycle, async current => ({ operation: current.operation, result: await client.rest(current.operation === 'update' ? '/update/confirm' : '/install/confirm', {
-    method: 'POST', body: current.operation === 'update'
-      ? requestBody(viewId, { receipt: current.receipt })
-      : requestBody(viewId, { receipt: current.receipt, accept_partial: acknowledgements.partial })
-  }) }), async (payload, token, isCurrent) => {
-    const { operation, result } = payload
+  const confirm = useCurrentMutation(client, lifecycle, async current => ({
+    operation: current.operation,
+    skillName: current.slug || current.skill_name,
+    result: await client.rest(current.operation === 'update' ? '/update/confirm' : '/install/confirm', {
+      method: 'POST', body: current.operation === 'update'
+        ? requestBody(viewId, { receipt: current.receipt })
+        : requestBody(viewId, { receipt: current.receipt, accept_partial: acknowledgements.partial })
+    })
+  }), async (payload, token, isCurrent) => {
+    const { operation, result, skillName } = payload
+    const name = skillName || result?.skill_name || result?.slug
     setReview(null)
-    if ((operation === 'install' && result?.installed === true) || (operation === 'update' && result?.updated === true)) {
+    if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
       await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-      if (isCurrent(token)) host.notify({ kind: 'success', message: operation === 'update' ? 'Skill updated' : `Installed ${label(result)}` })
+      if (isCurrent(token)) {
+        host.notify({ kind: 'success', message: operation === 'update' ? `✅ ${name} updated` : `✅ ${name} installed` })
+      }
     } else {
       setOutcome({ operation, result: result || { state: 'unknown' } })
     }
@@ -692,17 +739,24 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
   const uninstall = useCurrentMutation(client, lifecycle, item => client.rest('/uninstall/review', {
     method: 'POST', body: requestBody(viewId, { skill_id: item.skill_id })
   }), value => { setOutcome(null); setReview({ ...value, operation: 'uninstall' }) }, 'Could not prepare the uninstall review')
-  const confirm = useCurrentMutation(client, lifecycle, async current => ({ operation: current.operation, result: await client.rest(current.operation === 'uninstall' ? '/uninstall/confirm' : '/update/confirm', {
-    method: 'POST', body: current.operation === 'uninstall'
-      ? requestBody(viewId, { review_id: current.review_id })
-      : requestBody(viewId, { receipt: current.receipt })
-  }) }), async (payload, token, isCurrent) => {
-    const { operation, result } = payload
+  const confirm = useCurrentMutation(client, lifecycle, async current => ({
+    operation: current.operation,
+    skillName: current.slug || current.skill_name || current.installation?.slug || current.installation?.skill_name,
+    result: await client.rest(current.operation === 'uninstall' ? '/uninstall/confirm' : '/update/confirm', {
+      method: 'POST', body: current.operation === 'uninstall'
+        ? requestBody(viewId, { review_id: current.review_id })
+        : requestBody(viewId, { receipt: current.receipt })
+    })
+  }), async (payload, token, isCurrent) => {
+    const { operation, result, skillName } = payload
     setReview(null)
-    const succeeded = operation === 'uninstall' ? result?.uninstalled === true : result?.updated === true
-    if (succeeded) {
+    const name = skillName || result?.skill_name || result?.slug
+    if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-      if (isCurrent(token)) host.notify({ kind: 'success', message: operation === 'uninstall' ? 'Skill removed' : 'Skill updated' })
+      if (isCurrent(token)) host.notify({
+        kind: 'success',
+        message: operation === 'uninstall' ? `✅ ${name} removed` : `✅ ${name} updated`
+      })
     } else {
       setOutcome({ ...(result || { state: 'unknown' }), kind: operation })
     }

@@ -177,14 +177,17 @@ test('completed turns request one best-effort notice and use native notification
   assert.equal(notice.message, 'Collective Wisdom: Useful helper is available. Open Wisdom to review.')
 })
 
-async function renderPage(loaded) {
+async function renderPage(loaded, { strict = false } = {}) {
   const container = document.createElement('div')
   document.body.append(container)
   const route = loaded.calls.registrations.find(item => item.area === 'routes')
   assert.ok(route, 'route contribution should be registered')
   const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0, retry: false }, mutations: { gcTime: 0, retry: false } } })
   const root = createRoot(container)
-  await act(async () => { root.render(React.createElement(QueryClientProvider, { client }, route.render())) })
+  await act(async () => {
+    const page = React.createElement(QueryClientProvider, { client }, route.render())
+    root.render(strict ? React.createElement(React.StrictMode, null, page) : page)
+  })
   await settle()
   return {
     container,
@@ -301,7 +304,7 @@ function baseHandler(path, options, owner) {
 
 const button = (mounted, name) => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
 
-test('desktop slash dialog browses, views, reviews, and confirms an exact install', async () => {
+test('desktop slash dialog views read-only details and installs in one click', async () => {
   let catalogReads = 0
   let detailReads = 0
   const loaded = await loadPlugin((path, options, owner) => {
@@ -342,15 +345,51 @@ test('desktop slash dialog browses, views, reviews, and confirms an exact instal
   await click(button(mounted, 'View'))
   assert.match(mounted.container.textContent, /Useful skill/)
   assert.ok(button(mounted, 'Back'))
-  await click(button(mounted, 'Install'))
-  assert.match(mounted.container.textContent, /install review/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/review'), false)
   assert.equal(loaded.calls.rest.some(([path]) => path === '/install/confirm'), false)
-  await click(button(mounted, 'Confirm install'))
+  await click(button(mounted, 'Install'))
 
   assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
   assert.ok(catalogReads >= 2, 'successful install should refresh visible catalog status')
   assert.ok(detailReads >= 2, 'successful install should refresh the visible detail status')
   assert.match(mounted.container.textContent, /Installed v2/)
+  await mounted.cleanup()
+})
+
+for (const strict of [false, true]) test(`desktop clean install has no second confirmation (strict=${strict})`, async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview({
+      receipt: 'receipt-hidden-by-default',
+      content_hash: hash('e'),
+      manifest_hash: hash('f'),
+      hashes: { content: hash('e'), manifest: hash('f') }
+    })
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', version: 2 }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded, { strict })
+
+  await click(button(mounted, 'Install'))
+
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/review').length, 1)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.doesNotMatch(mounted.container.textContent, /receipt-hidden-by-default/)
+  assert.doesNotMatch(mounted.container.textContent, new RegExp(hash('e')))
+  assert.equal(button(mounted, 'Confirm install'), undefined)
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one installed')
+  await mounted.cleanup()
+})
+
+for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`desktop refuses contradictory install success ${JSON.stringify(contradiction)}`, async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview()
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', ...contradiction }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Install'))
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.match(mounted.container.textContent, /Install requires attention/)
   await mounted.cleanup()
 })
 
@@ -382,9 +421,6 @@ for (const updated of [true, false]) test(`desktop slash dialog handles ${update
   assert.match(mounted.container.textContent, /Installed v1 · Update available v2/)
   assert.equal(button(mounted, 'Install'), undefined)
   await click(button(mounted, 'Update'))
-  assert.match(mounted.container.textContent, /update review/)
-  assert.equal(loaded.calls.rest.some(([path]) => path === '/update/confirm'), false)
-  await click(button(mounted, 'Confirm update'))
   assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/confirm').length, 1)
   if (!updated) {
     assert.match(mounted.container.textContent, /Update requires attention/)
@@ -530,7 +566,7 @@ test('slash dialog uses theme-aware SDK classes in light and dark themes', async
   await mounted.cleanup()
 })
 
-test('registers the native page and performs catalog search, details, exact install review, and confirmation', async () => {
+test('registers the native page and performs a checked one-click install', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/install/review') {
       assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', reference: 'skill-1@v2', accept_warnings: false })
@@ -555,13 +591,9 @@ test('registers the native page and performs catalog search, details, exact inst
   assert.match(mounted.container.textContent, /withdrawn/)
 
   await click(button(mounted, 'Install'))
-  assert.match(mounted.container.textContent, new RegExp(hash('a')))
-  assert.match(mounted.container.textContent, /Hermes >= 0.16/)
-  assert.match(mounted.container.textContent, /Server security checks passed/)
-  assert.match(mounted.container.textContent, /Model review was not requested/)
-  assert.match(mounted.container.textContent, /Local scanner passed/)
-  assert.match(mounted.container.textContent, /SKILL\.md/)
-  await click(button(mounted, 'Confirm install'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/review').length, 1)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.equal(button(mounted, 'Confirm install'), undefined)
   assert.equal(loaded.calls.notify.at(-1)?.kind, 'success')
   assert.equal(loaded.calls.rest.some(([path]) => path.startsWith('/views/') && path !== '/views'), false, 'must not DELETE an old view through a newly routed ctx.rest')
   await mounted.cleanup()
@@ -648,7 +680,7 @@ test('unknown required install review fields fail closed', async () => {
   await click(button(mounted, 'Install'))
   assert.match(mounted.container.textContent, /confirmation blocked/)
   assert.match(mounted.container.textContent, /Compatibility evaluation is unavailable/)
-  assert.equal(button(mounted, 'Confirm install').disabled, true)
+  assert.equal(button(mounted, 'Acknowledge and install').disabled, true)
   await mounted.cleanup()
 })
 
@@ -659,12 +691,16 @@ test('catalog version history selects an exact published version for install rev
       assert.equal(options.body.reference, 'skill-1@v1')
       return installReview({ version: 1, receipt: 'install-v1' })
     }
+    if (path === '/install/confirm') {
+      assert.equal(options.body.receipt, 'install-v1')
+      return { installed: true, skill_id: 'skill-1', version: 1 }
+    }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
   await click(button(mounted, 'View'))
   await click(button(mounted, 'Install v1'))
-  assert.match(mounted.container.textContent, /install-v1/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
   await mounted.cleanup()
 })
 
@@ -701,14 +737,14 @@ test('install collects exact warning and partial acknowledgements before confirm
   await click(button(mounted, 'Install'))
   assert.match(mounted.container.textContent, /Requires setup before use/)
   assert.match(mounted.container.textContent, /Review host/)
-  assert.equal(button(mounted, 'Confirm install').disabled, true)
+  assert.equal(button(mounted, 'Acknowledge and install').disabled, true)
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge install scanner warnings"]'))
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept install partial compatibility"]'))
   await click(button(mounted, 'Review with acknowledgements'))
   assert.match(mounted.container.textContent, /install-after-acks/)
-  assert.equal(button(mounted, 'Confirm install').disabled, false)
-  await click(button(mounted, 'Confirm install'))
-  assert.equal(loaded.calls.notify.at(-1)?.message, 'Installed skill-1')
+  assert.equal(button(mounted, 'Acknowledge and install').disabled, false)
+  await click(button(mounted, 'Acknowledge and install'))
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one installed')
   await mounted.cleanup()
 })
 
@@ -758,15 +794,15 @@ test('update re-review binds warning partial sensitive and preservation acknowle
   assert.match(mounted.container.textContent, /new network destinations/)
   assert.match(mounted.container.textContent, /Review update host/)
   assert.match(mounted.container.textContent, /preserve_unmanaged_copy/)
-  assert.equal(button(mounted, 'Confirm update').disabled, true)
+  assert.equal(button(mounted, 'Acknowledge and update').disabled, true)
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge update scanner warnings"]'))
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept update partial compatibility"]'))
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept update sensitive capability expansion"]'))
   await click(button(mounted, 'Review with acknowledgements'))
   assert.match(mounted.container.textContent, /update-after-acks/)
-  assert.equal(button(mounted, 'Confirm update').disabled, false)
-  await click(button(mounted, 'Confirm update'))
-  assert.equal(loaded.calls.notify.at(-1)?.message, 'Skill updated')
+  assert.equal(button(mounted, 'Acknowledge and update').disabled, false)
+  await click(button(mounted, 'Acknowledge and update'))
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one updated')
   await mounted.cleanup()
 })
 
@@ -788,8 +824,8 @@ test('uninstall requires the exact installed snapshot and confirms its review id
   await click(button(mounted, 'Uninstall'))
   assert.match(mounted.container.textContent, /Installed snapshot to remove/)
   assert.match(mounted.container.textContent, new RegExp(hash('0')))
-  await click(button(mounted, 'Confirm uninstall'))
-  assert.equal(loaded.calls.notify.at(-1)?.message, 'Skill removed')
+  await click(button(mounted, 'Remove'))
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one removed')
   await mounted.cleanup()
 })
 
@@ -801,10 +837,27 @@ test('pending install outcome keeps operation identity and is never announced as
   })
   const mounted = await renderPage(loaded)
   await click(button(mounted, 'Install'))
-  await click(button(mounted, 'Confirm install'))
   assert.match(mounted.container.textContent, /op-install-1/)
   assert.match(mounted.container.textContent, /Check its status before trying again/)
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  await mounted.cleanup()
+})
+
+test('desktop success notifications use the reviewed human name for completed removal', async () => {
+  const installation = { skill_id: 'skill-1', slug: 'one', version: 1, content_hash: hash('0'), target_path: '/tmp/managed/one' }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap') return { ...bootstrap, installations: [installation] }
+    if (path === '/uninstall/review') return { review_id: 'uninstall-review', installation }
+    if (path === '/uninstall/confirm') return { uninstalled: true, skill_id: 'skill-1' }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+
+  await click(button(mounted, 'Installed'))
+  await click(button(mounted, 'Uninstall'))
+  await click(button(mounted, 'Remove'))
+
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one removed')
   await mounted.cleanup()
 })
 
@@ -1327,15 +1380,18 @@ test('A-B-A profile changes suppress a late review and open a fresh generation',
   resolveOld(installReview({ receipt: 'stale-A-review' }))
   await settle()
   assert.doesNotMatch(mounted.container.textContent, /stale-A-review/)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/confirm'), false)
   const currentGeneration = mounted.container.textContent.match(/generation (\d+)/)[1]
   assert.ok(Number(currentGeneration) > Number(firstGeneration))
   assert.ok(loaded.calls.rest.filter(([path]) => path === '/views').length >= 3)
   await mounted.cleanup()
 })
 
-test('profile replacement clears an already-visible exact review', async () => {
+test('profile replacement clears an already-visible exceptional review', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
-    if (path === '/install/review') return installReview({ receipt: `review-${owner.profile}` })
+    if (path === '/install/review') return installReview({
+      receipt: `review-${owner.profile}`, allowed: false, permitted_actions: ['recheck']
+    })
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)

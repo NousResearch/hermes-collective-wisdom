@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from importlib import import_module
+import logging
 import re
 import threading
 import time
@@ -18,8 +19,14 @@ from .native_review import NativeReviewController, parse_callback
 from .review_state import ReviewState
 
 
+logger = logging.getLogger(__name__)
+
+
 def _message_id(response: Any, *, platform: str, chat_id: str) -> str:
     """Extract the exact posted message identity from real Slack/Telegram SDK shapes."""
+    # Slack SDK responses expose their payload through .data, not .ts attributes.
+    if platform == "slack" and isinstance(getattr(response, "data", None), dict):
+        response = response.data
     if isinstance(response, dict):
         result = response.get("result")
         payload: dict[str, Any] = result if isinstance(result, dict) else response
@@ -64,6 +71,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         self._closed = False
         self._native: dict[tuple[str, int], Any] = {}
         self._leases: dict[tuple[str, int], object] = {}
+        self._loops: dict[tuple[str, int], asyncio.AbstractEventLoop] = {}
         self._turns: dict[
             tuple[str, str], tuple[float, NativeInvocation, dict[str, str], object]
         ] = {}
@@ -81,6 +89,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             self._closed = True
             self._native.clear()
             self._leases.clear()
+            self._loops.clear()
             self._turns.clear()
             self._local_tools.clear()
 
@@ -193,24 +202,107 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             grant = self._turns.pop(key, None)
         if grant is None or grant[0] < time.monotonic() or self._closed:
             return {"supported": False, "offered": 0, "polled": False}
-        invocation = grant[1]
-        service = self.service_factory()
-
-        def render(rows: list[dict[str, Any]]) -> None:
-            coroutine = self._send_notice(invocation, rows, expected_owner=grant[2])
-            if self._closed:
-                coroutine.close()
-                return
-            self.spawn_task(coroutine, name=f"wisdom-notice:{invocation.session_key}")
-
+        invocation, expected_owner, token = grant[1], grant[2], grant[3]
+        route = (invocation.platform, id(invocation.adapter))
+        with self._lock:
+            native = self._native.get(route)
+            loop = self._loops.get(route)
+        if (
+            native is None or loop is None or loop.is_closed()
+            or not self._notice_route_current(invocation, native, token, loop)
+        ):
+            return {"supported": False, "offered": 0, "polled": False, "scheduled": False}
         try:
-            return service.end_turn_notices(render)
+            loop.call_soon_threadsafe(
+                self._schedule_notice_poll,
+                invocation, expected_owner, native, token, loop,
+            )
+        except RuntimeError:
+            return {"supported": False, "offered": 0, "polled": False, "scheduled": False}
+        return {"supported": True, "offered": 0, "polled": False, "scheduled": True}
+
+    def _notice_route_current(
+        self, invocation: NativeInvocation, native: Any, token: object,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        route = (invocation.platform, id(invocation.adapter))
+        with self._lock:
+            current = (
+                not self._closed
+                and self._leases.get(route) is token
+                and self._native.get(route) is native
+                and self._loops.get(route) is loop
+            )
+        if not current or not loop.is_running() or invocation.profile != self.profile_name:
+            return False
+        try:
+            return adapter_profile(invocation.adapter) == self.profile_name
+        except PermissionError:
+            return False
+
+    def _schedule_notice_poll(
+        self, invocation: NativeInvocation, expected_owner: dict[str, str],
+        native: Any, token: object, loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Create the supervised task only from the adapter's owning event loop."""
+        if not self._notice_route_current(invocation, native, token, loop):
+            return
+        coroutine = self._run_notice_poll(
+            invocation, expected_owner, native=native, token=token, loop=loop,
+        )
+        try:
+            self.spawn_task(coroutine, name=f"wisdom-notice:{invocation.session_key}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            coroutine.close()
+
+    def _poll_notice_rows(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        rows: list[dict[str, Any]] = []
+        service = self.service_factory()
+        try:
+            result = service.end_turn_notices(rows.extend)
+            return result, rows
+        finally:
+            service.close()
+
+    async def _run_notice_poll(
+        self, invocation: NativeInvocation, expected_owner: dict[str, str], *,
+        native: Any, token: object, loop: asyncio.AbstractEventLoop,
+    ) -> dict[str, Any]:
+        """Preflight, poll off-loop, then render on the adapter's loop."""
+        if not self._notice_route_current(invocation, native, token, loop):
+            return {"supported": False, "offered": 0, "polled": False}
+        owner_current = await asyncio.to_thread(self._post_owner_current, expected_owner)
+        if (
+            not owner_current
+            or not self._notice_route_current(invocation, native, token, loop)
+        ):
+            return {"supported": False, "offered": 0, "polled": False}
+        result, rows = await asyncio.to_thread(self._poll_notice_rows)
+        if rows and self._notice_route_current(invocation, native, token, loop):
+            await self._send_notice(
+                invocation, rows, expected_owner=expected_owner,
+                route_authority=lambda: self._notice_route_current(
+                    invocation, native, token, loop
+                ),
+            )
+        return result
+
+    def _build_notice_review(
+        self, invocation: NativeInvocation, row: dict[str, Any],
+        expected_owner: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        service = self.service_factory()
+        try:
+            if expected_owner is not None and service.native_owner() != expected_owner:
+                raise PermissionError("Collective Wisdom notice ownership changed")
+            return self._notice_review(service, invocation, row)
         finally:
             service.close()
 
     async def _send_notice(
         self, invocation: NativeInvocation, rows: list[dict[str, Any]], *,
         expected_owner: dict[str, str] | None = None,
+        route_authority: Callable[[], bool] | None = None,
     ) -> None:
         # Existing policy/preferences already selected this bounded best-effort batch.
         # Reuse the explicit review route; no jobs, delivery claims or retry queue.
@@ -218,12 +310,20 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             return
         for row in rows:
             try:
-                self._begin(
-                    invocation,
-                    lambda service, row=row: self._notice_review(service, invocation, row),
-                    expected_owner=expected_owner,
+                if route_authority is not None and route_authority() is not True:
+                    return
+                record = await asyncio.to_thread(
+                    self._build_notice_review, invocation, row, expected_owner,
                 )
-            except Exception:  # pylint: disable=broad-exception-caught
+                if route_authority is not None and route_authority() is not True:
+                    return
+                await self._post_review(
+                    invocation, record, route_authority=route_authority,
+                )
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Collective Wisdom native notice failed (%s)", type(exc).__name__,
+                )
                 continue  # A missed notice must not fail the owning turn.
 
     def _notice_review(self, service: Any, invocation: NativeInvocation, row: dict[str, Any]):
@@ -244,10 +344,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             return None
 
     def _lease(self, platform: str, native: Any, adapter: Any) -> object:
+        loop = asyncio.get_running_loop()
         token = object()
         with self._lock:
             self._native[(platform, id(adapter))] = native
             self._leases[(platform, id(adapter))] = token
+            self._loops[(platform, id(adapter))] = loop
         return token
 
     def _check_lease(self, platform: str, adapter: Any, token: object) -> None:
@@ -289,7 +391,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                         channel=invocation.chat_id, ts=invocation.message_id,
                         text=view.to_text(), blocks=blocks(view, record_id),
                     )
-            except Exception:  # pylint: disable=broad-exception-caught
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Collective Wisdom Slack callback failed (%s)", type(exc).__name__,
+                )
                 return
 
         native.action(re.compile(r"^wisdom_native_[a-z0-9_]+_\d+$"))(callback)
@@ -372,13 +477,16 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         except Exception:  # pylint: disable=broad-exception-caught
             return
 
-    async def _post_review(self, invocation: NativeInvocation, record: dict[str, Any]) -> None:
-        service = self.service_factory()
-        try:
-            if service.native_owner() != record["owner"]:
-                return
-        finally:
-            service.close()
+    async def _post_review(
+        self, invocation: NativeInvocation, record: dict[str, Any], *,
+        route_authority: Callable[[], bool] | None = None,
+    ) -> None:
+        if route_authority is not None and route_authority() is not True:
+            return
+        if not await asyncio.to_thread(self._post_owner_current, record["owner"]):
+            return
+        if route_authority is not None and route_authority() is not True:
+            return
         view = self.reviews.view(record)
         native = self._native.get((invocation.platform, id(invocation.adapter)))
         if native is None:
@@ -426,7 +534,11 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if self._closed:
             coroutine.close()
             return {"state": "unavailable"}
-        self.spawn_task(coroutine, name=f"wisdom-review:{invocation.session_key}")
+        try:
+            self.spawn_task(coroutine, name=f"wisdom-review:{invocation.session_key}")
+        except Exception:
+            coroutine.close()
+            raise
         return {"state": "queued", "review_id": record["id"]}
 
     def begin_install_modes(self, invocation: NativeInvocation, reference: str):

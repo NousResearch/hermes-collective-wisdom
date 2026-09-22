@@ -1,6 +1,7 @@
 """Offline SDK harness invoking the registered Slack callback."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
 # pylint: disable=protected-access
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
         self.deletes = []
         self.tasks = []
         self.handler = None
+        self.post_response = None
         self.client = self
         self.adapter = SimpleNamespace(
             _owner_profile="default",
@@ -29,7 +31,15 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
             root, "default", lambda: service, None,
             lambda coro, **_kw: self.tasks.append(coro), installed_state=JsonState(root),
         )
-        self.runtime.wire_slack(self, self.adapter)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            async def wire():
+                self.runtime.wire_slack(self, self.adapter)
+
+            asyncio.run(wire())
+        else:
+            self.runtime.wire_slack(self, self.adapter)
 
     def action(self, _pattern):
         def register(handler):
@@ -39,6 +49,10 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
 
     async def chat_postMessage(self, **payload):  # pylint: disable=invalid-name
         self.posts.append(payload)
+        if callable(self.post_response):
+            return self.post_response(payload)
+        if self.post_response is not None:
+            return self.post_response
         return {"channel": "D1", "ts": "card-1"}
 
     async def chat_update(self, **payload):
@@ -54,9 +68,10 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
             await self.tasks.pop(0)
 
     async def click(self, record_id, action, **changes):
+        message_id = self.record(record_id).get("message_id") or "card-1"
         body = {
             "user": {"id": "U1"}, "channel": {"id": "D1"},
-            "team": {"id": "W1"}, "message": {"ts": "card-1"},
+            "team": {"id": "W1"}, "message": {"ts": message_id},
         }
         body.update(changes)
 

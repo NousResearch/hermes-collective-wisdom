@@ -42,10 +42,11 @@ authorization timing remains unchanged.
 
 ## Notice behavior
 
-A supported end-turn handler may poll a bounded feed after a cooldown and render one
+A supported end-turn handler checks a bounded feed on each eligible turn and renders one
 deterministic notice. Failure preserves the cursor and cannot fail the agent turn.
-Missing renderers are successful no-ops. A missed notice stays missed. A click opens an
-explicit review and never approves installation, update, setup, or publication.
+Missing renderers are successful no-ops. A missed notice stays missed. View opens
+read-only details; an explicit Install action authorizes checked installation.
+Notification delivery alone never approves an effect, and setup remains separate.
 
 Plain CLI/TUI chat and unsupported clients receive no proactive notice. Explicit
 catalog, contribution, install, publish, settings, and recovery commands remain.

@@ -474,6 +474,7 @@ class InstallExecutor:
         result = {
             "uninstalled": True,
             "skill_id": payload["skill_id"],
+            "slug": payload["slug"],
             "state": state,
             "recoverable_path": str(trash),
         }
@@ -520,6 +521,7 @@ class InstallExecutor:
         return {
             "installed": True,
             "skill_id": payload["skill_id"],
+            "slug": payload["slug"],
             "version": int(payload["version"]),
             "path": str(target),
             "content_hash": payload["content_hash"],
@@ -541,6 +543,7 @@ class InstallExecutor:
             "operation_id": operation_id,
             "receipt": payload.get("receipt"),
             "skill_id": payload["skill_id"],
+            "slug": payload["slug"],
             "phase": "local_ledger_committed",
             "retry": "uninstall" if uninstall else "apply",
             "files_installed": not uninstall,

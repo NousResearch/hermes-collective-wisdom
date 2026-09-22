@@ -346,6 +346,40 @@ def render_action_review(kind: str, value: object) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def render_operation_outcome(
+    kind: str, value: object, *, skill_name: str | None = None
+) -> str:
+    """Render a terse success only for a completed file operation."""
+
+    data = value if isinstance(value, dict) else {}
+    completed = {
+        "install": "installed",
+        "update": "updated",
+        "uninstall": "uninstalled",
+    }
+    key = completed.get(kind)
+    raw_name = skill_name or data.get("skill_name") or data.get("slug")
+    name = text(raw_name) if isinstance(raw_name, str) else ""
+    complete = (
+        data.get("pending") is not True and data.get("rejected") is not True
+        and not data.get("error")
+        and data.get("state") in (None, "completed", "done", "inactive")
+    )
+    if key and name and complete and data.get(key) is True:
+        verb = "removed" if kind == "uninstall" else key
+        return f"✅ {name} {verb}"
+    if data.get("pending") is True:
+        state = "pending"
+    elif data.get("rejected") is True:
+        state = "rejected"
+    else:
+        state = text(data.get("state") or "unknown")
+    detail = data.get("detail") or data.get("error")
+    return f"{name or 'This skill'}: {state}" + (
+        f" — {text(detail, limit=1024)}" if detail else ""
+    )
+
+
 def _requirements_summary(requirements: dict[str, Any]) -> str:
     parts: list[str] = []
     hermes = requirements.get("hermes")

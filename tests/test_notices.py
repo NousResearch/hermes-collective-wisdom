@@ -122,7 +122,7 @@ def test_feed_cursor_waits_until_every_row_in_an_oversized_page_is_consumed(tmp_
     assert checkpoint["cursor"] is None
     assert checkpoint["has_more"] is True
 
-    clock[0] += 601
+    clock[0] += 1
     second = client.run(renderer=shown.extend)
     checkpoint = DirectState(JsonState(tmp_path), tmp_path).notice_state()
     assert second["offered"] == 1
@@ -181,17 +181,24 @@ def test_failed_feed_preserves_cursor_and_never_breaks_turn(tmp_path: Path):
     assert result["offered"] == 0
     assert result["error"] == "RuntimeError"
     assert state.notice_state()["cursor"] == "saved"
+    service.fail = False
+    service.pages.append(Page([event()], "recovered", False))
+    shown = []
+    recovered = EndTurnNotices(state, lambda: service, clock=lambda: now[0]).run(
+        renderer=shown.extend
+    )
+    assert recovered["polled"] is True
+    assert recovered["offered"] == 1
+    assert state.notice_state()["cursor"] == "recovered"
 
 
-def test_poll_interval_and_owner_local_dedup_prevent_repeated_notice(tmp_path: Path):
+def test_each_turn_polls_but_owner_local_dedup_prevents_repeated_notice(tmp_path: Path):
     service = Service([Page([event()], "cursor-1", False), Page([event()], "cursor-2", False)])
     now = [1000.0]
     rendered = []
     client = notices(tmp_path, service, now)
     client.run(renderer=rendered.extend)
-    assert client.run(renderer=rendered.extend)["polled"] is False
-    now[0] += 601
-    client.run(renderer=rendered.extend)
+    assert client.run(renderer=rendered.extend)["polled"] is True
     assert [item["event_id"] for item in rendered] == ["event-1"]
 
 
@@ -203,30 +210,58 @@ def test_file_backed_offer_marker_survives_end_turn_runner_restart(tmp_path: Pat
     rendered = []
 
     notices(tmp_path, service, [1000.0]).run(renderer=rendered.extend)
-    restarted = notices(tmp_path, service, [1600.0])
+    restarted = notices(tmp_path, service, [1000.0])
     result = restarted.run(renderer=rendered.extend)
 
     assert result["offered"] == 0
     assert [item["event_id"] for item in rendered] == ["event-1"]
 
 
-def test_feed_poll_is_due_at_exactly_600_seconds(tmp_path: Path):
+@pytest.mark.parametrize("saved_deadline", [None, 999999.0])
+def test_new_event_is_offered_on_next_turn_after_empty_poll(tmp_path: Path, saved_deadline):
     service = Service([
-        Page([event("first")], "cursor-1", False),
-        Page([event("second")], "cursor-2", False),
+        Page([], "cursor-1", False),
+        Page([event("fresh")], "cursor-2", False),
     ])
     now = [1000.0]
     client = notices(tmp_path, service, now)
+    if saved_deadline is not None:
+        with client.state.change() as value:
+            value["notices"]["next_poll_at"] = saved_deadline
+    shown = []
 
-    assert client.run(renderer=lambda _rows: None)["polled"] is True
-    now[0] = 1599.999
-    assert client.run(renderer=lambda _rows: None)["polled"] is False
-    now[0] = 1600.0
-    assert client.run(renderer=lambda _rows: None)["polled"] is True
+    assert client.run(renderer=shown.extend)["polled"] is True
+    assert not shown
+    now[0] += 1
+    result = client.run(renderer=shown.extend)
+    assert result["polled"] is True
+    assert result["offered"] == 1
+    assert [row["event_id"] for row in shown] == ["fresh"]
     assert [call for call in service.calls if isinstance(call, tuple) and call[0] == "feed"] == [
         ("feed", None),
         ("feed", "cursor-1"),
     ]
+
+
+def test_overlapping_poll_is_skipped_and_next_turn_is_not_delayed(tmp_path: Path):
+    second_service = Service([Page([event()], "cursor-2", False)])
+    second = notices(tmp_path, second_service, [1000.0])
+    first_service = Service()
+    shown = []
+
+    def overlapping_feed(cursor):
+        assert cursor is None
+        result = second.run(renderer=shown.extend)
+        assert result["polled"] is False
+        assert not second_service.calls
+        return Page([event()], "cursor-1", False)
+
+    first_service.notice_feed = overlapping_feed
+    first = notices(tmp_path, first_service, [1000.0])
+    assert first.run(renderer=shown.extend)["offered"] == 1
+    assert second.run(renderer=shown.extend)["polled"] is True
+    assert [row["event_id"] for row in shown] == ["event-1"]
+    assert second.state.notice_state()["cursor"] == "cursor-2"
 
 
 def test_notice_payload_is_only_given_to_renderer_not_history(tmp_path: Path):
@@ -303,7 +338,7 @@ def test_uncertain_renderer_failure_is_marked_and_never_resent(tmp_path: Path):
         "feed:event-1": 1000.0
     }
 
-    clock[0] += 600
+    clock[0] += 1
     second = client.run(renderer=attempts.extend)
     assert second["offered"] == 0
     assert [row["event_id"] for row in attempts] == ["event-1"]
@@ -528,7 +563,7 @@ def test_previously_offered_candidates_do_not_starve_new_revision(tmp_path):
     client = EndTurnNotices(DirectState(JsonState(tmp_path), tmp_path), lambda: service,
                            clock=lambda: clock[0])
     client.run(renderer=shown.extend)
-    clock[0] += 601
+    clock[0] += 1
     client.run(renderer=shown.extend)
     assert 'local-8' in [row['local_skill_id'] for row in shown]
 
@@ -639,8 +674,8 @@ def test_notice_category_settings_are_independent(setting, expected):
     assert service.notice_policy() == expected
 
 
-def test_new_candidate_is_checked_between_feed_polls(tmp_path):
-    service = Service([Page([], None, False)])
+def test_new_candidate_is_checked_on_the_next_turn(tmp_path):
+    service = Service([Page([], None, False), Page([], None, False)])
     clock = [1000.0]
     client = notices(tmp_path, service, clock)
     shown = []
@@ -651,8 +686,8 @@ def test_new_candidate_is_checked_between_feed_polls(tmp_path):
     })
     clock[0] += 1
     result = client.run(renderer=shown.extend)
-    assert result['polled'] is False
+    assert result['polled'] is True
     assert [row['local_skill_id'] for row in shown] == ['fresh']
     assert [call for call in service.calls if isinstance(call, tuple) and call[0] == 'feed'] == [
-        ('feed', None)
+        ('feed', None), ('feed', None)
     ]
