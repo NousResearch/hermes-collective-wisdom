@@ -41,6 +41,7 @@ from .terminal_ui import (
     render_file_preview as _render_file_preview,
     render_findings as _render_findings,
     render_inventory as _render_inventory,
+    render_operation_outcome as _render_operation_outcome,
     render_read_command as _render_read_command,
     review_identity as _review_identity,
     safe_scan_details as _safe_scan_details,
@@ -634,7 +635,7 @@ def _read_prepared_payload(  # pylint: disable=too-many-branches
 
 
 def _install_cli(args, service):  # pylint: disable=too-many-return-statements
-    """Reference CLI plan/apply contract; a JSON review never implies approval."""
+    """Apply an explicit clean install command; keep plan and receipt APIs explicit."""
     if args.apply_receipt:
         if args.reference or args.plan or args.update_mode is not None or args.accept_warnings:
             raise PackagePolicyError(
@@ -648,17 +649,19 @@ def _install_cli(args, service):  # pylint: disable=too-many-return-statements
         update_mode=args.update_mode,
         accept_warnings=bool(args.accept_warnings),
     )
-    if args.plan or args.json:
+    if args.plan:
         return plan
-    _emit(plan, as_json=False, command="install")
-    if not sys.stdin.isatty():
-        raise PackagePolicyError("noninteractive install requires --plan then --apply-receipt")
     if _has_reviewable_warnings(plan) and not args.accept_warnings:
         scan = plan.get("local_scan") if isinstance(plan, dict) else None
         if not _safe_scan_details(scan):
             raise PackagePolicyError(
                 "scanner warning details are unavailable; create a new review before installing"
             )
+        if args.json or not sys.stdin.isatty():
+            raise PackagePolicyError(
+                "install has scanner warnings; inspect --plan and explicitly use --accept-warnings"
+            )
+        _emit(plan, as_json=False, command="install")
         answer = input(
             "Acknowledge the displayed scanner warnings for this exact install? [y/N] "
         )
@@ -676,11 +679,10 @@ def _install_cli(args, service):  # pylint: disable=too-many-return-statements
             if answer.strip().casefold() not in {"y", "yes"}:
                 return None
     if isinstance(plan, dict) and plan.get("allowed") is False:
-        print("Installation remains blocked; create a new plan with the listed acknowledgements.")
-        return None
-    answer = input("Apply this exact reviewed install plan? [y/N] ")
-    if answer.strip().lower() not in {"y", "yes"}:
-        return None
+        raise PackagePolicyError(
+            "installation is blocked; inspect --plan and provide the listed "
+            "specific acknowledgement"
+        )
     return service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
 
 
@@ -770,14 +772,14 @@ def _installed_setup_cli(args, service):
 
 def _terminal_handoff(command):
     instructions = {
-        "install": "hermes wisdom install <skill-id> --plan",
+        "install": "hermes wisdom install <skill-id>",
         "installed": "hermes wisdom installed",
         "check": "hermes wisdom check <skill-id>",
         "update": "hermes wisdom update <skill-id> --plan",
         "installed-setup": "hermes wisdom installed-setup inspect <skill-id>",
         "uninstall": "hermes wisdom uninstall <skill-id>",
     }
-    return ("Use the terminal for private installation review and confirmation.\n\n"
+    return ("Use the terminal for this private Wisdom action.\n\n"
             f"Run `{instructions[command]}`. Nothing has been changed.")
 
 
@@ -971,6 +973,12 @@ def _human_render(  # pylint: disable=too-many-return-statements
         "receipt"
     ):
         return _render_publication_outcome(data)
+    if command in {"install", "update"} and (
+        data.get("installed") is True or data.get("updated") is True
+    ):
+        return _render_operation_outcome(command, data)
+    if command == "uninstall" and data.get("uninstalled") is True:
+        return _render_operation_outcome(command, data)
     if command in {"publication", "install", "update", "installed-setup"}:
         return _render_action_review(command, value)
     return _render_read_command(command, value)

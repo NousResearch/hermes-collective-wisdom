@@ -66,9 +66,9 @@ action.
 Supported private Desktop and messaging routes may check for a notice at turn end.
 There is no proactive notice for plain CLI/TUI chat or unsupported clients.
 
-A check first requires a renderer, then uses the owner-local cooldown, performs one
-bounded cursor-based feed request, combines eligible local qualified candidates, and
-reads current policy, mute, and suppression. It offers at most one deterministic
+Each eligible completed turn checks one bounded cursor-based feed page, combines
+eligible local qualified candidates, and reads current policy, mute, and suppression.
+It offers at most one deterministic
 human-facing notice. Cursor advancement never skips unconsumed pagination; a failed
 feed preserves the cursor. Renderer failure is swallowed so it cannot fail the agent
 turn. A missed notice stays missed.

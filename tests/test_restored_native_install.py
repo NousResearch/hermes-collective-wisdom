@@ -63,18 +63,13 @@ def test_native_inspection_and_install_use_exact_real_package(invocation_executo
         assert not target.exists()
         assert not client.record_calls
         await ui.click(identity, "back")
-        await ui.click(identity, "review")
-        while True:
-            following = next((a for a in ui.view(identity).actions if a.label == "Next"), None)
-            if following is None:
-                break
-            await ui.click(identity, following.action)
-        await ui.click(identity, "confirm")
+        await ui.click(identity, "install")
         assert ui.record(identity)["state"] == "completed"
         for path, _mode, data in client.files:
             assert (target / path).read_bytes() == data
         assert len(client.record_calls) == 1
         assert store.installation("skill-1")["content_hash"] == original["content_hash"]
-        await ui.click(identity, "confirm")
+        assert ui.view(identity).to_text() == "✅ managed-skill installed"
+        await ui.click(identity, "install")
         assert len(client.record_calls) == 1
     asyncio.run(scenario())

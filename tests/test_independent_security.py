@@ -12,9 +12,9 @@ from hermes_wisdom_plugin.runtime import InvocationService
 
 
 @pytest.mark.parametrize('surface', [SlackHarness, TelegramHarness])
-@pytest.mark.parametrize('entry_action', ['review', 'share'])
-def test_share_action_cannot_install_without_file_inspection(
-    invocation_executor, tmp_path, surface, entry_action,
+@pytest.mark.parametrize('forged_action', ['review', 'share', 'confirm'])
+def test_forged_actions_cannot_install_and_real_install_still_inspects(
+    invocation_executor, tmp_path, surface, forged_action,
 ):
     executor, _store, _client, _receipts, _plan, target, _authority = invocation_executor
     inspections = []
@@ -41,16 +41,11 @@ def test_share_action_cannot_install_without_file_inspection(
         identity = ui.runtime.begin(ui.caller, 'skill-1@v2')['review_id']
         await ui.flush()
         assert ui.record(identity)['plan']['files']
-        # 'review' is the positive control; 'share' is not offered on this card.
-        await ui.click(identity, entry_action)
-        while await ui.next_page(identity):
-            pass
-        await ui.click(identity, 'confirm')
-
-        if entry_action == 'review':
-            assert target.exists() and len(inspections) == 1
-        else:
-            assert not target.exists(), 'Installed exact receipt without ever disclosing file bytes'
+        await ui.click(identity, forged_action)
+        assert not target.exists()
+        assert not inspections
+        await ui.click(identity, 'install')
+        assert target.exists() and len(inspections) == 1
     asyncio.run(scenario())
 
 

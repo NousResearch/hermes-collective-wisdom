@@ -71,8 +71,8 @@ def publication_review(draft_id="draft-1", **changes):
 
 
 def inspect_for_confirmation(controller, record_id, service, caller):
-    """Traverse the actual new review actions before testing effect invariants."""
-    record = controller.act(record_id, "review", service, caller)
+    """Enter an exceptional install review and traverse its exact pages."""
+    record = controller.act(record_id, "install", service, caller)
     while True:
         with controller.displaying(record):
             pass  # Simulate successful SDK display in controller-level tests.

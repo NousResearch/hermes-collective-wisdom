@@ -35,9 +35,11 @@ class Service:
 
     def install_plan(self, reference, *, update_mode=None):
         del update_mode
+        skill_id = reference.split("@v", 1)[0]
         return {
-            "operation": "install", "owner": dict(self.owner), "skill_id": reference,
-            "version": 2, "receipt": "receipt-1", "allowed": True,
+            "operation": "install", "owner": dict(self.owner), "skill_id": skill_id,
+            "slug": "incident-triage", "version": 2,
+            "receipt": "receipt-1", "allowed": True,
         }
 
     def native_install_inspect(self, receipt):
@@ -184,12 +186,7 @@ def test_lifecycle_admission_reaches_registered_consent_and_real_native_review(t
         await app.handler(ack, {
             "user": {"id": "U_NATIVE"}, "channel": {"id": "D1"},
             "team": {"id": "W1"}, "message": {"ts": "card-1"},
-        }, {"value": callback_value(review_id, "review")})
-        await app.handler(ack, {
-            "user": {"id": "U_NATIVE", "name": "Shannon"},
-            "channel": {"id": "D1"}, "team": {"id": "W1"},
-            "message": {"ts": "card-1"}, "container": {"message_ts": "card-1"},
-        }, {"value": callback_value(review_id, "confirm")})
+        }, {"value": callback_value(review_id, "install")})
         assert service.applied == ["receipt-1"]
 
     asyncio.run(scenario())

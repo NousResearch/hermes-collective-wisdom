@@ -229,7 +229,7 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         self._require_current(may_apply)
         self.store.record_install(self._install_record(payload, owner, mode=mode))
         result = {
-            "updated": True, "skill_id": payload["skill_id"],
+            "updated": True, "skill_id": payload["skill_id"], "slug": payload["slug"],
             "from_version": int(payload["from_version"]), "version": int(payload["version"]),
             "path": str(target), "content_hash": payload["content_hash"],
             "preserved_copy": payload["preservation"].get("destination"),
@@ -266,6 +266,7 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         self.store.deactivate_install(payload["skill_id"])
         result = {
             "updated": False, "rejected": True, "skill_id": payload["skill_id"],
+            "slug": payload["slug"],
             "version": int(payload["version"]), "path": None,
             "preserved_copy": payload["preservation"].get("destination"),
             "recovery_path": str(recovery),

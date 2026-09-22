@@ -256,6 +256,7 @@ def test_apply_commits_exact_tree_and_preserves_server_mode(executor):
     assert script.stat().st_mode & 0o777 == 0o700
     assert not (target / "SHOULD_NOT_EXIST").exists()
     assert result["effective_update_mode"] == "REQUIRED"
+    assert result["slug"] == "managed-skill"
     assert result["setup_required"] is False
     assert store.records["skill-1"]["owner"] == OWNER
     assert receipts.completed["receipt-1"] == result

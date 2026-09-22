@@ -89,20 +89,22 @@ install, update, and removal still use their separately reviewed authority check
 - **Desktop:** enable the package's Desktop half in **Capabilities → Plugins**
   (also available through **⌘K → Plugins**), then open **Collective Wisdom**.
   Catalog, Installed, Activity & Settings, and Contributions call the existing
-  workflows on the selected host/profile. Review exact versions, checks, and
-  files before confirming an install, update, removal, or submission.
+  workflows on the selected host/profile. Install runs the checks and applies a
+  clean package in one click; details remain available before acting. Material
+  warnings, removal, and sharing retain their explicit review controls.
 
 In Desktop chat, `/wisdom`, `/wisdom list`, `/wisdom browse [query]`, and
 `/wisdom show <skill-id>` open the same catalog/review workflow in a themed dialog.
-View, Install, and eligible Update controls never apply a package before explicit
-confirmation. Other Wisdom commands keep their normal route. The current Desktop
+View is read-only. Install authorizes the checked installation without another
+confirmation; material warnings still require acknowledgement. Other Wisdom
+commands keep their normal route. The current Desktop
 middleware API leaves the submitted command in the composer; closing the dialog
 does not send it. A focused-chat/active-profile mismatch refuses requests rather
 than silently switching owners.
 
 The Desktop page also offers explicit enrollment after disclosure. At completed
-turns it may poll a bounded feed and show a direct best-effort notification. A
-missed or failed notification is not queued or retried, and opening one starts a
+turns it checks a bounded feed without a polling delay and may show a direct
+best-effort notification. A missed or failed notification is not queued or retried, and opening one starts a
 review rather than approving any effect. Contributions supports complete private
 draft editing and save-and-re-review, including text-file add/remove/rename and
 inert opaque-byte export. Catalog exposes Install; Installed exposes Check for
@@ -116,15 +118,15 @@ Dashboard UI and full six-surface parity remain deferred.
 Use `hermes wisdom --help` for the full command list. Add `--help` to any
 subcommand for its options.
 
-### Review and install a skill
+### Install a skill
 
 ```bash
-hermes wisdom show <skill-id> --json
-hermes wisdom install <skill-id>@v1 --plan --json
+hermes wisdom install <skill-id>@v1
 ```
 
-Read the complete plan and its compatibility/security findings. Only after
-approving it, apply the returned receipt:
+The explicit install command runs the checks and installs a clean package without
+another approval prompt. `--json` changes output formatting, not that intent.
+To inspect without installing, add `--plan`; an inspected receipt can also be applied:
 
 ```bash
 hermes wisdom install --apply-receipt <receipt> --json

@@ -297,6 +297,24 @@ class _Service:  # pylint: disable=too-many-public-methods,too-many-instance-att
         self.calls.append(("update_apply", receipt))
         return {"updated": True, "receipt": receipt}
 
+    def install_plan(self, reference, **values):
+        self.calls.append(("install_plan", reference, values))
+        return {
+            "operation": "install", "skill_id": "skill-1",
+            "slug": "incident-handoff", "version": 2,
+            "receipt": "wip_install", "allowed": True,
+            "local_scan": {"allowed": True, "findings": []},
+            "compatibility": {"outcome": "compatible"},
+            "policy": {},
+        }
+
+    def install_apply(self, receipt, *, accept_partial=False):
+        self.calls.append(("install_apply", receipt, accept_partial))
+        return {
+            "installed": True, "skill_id": "skill-1",
+            "skill_name": "incident-handoff", "version": 2,
+        }
+
     def installed_setup_inspect(self, skill_id, *, version=None):
         self.calls.append(("installed_setup_inspect", skill_id, version))
         return {"skill_id": skill_id, "state": "setup_required"}
@@ -617,6 +635,60 @@ def test_human_dict_output_is_command_specific_not_json(capsys):
     output = capsys.readouterr().out
     assert output.startswith("Update check")
     assert not output.lstrip().startswith("{")
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_explicit_install_command_applies_clean_plan_without_prompt(
+    as_json, capsys, monkeypatch
+):
+    service = _Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+    argv = ["install", "skill-1@v2"] + (["--json"] if as_json else [])
+
+    assert run_cli(_parser().parse_args(argv), service) == 0
+
+    assert ("install_plan", "skill-1@v2", {
+        "update_mode": None, "accept_warnings": False,
+    }) in service.calls
+    assert ("install_apply", "wip_install", False) in service.calls
+    output = capsys.readouterr().out
+    if as_json:
+        assert json.loads(output)["installed"] is True
+    else:
+        assert output.strip() == "✅ incident-handoff installed"
+
+
+def test_install_plan_stays_read_only_and_human_handoff_uses_direct_command(capsys):
+    service = _Service()
+
+    assert run_cli(_parser().parse_args([
+        "install", "skill-1@v2", "--plan", "--json",
+    ]), service) == 0
+    assert json.loads(capsys.readouterr().out)["receipt"] == "wip_install"
+    assert not any(call[0] == "install_apply" for call in service.calls)
+    assert "hermes wisdom install <skill-id>" in run_slash("install", service)
+    assert "--plan" not in run_slash("install", service)
+
+
+def test_clean_install_does_not_silently_accept_scanner_warnings(capsys):
+    service = _Service()
+    original = service.install_plan
+
+    def warned(reference, **values):
+        plan = original(reference, **values)
+        plan["allowed"] = False
+        plan["local_scan"] = {"allowed": False, "findings": [{
+            "severity": "warning", "category": "instructions",
+            "pattern_id": "review-me", "file": "SKILL.md",
+            "description": "Review this exact instruction.",
+        }]}
+        return plan
+
+    service.install_plan = warned
+    assert run_cli(_parser().parse_args(["install", "skill-1@v2", "--json"]), service) == 6
+    assert not any(call[0] == "install_apply" for call in service.calls)
+    assert "warning" in json.loads(capsys.readouterr().out)["error"].casefold()
 
 
 @pytest.mark.parametrize(

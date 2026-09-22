@@ -2,7 +2,49 @@
 
 import pytest
 
-from hermes_wisdom_plugin.terminal_ui import render_action_review, render_file_preview
+from hermes_wisdom_plugin.terminal_ui import (
+    render_action_review,
+    render_file_preview,
+    render_operation_outcome,
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "result", "name", "expected"),
+    [
+        ("install", {"installed": True}, "Incident Triage", "✅ Incident Triage installed"),
+        ("update", {"updated": True}, "Incident Triage", "✅ Incident Triage updated"),
+        ("uninstall", {"uninstalled": True}, "Incident Triage", "✅ Incident Triage removed"),
+    ],
+)
+def test_completed_outcomes_use_human_name_and_one_line(kind, result, name, expected):
+    """Completed mutations render only the human-facing success line."""
+    assert render_operation_outcome(kind, result, skill_name=name) == expected
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"pending": True, "skill_id": "skill-id"},
+        {"installed": False, "rejected": True, "skill_id": "skill-id"},
+        {"state": "uncertain", "skill_id": "skill-id"},
+        {"installed": True, "pending": True},
+        {"installed": True, "rejected": True},
+        {"installed": True, "state": "uncertain"},
+    ],
+)
+def test_incomplete_install_outcomes_are_never_success(result):
+    """Pending, rejected, and uncertain outcomes never claim installation."""
+    output = render_operation_outcome("install", result, skill_name="Incident Triage")
+    assert not output.startswith("✅")
+    assert "installed" not in output.casefold()
+
+
+def test_success_without_a_human_name_is_not_announced():
+    """An opaque identifier is not a skill name for success copy."""
+    assert not render_operation_outcome(
+        "install", {"installed": True, "skill_id": "opaque-id"}
+    ).startswith("✅")
 
 
 def test_publication_review_preserves_complete_ordered_safe_output():

@@ -7,8 +7,8 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 
 - Enroll, inspect entitlement, and accept the explicit data-use disclosure.
 - Browse and inspect the organization catalog.
-- Prepare an exact install review, confirm the reviewed receipt, separately review
-  setup commands, and remove managed installs.
+- Install a checked exact version with one explicit Install action; inspect details
+  optionally, separately review setup commands, and remove managed installs.
 - Check, review, and apply updates while protecting local edits and sensitive
   capability changes. Explicit bounded maintenance may apply only policy-authorized
   automatic updates.
@@ -30,14 +30,14 @@ setup approval cannot authorize a later effect.
 ## Best-effort proactive notices
 
 On supported private Desktop and messaging surfaces, an end-of-turn hook may perform
-an occasional bounded feed poll and emit one deterministic human-facing notice.
+a bounded feed poll on each eligible turn and emit one deterministic human-facing notice.
 Unsupported clients receive no proactive notice; their explicit commands remain
 available.
 
 The notice path:
 
 1. returns early when no renderer is available;
-2. uses owner-local poll time, cursor, bounded deduplication, and last-offered markers;
+2. uses an owner-local cursor, bounded deduplication, and last-offered markers;
 3. reads Gateway policy, mute, and suppression before rendering;
 4. preserves the cursor on feed failure and never advances past unconsumed pagination;
 5. calls the surface directly, without model assessment or history injection; and
@@ -55,7 +55,7 @@ small JSON record:
 
 - direct enrollment/setup/publication records;
 - qualification counters and candidates;
-- notice cursor, poll timestamp, and bounded offer markers;
+- notice cursor and bounded offer markers;
 - explicit native review records; and
 - managed install/update records owned by the install subsystem.
 
