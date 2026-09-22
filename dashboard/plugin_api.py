@@ -1,6 +1,6 @@
 """Authenticated Desktop REST routes for Collective Wisdom.
 
-The host mounts ``router`` under ``/api/plugins/hermes-collective-wisdom`` after
+The host mounts ``router`` under ``/api/plugins/collective-wisdom`` after
 its normal dashboard authentication gate.  Every request constructs the
 existing owner-bound InvocationService from the request process' current
 profile scope; no identity supplied by the renderer is accepted.
@@ -44,7 +44,7 @@ InvocationService = _runtime.InvocationService
 current_profile = _runtime.current_profile
 build_router = _api.build_router
 
-_PLUGIN_ID = "hermes-collective-wisdom"
+_PLUGIN_ID = "collective-wisdom"
 _context = PluginContext(
     PluginManifest(name=_PLUGIN_ID, kind="standalone", key=_PLUGIN_ID),
     manager=None,  # get/set_config and state do not consult the manager

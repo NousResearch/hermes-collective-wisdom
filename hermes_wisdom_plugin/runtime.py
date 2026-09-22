@@ -1455,7 +1455,7 @@ def worker_main(request) -> str:
 
     service = InvocationService(
         Path(request["root"]), (request["profile"][0], Path(request["profile"][1])),
-        state=plugin_state("hermes-collective-wisdom"),
+        state=plugin_state("collective-wisdom"),
         config=request.get("config"),
     )
     try:

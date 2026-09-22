@@ -1233,7 +1233,7 @@ function WisdomPage({ client }) {
 }
 
 export default {
-  id: 'hermes-collective-wisdom',
+  id: 'collective-wisdom',
   name: 'Collective Wisdom',
   description: 'Browse, install, update, and publish owner-bound team skills with exact review.',
   defaultEnabled: false,

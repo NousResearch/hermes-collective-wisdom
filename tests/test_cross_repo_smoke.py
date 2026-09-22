@@ -508,7 +508,7 @@ def test_native_artifact_layout_requires_loader_manifest_and_package(tmp_path: P
     with pytest.raises(harness.AcceptanceError, match="plugin.yaml"):
         harness.verify_native_artifact_layout(root)
 
-    (root / "plugin.yaml").write_text("name: hermes-collective-wisdom\n")
+    (root / "plugin.yaml").write_text("name: collective-wisdom\n")
     with pytest.raises(harness.AcceptanceError, match="desktop/plugin.js"):
         harness.verify_native_artifact_layout(root)
     (root / "desktop").mkdir()

@@ -16,7 +16,7 @@ from host_probe_support import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_HOST_REVISION = "bf51fee548ceaa28d2c299a41c0f65066c04c061"
-PLUGIN_ID = "hermes-collective-wisdom"
+PLUGIN_ID = "collective-wisdom"
 PROBE = r'''
 import base64
 import contextlib
@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PLUGIN_ID = "hermes-collective-wisdom"
+PLUGIN_ID = "collective-wisdom"
 PROJECT_ROOT = Path(os.environ["WISDOM_PLUGIN_ROOT"]).resolve()
 HOME = Path(os.environ["HERMES_HOME"]).resolve()
 SKILLS_ROOT = HOME / "skills"
