@@ -119,6 +119,7 @@ def test_install_operations_use_fresh_install_credentials_and_validate_wire_data
     }
     assert session.calls[1][0] == "POST"
     assert session.calls[3][0] == "DELETE"
+    assert [call[2]["timeout"] for call in session.calls] == [(30, 120), 30, 30, 30]
 
 
 def test_content_tolerates_additive_fields_but_rejects_invalid_base64():

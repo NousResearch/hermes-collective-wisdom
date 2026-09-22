@@ -115,16 +115,20 @@ def test_publication_calls_use_pinned_paths_shapes_and_publish_scope():
     ]
     assert "publication_mode" not in session.calls[-2][2]["json"]
     assert session.calls[-2][2]["json"]["base_commit"] == "sha256:" + "9" * 64
+    assert [call[2]["timeout"] for call in session.calls] == [
+        30, (30, 120), 30, 30, 30, (30, 120), 30,
+    ]
 
 
-def test_revision_uses_gateway_idempotent_successor_contract():
+@pytest.mark.parametrize("timeout, package_timeout", [(10, 120), (180, 180)])
+def test_revision_uses_gateway_idempotent_successor_contract(timeout, package_timeout):
     calls = []
     successor = draft_body()
     successor["id"] = "draft-2"
     successor["supersedesDraftId"] = "draft-1"
     session = Session(Response(201, {"draft": successor}))
     value = WisdomClient(
-        credentials(calls, "read"), "org-1", session=session,
+        credentials(calls, "read"), "org-1", session=session, timeout=timeout,
         publish_credential_provider=credentials(calls, "publish"),
     )
 
@@ -148,7 +152,7 @@ def test_revision_uses_gateway_idempotent_successor_contract():
         {
             "headers": session.calls[0][2]["headers"],
             "params": None,
-            "timeout": 30.0,
+            "timeout": (timeout, package_timeout),
             "stream": True,
             "allow_redirects": False,
             "json": {
