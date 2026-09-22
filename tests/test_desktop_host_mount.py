@@ -17,10 +17,10 @@ def test_stock_host_mount_auth_and_profile_isolation(tmp_path):
         pytest.skip("set WISDOM_DESKTOP_HOST_DIR and WISDOM_HOST_PYTHON for stock API mount")
     source = Path(__file__).resolve().parents[1]
     home = tmp_path / "home"
-    plugin_root = home / "plugins" / "hermes-collective-wisdom"
+    plugin_root = home / "plugins" / "collective-wisdom"
     plugin_root.parent.mkdir(parents=True)
     plugin_root.symlink_to(source, target_is_directory=True)
-    config = "plugins:\n  enabled: [hermes-collective-wisdom]\n"
+    config = "plugins:\n  enabled: [collective-wisdom]\n"
     (home / "config.yaml").write_text(config, encoding="utf-8")
     for profile in ("alpha", "beta"):
         directory = home / "profiles" / profile
@@ -39,12 +39,24 @@ def test_stock_host_mount_auth_and_profile_isolation(tmp_path):
         import sys
         from pathlib import Path
         from fastapi.testclient import TestClient
-        from hermes_cli import web_server
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from hermes_cli import plugins_cmd, web_server
 
-        name = "hermes_dashboard_plugin_hermes-collective-wisdom"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            plugins_cmd.cmd_list(SimpleNamespace(json=True))
+        listed = json.loads(output.getvalue())
+        wisdom = [row for row in listed if row["name"] == "collective-wisdom"]
+        assert len(wisdom) == 1, listed
+        assert wisdom[0]["status"] == "enabled", wisdom
+        assert not any(row["name"] == "hermes-collective-wisdom" for row in listed)
+
+        name = "hermes_dashboard_plugin_collective-wisdom"
         assert name in sys.modules, "stock host failed to import plugin backend"
         backend = sys.modules[name]
-        prefix = "/api/plugins/hermes-collective-wisdom"
+        prefix = "/api/plugins/collective-wisdom"
         http = TestClient(web_server.app, base_url="http://127.0.0.1")
         assert http.get(prefix + "/bootstrap").status_code == 401
         headers = {"X-Hermes-Session-Token": web_server._SESSION_TOKEN}
@@ -99,7 +111,7 @@ def test_stock_host_mount_auth_and_profile_isolation(tmp_path):
         assert missing.status_code == 404, missing.text
         root = Path(__import__("os").environ["HERMES_HOME"])
         (root / "profiles" / "beta" / "config.yaml").write_text(
-            "plugins:\\n  disabled: [hermes-collective-wisdom]\\n")
+            "plugins:\\n  disabled: [collective-wisdom]\\n")
         disabled = http.get(prefix + "/bootstrap?profile=beta", headers=headers)
         assert disabled.status_code == 404, disabled.text
         assert http.get(prefix + "/bootstrap?profile=beta").status_code == 401

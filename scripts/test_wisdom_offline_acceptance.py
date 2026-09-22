@@ -536,22 +536,22 @@ artifact = pathlib.Path(sys.argv[2]).resolve()
 sys.path.insert(0, str(agent))
 with tempfile.TemporaryDirectory(prefix='wisdom-host-discovery-') as temporary:
     home = pathlib.Path(temporary)
-    installed = home / 'plugins' / 'hermes-collective-wisdom'
+    installed = home / 'plugins' / 'collective-wisdom'
     shutil.copytree(artifact, installed, symlinks=True)
     (home / 'config.yaml').write_text(
-        'plugins:\\n  enabled:\\n    - hermes-collective-wisdom\\n', encoding='utf-8')
+        'plugins:\\n  enabled:\\n    - collective-wisdom\\n', encoding='utf-8')
     os.environ['HERMES_HOME'] = str(home)
     from hermes_cli.plugins import PluginContext, PluginManager
     manager = PluginManager(scope_key=str(home))
     try:
         manager.discover_and_load()
         matches = [row for row in manager.list_plugins()
-                   if row['name'] == 'hermes-collective-wisdom']
+                   if row['name'] == 'collective-wisdom']
         assert len(matches) == 1, matches
         row = matches[0]
         assert row['enabled'] is True and row['error'] is None, row
         loaded = next(item for item in manager._plugins.values()
-                      if item.manifest.name == 'hermes-collective-wisdom')
+                      if item.manifest.name == 'collective-wisdom')
         module_file = pathlib.Path(loaded.module.__file__).resolve()
         assert module_file.is_relative_to(installed.resolve())
         assert 'hermes_wisdom' not in sys.modules

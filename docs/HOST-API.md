@@ -250,7 +250,7 @@ patch a Wisdom condition into host navigation or core routes.
 
 ### Desktop management host boundary
 
-The external page calls `ctx.rest` in `/api/plugins/hermes-collective-wisdom`.
+The external page calls `ctx.rest` in `/api/plugins/collective-wisdom`.
 Git installation includes `dashboard/manifest.json` and `plugin_api.py`; the latter
 loads its adjacent Python package under a synthetic namespace, independent of
 the host working directory or a stale pip installation. The host owns HTTP
