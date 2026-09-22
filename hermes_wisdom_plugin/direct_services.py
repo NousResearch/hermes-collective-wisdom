@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .contribution_review import exact_review_files
 from .credential_scan import scan_credentials
 from .contract import author_description_hash, parse_manifest_bytes, sha256_address
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
@@ -1085,6 +1086,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         if operation.get("owner") != owner or operation.get("phase") != "policy_review_required":
             raise WisdomConflict("Publication operation is not awaiting review")
+        prepared = self._operation_review(operation)
         remote = self._remote(operation, may_apply)
         policy = self._policy(owner, may_apply)
         receipt = self.state.save_publication_review({
@@ -1097,7 +1099,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "expires_at": (datetime.now(timezone.utc) + self.REVIEW_TTL).isoformat(),
         })
         return {
-            **copy.deepcopy(operation["review"]), "state": "policy_review_required",
+            **prepared, "state": "policy_review_required",
             "draft_id": operation["local_draft_id"], "operation_id": operation["id"],
             "hashes": copy.deepcopy(operation["hashes"]), "receipt": receipt,
             "publication_mode": policy["publication_mode"], "policy_version": policy["version"],
@@ -1136,6 +1138,67 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         }
         return dict(objects.objects), request
 
+    def _operation_snapshot(self, operation: dict[str, Any]) -> dict[str, Any]:
+        package = operation.get("prepared_package")
+        request = operation.get("request")
+        if not isinstance(package, dict) or not isinstance(request, dict):
+            raise WisdomValidationError("Publication package snapshot is unavailable")
+        snapshot = {
+            "overlay_path": package.get("overlay_path"),
+            "created_at": package.get("created_at"),
+            "description": request.get("description"),
+        }
+        if any(not isinstance(value, str) or not value for value in snapshot.values()):
+            raise WisdomValidationError("Publication package snapshot is unavailable")
+        return snapshot
+
+    def _operation_review(self, operation: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild full review bytes from the operation's immutable package pointer."""
+
+        snapshot = self._operation_snapshot(operation)
+        try:
+            files, content_hash = exact_review_files(Path(snapshot["overlay_path"]))
+            _objects, request = self._snapshot(snapshot, operation["owner"])
+        except (OSError, PackagePolicyError, ValueError) as exc:
+            raise WisdomConflict(
+                "The prepared publication snapshot is missing or changed; publication is blocked"
+            ) from exc
+        exact = (
+            "slug", "commit", "content_hash", "description", "description_hash", "manifest_hash"
+        )
+        hashes = operation.get("hashes")
+        request_matches_hashes = isinstance(hashes, dict) and all((
+            request["content_hash"] == hashes.get("content"),
+            request["description_hash"] == hashes.get("author_description"),
+            request["manifest_hash"] == hashes.get("package_manifest"),
+        ))
+        if not isinstance(hashes, dict) or (
+            not request_matches_hashes
+        ) or content_hash != hashes["content"] or any(
+            request[key] != operation["request"][key] for key in exact
+        ):
+            raise WisdomConflict(
+                "The prepared publication snapshot is missing or changed; publication is blocked"
+            )
+        review = copy.deepcopy(operation.get("review"))
+        if not isinstance(review, dict) or self._scan_fingerprint(review) != operation.get(
+            "scan_fingerprint"
+        ):
+            raise WisdomConflict("Publication security review no longer matches its package")
+        security = review.get("security_check")
+        if (
+            not isinstance(security, dict)
+            or security.get("content_hash") != content_hash
+            or security.get("author_description_hash") != hashes["author_description"]
+        ):
+            raise WisdomConflict("Publication security review no longer matches its package")
+        prepared = {**review, "files": files, "hashes": copy.deepcopy(hashes)}
+        self._security(
+            prepared, accept_warnings=False, expected=operation.get("warning_acceptance")
+        )
+        prepared["warning_acceptance"] = copy.deepcopy(operation.get("warning_acceptance"))
+        return prepared
+
     def _authorized(
         self, receipt: str, may_apply: Callable[[], bool] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str], dict[str, Any]]:
@@ -1156,10 +1219,11 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         if policy != review["policy"]:
             raise WisdomConflict("The package or team publication policy changed; review it again")
         if operation is not None:
+            prepared = self._operation_review(operation)
             remote = self._remote(operation, may_apply)
             if _value(remote, "updatedAt") != review.get("remote_revision"):
                 raise WisdomConflict("The publication changed; review it again")
-            return draft, operation["review"], owner, policy
+            return draft, prepared, owner, policy
         prepared = self.reviewer.reopen(draft["id"], may_apply=may_apply)
         if self._scan_fingerprint(prepared) != review["scan_fingerprint"]:
             raise WisdomConflict("The scanner findings changed; review them again")
@@ -1191,9 +1255,13 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "owner": owner, "policy": policy, "hashes": hashes,
             "scan_fingerprint": self._scan_fingerprint(prepared),
             "warning_acceptance": prepared.get("warning_acceptance"),
-            "request": request, "review": {
+            "request": request,
+            "prepared_package": {
+                "overlay_path": draft["overlay_path"], "created_at": draft["created_at"],
+            },
+            "review": {
                 key: copy.deepcopy(prepared.get(key)) for key in (
-                    "files", "security_check", "professionalism_check", "source_hash",
+                    "security_check", "professionalism_check", "source_hash",
                     "description", "system_specification", "local_scan",
                 )
             },
@@ -1408,10 +1476,13 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         self, operation: dict[str, Any], may_apply: Callable[[], bool] | None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         _current(may_apply)
-        draft = self.state.draft(operation["local_draft_id"])
-        if draft is None:
-            raise WisdomNotFound("Prepared publication draft not found")
-        objects, request = self._snapshot(draft, operation["owner"])
+        snapshot = self._operation_snapshot(operation)
+        try:
+            objects, request = self._snapshot(snapshot, operation["owner"])
+        except (OSError, PackagePolicyError, ValueError) as exc:
+            raise WisdomConflict(
+                "The prepared publication snapshot is missing or changed; publication is blocked"
+            ) from exc
         exact = ("slug", "commit", "content_hash", "description", "description_hash", "manifest_hash")
         if any(request[key] != operation["request"][key] for key in exact):
             raise WisdomConflict("Prepared package changed after publication intent")
