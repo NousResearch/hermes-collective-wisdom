@@ -1,6 +1,7 @@
 """Offline SDK harness invoking the registered Slack callback."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
 # pylint: disable=protected-access
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -29,7 +30,15 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
             root, "default", lambda: service, None,
             lambda coro, **_kw: self.tasks.append(coro), installed_state=JsonState(root),
         )
-        self.runtime.wire_slack(self, self.adapter)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            async def wire():
+                self.runtime.wire_slack(self, self.adapter)
+
+            asyncio.run(wire())
+        else:
+            self.runtime.wire_slack(self, self.adapter)
 
     def action(self, _pattern):
         def register(handler):
