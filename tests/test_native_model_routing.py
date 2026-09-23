@@ -114,7 +114,7 @@ def _event(adapter):
 def _gateway(adapter):
     return SimpleNamespace(
         _session_key_for_source=lambda _source: "slack:W1:D1:U_NATIVE",
-        _adapter_for_source=lambda _source: adapter,
+        _delivery_adapter_for=lambda _source: adapter,
         _is_user_authorized_for_source=lambda source: source.user_id == "U_NATIVE",
     )
 

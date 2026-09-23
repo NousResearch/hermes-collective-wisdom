@@ -36,7 +36,7 @@ class Gateway:
     def _is_user_authorized_for_source(self, source):
         return self.authorized and source.user_id == "U1"
 
-    def _adapter_for_source(self, _source):
+    def _delivery_adapter_for(self, _source):
         return self.adapter
 
     def _session_key_for_source(self, source):
@@ -121,7 +121,7 @@ def test_normal_admitted_turn_is_consumed_once_and_no_session_key_is_fabricated(
         assert captures.consume_lifecycle(**LIFECYCLE) is None
 
         bad_gateway = SimpleNamespace(
-            _adapter_for_source=gateway._adapter_for_source,
+            _delivery_adapter_for=gateway._delivery_adapter_for,
             _is_user_authorized_for_source=gateway._is_user_authorized_for_source,
         )
         captures.hook(event=event(command="", args=""), gateway=bad_gateway)
