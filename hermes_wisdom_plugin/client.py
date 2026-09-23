@@ -529,6 +529,7 @@ class WisdomClient:
         publish: bool = False,
         files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
         response_limit: int | None = None,
+        package_io: bool = False,
     ) -> Any:
         if self._closed:
             raise WisdomError("Collective Wisdom client is closed")
@@ -551,10 +552,10 @@ class WisdomClient:
                     "Accept": "application/json",
                 },
                 params=params,
-                # Bulk object persistence needs longer than ordinary API reads.
+                # Package closure reads, scans and copies outlast metadata requests.
                 timeout=(
                     (self.timeout, max(self.timeout, 120.0))
-                    if files is not None else self.timeout
+                    if files is not None or package_io else self.timeout
                 ),
                 stream=True,
                 allow_redirects=False,
@@ -684,8 +685,42 @@ class WisdomClient:
             payload["professionalism_review"] = professionalism_review
         return self._request(
             "drafts", model=DraftResponse, method="POST",
-            json_body=payload, publish=True,
+            json_body=payload, publish=True, package_io=True,
         ).draft
+
+    def revise_draft(  # pylint: disable=too-many-arguments
+        self,
+        draft_id: str,
+        *,
+        commit: str,
+        content_hash: str,
+        description: str,
+        description_hash: str,
+        manifest_hash: str,
+        expected_content_hash: str,
+        expected_description_hash: str,
+        expected_manifest_hash: str,
+        professionalism_review: dict[str, Any] | None = None,
+    ) -> Draft:
+        """Create or recover one idempotent, newly vetted draft successor."""
+
+        payload: dict[str, Any] = {
+            "draft_commit": commit,
+            "content_hash": content_hash,
+            "author_description": description,
+            "expected_content_hash": expected_content_hash,
+            "expected_author_description_hash": expected_description_hash,
+            "expected_package_manifest_hash": expected_manifest_hash,
+        }
+        if professionalism_review is not None:
+            payload["professionalism_review"] = professionalism_review
+        revised = self._request(
+            f"drafts/{_quoted_identifier(draft_id, 'draft_id')}/revise",
+            model=DraftResponse, method="POST", json_body=payload, publish=True, package_io=True,
+        ).draft
+        # These are response bindings, not request fields in the Gateway contract.
+        del description_hash, manifest_hash
+        return revised
 
     def list_drafts(self) -> list[Draft]:
         """List current caller's owner-private drafts for exact reconciliation."""
@@ -757,7 +792,7 @@ class WisdomClient:
             model=None,
             method="POST",
             json_body={"content_hash": content_hash, "base_commit": base_commit},
-            publish=True,
+            publish=True, package_io=True,
         )
 
     def decline(self, draft_id: str) -> dict[str, Any]:
@@ -840,6 +875,7 @@ class WisdomClient:
             },
             install=True,
             response_limit=MAX_CONTENT_RESPONSE_BYTES,
+            package_io=True,
         )
         return self._decode_version_content(response)
 

@@ -27,11 +27,15 @@ def sharing_checks(plan):
     security = plan.get("security_check") or {}
     professional = plan.get("professionalism_check") or {}
     hashes = plan.get("hashes") or {}
+    server = plan.get("server_checks") or {}
+    gateway = server.get("security_check") or server.get("scan")
+    gateway_safe = not gateway or gateway.get("status") in {"pass", "passed"}
     safe = bool(
         hashes.get("content") and hashes.get("author_description")
         and professional.get("content_hash") == hashes["content"]
         and professional.get("author_description_hash") == hashes["author_description"]
         and _passed(security, SECURITY_LABELS) and _passed(professional, CHECK_LABELS)
+        and gateway_safe
     )
     lines = []
     for check, labels in ((security, SECURITY_LABELS), (professional, CHECK_LABELS)):
@@ -43,6 +47,8 @@ def sharing_checks(plan):
             }:
                 status = "unavailable"
             lines.append(f"  {label}: {status}")
+    if gateway:
+        lines.append(f"  Gateway security: {gateway.get('status') or 'unavailable'}")
     return safe, "\n".join(lines)
 
 

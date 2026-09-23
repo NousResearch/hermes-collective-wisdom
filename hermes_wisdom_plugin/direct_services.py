@@ -385,6 +385,37 @@ class DirectState:
             review["consumed_at"] = now
             return operation_id
 
+    def consume_publication_review(
+        self, receipt: str, operation_id: str, *, owner: dict[str, str],
+        phase: str, requested_action: str | None,
+    ) -> dict[str, Any]:
+        """Consume an existing-operation receipt and advance it in one state change."""
+
+        with self.change() as value:
+            review = value["publication_reviews"].get(receipt)
+            operation = value["publications"].get(operation_id)
+            if not isinstance(review, dict) or review.get("consumed_at") is not None:
+                raise WisdomConflict("Publication review receipt is missing or already used")
+            if review.get("operation_id") != operation_id or not isinstance(operation, dict):
+                raise WisdomConflict("Publication review no longer matches its operation")
+            if review.get("owner") != owner or operation.get("owner") != owner:
+                raise WisdomAuthError("Collective Wisdom publication owner changed")
+            if operation.get("phase") not in {
+                "policy_review_required", "approval_rejected",
+            }:
+                raise WisdomConflict("Publication operation is not awaiting review")
+            now = _now()
+            review["consumed_at"] = now
+            operation.update({
+                "policy": copy.deepcopy(review["policy"]), "phase": phase,
+                "resume_phase": None, "requested_action": requested_action,
+                "gateway_warning_acceptance": copy.deepcopy(
+                    review.get("gateway_warning_acceptance")
+                ),
+                "updated_at": now,
+            })
+            return copy.deepcopy(operation)
+
     def publication(self, operation_id: str) -> dict[str, Any] | None:
         return copy.deepcopy(self._load()["publications"].get(operation_id))
 
@@ -1006,6 +1037,29 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             ensure_ascii=True,
         ).encode())
 
+    @staticmethod
+    def _gateway_evidence(remote: Any) -> str:
+        evidence = {
+            key: _value(remote, key) for key in (
+                "id", "orgId", "ownerUserId", "slug", "draftCommit", "contentHash",
+                "authorDescription", "authorDescriptionHash", "packageManifestHash",
+                "state", "scanVerdict", "scan", "supersedesDraftId",
+            )
+        }
+        return sha256_address(json.dumps(
+            evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode())
+
+    @staticmethod
+    def _gateway_check(remote: Any) -> dict[str, Any]:
+        verdict = str(_value(remote, "scanVerdict") or "unavailable")
+        scan = _value(remote, "scan")
+        check = copy.deepcopy(scan) if isinstance(scan, dict) else {}
+        check["status"] = verdict
+        check.setdefault("verdict", verdict)
+        check.setdefault("summary", f"Gateway security scan: {verdict}")
+        return check
+
     def _security(
         self, prepared: dict[str, Any], *, accept_warnings: bool,
         expected: dict[str, Any] | None = None,
@@ -1042,7 +1096,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         owner = self._owner()
         existing = self.state.publication(draft_id)
         if existing is not None:
-            return self._review_existing(existing, owner, may_apply)
+            return self._review_existing(existing, owner, may_apply, accept_warnings)
         prepared = self.reviewer.reopen(draft_id, may_apply=may_apply)
         draft = self.state.draft(draft_id)
         if draft is None or draft.get("owner") != owner or draft.get("state") != "prepared":
@@ -1073,19 +1127,39 @@ class PublicationService:  # pylint: disable=too-many-public-methods
 
     def _review_existing(
         self, operation: dict[str, Any], owner: dict[str, str],
-        may_apply: Callable[[], bool] | None,
+        may_apply: Callable[[], bool] | None, accept_warnings: bool,
     ) -> dict[str, Any]:
-        if operation.get("owner") != owner or operation.get("phase") != "policy_review_required":
+        if operation.get("owner") != owner or operation.get("phase") not in {
+            "policy_review_required", "approval_rejected",
+        }:
             raise WisdomConflict("Publication operation is not awaiting review")
         prepared = self._operation_review(operation)
         remote = self._remote(operation, may_apply)
+        if operation.get("phase") == "approval_rejected" and (
+            _value(remote, "state") != "ready" or _value(remote, "scanVerdict") != "blocked"
+        ):
+            raise WisdomConflict("The rejected publication draft changed; reopen it first")
         policy = self._policy(owner, may_apply)
+        gateway_evidence = self._gateway_evidence(remote)
+        gateway_acceptance = None
+        if _value(remote, "scanVerdict") == "advisory":
+            if not accept_warnings:
+                raise WisdomConflict(
+                    "Gateway advisory warnings require explicit acknowledgement before review"
+                )
+            gateway_acceptance = {
+                "accepted": True, "operation": "publication",
+                "content_hash": operation["hashes"]["content"],
+                "gateway_evidence_hash": gateway_evidence,
+            }
         receipt = self.state.save_publication_review({
             "draft_id": operation["local_draft_id"], "owner": owner, "policy": policy,
             "hashes": copy.deepcopy(operation["hashes"]),
             "scan_fingerprint": operation["scan_fingerprint"],
             "warning_acceptance": operation.get("warning_acceptance"),
+            "gateway_warning_acceptance": gateway_acceptance,
             "operation_id": operation["id"], "remote_revision": _value(remote, "updatedAt"),
+            "gateway_evidence_hash": gateway_evidence,
             "reviewed_at": _now(),
             "expires_at": (datetime.now(timezone.utc) + self.REVIEW_TTL).isoformat(),
         })
@@ -1094,7 +1168,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "draft_id": operation["local_draft_id"], "operation_id": operation["id"],
             "hashes": copy.deepcopy(operation["hashes"]), "receipt": receipt,
             "publication_mode": policy["publication_mode"], "policy_version": policy["version"],
-            "warning_acceptance": copy.deepcopy(operation.get("warning_acceptance")),
+            "warning_acceptance": gateway_acceptance or copy.deepcopy(
+                operation.get("warning_acceptance")
+            ),
+            "server_checks": {"security_check": self._gateway_check(remote)},
             "network_submission": False,
         }
 
@@ -1212,7 +1289,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         if operation is not None:
             prepared = self._operation_review(operation)
             remote = self._remote(operation, may_apply)
-            if _value(remote, "updatedAt") != review.get("remote_revision"):
+            if (
+                _value(remote, "updatedAt") != review.get("remote_revision")
+                or self._gateway_evidence(remote) != review.get("gateway_evidence_hash")
+            ):
                 raise WisdomConflict("The publication changed; review it again")
             return draft, prepared, owner, policy
         prepared = self.reviewer.reopen(draft["id"], may_apply=may_apply)
@@ -1272,26 +1352,36 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             candidate_assessment_id=candidate_assessment_id,
         )
 
-    def _submit(
+    def _submit(  # pylint: disable=too-many-locals
         self, receipt: str, *, private: bool,
         may_apply: Callable[[], bool] | None,
         candidate_assessment_id: str | None = None,
     ) -> dict[str, Any]:
-        draft, prepared, owner, policy = self._authorized(receipt, may_apply)
+        draft, _prepared, _owner, _policy = self._authorized(receipt, may_apply)
         current_review = self.state.publication_review(receipt)
         if current_review is None:
             raise WisdomConflict("Publication review receipt is missing or already used")
         existing_id = current_review.get("operation_id")
         lock_key = "publication:" + draft["skill_id"]
         with managed_operation_guard(self.state.root, lock_key):
+            draft, prepared, owner, policy = self._authorized(receipt, may_apply)
+            _current(may_apply)
             if existing_id:
                 operation = self.state.publication(existing_id)
-                if operation is None or operation.get("phase") != "policy_review_required":
+                if operation is None or operation.get("phase") not in {
+                    "policy_review_required", "approval_rejected",
+                }:
                     raise WisdomConflict("Publication operation is not awaiting review")
-                self.state.update_publication(
-                    existing_id, policy=policy,
-                    phase=operation.get("resume_phase", "submitted"), resume_phase=None,
-                    requested_action=None,
+                phase = (
+                    "revision_required" if operation.get("phase") == "approval_rejected"
+                    else operation.get("resume_phase", "submitted")
+                )
+                requested_action = (
+                    "private_draft" if private else None
+                )
+                self.state.consume_publication_review(
+                    receipt, existing_id, owner=owner, phase=phase,
+                    requested_action=requested_action,
                 )
                 return self._drive(existing_id, may_apply=may_apply)
             intent = self._intent(draft, prepared, owner, policy)
@@ -1446,11 +1536,16 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         operation = self._operation(operation_id)
         if not self._matches(remote, operation):
             raise WisdomValidationError("Gateway acknowledged a different publication draft")
+        verdict = str(_value(remote, "scanVerdict") or "")
+        if verdict not in {"pass", "advisory", "blocked"}:
+            raise WisdomValidationError("Gateway draft scan verdict is unavailable")
         self.state.set_draft_state(operation["local_draft_id"], "submitted")
         return self.state.update_publication(
             operation_id, remote_draft_id=str(_value(remote, "id")),
             remote_state=str(_value(remote, "state")),
             remote_revision=str(_value(remote, "updatedAt")), phase="submitted",
+            remote_scan_verdict=verdict,
+            gateway_evidence_hash=self._gateway_evidence(remote),
         )
 
     def _reconcile_submission(
@@ -1566,6 +1661,8 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             operation = self.state.update_publication(
                 operation_id, remote_state=remote_state,
                 remote_revision=str(_value(remote, "updatedAt")),
+                remote_scan_verdict=str(_value(remote, "scanVerdict") or ""),
+                gateway_evidence_hash=self._gateway_evidence(remote),
             )
         if self._policy(operation["owner"], may_apply) != operation["policy"]:
             self.state.update_publication(
@@ -1574,12 +1671,30 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             return operation, self.status(operation_id)
         return self._approve_ready(operation)
 
+    def _require_approval_scan(self, operation: dict[str, Any]) -> None:
+        """Require a known verdict and exact acknowledgement of Gateway advisories."""
+        verdict = operation.get("remote_scan_verdict")
+        acceptance = operation.get("gateway_warning_acceptance")
+        advisory_accepted = (
+            verdict == "advisory" and isinstance(acceptance, dict)
+            and acceptance.get("accepted") is True
+            and acceptance.get("gateway_evidence_hash") == operation.get("gateway_evidence_hash")
+        )
+        if verdict not in {"pass", "blocked", "advisory"} or (
+            verdict == "advisory" and not advisory_accepted
+        ):
+            self.state.update_publication(
+                operation["id"], phase="policy_review_required", resume_phase="submitted"
+            )
+            raise WisdomValidationError("Gateway scan verdict requires a fresh review")
+
     def _approve_ready(
         self, operation: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         operation_id = operation["id"]
         if operation.get("remote_state") != "ready":
             return operation, None
+        self._require_approval_scan(operation)
         if operation["phase"] == "approval_unknown":
             return operation, self._uncertain(
                 operation_id, "approval_unknown",
@@ -1593,7 +1708,22 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 description_hash=operation["hashes"]["author_description"],
                 manifest_hash=operation["hashes"]["package_manifest"],
             )
-        except (WisdomAuthError, WisdomConflict, WisdomValidationError):
+        except WisdomValidationError as exc:
+            if exc.status == 422 and exc.code == "scan_blocked":
+                self.state.update_publication(
+                    operation_id, phase="approval_rejected",
+                    rejection_code="scan_blocked",
+                )
+                return operation, self._approval_rejection(operation_id)
+            if exc.status is None:
+                return operation, self._uncertain(
+                    operation_id, "approval_unknown",
+                    "Owner approval acknowledgement was invalid; exact reconciliation is required.",
+                )
+            self.state.update_publication(operation_id, phase=operation["phase"])
+            raise
+        except (WisdomAuthError, WisdomConflict):
+            self.state.update_publication(operation_id, phase=operation["phase"])
             raise
         except Exception:
             return operation, self._uncertain(
@@ -1604,6 +1734,127 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         return self.state.update_publication(
             operation_id, phase="approved", remote_state=str(_value(approved, "state"))
         ), None
+
+    def _approval_rejection(self, operation_id: str) -> dict[str, Any]:
+        return {
+            "operation_id": operation_id, "state": "rejected",
+            "phase": "approval_rejected", "code": "scan_blocked",
+            "detail": (
+                "Gateway rejected approval because its stored scan blocked this draft. "
+                "Review the retained operation again to authorize an idempotent rescan revision."
+            ),
+            "retry_safe": False,
+        }
+
+    def _record_revision(
+        self, operation_id: str, predecessor_id: str, revised: Any,
+    ) -> dict[str, Any]:
+        operation = self._operation(operation_id)
+        verdict = str(_value(revised, "scanVerdict") or "")
+        if (
+            str(_value(revised, "id") or "") == predecessor_id
+            or _value(revised, "supersedesDraftId") != predecessor_id
+            or _value(revised, "state") != "ready"
+            or not self._matches(revised, operation)
+            or verdict not in {"pass", "advisory", "blocked"}
+        ):
+            raise WisdomValidationError("Gateway returned an invalid publication revision")
+        history = list(operation.get("remote_draft_history") or [])
+        if predecessor_id not in history:
+            history.append(predecessor_id)
+        phase = {
+            "pass": "submitted", "advisory": "policy_review_required",
+            "blocked": "approval_rejected",
+        }[verdict]
+        return self.state.update_publication(
+            operation_id,
+            remote_draft_id=str(_value(revised, "id")),
+            remote_draft_history=history,
+            remote_state=str(_value(revised, "state")),
+            remote_revision=str(_value(revised, "updatedAt")),
+            phase=phase, remote_scan_verdict=verdict,
+            gateway_evidence_hash=self._gateway_evidence(revised),
+            gateway_warning_acceptance=None,
+            revision_predecessor_id=None,
+        )
+
+    def _revision_outcome(
+        self, operation: dict[str, Any], revised: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        verdict = str(_value(revised, "scanVerdict") or "")
+        if verdict == "blocked":
+            operation = self.state.update_publication(
+                operation["id"], rejection_code="scan_blocked",
+            )
+            return operation, self._approval_rejection(operation["id"])
+        if verdict == "advisory":
+            result = self.status(operation["id"])
+            result["server_checks"] = {"security_check": self._gateway_check(revised)}
+            result["detail"] = (
+                "Gateway rescan produced advisory findings; review the successor before approval."
+            )
+            return operation, result
+        if verdict != "pass":
+            raise WisdomValidationError("Gateway revision scan verdict is unavailable")
+        return operation, None
+
+    def _revise_blocked(
+        self, operation: dict[str, Any], may_apply: Callable[[], bool] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        operation_id = operation["id"]
+        predecessor_id = str(
+            operation.get("revision_predecessor_id") or operation.get("remote_draft_id") or ""
+        )
+        if not predecessor_id:
+            raise WisdomConflict("Publication draft identity is unavailable")
+        if operation["phase"] == "revision_unknown":
+            _current(may_apply)
+            matches = [
+                draft for draft in self.client.list_drafts()
+                if _value(draft, "supersedesDraftId") == predecessor_id
+                and self._matches(draft, operation)
+            ]
+            _current(may_apply)
+            if len(matches) > 1:
+                raise WisdomValidationError("Gateway returned multiple publication revisions")
+            if matches:
+                _current(may_apply)
+                recorded = self._record_revision(operation_id, predecessor_id, matches[0])
+                return self._revision_outcome(recorded, matches[0])
+        request = operation["request"]
+        hashes = operation["hashes"]
+        self.state.update_publication(
+            operation_id, phase="revision_unknown", revision_predecessor_id=predecessor_id,
+        )
+        _current(may_apply)
+        try:
+            revised = self.client.revise_draft(
+                predecessor_id,
+                commit=request["commit"], content_hash=request["content_hash"],
+                description=request["description"],
+                description_hash=request["description_hash"],
+                manifest_hash=request["manifest_hash"],
+                professionalism_review=request.get("professionalism_review"),
+                expected_content_hash=hashes["content"],
+                expected_description_hash=hashes["author_description"],
+                expected_manifest_hash=hashes["package_manifest"],
+            )
+        except (WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError) as exc:
+            if exc.status is None:
+                return operation, self._uncertain(
+                    operation_id, "revision_unknown",
+                    "Draft revision acknowledgement was invalid; authoritative reconciliation is required.",
+                )
+            self.state.update_publication(operation_id, phase="approval_rejected")
+            raise
+        except Exception:  # idempotent revision is reconciled before any retry
+            return operation, self._uncertain(
+                operation_id, "revision_unknown",
+                "Draft revision acknowledgement was lost; authoritative successor reconciliation is required.",
+            )
+        _current(may_apply)
+        recorded = self._record_revision(operation_id, predecessor_id, revised)
+        return self._revision_outcome(recorded, revised)
 
     def _publish(
         self, operation: dict[str, Any], may_apply: Callable[[], bool] | None,
@@ -1653,6 +1904,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         operation, result = self._submission(operation, may_apply, reconcile)
         if result is not None:
             return result
+        if operation["phase"] in {"revision_required", "revision_unknown"}:
+            operation, result = self._revise_blocked(operation, may_apply)
+            if result is not None:
+                return result
         operation, result = self._approval(operation, may_apply)
         if result is not None:
             return result
@@ -1666,6 +1921,8 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         if operation["status"] == "done":
             return self._done(operation)
         phase = operation["phase"]
+        if phase == "approval_rejected":
+            return self._approval_rejection(operation_id)
         return {
             "operation_id": operation_id,
             "state": "uncertain" if "unknown" in phase else "pending",
@@ -1720,7 +1977,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             return self._finish_reconciled_published(operation_id, may_apply)
         return self._finish(operation_id, remote_state)
 
-    def reopen(
+    def reopen(  # pylint: disable=too-many-return-statements
         self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         operation = self._operation(operation_id)
@@ -1740,11 +1997,28 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                     self.state.update_publication(
                         operation_id, phase="approved", remote_state=remote_state
                     )
+                elif operation["phase"] == "approval_unknown" and remote_state == "ready":
+                    if _value(remote, "scanVerdict") == "blocked":
+                        self.state.update_publication(
+                            operation_id, phase="approval_rejected",
+                            remote_state=remote_state,
+                            remote_revision=str(_value(remote, "updatedAt")),
+                            rejection_code="scan_blocked",
+                        )
+                        return self._approval_rejection(operation_id)
+                    self.state.update_publication(
+                        operation_id, phase="policy_review_required",
+                        resume_phase="submitted", remote_state=remote_state,
+                        remote_revision=str(_value(remote, "updatedAt")),
+                    )
+                    return self.status(operation_id)
                 else:
                     return self._uncertain(
                         operation_id, operation["phase"],
                         f"Gateway draft is {remote_state}; nothing was retried.",
                     )
+            if operation["phase"] == "revision_unknown":
+                return self._drive(operation_id, may_apply=may_apply, reconcile=True)
             if operation["phase"] == "base_conflict":
                 self.state.update_publication(operation_id, phase="approved")
             return self._drive(operation_id, may_apply=may_apply, reconcile=True)

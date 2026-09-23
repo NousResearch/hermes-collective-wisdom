@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import argparse
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from installed_test_support import JsonState
 from test_contribution_review import Host, make_skill, owner as contribution_owner, reviewer
 
 from hermes_wisdom_plugin.contribution_review import ContributionReviewer
+from hermes_wisdom_plugin.commands import build_parser, run_cli
 from hermes_wisdom_plugin.direct_services import DirectState, PublicationService
 from hermes_wisdom_plugin.errors import (
     WisdomAuthError, WisdomConflict, WisdomValidationError,
@@ -49,7 +51,8 @@ class RecordingPublicationClient:
         self.state = SimpleNamespace(
             owner=owner, mode=mode, policy_version=7, calls=Counter(), drafts={},
             fail_after_effect=set(), submit_error=None, upload_error=None,
-            uploaded_objects=None, head=None,
+            revise_error=None, approve_error=None, uploaded_objects=None, head=None,
+            scan_verdict="pass",
         )
 
     def agent_led_policy(self):
@@ -78,6 +81,7 @@ class RecordingPublicationClient:
             authorDescription=payload["description"],
             authorDescriptionHash=payload["description_hash"],
             packageManifestHash=payload["manifest_hash"], state="ready",
+            scanVerdict=self.state.scan_verdict, supersedesDraftId=None,
             updatedAt="server-revision-1",
         )
         self.state.drafts[draft.id] = draft
@@ -93,15 +97,50 @@ class RecordingPublicationClient:
 
     def approve(self, draft_id, **hashes):
         self.state.calls["approve"] += 1
+        if self.state.approve_error is not None:
+            raise self.state.approve_error
         draft = self.state.drafts[draft_id]
         assert hashes == {
             "content_hash": draft.contentHash,
             "description_hash": draft.authorDescriptionHash,
             "manifest_hash": draft.packageManifestHash,
         }
+        if draft.scanVerdict == "blocked":
+            raise WisdomValidationError("scan_blocked", status=422, code="scan_blocked")
         draft.state = "owner_approved"
         draft.updatedAt = "server-revision-2"
         return draft
+
+    def revise_draft(self, draft_id, **payload):
+        self.state.calls["revise"] += 1
+        if self.state.revise_error is not None:
+            raise self.state.revise_error
+        predecessor = self.state.drafts[draft_id]
+        assert payload["expected_content_hash"] == predecessor.contentHash
+        assert payload["expected_description_hash"] == predecessor.authorDescriptionHash
+        assert payload["expected_manifest_hash"] == predecessor.packageManifestHash
+        successor = SimpleNamespace(
+            id="draft-2", orgId=predecessor.orgId,
+            ownerUserId=predecessor.ownerUserId, slug=predecessor.slug,
+            draftCommit=payload["commit"], contentHash=payload["content_hash"],
+            authorDescription=payload["description"],
+            authorDescriptionHash=payload["description_hash"],
+            packageManifestHash=payload["manifest_hash"], state="ready",
+            scanVerdict=self.state.scan_verdict, supersedesDraftId=draft_id,
+            scan={
+                "verdict": self.state.scan_verdict,
+                "findings": ([{
+                    "severity": "warning", "category": "gateway",
+                    "path": "SKILL.md", "message": "Gateway advisory finding",
+                }] if self.state.scan_verdict == "advisory" else []),
+            },
+            updatedAt="server-revision-2",
+        )
+        predecessor.state = "invalidated"
+        self.state.drafts[successor.id] = successor
+        if "revise" in self.state.fail_after_effect:
+            raise TimeoutError("lost revision acknowledgement")
+        return successor
 
     def organization_head(self):
         self.state.calls["head"] += 1
@@ -154,6 +193,257 @@ def publication(tmp_path: Path, *, mode: str = "open", scan_allowed: bool = True
         prepared_reviewer.store, prepared_reviewer, client, lambda: dict(binding)
     )
     return service, prepared, client, binding
+
+
+class PublicationCli:
+    """Expose the real publication service through the public CLI contract."""
+
+    def __init__(self, service):
+        self.service = service
+
+    def publication_review(self, draft_id, *, accept_warnings=False):
+        return self.service.review(draft_id, accept_warnings=accept_warnings)
+
+    def publication_submit(self, receipt):
+        return self.service.submit(receipt)
+
+    def publication_reopen(self, operation_id):
+        return self.service.reopen(operation_id)
+
+
+def publication_parser():
+    parser = argparse.ArgumentParser(prog="hermes wisdom")
+    build_parser(parser)
+    return parser
+
+
+def cli_json(parser, service, capsys, *arguments):
+    code = run_cli(parser.parse_args([*arguments, "--json"]), service)
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_cli_recovers_persisted_blocked_approval_via_fresh_review_and_revision(
+    tmp_path: Path, capsys,
+):  # pylint: disable=too-many-locals
+    service, prepared, client, binding = publication(tmp_path)
+    client.state.scan_verdict = "blocked"
+    parser = publication_parser()
+    cli = PublicationCli(service)
+
+    code, review = cli_json(
+        parser, cli, capsys, "publication", "review", prepared["draft_id"]
+    )
+    assert code == 0
+    code, rejected = cli_json(
+        parser, cli, capsys, "publication", "submit", review["receipt"]
+    )
+    assert code == WisdomValidationError.exit_code
+    assert rejected["phase"] == "approval_rejected"
+    operation_id = rejected["operation_id"]
+    assert service.state.publication(operation_id)["phase"] == "approval_rejected"
+
+    restarted = PublicationService(
+        DirectState(service.state.state, service.state.root),
+        service.reviewer, client, lambda: dict(binding),
+    )
+    cli = PublicationCli(restarted)
+    client.state.scan_verdict = "pass"
+    code, fresh = cli_json(
+        parser, cli, capsys, "publication", "review", operation_id
+    )
+    assert code == 0
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1)
+
+    code, completed = cli_json(
+        parser, cli, capsys, "publication", "submit", fresh["receipt"]
+    )
+    assert code == 0
+    assert completed["publication_state"] == "published"
+    assert completed["remote_draft_id"] == "draft-2"
+    operation = restarted.state.publication(operation_id)
+    assert operation["remote_draft_history"] == ["draft-1"]
+    assert client.state.drafts["draft-1"].state == "invalidated"
+    assert client.state.calls == Counter(
+        upload=1, submit=1, approve=2, revise=1, head=1, publish=1
+    )
+
+
+def blocked_publication(tmp_path: Path):
+    service, prepared, client, binding = publication(tmp_path)
+    client.state.scan_verdict = "blocked"
+    rejected = service.submit(service.review(prepared["draft_id"])["receipt"])
+    return service, client, binding, rejected["operation_id"]
+
+
+def test_reopen_converts_legacy_blocked_approval_unknown_to_reviewable_rejection(tmp_path: Path):
+    service, client, binding, operation_id = blocked_publication(tmp_path)
+    service.state.update_publication(operation_id, phase="approval_unknown")
+    restarted = PublicationService(
+        DirectState(service.state.state, service.state.root),
+        service.reviewer, client, lambda: dict(binding),
+    )
+
+    recovered = restarted.reopen(operation_id)
+
+    assert recovered["phase"] == "approval_rejected"
+    assert restarted.review(operation_id)["network_submission"] is False
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1)
+
+
+def test_blocked_rescan_requires_another_fresh_review_without_approval(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+
+    rejected = service.submit(service.review(operation_id)["receipt"])
+
+    assert rejected["phase"] == "approval_rejected"
+    assert service.state.publication(operation_id)["remote_draft_id"] == "draft-2"
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, revise=1)
+    assert service.review(operation_id)["server_checks"]["security_check"]["status"] == "blocked"
+
+
+def test_lost_revision_ack_reconciles_exact_successor_without_duplicate(tmp_path: Path):
+    service, client, binding, operation_id = blocked_publication(tmp_path)
+    review = service.review(operation_id)
+    client.state.scan_verdict = "pass"
+    client.state.fail_after_effect.add("revise")
+
+    uncertain = service.submit(review["receipt"])
+    assert uncertain["phase"] == "revision_unknown"
+    client.state.fail_after_effect.clear()
+    restarted = PublicationService(
+        DirectState(service.state.state, service.state.root),
+        service.reviewer, client, lambda: dict(binding),
+    )
+
+    recovered = restarted.reopen(operation_id)
+
+    assert recovered["publication_state"] == "published"
+    assert recovered["remote_draft_id"] == "draft-2"
+    assert client.state.calls == Counter(
+        upload=1, submit=1, approve=2, revise=1, head=1, publish=1
+    )
+
+
+def test_revision_advisory_requires_review_before_any_approval(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    review = service.review(operation_id)
+    client.state.scan_verdict = "advisory"
+
+    pending = service.submit(review["receipt"])
+
+    assert pending["phase"] == "policy_review_required"
+    assert "advisory" in pending["detail"]
+    assert pending["server_checks"]["security_check"]["findings"] == (
+        client.state.drafts["draft-2"].scan["findings"]
+    )
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, revise=1)
+    with pytest.raises(WisdomConflict, match="acknowledgement"):
+        service.review(operation_id)
+    fresh = service.review(operation_id, accept_warnings=True)
+    assert fresh["server_checks"]["security_check"]["status"] == "advisory"
+    assert fresh["warning_acceptance"]["accepted"] is True
+
+
+def test_unknown_revision_verdict_stays_review_required_across_reopen(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    review = service.review(operation_id)
+    client.state.scan_verdict = None
+
+    with pytest.raises(WisdomValidationError, match="revision"):
+        service.submit(review["receipt"])
+
+    assert service.state.publication_review(review["receipt"]) is None
+    assert service.state.publication(operation_id)["phase"] == "revision_unknown"
+    with pytest.raises(WisdomValidationError, match="revision"):
+        service.reopen(operation_id)
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, revise=1)
+
+
+def test_advisory_acceptance_binds_complete_gateway_evidence(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    client.state.scan_verdict = "advisory"
+    service.submit(service.review(operation_id)["receipt"])
+    review = service.review(operation_id, accept_warnings=True)
+    client.state.drafts["draft-2"].scan["findings"][0]["message"] = "changed evidence"
+
+    with pytest.raises(WisdomConflict, match="changed"):
+        service.submit(review["receipt"])
+
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, revise=1)
+
+
+def test_private_existing_submission_stays_private_until_public_submit(tmp_path: Path):
+    service, prepared, client, _binding = publication(tmp_path)
+    staged = service.submit_private_draft(service.review(prepared["draft_id"])["receipt"])
+    operation_id = staged["operation_id"]
+
+    staged_again = service.submit_private_draft(service.review(operation_id)["receipt"])
+
+    assert staged_again["phase"] == "policy_review_required"
+    assert service.state.publication(operation_id)["requested_action"] == "private_draft"
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+    completed = service.submit(service.review(operation_id)["receipt"])
+    assert completed["publication_state"] == "published"
+
+
+def test_malformed_revision_acknowledgement_is_uncertain_not_rejected(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    client.state.revise_error = WisdomValidationError("malformed response")
+
+    result = service.submit(service.review(operation_id)["receipt"])
+
+    assert result["phase"] == "revision_unknown"
+    assert service.state.publication(operation_id)["phase"] == "revision_unknown"
+
+
+def test_malformed_approval_acknowledgement_remains_uncertain(tmp_path: Path):
+    service, prepared, client, _binding = publication(tmp_path)
+    client.state.approve_error = WisdomValidationError("malformed response")
+
+    result = service.submit(service.review(prepared["draft_id"])["receipt"])
+
+    assert result["phase"] == "approval_unknown"
+    operation = service.state.publication(result["operation_id"])
+    assert operation is not None
+    assert operation["phase"] == "approval_unknown"
+
+
+def test_expired_blocked_recovery_receipt_cannot_rescan(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    review = service.review(operation_id)
+    with service.state.change() as state:
+        state["publication_reviews"][review["receipt"]]["expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+
+    with pytest.raises(WisdomConflict, match="expired"):
+        service.submit(review["receipt"])
+
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1)
+
+
+def test_changed_blocked_remote_invalidates_recovery_receipt(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    review = service.review(operation_id)
+    client.state.drafts["draft-1"].updatedAt = "changed-after-review"
+
+    with pytest.raises(WisdomConflict, match="changed"):
+        service.submit(review["receipt"])
+
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1)
+
+
+def test_definite_revision_conflict_does_not_become_unknown(tmp_path: Path):
+    service, client, _binding, operation_id = blocked_publication(tmp_path)
+    review = service.review(operation_id)
+    client.state.revise_error = WisdomConflict("stale_revision", status=409, code="stale_revision")
+
+    with pytest.raises(WisdomConflict, match="stale_revision"):
+        service.submit(review["receipt"])
+
+    assert service.state.publication(operation_id)["phase"] == "approval_rejected"
+    assert client.state.calls == Counter(upload=1, submit=1, approve=1, revise=1)
 
 
 def test_large_private_publication_stays_within_host_state_quota_and_rereviews_exactly(  # pylint: disable=too-many-locals

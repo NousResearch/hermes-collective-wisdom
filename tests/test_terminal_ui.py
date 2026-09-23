@@ -2,6 +2,7 @@
 
 import pytest
 
+from hermes_wisdom_plugin.native_inspection import sharing_checks
 from hermes_wisdom_plugin.terminal_ui import (
     render_action_review,
     render_file_preview,
@@ -179,7 +180,7 @@ Organization: org
 Skill: raccoon
 Version: 3
 Files (0)
-Scanner warnings: none reported.
+Local scanner warnings: none reported.
 Setup phase: setup
 Setup step: 2
 Command (escaped literal; not executed by review): "printf \\"ok\\"\\n\\u001b"
@@ -190,6 +191,37 @@ Verification: pending
 Approval permission: allowed
 Approval status: eligible for exact final confirmation.
 Next: hermes wisdom installed-setup apply 'setup receipt'"""
+
+
+def test_publication_gateway_advisory_uses_shared_server_check_rendering():
+    """Gateway evidence remains distinct from the local scanner in human output."""
+    rendered = render_action_review("publication", {
+        "files": [],
+        "server_checks": {"security_check": {
+            "status": "advisory", "findings": [{
+                "severity": "advisory", "category": "secret_assignment",
+                "path": "references/example.md", "detail": "Possible secret assignment",
+            }],
+        }},
+        "local_scan": {"allowed": True, "findings": []},
+        "warning_acceptance": {"accepted": True},
+    })
+
+    assert "Server checks:\n  - security_check: advisory" in rendered
+    assert "references/example.md" in rendered
+    assert "Possible secret assignment" in rendered
+    assert "Local scanner warnings: none reported." in rendered
+    assert "Warning acknowledgement: accepted" in rendered
+
+
+def test_native_sharing_checks_show_gateway_advisory_separately():
+    """Native checks cannot claim all-safe while Gateway evidence is advisory."""
+    safe, rendered = sharing_checks({
+        "server_checks": {"security_check": {"status": "advisory"}},
+    })
+
+    assert safe is False
+    assert "Gateway security: advisory" in rendered
 
 
 def test_unverified_local_update_discloses_unknown_baseline_and_preservation():
@@ -256,7 +288,7 @@ def test_package_reviews_preserve_kind_specific_actions(kind, title, next_comman
     assert render_action_review(kind, {"files": [], "receipt": "receipt"}) == (
         f"{title}\n"
         "Files (0)\n"
-        "Scanner warnings: none reported.\n"
+        "Local scanner warnings: none reported.\n"
         "Consequence: writes the reviewed package files; setup commands are not run.\n"
         f"Next: {next_command}"
     )
@@ -270,7 +302,7 @@ def test_unknown_review_kind_retains_generic_denial_without_receipt_action():
     ) == """Collective Wisdom review
 State: denied
 Files (0)
-Scanner warnings: none reported.
+Local scanner warnings: none reported.
 Approval permission: blocked
 Approval status: blocked until the listed review actions are completed."""
 
