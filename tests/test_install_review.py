@@ -21,7 +21,7 @@ from hermes_wisdom_plugin.contract import (
     RuntimeRequirement,
     sha256_address,
 )
-from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomValidationError
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound, WisdomValidationError
 from hermes_wisdom_plugin.install_review import InstallReviewer, VerifiedInstall
 from hermes_wisdom_plugin.package import PackagePolicyError
 
@@ -152,6 +152,54 @@ def _reviewer(tmp_path, *, client=None, store=None, host=None, owner=None):
         host or Host(tmp_path),
         provider,
     )
+
+
+def test_install_plan_resolves_exact_catalog_slug_to_id(tmp_path: Path):
+    class SlugClient(Client):
+        def skill(self, skill_id):
+            if skill_id == "managed-skill":
+                raise WisdomNotFound("Collective Wisdom item not found")
+            return super().skill(skill_id)
+
+        def list_skills(self, *, cursor=None):
+            assert cursor is None
+            item = SimpleNamespace(model_dump=lambda *, mode: {
+                "id": "skill-1", "slug": "managed-skill",
+            })
+            return SimpleNamespace(skills=[item], next_cursor=None)
+
+    client = SlugClient()
+    reviewer = _reviewer(tmp_path, client=client)
+    plan = reviewer.plan("managed-skill@v1")
+    assert (plan["skill_id"], plan["slug"], plan["version"]) == (
+        "skill-1", "managed-skill", 1,
+    )
+    assert reviewer.verify(plan).plan["skill_id"] == "skill-1"
+    client.skill_value["slug"] = "renamed"
+    content_calls = sum(call[0] == "content" for call in client.calls)
+    with pytest.raises(WisdomValidationError, match="slug changed"):
+        reviewer.plan("managed-skill")
+    assert sum(call[0] == "content" for call in client.calls) == content_calls
+
+
+def test_install_plan_rejects_ambiguous_slug_before_receipt(tmp_path: Path):
+    class DuplicateSlugClient(Client):
+        def skill(self, skill_id):
+            del skill_id
+            raise WisdomNotFound("Collective Wisdom item not found")
+
+        def list_skills(self, *, cursor=None):
+            assert cursor is None
+            items = [
+                SimpleNamespace(model_dump=lambda *, mode, id=skill_id: {
+                    "id": id, "slug": "managed-skill",
+                })
+                for skill_id in ("skill-1", "skill-2")
+            ]
+            return SimpleNamespace(skills=items, next_cursor=None)
+
+    with pytest.raises(WisdomNotFound, match="Wisdom skill not found"):
+        _reviewer(tmp_path, client=DuplicateSlugClient()).plan("managed-skill")
 
 
 def test_plan_preserves_exact_version_url_and_complete_review(tmp_path: Path):
