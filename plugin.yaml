@@ -1,6 +1,6 @@
 manifest_version: 1
 kind: standalone
-name: hermes-collective-wisdom
+name: collective-wisdom
 version: 0.1.0.dev0
 description: "Terminal setup and read-only discovery for Collective Wisdom."
 provides_hooks:

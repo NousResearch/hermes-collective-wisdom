@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import uuid
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,8 +20,9 @@ from .install_execution import (
     _tree_hashes,
 )
 from .install_review import InstallReviewer
-from .managed_target import validate_managed_target
+from .managed_target import local_provenance, validate_managed_target
 from .package import PackagePolicyError
+from .qualification import _eligible_path
 
 _UPDATE_MODES = frozenset({"MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"})
 _INCOMING_FIELDS = (
@@ -28,6 +30,16 @@ _INCOMING_FIELDS = (
     "update_mode", "manifest", "files", "compatibility", "server_checks",
     "local_scan", "security_check", "hashes",
 )
+
+
+def _host_skill_resolver(skill_name: str) -> Path | None:
+    """Resolve the active profile's local skill through the current host API."""
+
+    try:
+        resolver = getattr(import_module("tools.skill_usage"), "_find_skill_dir")
+        return resolver(skill_name)
+    except (AttributeError, ImportError, RuntimeError, ValueError, OSError):
+        return None
 
 
 class UpdateAuthorityRejected(PackagePolicyError):
@@ -102,17 +114,46 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         self.receipts = receipts
         self.host = host
         self.owner = owner
+        self.skill_resolver = _host_skill_resolver
         self.install_reviewer = InstallReviewer(client, store, receipts, host, owner)
 
     def _owner(self) -> dict[str, Any]:
         return self.install_reviewer._owner_snapshot()  # pylint: disable=protected-access
 
     def _installation(
-        self, skill_id: str, owner: dict[str, Any], *, require_tree: bool = True,
+        self, skill_id: str, owner: dict[str, Any], *, slug: str | None = None,
+        require_tree: bool = True,
     ) -> dict[str, Any]:
         installation = self.store.installation(skill_id, owner=owner)
         if not isinstance(installation, dict) or installation.get("state") != "active":
-            raise PackagePolicyError("managed installation is not active for this enrolment")
+            any_owner = self.store.installation(skill_id)
+            if isinstance(any_owner, dict) and any_owner.get("owner") != owner:
+                raise WisdomAuthError("managed installation belongs to another enrolment")
+            if not isinstance(slug, str) or not slug:
+                raise PackagePolicyError(
+                    "no active managed installation was found; use the catalog skill name "
+                    "to review an existing local copy"
+                )
+            target = _eligible_path(
+                slug, skills_root=Path(self.host.skills_root),
+                skill_resolver=self.skill_resolver,
+            )
+            if target is None:
+                raise PackagePolicyError(
+                    "no local copy exists for this Wisdom skill; "
+                    "update will not install it implicitly"
+                )
+            baseline = _tree_hashes(target)
+            if not baseline:
+                raise PackagePolicyError("local skill bytes are unavailable or unsafe")
+            self._reject_local_collision(skill_id, target)
+            installation = {
+                "skill_id": skill_id, "org_id": owner["organization_id"],
+                "slug": slug, "version": None, "content_hash": None,
+                "baseline": baseline, "target_path": str(target),
+                "target_provenance": local_provenance(owner=owner, source_path=target),
+                "update_mode": "MANUAL", "state": "active", "owner": owner,
+            }
         if installation.get("owner") != owner:
             raise WisdomAuthError("managed installation belongs to another enrolment")
         validate_update_target(
@@ -120,9 +161,47 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         )
         return copy.deepcopy(installation)
 
-    def _authority(self, skill_id: str, owner: dict[str, Any]) -> dict[str, Any] | None:
-        _detail, authority = self._authority_detail(skill_id, owner)
-        return authority
+    def _reject_local_collision(self, skill_id, target):
+        for row in self.store.installations():
+            if (
+                isinstance(row, dict) and row.get("state") == "active"
+                and row.get("skill_id") != skill_id
+                and row.get("target_path") == str(target)
+            ):
+                raise PackagePolicyError(
+                    "local skill target belongs to another managed skill"
+                )
+
+    @staticmethod
+    def _unknown_local(installation: dict[str, Any]) -> bool:
+        provenance = installation.get("target_provenance")
+        return (isinstance(provenance, dict) and provenance.get("kind") == "local_source"
+                and installation.get("version") is None)
+
+    def _catalog_authority(
+        self, skill_id: str, owner: dict[str, Any], *, installed_version: int | None = None,
+    ) -> dict[str, Any]:
+        detail = self.install_reviewer._request(  # pylint: disable=protected-access
+            owner, lambda: self.client.skill(skill_id)
+        )
+        skill = getattr(detail, "skill", None)
+        versions = getattr(detail, "versions", None)
+        if (
+            not isinstance(skill, dict) or skill.get("id", skill_id) != skill_id
+            or skill.get("state") != "active"
+        ):
+            raise PackagePolicyError(
+                "only an active published Wisdom skill can update a local copy"
+            )
+        published = self.install_reviewer._published_versions(versions)  # pylint: disable=protected-access
+        generation = self.install_reviewer._generation(  # pylint: disable=protected-access
+            skill.get("takedown_generation")
+        )
+        return {
+            "installed_version": installed_version, "latest_version": max(published),
+            "takedown_generation": generation, "update_mode": "MANUAL",
+            "skill_state": "active", "source": "catalog",
+        }
 
     def _authority_detail(
         self, skill_id: str, owner: dict[str, Any]
@@ -170,11 +249,20 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "skill_state": state,
         }
 
-    def check(self, skill_id: str) -> dict[str, Any]:
+    def check(self, skill_id: str, *, slug: str | None = None) -> dict[str, Any]:
         """Compare local and authoritative versions without package/feed side effects."""
 
         owner = self._owner()
-        installation = self._installation(skill_id, owner)
+        installation = self._installation(skill_id, owner, slug=slug)
+        if self._unknown_local(installation):
+            authority = self._catalog_authority(skill_id, owner)
+            return {
+                "skill_id": skill_id, "slug": installation["slug"],
+                "installed_version": None, "latest_version": authority["latest_version"],
+                "content_hash": None, "update_mode": "MANUAL",
+                "state": "update_available", "local_baseline": "unknown",
+                "preservation_required": True,
+            }
         detail, authority = self._authority_detail(skill_id, owner)
         base = {
             "skill_id": skill_id,
@@ -183,7 +271,10 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "update_mode": installation["update_mode"],
         }
         if detail == "absent":
-            return {**base, "state": "not_recorded", "latest_version": None}
+            authority = self._catalog_authority(
+                skill_id, owner, installed_version=installation["version"],
+            )
+            detail = "verified"
         if detail != "verified" or authority is None:
             return {**base, "state": "unverifiable", "latest_version": None}
         state = authority.get("skill_state")
@@ -211,10 +302,33 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "takedown_generation": checked["takedown_generation"],
         }
 
+    def _planning_authority(self, skill_id, owner, installation, *, automatic):
+        if self._unknown_local(installation):
+            if automatic:
+                raise PackagePolicyError(
+                    "automatic updates require an existing managed installation"
+                )
+            return self._catalog_authority(skill_id, owner)
+        detail, raw = self._authority_detail(skill_id, owner)
+        if detail == "absent" and not automatic:
+            authority = self._catalog_authority(
+                skill_id, owner, installed_version=installation["version"],
+            )
+        else:
+            authority = self._authority_snapshot(raw or {})
+        if authority is None or authority["skill_state"] != "active":
+            raise PackagePolicyError("Gateway does not authorize this managed update")
+        if authority["installed_version"] != installation["version"]:
+            raise PackagePolicyError("local and Gateway installed versions do not agree")
+        if authority["latest_version"] <= installation["version"]:
+            raise PackagePolicyError("managed installation is already current")
+        return authority
+
     def plan(  # pylint: disable=too-many-locals,too-many-arguments
         self,
         skill_id: str,
         *,
+        slug: str | None = None,
         preserve_modified: bool = False,
         accept_sensitive: bool = False,
         accept_partial: bool = False,
@@ -224,15 +338,9 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         """Create an exact review; acknowledgements become immutable receipt facts."""
 
         owner = self._owner()
-        installation = self._installation(skill_id, owner)
-        authority_raw = self._authority(skill_id, owner)
-        authority = self._authority_snapshot(authority_raw or {})
-        if authority is None or authority["skill_state"] != "active":
-            raise PackagePolicyError("Gateway does not authorize this managed update")
-        if authority["installed_version"] != installation["version"]:
-            raise PackagePolicyError("local and Gateway installed versions do not agree")
-        if authority["latest_version"] <= installation["version"]:
-            raise PackagePolicyError("managed installation is already current")
+        installation = self._installation(skill_id, owner, slug=slug)
+        local_source = self._unknown_local(installation)
+        authority = self._planning_authority(skill_id, owner, installation, automatic=automatic)
         if automatic and authority["update_mode"] not in {"AUTO_WITH_NOTICE", "REQUIRED"}:
             raise PackagePolicyError("manual update policy requires explicit review")
         if automatic and any((
@@ -252,7 +360,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         local_snapshot = _tree_hashes(target)
         if local_snapshot is None:
             raise PackagePolicyError("managed local bytes are unavailable or unsafe")
-        modified = local_snapshot != installation.get("baseline")
+        modified = local_source or local_snapshot != installation.get("baseline")
         sensitive = self._sensitive(target, incoming["manifest"])
         outcome = incoming["compatibility"]["outcome"]
         partial = outcome in {"partial", "compatible_after_setup"}
@@ -288,8 +396,8 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         review = {
             **{field: copy.deepcopy(incoming[field]) for field in _INCOMING_FIELDS},
             "skill_id": skill_id,
-            "from_version": installation["version"],
-            "previous_content_hash": installation["content_hash"],
+            "from_version": installation.get("version"),
+            "previous_content_hash": installation.get("content_hash"),
             "previous_baseline": copy.deepcopy(installation["baseline"]),
             "previous_installation": installation,
             "target_path": str(target),
@@ -298,6 +406,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "baseline": baseline,
             "authority": authority,
             "modified": modified,
+            "local_baseline": "unknown" if local_source else "published",
             "sensitive_expansion": sensitive,
             "preservation": preservation,
             "policy": {
@@ -359,29 +468,56 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             ]
         return sensitive_expansion(previous.requirements, incoming)
 
-    def verify(  # pylint: disable=too-many-locals,too-many-branches
-        self, plan: dict[str, Any], *, recovery_phase: str | None = None
-    ) -> VerifiedUpdate:
-        """Reauthorize all receipt facts and reject local or package drift."""
+    def _review_installation(self, plan, owner, recovery_phase):
+        previous = plan.get("previous_installation")
+        if not isinstance(previous, dict):
+            raise WisdomValidationError("Invalid previous update installation")
+        current = self.store.installation(plan["skill_id"], owner=owner)
+        if (recovery_phase is not None and self._unknown_local(previous)
+                and (current is None or current.get("state") != "active")):
+            # The reviewed original can be in recovery while its replacement is not
+            # yet recorded. Use the receipt's exact path/baseline, never rediscover it.
+            any_owner = self.store.installation(plan["skill_id"])
+            if any_owner is not None and any_owner.get("owner") != owner:
+                raise WisdomAuthError("managed installation belongs to another enrolment")
+            validate_update_target(self.host, previous, owner, require_tree=False)
+            self._reject_local_collision(plan["skill_id"], Path(previous["target_path"]))
+            return copy.deepcopy(previous)
+        return self._installation(
+            plan["skill_id"], owner, slug=previous.get("slug"),
+            require_tree=recovery_phase is None,
+        )
 
-        if not isinstance(plan, dict) or plan.get("operation") != "update":
-            raise WisdomValidationError("Invalid update review")
-        owner = self._owner()
-        if plan.get("owner") != owner:
-            raise WisdomAuthError("Update review does not belong to this enrolment")
-        skill_id = plan.get("skill_id")
-        if not isinstance(skill_id, str) or not skill_id:
-            raise WisdomValidationError("Invalid update review")
-        installation = self._installation(
-            skill_id, owner, require_tree=recovery_phase is None,
+    def _verify_authority(self, plan, owner, recovery_phase):
+        expected = plan.get("authority")
+        if not isinstance(expected, dict):
+            raise WisdomValidationError("Invalid update review authority")
+        if expected.get("source") == "catalog":
+            return self._verify_catalog_authority(plan, owner, recovery_phase)
+        return self._verify_gateway_authority(plan, owner, recovery_phase)
+
+    def _verify_catalog_authority(self, plan, owner, recovery_phase):
+        expected = plan["authority"]
+        current = self._catalog_authority(
+            plan["skill_id"], owner, installed_version=plan.get("from_version"),
         )
-        expected_previous = plan.get("previous_installation")
-        target = Path(str(plan.get("target_path") or ""))
-        self._verify_local_recovery_state(
-            plan, installation, expected_previous, target, recovery_phase
-        )
+        current["update_mode"] = expected["update_mode"]
+        if "source" not in expected:
+            current.pop("source")
+        if recovery_phase in {"files_committed", "local_committed"}:
+            current["latest_version"] = expected["latest_version"]
+        if current != expected:
+            raise PackagePolicyError(
+                "published update changed after planning; create a new review"
+            )
+        return expected, False
+
+    def _verify_gateway_authority(self, plan, owner, recovery_phase):
+        skill_id = plan["skill_id"]
         detail, authority_raw = self._authority_detail(skill_id, owner)
         if detail == "absent":
+            if plan["authorization"]["kind"] == "manual_receipt":
+                return self._verify_catalog_authority(plan, owner, recovery_phase)
             raise UpdateAuthorityRejected(
                 "Gateway no longer records an active installation for this skill"
             )
@@ -412,6 +548,30 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             raise PackagePolicyError(
                 "update authority or policy changed after planning; create a new review"
             )
+        return expected_authority, remote_committed
+
+    def verify(  # pylint: disable=too-many-locals,too-many-branches
+        self, plan: dict[str, Any], *, recovery_phase: str | None = None
+    ) -> VerifiedUpdate:
+        """Reauthorize all receipt facts and reject local or package drift."""
+
+        if not isinstance(plan, dict) or plan.get("operation") != "update":
+            raise WisdomValidationError("Invalid update review")
+        owner = self._owner()
+        if plan.get("owner") != owner:
+            raise WisdomAuthError("Update review does not belong to this enrolment")
+        skill_id = plan.get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id:
+            raise WisdomValidationError("Invalid update review")
+        expected_previous = plan.get("previous_installation")
+        installation = self._review_installation(plan, owner, recovery_phase)
+        target = Path(str(plan.get("target_path") or ""))
+        self._verify_local_recovery_state(
+            plan, installation, expected_previous, target, recovery_phase
+        )
+        expected_authority, remote_committed = self._verify_authority(
+            plan, owner, recovery_phase,
+        )
         if remote_committed:
             self.install_reviewer._check_owner(owner)  # pylint: disable=protected-access
             return VerifiedUpdate(
@@ -460,10 +620,10 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         target: Path, recovery_phase: str | None,
     ) -> None:
         if recovery_phase is None:
-            if installation != expected_previous:
-                raise PackagePolicyError("managed installation changed after update review")
             if _tree_hashes(target) != plan.get("local_snapshot"):
                 raise PackagePolicyError("managed local bytes changed after update review")
+            if installation != expected_previous:
+                raise PackagePolicyError("managed installation changed after update review")
             return
         allowed_hash = {
             "prepared": plan.get("local_snapshot"), "old_preserved": None,

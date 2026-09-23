@@ -204,7 +204,8 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         remote = self._remote(payload["skill_id"], owner)
         remote_version = remote.get("installed_version") if remote else None
         mode = remote.get("update_mode") if remote_version == payload["version"] else None
-        if remote_version == payload["from_version"]:
+        manual = payload.get("authorization", {}).get("kind") == "manual_receipt"
+        if remote_version == payload["from_version"] or (manual and remote is None):
             try:
                 self._require_current(may_apply)
                 server = self.client.record_install(
@@ -230,7 +231,10 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         self.store.record_install(self._install_record(payload, owner, mode=mode))
         result = {
             "updated": True, "skill_id": payload["skill_id"], "slug": payload["slug"],
-            "from_version": int(payload["from_version"]), "version": int(payload["version"]),
+            "from_version": (
+                int(payload["from_version"]) if payload.get("from_version") is not None else None
+            ),
+            "version": int(payload["version"]),
             "path": str(target), "content_hash": payload["content_hash"],
             "preserved_copy": payload["preservation"].get("destination"),
             "recovery_path": str(recovery), "effective_update_mode": mode,
@@ -263,6 +267,8 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         if quarantine.exists():
             _require_tree(quarantine, payload["baseline"])
         self._preserve_copy(payload, recovery, operation_id, owner)
+        if payload.get("local_baseline") == "unknown":
+            self._restore_local_source(payload, owner, paths)
         self.store.deactivate_install(payload["skill_id"])
         result = {
             "updated": False, "rejected": True, "skill_id": payload["skill_id"],
@@ -274,6 +280,20 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             "setup_execution_authorized": False, "ready_to_use": None,
         }
         return self._record_outcome(operation_id, payload, result)
+
+    def _restore_local_source(self, payload, owner, paths):
+        """A rejected adoption must not remove the user's original local skill."""
+        target = Path(payload["target_path"])
+        if target.exists():
+            _require_tree(target, payload["local_snapshot"])
+            return
+        staging, recovery = paths["staging_path"], paths["recovery_path"]
+        self._assert_owner(owner)
+        if not staging.exists():
+            shutil.copytree(recovery, staging)
+        _require_tree(staging, payload["local_snapshot"])
+        self._assert_owner(owner)
+        _durable_replace(staging, target)
 
     def _record_outcome(self, operation_id, payload, result):
         payload["result"] = result
@@ -351,11 +371,16 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
 
     @staticmethod
     def _validate_identity(payload, skill_id):
+        provenance = payload.get("target_provenance")
+        local_source = isinstance(provenance, dict) and provenance.get("kind") == "local_source"
+        valid_from = (
+            isinstance(payload.get("from_version"), int)
+            and not isinstance(payload.get("from_version"), bool)
+        ) or (local_source and payload.get("from_version") is None)
         if (payload.get("skill_id") != skill_id or not isinstance(payload.get("receipt"), str)
                 or not isinstance(payload.get("version"), int)
                 or isinstance(payload.get("version"), bool)
-                or not isinstance(payload.get("from_version"), int)
-                or isinstance(payload.get("from_version"), bool)
+                or not valid_from
                 or not isinstance(payload.get("content_hash"), str)):
             raise PackagePolicyError("update recovery identity is invalid")
 

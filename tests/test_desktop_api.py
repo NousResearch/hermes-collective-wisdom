@@ -590,32 +590,32 @@ def test_fastapi_router_exposes_real_catalog_and_review_confirmation_flow(tmp_pa
     app = FastAPI()
     app.include_router(
         build_router(lambda: services[selected[0]], workflow=workflow),
-        prefix="/api/plugins/hermes-collective-wisdom",
+        prefix="/api/plugins/collective-wisdom",
     )
     async def request(method, path, **kwargs):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
             return await http.request(method, path, **kwargs)
 
-    opened = asyncio.run(request("POST", "/api/plugins/hermes-collective-wisdom/views")).json()
+    opened = asyncio.run(request("POST", "/api/plugins/collective-wisdom/views")).json()
     view_id = opened["view_id"]
     catalog = asyncio.run(request(
         "GET",
-        "/api/plugins/hermes-collective-wisdom/catalog", params={"q": "incident"}
+        "/api/plugins/collective-wisdom/catalog", params={"q": "incident"}
     ))
     assert catalog.status_code == 200
     assert catalog.json()["skills"][0]["author_description"] == "incident"
 
     plan = asyncio.run(request(
         "POST",
-        "/api/plugins/hermes-collective-wisdom/install/review",
+        "/api/plugins/collective-wisdom/install/review",
         json={"view_id": view_id, "reference": "skill-1@v1"},
     ))
     assert plan.status_code == 200
     receipt = plan.json()["receipt"]
     applied = asyncio.run(request(
         "POST",
-        "/api/plugins/hermes-collective-wisdom/install/confirm",
+        "/api/plugins/collective-wisdom/install/confirm",
         json={"view_id": view_id, "receipt": receipt},
     ))
     assert applied.json() == {"installed": True, "skill_id": "skill-1", "version": 1}
@@ -623,7 +623,7 @@ def test_fastapi_router_exposes_real_catalog_and_review_confirmation_flow(tmp_pa
     selected[0] = "b"
     stale = asyncio.run(request(
         "POST",
-        "/api/plugins/hermes-collective-wisdom/install/confirm",
+        "/api/plugins/collective-wisdom/install/confirm",
         json={"view_id": view_id, "receipt": receipt},
     ))
     assert stale.status_code == 401

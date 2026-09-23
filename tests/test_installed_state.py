@@ -53,7 +53,7 @@ def test_actual_host_plugin_state_round_trip_uses_manifest_namespace(tmp_path: P
 import json, os
 from hermes_cli.plugins_state import PluginState
 from hermes_wisdom_plugin.installed_state import InstalledState
-state = PluginState('hermes-collective-wisdom')
+state = PluginState('collective-wisdom')
 installed = InstalledState(state, state.data_dir)
 if os.environ['ACTION'] == 'write':
     installed.record_install(json.loads(os.environ['RECORD']))
@@ -95,7 +95,7 @@ import json, threading
 from concurrent.futures import ThreadPoolExecutor
 from hermes_cli.plugins_state import PluginState
 from hermes_wisdom_plugin.installed_state import InstalledState
-state = PluginState('hermes-collective-wisdom')
+state = PluginState('collective-wisdom')
 installed = InstalledState(state, state.data_dir)
 original_set = state.set
 entered = threading.Event()

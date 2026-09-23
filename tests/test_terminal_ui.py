@@ -224,6 +224,21 @@ def test_native_sharing_checks_show_gateway_advisory_separately():
     assert "Gateway security: advisory" in rendered
 
 
+def test_unverified_local_update_discloses_unknown_baseline_and_preservation():
+    """Unknown local history is not mislabeled as detected edits."""
+
+    output = render_action_review("update", {
+        "slug": "raccoon", "version": 2, "files": [],
+        "modified": True, "local_baseline": "unknown",
+        "preservation": {"action": "preserve_unmanaged_copy"},
+        "allowed": True,
+    })
+
+    assert "Local published baseline: unknown" in output
+    assert "preservation required; action: preserve_unmanaged_copy" in output
+    assert "Local edits: detected" not in output
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [

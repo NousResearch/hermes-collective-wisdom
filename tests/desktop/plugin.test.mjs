@@ -393,8 +393,10 @@ for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'un
   await mounted.cleanup()
 })
 
-for (const updated of [true, false]) test(`desktop slash dialog handles ${updated ? 'completed' : 'pending'} checked updates`, async () => {
-  const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
+for (const local of [false, true]) for (const updated of [true, false]) test(`desktop slash dialog handles ${updated ? 'completed' : 'pending'} checked updates (local=${local})`, async t => {
+  const installedStatus = local
+    ? { state: 'unmanaged_local', text: 'Local copy · published version unknown', installed_version: null, latest_version: 2 }
+    : { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
     if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }
@@ -405,7 +407,10 @@ for (const updated of [true, false]) test(`desktop slash dialog handles ${update
         view_id: 'view-remote-a-A', skill_id: 'skill-1', preserve_modified: true,
         accept_sensitive: false, accept_partial: false, accept_warnings: false
       })
-      return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' } })
+      return local ? updateReview({
+        from_version: null, local_baseline: 'unknown', sensitive_expansion: [],
+        previous_installation: { version: null, target_provenance: { kind: 'local_source' } }
+      }) : updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' } })
     }
     if (path === '/update/confirm') {
       assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', receipt: 'update-receipt' })
@@ -418,7 +423,8 @@ for (const updated of [true, false]) test(`desktop slash dialog handles ${update
   const mounted = await renderComposerContribution(loaded)
   assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
 
-  assert.match(mounted.container.textContent, /Installed v1 · Update available v2/)
+  t.after(() => mounted.cleanup())
+  assert.ok(mounted.container.textContent.includes(installedStatus.text))
   assert.equal(button(mounted, 'Install'), undefined)
   await click(button(mounted, 'Update'))
   assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/confirm').length, 1)
@@ -431,13 +437,13 @@ for (const updated of [true, false]) test(`desktop slash dialog handles ${update
   await mounted.cleanup()
 })
 
-test('desktop slash dialog paginates with approved controls and blocks unmanaged or unavailable installs', async () => {
+test('desktop slash dialog offers local updates and blocks unavailable installs', async () => {
   const skills = Array.from({ length: 7 }, (_, index) => ({
     id: `skill-${index + 1}`,
     slug: `skill-${index + 1}`,
     latest_version: 1,
     installation_status: index === 5
-      ? { state: 'unmanaged_local', text: 'Local same-name skill is unmanaged', installed_version: null, latest_version: 1 }
+      ? { state: 'unmanaged_local', text: 'Local copy · published version unknown', installed_version: null, latest_version: 1 }
       : index === 6 ? undefined : { state: 'not_installed', text: 'Not installed', installed_version: null, latest_version: 1 }
   }))
   const loaded = await loadPlugin((path, options, owner) => {
@@ -458,9 +464,9 @@ test('desktop slash dialog paginates with approved controls and blocks unmanaged
   assert.equal(button(mounted, 'Next').disabled, true)
   assert.equal(button(mounted, 'Previous').disabled, false)
   await click(button(mounted, 'View'))
-  assert.match(mounted.container.textContent, /Local same-name skill is unmanaged/)
+  assert.match(mounted.container.textContent, /Local copy · published version unknown/)
   assert.equal(button(mounted, 'Install'), undefined)
-  assert.equal(button(mounted, 'Update'), undefined)
+  assert.ok(button(mounted, 'Update'))
   await click(button(mounted, 'Back'))
   const unavailableRow = mounted.container.querySelector('[data-testid="catalog-skill-skill-7"]')
   await click([...unavailableRow.querySelectorAll('button')].find(item => item.textContent === 'View'))

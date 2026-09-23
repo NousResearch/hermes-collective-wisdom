@@ -119,7 +119,7 @@ def _tree(root: Path, files):
         path.write_bytes(body)
 
 
-def _reviewer(tmp_path, *, client=None, host=None):
+def _reviewer(tmp_path, *, client=None, host=None, skill_resolver=None):
     owner = _owner(profile_home=str(tmp_path / "profile"))
     target = (tmp_path / "profile" / "skills" / "_wisdom"
               / org_directory_name(owner["organization_id"]) / "managed-skill")
@@ -138,7 +138,83 @@ def _reviewer(tmp_path, *, client=None, host=None):
         client or Client(), store, Receipts(lambda: dict(owner)), host,
         lambda: dict(owner),
     )
+    if skill_resolver is not None:
+        value.skill_resolver = skill_resolver
     return value, store, target
+
+
+def test_unmanaged_local_copy_has_unknown_baseline_and_requires_preservation(tmp_path):
+    reviewer, store, canonical = _reviewer(tmp_path)
+    local = reviewer.host.skills_root / "authored" / "managed-skill"
+    local.parent.mkdir(parents=True)
+    canonical.rename(local)
+    store.record = {"skill_id": "other", "owner": reviewer._owner()}
+    reviewer.skill_resolver = lambda name: local if name == "managed-skill" else None
+
+    checked = reviewer.check("skill-1", slug="managed-skill")
+    blocked = reviewer.plan("skill-1", slug="managed-skill")
+    accepted = reviewer.plan(
+        "skill-1", slug="managed-skill", preserve_modified=True,
+    )
+
+    assert checked == {
+        "skill_id": "skill-1", "slug": "managed-skill",
+        "installed_version": None, "latest_version": 2,
+        "content_hash": None, "update_mode": "MANUAL",
+        "state": "update_available", "local_baseline": "unknown",
+        "preservation_required": True,
+    }
+    assert blocked["from_version"] is None
+    assert blocked["previous_content_hash"] is None
+    assert blocked["local_baseline"] == "unknown"
+    assert blocked["modified"] is True and blocked["allowed"] is False
+    assert blocked["preservation"] == {"action": "block", "destination": None}
+    assert accepted["allowed"] is True
+    assert accepted["preservation"]["action"] == "preserve_unmanaged_copy"
+    assert accepted["previous_installation"]["target_provenance"] == {
+        "kind": "local_source", "owner": accepted["owner"],
+        "source_path": str(local),
+    }
+    assert not any(call[0] == "installations" for call in reviewer.client.calls)
+
+
+def test_unmanaged_update_reports_genuinely_missing_local_copy(tmp_path):
+    reviewer, store, target = _reviewer(tmp_path, skill_resolver=lambda _name: None)
+    store.record = {"skill_id": "other", "owner": reviewer._owner()}
+    for path in sorted(target.rglob("*"), reverse=True):
+        if path.is_file():
+            path.unlink()
+        else:
+            path.rmdir()
+    target.rmdir()
+
+    with pytest.raises(PackagePolicyError, match="no local copy"):
+        reviewer.check("skill-1", slug="managed-skill")
+    with pytest.raises(PackagePolicyError, match="no local copy"):
+        reviewer.plan("skill-1", slug="managed-skill")
+
+    assert reviewer.client.calls == []
+
+
+def test_unmanaged_review_rechecks_exact_local_and_published_snapshots(tmp_path):
+    client = Client()
+    reviewer, store, canonical = _reviewer(tmp_path, client=client)
+    local = reviewer.host.skills_root / "authored" / "managed-skill"
+    local.parent.mkdir(parents=True)
+    canonical.rename(local)
+    store.record = {"skill_id": "other", "owner": reviewer._owner()}
+    reviewer.skill_resolver = lambda _name: local
+    plan = reviewer.plan("skill-1", slug="managed-skill", preserve_modified=True)
+
+    assert reviewer.verify(plan).plan == plan
+    local.joinpath("SKILL.md").write_bytes(b"changed after exact review")
+    with pytest.raises(PackagePolicyError, match="local bytes changed"):
+        reviewer.verify(plan)
+
+    local.joinpath("SKILL.md").write_bytes(b"# Managed\n")
+    client.files[2][0] = ("SKILL.md", "file", b"changed published package")
+    with pytest.raises(WisdomValidationError, match="package or review changed"):
+        reviewer.verify(plan)
 
 
 @pytest.mark.parametrize(
@@ -148,16 +224,12 @@ def _reviewer(tmp_path, *, client=None, host=None):
         ({"latest_version": 2, "skill_state": "active"}, "update_available"),
         ({"latest_version": 2, "skill_state": "archived"}, "archived"),
         ({"latest_version": 2, "skill_state": "taken_down"}, "taken_down"),
-        (None, "not_recorded"),
         ({"latest_version": None, "skill_state": "active"}, "unverifiable"),
     ],
 )
 def test_check_reports_authoritative_state_without_package_or_mutation(tmp_path, remote, state):
     client = Client()
-    if remote is None:
-        client.remote = None
-    else:
-        client.remote.update(remote)
+    client.remote.update(remote)
     reviewer, _store, target = _reviewer(tmp_path, client=client)
     before = {
         path.relative_to(target): path.read_bytes()
