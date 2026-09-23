@@ -25,7 +25,8 @@ from .contract import (
     parse_manifest_bytes,
     sha256_address,
 )
-from .errors import WisdomAuthError, WisdomValidationError
+from .discovery import Discovery
+from .errors import WisdomAuthError, WisdomNotFound, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
 from .local_security import prepared_security_check
 
@@ -138,6 +139,46 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             return operation()
         finally:
             self._check_owner(expected)
+
+    def _resolve_slug(self, slug: str, owner: dict[str, Any]) -> str:
+        """Use the same bounded, owner-checked catalog as discovery for exact slugs."""
+        discovery = Discovery(
+            self.client, lambda: self._check_owner(owner),
+            owner["base_url"], owner["organization_id"],
+        )
+        matches = [
+            item for item in discovery.search_skills(slug) if item.get("slug") == slug
+        ]
+        if (
+            len(matches) != 1
+            or not isinstance(matches[0].get("id"), str)
+            or not matches[0]["id"]
+        ):
+            raise WisdomNotFound("Wisdom skill not found")
+        self._check_owner(owner)
+        return matches[0]["id"]
+
+    def _skill_detail(
+        self, skill_id: str, owner: dict[str, Any], *, check_existing: bool,
+    ) -> tuple[str, Any, str | None]:
+        """Prefer a direct ID; resolve a missing reference by exact catalog slug."""
+        self._reject_existing(skill_id, owner, check_existing=check_existing)
+        try:
+            return skill_id, self._request(owner, lambda: self.client.skill(skill_id)), None
+        except WisdomNotFound:
+            canonical_id = self._resolve_slug(skill_id, owner)
+            self._reject_existing(canonical_id, owner, check_existing=check_existing)
+            detail = self._request(owner, lambda: self.client.skill(canonical_id))
+            return canonical_id, detail, skill_id
+
+    @staticmethod
+    def _review_slug(skill: dict[str, Any], skill_id: str, requested: str | None) -> str:
+        slug = skill.get("slug") or skill_id
+        if not isinstance(slug, str) or not slug:
+            raise WisdomValidationError("Gateway returned an invalid skill slug")
+        if requested is not None and slug != requested:
+            raise WisdomValidationError("Wisdom skill slug changed during review")
+        return slug
 
     @staticmethod
     def _positive_int(value: object, field: str) -> int:
@@ -303,8 +344,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         accept_warnings: bool = False,
         warning_operation: str = "install",
     ) -> tuple[dict[str, Any], list[tuple[str, str, bytes]], dict[str, str]]:
-        self._reject_existing(skill_id, owner, check_existing=check_existing)
-        detail = self._request(owner, lambda: self.client.skill(skill_id))
+        skill_id, detail, requested_slug = self._skill_detail(
+            skill_id, owner, check_existing=check_existing
+        )
         skill = getattr(detail, "skill", None)
         versions = getattr(detail, "versions", None)
         if not isinstance(skill, dict) or skill.get("state") != "active":
@@ -312,9 +354,7 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         returned_id = skill.get("id")
         if returned_id is not None and returned_id != skill_id:
             raise WisdomValidationError("Gateway returned a different Wisdom skill")
-        slug = skill.get("slug") or skill_id
-        if not isinstance(slug, str) or not slug:
-            raise WisdomValidationError("Gateway returned an invalid skill slug")
+        slug = self._review_slug(skill, skill_id, requested_slug)
         self._reject_existing(
             skill_id, owner, slug, check_existing=check_existing
         )
