@@ -19,11 +19,40 @@ from review_test_support import _content, _files, _owner, _spec
 from hermes_wisdom_plugin.compatibility import LocalCapabilities
 from hermes_wisdom_plugin.contract import (
     RuntimeRequirement,
+    canonical_json_bytes,
     sha256_address,
 )
-from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound, WisdomValidationError
+from hermes_wisdom_plugin.errors import (
+    WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+)
 from hermes_wisdom_plugin.install_review import InstallReviewer, VerifiedInstall
 from hermes_wisdom_plugin.package import PackagePolicyError
+from hermes_wisdom_plugin.setup_document import PREFIX, SUFFIX
+
+
+def test_install_review_binds_explicit_setup_commands(tmp_path: Path):
+    """A one-click install can only run setup commands in its exact review."""
+    client = Client()
+    guidance = {
+        "schema_version": 1, "execution_requires_user_approval": True,
+        "requirements": [], "setup_instructions": [],
+        "setup_commands": ["python scripts/setup.py --local"],
+        "credential_handoff": [], "compatibility_limits": [],
+        "verification_step": "Check installed skill.",
+        "removed_or_generalized": [], "related_skills": [],
+    }
+    body = PREFIX.encode() + canonical_json_bytes(guidance) + SUFFIX.encode()
+    client.files.append(("refs/wisdom-setup.md", "file", body))
+    content = _content(client.files)
+    client.version_value["content_hash"] = content.content_hash
+    client.version_value["commit"] = content.commit
+    reviewer = _reviewer(tmp_path, client=client)
+    plan = reviewer.plan("skill-1@v1")
+    assert plan["setup_commands"] == ["python scripts/setup.py --local"]
+    assert reviewer.verify(plan).plan["setup_commands"] == plan["setup_commands"]
+    client.files[-1] = ("refs/wisdom-setup.md", "file", body.replace(b"--local", b"--global"))
+    with pytest.raises((WisdomValidationError, PackagePolicyError)):
+        reviewer.verify(plan)
 
 
 class Client:
@@ -51,6 +80,12 @@ class Client:
         }
         self.calls = []
         self.after_skill = None
+
+    def list_skills(self, *, cursor=None):
+        assert cursor is None
+        item = SimpleNamespace(model_dump=lambda *, mode: {
+            "id": self.skill_value["id"], "slug": self.skill_value["slug"]})
+        return SimpleNamespace(skills=[item], next_cursor=None)
 
     def skill(self, skill_id):
         self.calls.append(("skill", skill_id))
@@ -198,8 +233,30 @@ def test_install_plan_rejects_ambiguous_slug_before_receipt(tmp_path: Path):
             ]
             return SimpleNamespace(skills=items, next_cursor=None)
 
-    with pytest.raises(WisdomNotFound, match="Wisdom skill not found"):
+    with pytest.raises(WisdomConflict, match="name is ambiguous"):
         _reviewer(tmp_path, client=DuplicateSlugClient()).plan("managed-skill")
+
+
+def test_install_name_wins_over_another_skills_matching_id(tmp_path: Path):
+    class CollisionClient(Client):
+        def skill(self, skill_id):
+            if skill_id == "managed-skill":
+                self.calls.append(("skill", skill_id))
+                return SimpleNamespace(skill={**self.skill_value, "id": skill_id,
+                                              "slug": "another-skill"},
+                                       versions=self.version_values)
+            return super().skill(skill_id)
+
+        def list_skills(self, *, cursor=None):
+            assert cursor is None
+            rows = [{"id": "skill-1", "slug": "managed-skill"},
+                    {"id": "managed-skill", "slug": "another-skill"}]
+            return SimpleNamespace(skills=[SimpleNamespace(
+                model_dump=lambda *, mode, row=row: row) for row in rows],
+                next_cursor=None)
+
+    plan = _reviewer(tmp_path, client=CollisionClient()).plan("managed-skill@v1")
+    assert (plan["skill_id"], plan["slug"]) == ("skill-1", "managed-skill")
 
 
 def test_plan_preserves_exact_version_url_and_complete_review(tmp_path: Path):

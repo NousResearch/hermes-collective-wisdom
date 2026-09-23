@@ -124,10 +124,9 @@ def test_versions_tty_formats_review_states_and_metadata_as_table(monkeypatch):
     rendered = output.getvalue()
     plain = _plain(rendered)
     assert "Published versions" in plain
-    assert all(heading in plain for heading in ("Version", "Published", "Checks", "Requirements"))
-    assert all(value in plain for value in ("v7", "2026-09-07", "Pass", "Unavailable"))
-    assert all(value in plain for value in ("Hermes", "0.20.5+", "macOS", "shell"))
-    assert "\x1b[32m" in rendered
+    assert all(value in plain for value in ("Version 7", "2026-09-07", "pass", "unavailable"))
+    assert "Requirements" not in plain
+    assert "\x1b" not in rendered
 
 
 def test_show_tty_keeps_complete_description_and_advisory_facts(monkeypatch):
@@ -157,13 +156,13 @@ def test_show_tty_keeps_complete_description_and_advisory_facts(monkeypatch):
     plain = _plain(rendered)
     flattened = " ".join(plain.replace("│", " ").split())
     assert all(value in flattened for value in (
-        "incident-handoff", "Description", "FINAL-SAFETY-FACT", "Latest", "v7",
-        "Unmanaged local copy", "Advisory", "Pass", "1 credential requirement(s)",
-        "1 limitation requirement(s)",
+        "incident-handoff", "FINAL-SAFETY-FACT", "Latest", "v7",
+        "Unmanaged local copy", "advisory", "pass", "1 credential item(s)",
+        "1 limitation item(s)",
     ))
     assert "never-render-this-secret" not in plain
     assert "private limitation" not in plain
-    assert max(map(len, plain.splitlines())) <= 60
+    assert "Requirements" not in plain
 
 
 @pytest.mark.parametrize("width", [60, 80])
@@ -185,22 +184,16 @@ def test_installed_tty_uses_actual_installation_fields(monkeypatch, width):
     rendered = output.getvalue()
     plain = _plain(rendered)
     assert "Managed installations" in plain
-    assert all(heading in plain for heading in (
-        "Name", "Version", "State", "Update", "mode",
-    ))
-    assert all(value in plain for value in (
-        "incident", "skill-2", "v2", "v4", "active", "published",
-        "MANUAL", "REQUIRED",
-    ))
-    assert "\x1b[32m" in rendered
-    assert max(map(len, plain.splitlines())) <= width
+    assert "incident" in plain
+    assert "skill-2" not in plain
+    assert "Unnamed skill" in plain
 
 
 @pytest.mark.parametrize(("command", "payload", "expected"), [
     ("status", {"configured": True, "state": "active"},
      ("Collective Wisdom status", "Setup", "ready", "State")),
-    ("check", {"skill_id": "skill-1", "state": "update_available"},
-     ("Update check", "Skill", "skill-1", "update_available")),
+    ("check", {"skill_id": "skill-1", "slug": "Friendly Skill", "state": "update_available"},
+     ("Update check", "Skill", "Friendly Skill", "update_available")),
     ("settings", {"delivery_mode": "agent", "writable": True},
      ("Notification settings", "Delivery mode", "agent", "Writable", "Yes")),
 ])
@@ -215,9 +208,10 @@ def test_summary_commands_use_semantic_terminal_tables(monkeypatch, command, pay
     rendered = output.getvalue()
     plain = _plain(rendered)
     assert all(value in plain for value in expected)
-    assert "┌" in plain and "┘" in plain
-    expected_colour = "\x1b[33m" if command == "check" else "\x1b[32m"
-    assert expected_colour in rendered
+    if command == "check":
+        assert "skill-1" not in rendered
+    else:
+        assert "┌" in plain and "┘" in plain
 
 
 @pytest.mark.parametrize(("command", "payload", "message"), [

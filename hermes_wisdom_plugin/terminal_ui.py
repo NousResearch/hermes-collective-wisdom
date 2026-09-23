@@ -10,8 +10,9 @@ import stat
 import subprocess
 import tempfile
 import unicodedata
+from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .package import MAX_TREE_BYTES, PackagePolicyError
 
@@ -137,9 +138,6 @@ def render_inventory(value: object) -> str:
         size = item.get("size")
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             facts.append(f"{size} bytes")
-        digest = item.get("hash")
-        if isinstance(digest, str) and digest:
-            facts.append(text(digest, limit=96))
         suffix = " — " + ", ".join(facts) if facts else ""
         lines.append(f"  {number}. {path}{mode}{suffix}")
     return "\n".join(lines)
@@ -190,16 +188,16 @@ _REVIEW_FACTS = (
 )
 
 _RECEIPT_COMMANDS = {
-    "install": "hermes wisdom install --apply-receipt ",
-    "update": "hermes wisdom update --apply-receipt ",
     "publication": "hermes wisdom publication submit ",
     "installed-setup": "hermes wisdom installed-setup apply ",
 }
 
 
 def _review_header_lines(kind: str, data: dict[str, Any]) -> list[str]:
-    lines = [_REVIEW_TITLES.get(kind, "Collective Wisdom review"), *_owner_lines(data)]
+    lines = [_REVIEW_TITLES.get(kind, "Collective Wisdom review")]
     for key, label in _REVIEW_FACTS:
+        if key in {"skill_id", "operation_id", "draft_id", "review_expires_at"}:
+            continue
         value = data.get(key)
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             lines.append(f"{label}: {text(value)}")
@@ -218,7 +216,7 @@ def _compatibility_lines(data: dict[str, Any]) -> list[str]:
             ("satisfied", "Satisfied checks"),
             ("setup_actions", "Required setup actions"),
             ("limitations", "Known limitations"),
-            ("blocked", "Blocking requirements"),
+            ("blocked", "Needs attention"),
         ):
             lines.extend(_list_lines(label, compatibility.get(key)))
     requirements = data.get("system_specification")
@@ -226,7 +224,7 @@ def _compatibility_lines(data: dict[str, Any]) -> list[str]:
         manifest = data.get("manifest") if isinstance(data.get("manifest"), dict) else {}
         requirements = manifest.get("requirements")
     if isinstance(requirements, dict) and requirements:
-        lines.append("Requirements: " + _requirements_summary(requirements))
+        lines.append("Needed to use this skill: " + _requirements_summary(requirements))
     return lines
 
 
@@ -309,11 +307,7 @@ def _decision_lines(kind: str, data: dict[str, Any]) -> list[str]:
     elif data.get("allowed") is True:
         lines.append("Approval permission: allowed")
         lines.append("Approval status: eligible for exact final confirmation.")
-    if kind in {"install", "update"}:
-        lines.append(
-            "Consequence: writes the reviewed package files; setup commands are not run."
-        )
-    elif kind == "publication":
+    if kind == "publication":
         raw_mode = data.get("publication_mode")
         mode = raw_mode.casefold() if isinstance(raw_mode, str) else ""
         consequence = {
@@ -332,17 +326,121 @@ def _decision_lines(kind: str, data: dict[str, Any]) -> list[str]:
         lines.append("Consequence: " + consequence)
         if data.get("network_submission") is False:
             lines.append("Nothing has been uploaded yet.")
-    receipt = data.get("receipt")
-    command = _RECEIPT_COMMANDS.get(kind)
-    if isinstance(receipt, str) and receipt and command is not None:
-        lines.append("Next: " + command + shlex.quote(without_controls(receipt)))
+        if isinstance(data.get("receipt"), str) and data.get("receipt"):
+            lines.append("Next: hermes wisdom publication submit <local-skill-name>")
     return lines
+
+
+def _compact_scanner_lines(data: dict[str, Any]) -> list[str]:
+    """Report severity and bounded, sanitized examples."""
+    details = safe_scan_details(data.get("local_scan"))
+    if not details:
+        return (["Scanner warnings: details unavailable; acknowledgement blocked."]
+                if has_reviewable_warnings(data) else ["Scanner warnings: none reported."])
+    counts = Counter(text(item.get("severity") or "warning").lower() for item in details)
+    levels = ("critical", "high", "medium", "low", "warning", "advisory")
+    totals = [f"{level}: {counts.pop(level)}" for level in levels if counts[level]]
+    totals.extend(f"{name}: {count}" for name, count in sorted(counts.items()) if count)
+    ordered = sorted(details, key=lambda item: levels.index(item.get("severity"))
+                     if item.get("severity") in levels else len(levels))
+    examples = dict.fromkeys(
+        text(item.get("pattern_id") or item.get("category") or "finding", limit=60)
+        + (": " + text(item["description"], limit=100)
+           if item.get("description") else "") for item in ordered
+    )
+    return [f"Scanner warnings: {len(details)} ({', '.join(totals)})",
+            "Examples: " + "; ".join(list(examples)[:3]),
+            "Full scanner findings: review with --plan --json."]
+
+
+def _compact_compat_lines(data: dict[str, Any]) -> list[str]:
+    """Summarize compatibility actions without an unbounded list."""
+    lines: list[str] = []
+    compatibility = data.get("compatibility")
+    if isinstance(compatibility, dict):
+        lines.append("Compatibility: " + text(compatibility.get("outcome") or "unknown"))
+        for key, label in (("blocked", "Needs attention"),
+                           ("setup_actions", "Required setup actions"),
+                           ("limitations", "Known limitations")):
+            actions = compatibility.get(key)
+            if isinstance(actions, list) and actions:
+                lines.extend(_list_lines(label, actions[:2]))
+                if len(actions) > 2:
+                    lines.append(f"  - and {len(actions) - 2} more")
+    return lines
+
+
+def _compact_server_lines(data: dict[str, Any]) -> list[str]:
+    """Summarize Gateway checks separately from local scanner findings."""
+    lines: list[str] = []
+    server = data.get("server_checks")
+    if isinstance(server, dict):
+        for name, check in server.items():
+            if isinstance(check, dict):
+                state = check.get("status") or check.get("state") or "available"
+                findings = check.get("findings")
+                suffix = (f" ({len(findings)} findings)"
+                          if isinstance(findings, list) and findings else "")
+                lines.append(f"{text(name)}: {text(state)}{suffix}")
+    return lines
+
+
+def _compact_approval_lines(data: dict[str, Any]) -> list[str]:
+    """Retain state-changing review gates while hiding internal receipts."""
+    lines: list[str] = []
+    policy = data.get("policy")
+    if not isinstance(policy, dict):
+        policy = {}
+    acceptance = policy.get("warning_acceptance") or data.get("warning_acceptance")
+    if isinstance(acceptance, dict):
+        state = "accepted" if acceptance.get("accepted") is True else "not accepted"
+        lines.append("Warning acknowledgement: " + state)
+    if data.get("modified") is True:
+        preservation = data.get("preservation")
+        preservation = preservation if isinstance(preservation, dict) else {}
+        if data.get("local_baseline") == "unknown":
+            lines.append("Local published baseline: unknown; preservation required; action: "
+                         + text(preservation.get("action") or "blocked"))
+        else:
+            lines.append("Local edits: detected; action: "
+                         + text(preservation.get("action") or "blocked"))
+    if data.get("sensitive_expansion"):
+        lines.extend(_list_lines("New sensitive capabilities", data["sensitive_expansion"]))
+    if data.get("allowed") is False:
+        lines.append("Approval permission: blocked")
+    elif data.get("allowed") is True:
+        lines.append("Approval permission: allowed")
+    return lines
+
+
+def _package_review(kind: str, data: dict[str, Any]) -> str:
+    """Summarize install/update evidence without suppressing its severity."""
+    lines = [_REVIEW_TITLES[kind]]
+    for key, label in (("slug", "Skill"), ("from_version", "Installed version"),
+                       ("version", "Version")):
+        value = data.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            lines.append(f"{label}: {text(value)}")
+    lines.extend(_compact_compat_lines(data))
+    files = data.get("files")
+    lines.append(f"Files: {len(files) if isinstance(files, list) else 0}")
+    lines.extend(_compact_server_lines(data))
+    lines.extend(_compact_scanner_lines(data))
+    commands = data.get("setup_commands")
+    if isinstance(commands, list):
+        for command in commands:
+            if isinstance(command, str):
+                lines.append("Setup command: " + json.dumps(command, ensure_ascii=True))
+    lines.extend(_compact_approval_lines(data))
+    return "\n".join(lines)
 
 
 def render_action_review(kind: str, value: object) -> str:
     """Render approval-critical install/update/publication/setup facts."""
 
     data = value if isinstance(value, dict) else {}
+    if kind in {"install", "update"}:
+        return _package_review(kind, data)
     lines = _review_header_lines(kind, data)
     lines.extend(_compatibility_lines(data))
     lines.append(render_inventory(data))
@@ -350,6 +448,22 @@ def render_action_review(kind: str, value: object) -> str:
     lines.extend(_setup_lines(data))
     lines.extend(_decision_lines(kind, data))
     return "\n".join(line for line in lines if line)
+
+
+def _partial_setup_outcome(data: dict, name: str) -> str | None:
+    """Separate the file-write result from setup's independently tracked state."""
+    setup = data.get("setup")
+    if data.get("installed") is not True or not isinstance(setup, dict):
+        return None
+    if setup.get("state") == "passed":
+        return None
+    step = setup.get("step")
+    position = f" at step {step}" if isinstance(step, int) and step > 0 else ""
+    details = str(setup.get("detail") or "").splitlines()
+    reason = details[0][:200] if details else ""
+    detail = f": {reason}" if reason else ""
+    return (f"{name or 'This skill'}: files installed; setup "
+            f"{text(setup.get('state') or 'unknown')}{position}{detail}")
 
 
 def render_operation_outcome(
@@ -371,6 +485,9 @@ def render_operation_outcome(
         and not data.get("error")
         and data.get("state") in (None, "completed", "done", "inactive")
     )
+    partial_setup = _partial_setup_outcome(data, name) if kind == "install" else None
+    if partial_setup is not None:
+        return partial_setup
     if key and name and complete and data.get(key) is True:
         verb = "removed" if kind == "uninstall" else key
         return f"✅ {name} {verb}"
@@ -408,8 +525,8 @@ def _requirements_summary(requirements: dict[str, Any]) -> str:
     ):
         values = requirements.get(key)
         if isinstance(values, list) and values:
-            parts.append(f"{len(values)} {label} requirement(s)")
-    return "; ".join(parts) or "declared (inspect JSON for structured details)"
+            parts.append(f"{len(values)} {label} item(s)")
+    return "; ".join(parts) or "No special setup listed"
 
 
 def _installation_status_text(value: object) -> str:
@@ -418,6 +535,39 @@ def _installation_status_text(value: object) -> str:
     if isinstance(status, dict) and isinstance(status.get("text"), str):
         return text(status["text"])
     return "Installation status unavailable"
+
+
+def _render_skill_detail(data: dict[str, Any]) -> str:
+    """Show named catalog metadata and current installation state."""
+    skill = cast(dict[str, Any], data["skill"]) if isinstance(data.get("skill"), dict) else {}
+    raw_detail = data.get("latest_version_detail")
+    latest_detail = cast(dict[str, Any], raw_detail) if isinstance(raw_detail, dict) else {}
+    latest = (cast(dict[str, Any], latest_detail["version"])
+              if isinstance(latest_detail.get("version"), dict) else {})
+    lines = [text(skill.get("slug") or "Shared skill")]
+    description = (
+        latest.get("author_description")
+        or skill.get("author_description")
+        or "No description"
+    )
+    lines.append(text(description, limit=4096))
+    versions = cast(list[Any], data["versions"]) if isinstance(data.get("versions"), list) else []
+    numbers = [row.get("version") for row in versions if isinstance(row, dict)]
+    numbers = [
+        item for item in numbers
+        if isinstance(item, int) and not isinstance(item, bool) and item > 0
+    ]
+    lines.append(f"Latest: v{max(numbers) if numbers else '?'}")
+    lines.append(_installation_status_text(data))
+    for key, label in (("security_check", "Security"),
+                       ("professionalism_check", "Professionalism")):
+        check = latest.get(key)
+        if isinstance(check, dict):
+            lines.append(f"{label}: {text(check.get('status') or 'unavailable')}")
+    requirements = latest.get("system_spec")
+    if isinstance(requirements, dict):
+        lines.append("Needed to use this skill: " + _requirements_summary(requirements))
+    return "\n".join(lines)
 
 
 def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -432,7 +582,7 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            name = row.get("slug") or row.get("id") or "Unnamed skill"
+            name = row.get("slug") or "Unnamed skill"
             version = row.get("latest_version")
             suffix = (
                 f" (v{version})"
@@ -445,32 +595,7 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
             lines.append("No matching shared skills.")
         return "\n".join(lines)
     if command == "show":
-        skill = data.get("skill") if isinstance(data.get("skill"), dict) else {}
-        latest_detail = data.get("latest_version_detail")
-        latest_detail = latest_detail if isinstance(latest_detail, dict) else {}
-        latest = (
-            latest_detail.get("version")
-            if isinstance(latest_detail.get("version"), dict) else {}
-        )
-        lines = [text(skill.get("slug") or skill.get("id") or "Shared skill")]
-        description = (
-            latest.get("author_description")
-            or skill.get("author_description")
-            or "No description"
-        )
-        lines.append(text(description))
-        versions = data.get("versions") if isinstance(data.get("versions"), list) else []
-        numbers = [row.get("version") for row in versions if isinstance(row, dict)]
-        numbers = [
-            item for item in numbers
-            if isinstance(item, int) and not isinstance(item, bool) and item > 0
-        ]
-        lines.append(f"Latest: v{max(numbers) if numbers else '?'}")
-        lines.append(_installation_status_text(data))
-        requirements = latest.get("system_spec")
-        if isinstance(requirements, dict):
-            lines.append("Requirements: " + _requirements_summary(requirements))
-        return "\n".join(lines)
+        return _render_skill_detail(data)
     if command == "versions":
         raw_rows = data.get("versions")
         rows = raw_rows if isinstance(raw_rows, list) else []
@@ -492,6 +617,13 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
                 continue
             state = text(row.get("published_at") or row.get("state") or "published")
             lines.append(f"  Version {version}: {state}")
+            checks = [f"{label}: {text(row[key].get('status') or 'unavailable')}"
+                      for key, label in (("security_check", "Security"),
+                                         ("professionalism_check", "Professionalism"))
+                      if isinstance(row.get(key), dict)]
+            lines.extend(checks)
+        if not valid:
+            lines.append("No published versions.")
         return "\n".join(lines)
     if command == "installed":
         rows = value if isinstance(value, list) else data.get("installations")
@@ -500,7 +632,7 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
         for row in rows:
             if isinstance(row, dict):
                 lines.append(
-                    f"  - {text(row.get('slug') or row.get('skill_id') or 'unknown')}"
+                    f"  - {text(row.get('slug') or 'Unnamed skill')}"
                     f" v{text(row.get('version') or '?')}"
                 )
         return "\n".join(lines)
@@ -512,7 +644,7 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
     for key, label in (
         ("state", "State"), ("configured", "Configured"),
         ("delivery_mode", "Delivery mode"), ("queued", "Queued"),
-        ("message", "Message"), ("skill_id", "Skill"), ("version", "Version"),
+        ("message", "Message"), ("slug", "Skill"), ("version", "Version"),
     ):
         item = data.get(key)
         if isinstance(item, (str, int, bool)):
@@ -535,7 +667,7 @@ def _safe_row_summary(row: dict[str, Any]) -> str:
 
     values = []
     for key in (
-        "kind", "id", "operation_id", "skill_id", "slug", "version", "state",
+        "kind", "slug", "version", "state",
         "message", "advice", "occurred_at", "created_at",
     ):
         value = row.get(key)

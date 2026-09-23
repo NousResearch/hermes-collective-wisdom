@@ -459,8 +459,9 @@ def test_human_suggest_nontty_keeps_draft_and_prints_resume_without_prompt(
 
     output = capsys.readouterr().out
     assert "Draft prepared" in output
-    assert "local:draft-1" in output
-    assert "hermes wisdom publication review local:draft-1" in output
+    assert "local:draft-1" not in output
+    assert "prepared review local-skill" in output
+    assert "hermes wisdom publication review local-skill" in output
     assert "\x1b" not in output
     assert not any(call[0].startswith("publication_") for call in service.calls)
 
@@ -488,8 +489,8 @@ def test_interactive_suggest_warning_requires_exact_ack_and_confirmation(
     assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 0
 
     output = capsys.readouterr().out
-    assert "Organization: team-7" in output
-    assert "Owner account: member-42" in output
+    assert "Organization: team-7" not in output
+    assert "Owner account: member-42" not in output
     assert "moderated" in output
     assert "shell-download" in output
     assert "Downloads content before use." in output
@@ -519,8 +520,8 @@ def test_interactive_suggest_uncertain_submission_is_nonzero_with_safe_recovery(
     assert "State: uncertain" in output
     assert "Phase: draft_submission_unknown" in output
     assert "No unique exact owner draft is visible; nothing was retried." in output
-    assert "hermes wisdom publication status op-uncertain" in output
-    assert "hermes wisdom publication reopen op-uncertain" in output
+    assert "hermes wisdom publication status <skill-name>" in output
+    assert "op-uncertain" not in output
     outcome = output.split("Publication result", 1)[1]
     assert "Files (0)" not in outcome
     assert "Nothing has been uploaded" not in outcome
@@ -542,7 +543,7 @@ def test_interactive_suggest_rejected_submission_uses_validation_exit(
     assert run_cli(_parser().parse_args(["suggest", "local-skill"]), service) == 6
     output = capsys.readouterr().out
     assert "State: rejected" in output
-    assert "Code: instruction_only_violation" in output
+    assert "instruction_only_violation" not in output
     assert "Edit and re-review the local draft" in output
 
 
@@ -667,7 +668,7 @@ def test_install_plan_stays_read_only_and_human_handoff_uses_direct_command(caps
     ]), service) == 0
     assert json.loads(capsys.readouterr().out)["receipt"] == "wip_install"
     assert not any(call[0] == "install_apply" for call in service.calls)
-    assert "hermes wisdom install <skill-id>" in run_slash("install", service)
+    assert "hermes wisdom install <skill-name>" in run_slash("install", service)
     assert "--plan" not in run_slash("install", service)
 
 
@@ -704,7 +705,7 @@ def test_clean_install_does_not_silently_accept_scanner_warnings(capsys):
 def test_human_read_commands_render_substantive_rows(argv, expected, capsys):
     service = _Service()
     setattr(service, "list_installations", lambda: [
-        {"skill_id": "example", "version": 2}
+        {"skill_id": "opaque-example", "slug": "example", "version": 2}
     ])
 
     assert run_cli(_parser().parse_args(argv), service) == 0
@@ -1076,7 +1077,7 @@ def test_human_installed_setup_plan_shows_exact_inert_command_and_next_action(ca
     output = capsys.readouterr().out
     assert "Command (escaped literal; not executed by review)" in output
     assert "printf 'exact '  \\n" in output
-    assert "hermes wisdom installed-setup apply wip_setup" in output
+    assert "wip_setup" not in output
     assert service.calls == [
         ("installed_setup_plan", "skill-1", 1, "setup", 0, command)
     ]
@@ -1269,9 +1270,9 @@ def test_prepared_human_output_shell_quotes_every_draft_continuation(capsys):
 
     assert run_cli(args, service) == 0
     output = capsys.readouterr().out
-    quoted = shlex.quote(draft_id)
-    assert f"prepared edit {quoted}" in output
-    assert f"prepared inspect {quoted} --json" in output
+    assert "prepared edit reviewed-skill" in output
+    assert "prepared inspect reviewed-skill --json" in output
+    assert draft_id not in output
 
 
 @pytest.mark.parametrize("command", ["check skill-1", "update skill-1 --plan"])
@@ -1587,7 +1588,7 @@ def test_native_suggest_prepare_inspect_keep_and_separate_share_confirmation(tmp
     assert service.calls == [("suggest", "local-skill", False)]
     assert prepared["operation"] == "suggest"
     view = controller.view(prepared)
-    assert view.summary == "Draft prepared locally"
+    assert view.summary == "local-skill — prepared locally"
     assert "Nothing has been uploaded. The original skill is unchanged." in view.to_text()
     assert [action.label for action in view.actions] == [
         "Review files", "Review checks", "Re-review edited draft",
@@ -1730,7 +1731,8 @@ def test_native_suggest_large_review_has_bounded_same_draft_continuation(tmp_pat
     sharing = _act_displayed(controller, record["id"], "suggest.ack", service, clicked)
     view = controller.view(sharing)
     assert not any(action.primary for action in view.actions)
-    assert "hermes wisdom publication review local:draft-1" in view.notice
+    assert "large-skill" in view.to_text()
+    assert "local:draft-1" not in view.to_text()
     assert "same prepared draft" in view.notice
     with pytest.raises(WisdomValidationError, match="not offered"):
         controller.act(record["id"], "suggest.confirm", service, clicked)

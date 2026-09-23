@@ -64,6 +64,7 @@ class SetupDocument(_Strict):
     execution_requires_user_approval: Literal[True] = True
     requirements: list[SetupRequirement] = Field(default_factory=list, max_length=40)
     setup_instructions: list[str] = Field(default_factory=list, max_length=20)
+    setup_commands: list[str] | None = Field(default=None, max_length=3)
     credential_handoff: list[str] = Field(default_factory=list, max_length=20)
     compatibility_limits: list[str] = Field(default_factory=list, max_length=20)
     verification_step: str = Field(min_length=1, max_length=400)
@@ -76,6 +77,15 @@ class SetupDocument(_Strict):
     )
     @classmethod
     def _visible_lines(cls, values: list[str]) -> list[str]:
+        return [_safe_visible_line(value) for value in values]
+
+    @field_validator("setup_commands")
+    @classmethod
+    def _visible_commands(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        if any(not value.strip() or len(value) > 256 for value in values):
+            raise ValueError("setup commands must be non-empty bounded lines")
         return [_safe_visible_line(value) for value in values]
 
     @field_validator("verification_step")

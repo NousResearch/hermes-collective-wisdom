@@ -92,6 +92,20 @@ def test_json_install_never_prompts_on_tty(capsys, monkeypatch):
     ]
 
 
+def test_installed_files_with_failed_setup_return_nonzero(capsys):
+    class FailedSetup(Service):
+        """The package write succeeded, but setup did not."""
+
+        def install_apply(self, receipt, *, accept_partial=False):
+            super().install_apply(receipt, accept_partial=accept_partial)
+            return {"installed": True, "setup": {"state": "failed", "step": 1}}
+
+    service = FailedSetup()
+    assert run_cli(_args("install", "skill", "--accept-warnings", "--json"), service) != 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"installed": True, "setup": {"state": "failed", "step": 1}}
+
+
 def test_explicit_receipt_preserves_partial_acceptance(capsys):
     service = Service()
     assert run_cli(_args("install", "--apply-receipt", "receipt", "--accept-partial",
@@ -127,7 +141,7 @@ def test_interactive_install_only_acknowledges_specific_warning(monkeypatch, ans
     assert service.calls == expected
 
 
-def test_interactive_install_displays_safe_warning_and_exact_review_before_apply(
+def test_interactive_install_displays_bounded_safe_warning_before_apply(
     capsys, monkeypatch
 ):
     service = Service()
@@ -138,12 +152,41 @@ def test_interactive_install_displays_safe_warning_and_exact_review_before_apply
 
     output = capsys.readouterr().out
     for expected in (
-        "Organization: team-7", "Version: 2", "scripts/setup.sh [executable]",
+        "Skill: example", "Version: 2", "Files: 1",
         "Install uv", "No Windows", "shell-network", "Uses the network.",
         "Warning acknowledgement: accepted",
     ):
         assert expected in output
     assert "RAW_SECRET" not in output
+    assert "scripts/setup.sh [executable]" not in output
+    assert "--apply-receipt" not in output
+    assert service.calls[-1][0] == "apply"
+
+
+@pytest.mark.parametrize("warning", [False, True])
+def test_install_shows_setup_without_extra_approval(warning, capsys, monkeypatch):
+    """The install command itself authorizes reviewed setup; warnings still need acknowledgement."""
+    class SetupService(Service):
+        """Plan a disposable package with a declared command."""
+        def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
+            plan = super().install_plan(reference, update_mode=update_mode,
+                                        accept_warnings=accept_warnings)
+            plan["setup_commands"] = ["python scripts/setup.py --local"]
+            if not warning:
+                plan["local_scan"] = {"allowed": True, "findings": []}
+                plan["allowed"] = True
+            return plan
+
+    service = SetupService()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "yes")
+    assert run_cli(_args("install", "skill"), service) == 0
+    output = capsys.readouterr().out
+    assert 'Setup command: "python scripts/setup.py --local"' in output
+    assert len(prompts) == (1 if warning else 0)
+    if warning:
+        assert "warnings" in prompts[0].lower()
     assert service.calls[-1][0] == "apply"
 
 

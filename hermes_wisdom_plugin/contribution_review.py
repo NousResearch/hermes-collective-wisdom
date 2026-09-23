@@ -202,6 +202,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         if draft.get("owner") != expected:
             raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
 
+    def prepared_drafts(self) -> list[dict[str, str]]:
+        """List this owner's saved draft names for safe, explicit resumption."""
+        owner = self._owner()
+        rows = self.store.prepared_drafts(owner)
+        self._assert_owner(owner)
+        return rows
+
     def source(self, skill_name: str) -> Path:
         """Resolve one unique safe profile-local skill source by its local name."""
 

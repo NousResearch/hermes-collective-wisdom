@@ -215,6 +215,7 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
                 compatibility["setup_actions"]
                 or compatibility["blocked"]
                 or document.setup_instructions
+                or document.setup_commands
                 or any(row["status"] != "present" for row in result["prerequisites"])
             )
             result["state"] = "setup_required" if needs_setup else "verification_required"
@@ -252,7 +253,7 @@ def _derive_readiness(result: dict[str, Any]) -> None:
     )
     setup_ready = all(
         latest.get(("setup", index), {}).get("state") == "passed"
-        for index in range(len(guidance["setup_instructions"]))
+        for index in range(len(guidance.get("setup_commands") or guidance["setup_instructions"]))
     )
     verify_ready = verification[-1]["state"] == "passed" and verification[-1] == progress[-1]
     if (

@@ -8,7 +8,7 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 - Enroll, inspect entitlement, and accept the explicit data-use disclosure.
 - Browse and inspect the organization catalog.
 - Install a checked exact version with one explicit Install action; inspect details
-  optionally, separately review setup commands, and remove managed installs.
+  optionally, run explicitly declared setup commands, and remove managed installs.
 - Check, review, and apply updates while protecting local edits and sensitive
   capability changes. Explicit bounded maintenance may apply only policy-authorized
   automatic updates.

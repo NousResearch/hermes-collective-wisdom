@@ -338,7 +338,10 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 args.skill, allow_model_review=bool(args.allow_model_review)
             )
             if not as_json:
-                publication_result = _suggest_human(result, service)
+                presentation = (
+                    {**result, "skill_name": args.skill} if isinstance(result, dict) else result
+                )
+                publication_result = _suggest_human(presentation, service)
                 return _publication_result_exit(publication_result)
         elif command == "prepared":
             result = _prepared_cli(args, service)
@@ -360,6 +363,10 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             getattr(args, "_wisdom_parser").print_help()
             return 2
         _emit(result, as_json=as_json, command=command)
+        if (command == "install" and isinstance(result, dict)
+                and isinstance(result.get("setup"), dict)
+                and result["setup"].get("state") != "passed"):
+            return 8
         if (command, getattr(args, "publication_action", None)) == ("publication", "submit"):
             return _publication_result_exit(cast(dict[str, Any], result))
         return 0
@@ -511,7 +518,26 @@ def _uninstall_cli(args, service):
         answer = input("Move this managed skill to recoverable Wisdom trash? [y/N] ")
         if answer.strip().lower() not in {"y", "yes"}:
             return None
-    return service.uninstall(args.skill_id)
+    return service.uninstall(_managed_reference(service, args.skill_id))
+
+
+def _managed_reference(service, reference):
+    """Map an exact active installation name to its ID, never guess among peers."""
+    resolver = getattr(service, "resolve_managed_skill", None)
+    if callable(resolver):
+        return resolver(reference)
+    listing = getattr(service, "list_installations", None)
+    rows = cast(list[dict[str, Any]], listing()) if callable(listing) else []
+    matches = [row for row in rows if isinstance(row, dict)
+               and row.get("slug") == reference and row.get("state", "active") == "active"]
+    if len(matches) > 1:
+        raise WisdomConflict("Managed skill name is ambiguous; use an exact ID with --json")
+    if matches:
+        skill_id = matches[0].get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id:
+            raise WisdomValidationError("Managed skill identity is unavailable")
+        return skill_id
+    return reference
 
 
 def _publication_cli(args, service):
@@ -520,38 +546,52 @@ def _publication_cli(args, service):
     action = args.publication_action
     if action == "review":
         return service.publication_review(
-            args.draft_id, accept_warnings=bool(args.accept_warnings)
+            _local_reference(service, args.draft_id),
+            accept_warnings=bool(args.accept_warnings)
         )
     if action == "submit":
-        return service.publication_submit(args.receipt)
+        resolver = getattr(service, "resolve_publication_receipt", None)
+        receipt = resolver(args.receipt) if callable(resolver) else args.receipt
+        return service.publication_submit(receipt)
     if action == "status":
-        return service.publication_status(args.operation_id)
+        return service.publication_status(_operation_reference(service, args.operation_id))
     if action == "reopen":
-        return service.publication_reopen(args.operation_id)
+        return service.publication_reopen(_operation_reference(service, args.operation_id))
     if action == "enroll":
         return service.publication_enroll(args.skill_name)
     if action == "decline":
-        return service.publication_decline(args.operation_id)
+        return service.publication_decline(_operation_reference(service, args.operation_id))
     raise PackagePolicyError("unsupported publication action")
+
+
+def _local_reference(service, reference):
+    resolver = getattr(service, "resolve_local_draft", None)
+    return cast(str, resolver(reference)) if callable(resolver) else reference
+
+
+def _operation_reference(service, reference):
+    resolver = getattr(service, "resolve_publication_operation", None)
+    return resolver(reference) if callable(resolver) else reference
 
 
 def _prepared_cli(args, service):
     """Dispatch the bounded local draft adapter; it has no submission action."""
 
     if args.prepared_action == "inspect":
-        return service.prepared_inspect(args.draft_id)
+        return service.prepared_inspect(_local_reference(service, args.draft_id))
     if args.prepared_action == "review":
         return service.prepared_review(
-            args.draft_id, allow_model_review=bool(args.allow_model_review)
+            _local_reference(service, args.draft_id),
+            allow_model_review=bool(args.allow_model_review)
         )
     if args.prepared_action == "edit":
         if args.json or not sys.stdin.isatty():
             raise PackagePolicyError("prepared edit requires an interactive terminal")
-        return _edit_prepared(service, args.draft_id)
+        return _edit_prepared(service, _local_reference(service, args.draft_id))
     if args.prepared_action == "save":
         payload = _read_prepared_payload(Path(args.payload))
         return service.prepared_save(
-            payload["draft_id"],
+            _local_reference(service, payload["draft_id"]),
             author_description=payload["author_description"],
             files=payload["files"],
             expected_hashes=payload["expected_hashes"],
@@ -634,7 +674,44 @@ def _read_prepared_payload(  # pylint: disable=too-many-branches
     return value
 
 
-def _install_cli(args, service):  # pylint: disable=too-many-return-statements
+def _acknowledged_install_plan(args, service, plan):
+    """Review warnings once and refuse an unapproved change on re-review."""
+    if not _has_reviewable_warnings(plan) or args.accept_warnings:
+        return plan
+    scan = plan.get("local_scan") if isinstance(plan, dict) else None
+    if not _safe_scan_details(scan):
+        raise PackagePolicyError(
+            "scanner warning details are unavailable; create a new review before installing"
+        )
+    if args.json or not sys.stdin.isatty():
+        raise PackagePolicyError(
+            "install has scanner warnings; inspect --plan and explicitly use --accept-warnings"
+        )
+    _emit(plan, as_json=False, command="install")
+    action = (" and install with the displayed setup commands"
+              if plan.get("setup_commands") else "")
+    if input(f"Acknowledge the scanner warnings{action}? [y/N] ").strip().casefold() not in {
+        "y", "yes",
+    }:
+        return None
+    original_identity = _review_identity(plan)
+    plan = service.install_plan(
+        args.reference, update_mode=args.update_mode, accept_warnings=True
+    )
+    if not plan.get("setup_commands"):
+        _emit(plan, as_json=False, command="install")
+    if _review_identity(plan) != original_identity:
+        if plan.get("setup_commands"):
+            _emit(plan, as_json=False, command="install")
+        answer = input(
+            "The reviewed package or findings changed. Acknowledge this updated review? [y/N] "
+        )
+        if answer.strip().casefold() not in {"y", "yes"}:
+            return None
+    return plan
+
+
+def _install_cli(args, service):  # pylint: disable=too-many-return-statements,too-many-branches
     """Apply an explicit clean install command; keep plan and receipt APIs explicit."""
     if args.apply_receipt:
         if args.reference or args.plan or args.update_mode is not None or args.accept_warnings:
@@ -651,42 +728,29 @@ def _install_cli(args, service):  # pylint: disable=too-many-return-statements
     )
     if args.plan:
         return plan
-    if _has_reviewable_warnings(plan) and not args.accept_warnings:
-        scan = plan.get("local_scan") if isinstance(plan, dict) else None
-        if not _safe_scan_details(scan):
-            raise PackagePolicyError(
-                "scanner warning details are unavailable; create a new review before installing"
-            )
-        if args.json or not sys.stdin.isatty():
-            raise PackagePolicyError(
-                "install has scanner warnings; inspect --plan and explicitly use --accept-warnings"
-            )
-        _emit(plan, as_json=False, command="install")
-        answer = input(
-            "Acknowledge the displayed scanner warnings for this exact install? [y/N] "
-        )
-        if answer.strip().casefold() not in {"y", "yes"}:
-            return None
-        original_identity = _review_identity(plan)
-        plan = service.install_plan(
-            args.reference, update_mode=args.update_mode, accept_warnings=True
-        )
-        _emit(plan, as_json=False, command="install")
-        if _review_identity(plan) != original_identity:
-            answer = input(
-                "The reviewed package or findings changed. Acknowledge this updated review? [y/N] "
-            )
-            if answer.strip().casefold() not in {"y", "yes"}:
-                return None
+    plan = _acknowledged_install_plan(args, service, plan)
+    if plan is None:
+        return None
     if isinstance(plan, dict) and plan.get("allowed") is False:
         raise PackagePolicyError(
             "installation is blocked; inspect --plan and provide the listed "
             "specific acknowledgement"
         )
-    return service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
+    if (plan.get("setup_commands") and not args.json and sys.stdin.isatty()
+            and (args.accept_warnings or not _has_reviewable_warnings(plan))):
+        _emit(plan, as_json=False, command="install")
+    result = service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
+    return _result_with_reviewed_slug(result, plan) if not args.json else result
 
 
-def _update_cli(args, service):  # pylint: disable=too-many-return-statements
+def _result_with_reviewed_slug(result: Any, plan: dict[str, Any]) -> Any:
+    """Keep a verified human name alongside thin effect results."""
+    if isinstance(result, dict) and isinstance(plan.get("slug"), str):
+        return {**result, "slug": plan["slug"]}
+    return result
+
+
+def _update_cli(args, service):  # pylint: disable=too-many-return-statements,too-many-branches
     """Keep all acknowledgements in the reviewed plan, never apply-time flags."""
     acknowledgements = (
         args.preserve_modified or args.accept_sensitive or args.accept_partial
@@ -746,25 +810,28 @@ def _update_cli(args, service):  # pylint: disable=too-many-return-statements
     answer = input("Apply this exact reviewed update plan? [y/N] ")
     if answer.strip().lower() not in {"y", "yes"}:
         return None
-    return service.update_apply(plan["receipt"])
+    result = service.update_apply(plan["receipt"])
+    return _result_with_reviewed_slug(result, plan)
 
 
 def _installed_setup_cli(args, service):
     """Dispatch explicit setup controls; no conversational confirmation exists."""
     if args.setup_action == "inspect":
-        return service.installed_setup_inspect(args.skill_id, version=args.version)
+        return service.installed_setup_inspect(_managed_reference(service, args.skill_id),
+                                               version=args.version)
     if args.setup_action == "plan":
         return service.installed_setup_plan(
-            args.skill_id, version=args.version, phase=args.phase,
+            _managed_reference(service, args.skill_id), version=args.version, phase=args.phase,
             index=args.index, command=args.command,
         )
     if args.setup_action == "apply":
         return service.installed_setup_apply(args.receipt)
     if args.setup_action == "status":
-        return service.installed_setup_status(args.skill_id, version=args.version)
+        return service.installed_setup_status(_managed_reference(service, args.skill_id),
+                                              version=args.version)
     if args.setup_action == "recover":
         return service.installed_setup_recover(
-            args.skill_id, args.operation_id,
+            _managed_reference(service, args.skill_id), args.operation_id,
             acknowledged=args.acknowledge_effects_checked_and_stopped,
         )
     raise PackagePolicyError("unsupported installed setup action")
@@ -772,12 +839,12 @@ def _installed_setup_cli(args, service):
 
 def _terminal_handoff(command):
     instructions = {
-        "install": "hermes wisdom install <skill-id>",
+        "install": "hermes wisdom install <skill-name>",
         "installed": "hermes wisdom installed",
-        "check": "hermes wisdom check <skill-id>",
-        "update": "hermes wisdom update <skill-id> --plan",
-        "installed-setup": "hermes wisdom installed-setup inspect <skill-id>",
-        "uninstall": "hermes wisdom uninstall <skill-id>",
+        "check": "hermes wisdom check <skill-name>",
+        "update": "hermes wisdom update <skill-name> --plan",
+        "installed-setup": "hermes wisdom installed-setup inspect <skill-name>",
+        "uninstall": "hermes wisdom uninstall <skill-name>",
     }
     return ("Use the terminal for this private Wisdom action.\n\n"
             f"Run `{instructions[command]}`. Nothing has been changed.")
@@ -785,7 +852,7 @@ def _terminal_handoff(command):
 
 def _suggest_summary(prepared: object) -> str:
     data = prepared if isinstance(prepared, dict) else {}
-    draft_id = _text(data.get("draft_id") or data.get("local_draft_id") or "unavailable")
+    name = _text(data.get("skill_name") or data.get("slug") or "This skill")
     files = data.get("files") if isinstance(data.get("files"), list) else []
     security = data.get("security_check")
     security = security if isinstance(security, dict) else {}
@@ -793,11 +860,19 @@ def _suggest_summary(prepared: object) -> str:
     return "\n".join((
         "Draft prepared locally",
         "",
-        f"Draft: {draft_id}",
+        f"Skill: {name}",
         f"Files: {len(files)}",
         f"Warnings: {warning}",
         "Nothing has been uploaded. The original skill is unchanged.",
     ))
+
+
+def _print_named_resume(name: str) -> None:
+    """Show only a human-resumable local draft when the terminal is not interactive."""
+    if name:
+        safe_name = shlex.quote(_without_controls(name))
+        print("\nResume local review: hermes wisdom prepared review " + safe_name
+              + "\nResume sharing review: hermes wisdom publication review " + safe_name)
 
 
 def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
@@ -811,12 +886,9 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
     if not draft_id:
         raise PackagePolicyError("prepared draft identity is unavailable")
     print(_suggest_summary(data))
+    name = str(data.get("skill_name") or data.get("slug") or "")
     if not sys.stdin.isatty():
-        safe_id = shlex.quote(_without_controls(draft_id))
-        print(
-            "\nResume local review: hermes wisdom prepared review " + safe_id
-            + "\nResume sharing review: hermes wisdom publication review " + safe_id
-        )
+        _print_named_resume(name)
         return None
     while True:
         print(
@@ -836,10 +908,8 @@ def _suggest_human(  # pylint: disable=too-many-locals,too-many-branches
             print(_human_render("prepared", saved))
             continue
         if choice == "4":
-            print(
-                "\nDraft kept. Resume with: hermes wisdom prepared review "
-                + shlex.quote(_without_controls(draft_id))
-            )
+            print("\nDraft kept. Resume with: hermes wisdom prepared review "
+                  + shlex.quote(_without_controls(name)) if name else "\nDraft kept locally.")
             return None
         if choice != "3":
             print("Choose 1, 2, 3, or 4.")
@@ -934,6 +1004,23 @@ def _review_draft_files(data: dict[str, Any]) -> None:
         print("\n" + _render_file_preview(files[index]))
 
 
+def _render_prepared_human(data: dict[str, Any]) -> str:
+    """Keep draft navigation named without changing its exact internal binding."""
+    files = cast(list[Any], data["files"]) if isinstance(data.get("files"), list) else []
+    raw_name = data.get("skill_name") or data.get("slug")
+    lines = ["Prepared draft", f"Skill: {_text(raw_name or 'This skill')}",
+             f"Files: {len(files)}"]
+    description = data.get("description") or data.get("drafted_description")
+    if isinstance(description, str) and description:
+        lines.append("Description: " + _text(description, limit=1024))
+    lines.extend((_render_inventory(data), _render_findings(data)))
+    if isinstance(raw_name, str) and raw_name:
+        safe_name = shlex.quote(_without_controls(raw_name))
+        lines.extend((f"Edit: hermes wisdom prepared edit {safe_name}",
+                      f"Full export: hermes wisdom prepared inspect {safe_name} --json"))
+    return "\n".join(lines)
+
+
 def _human_render(  # pylint: disable=too-many-return-statements
     command: str | None, value: Any
 ) -> str:
@@ -947,28 +1034,11 @@ def _human_render(  # pylint: disable=too-many-return-statements
     if command == "check":
         return "\n".join((
             "Update check",
-            f"Skill: {_text(data.get('skill_id') or 'unknown')}",
+            f"Skill: {_text(data.get('slug') or 'This skill')}",
             f"State: {_text(data.get('state') or 'unknown')}",
         ))
     if command == "prepared":
-        files = data.get("files") if isinstance(data.get("files"), list) else []
-        draft = _text(data.get("draft_id") or "unknown")
-        lines = [
-            "Prepared draft",
-            f"Draft: {draft}",
-            f"Files: {len(files)}",
-        ]
-        description = data.get("description") or data.get("drafted_description")
-        if isinstance(description, str) and description:
-            lines.append("Description: " + _text(description, limit=1024))
-        lines.extend((
-            _render_inventory(data),
-            _render_findings(data),
-            f"Edit: hermes wisdom prepared edit {shlex.quote(_without_controls(draft))}",
-            f"Full export: hermes wisdom prepared inspect "
-            f"{shlex.quote(_without_controls(draft))} --json",
-        ))
-        return "\n".join(lines)
+        return _render_prepared_human(data)
     if command == "publication" and isinstance(data.get("operation_id"), str) and not data.get(
         "receipt"
     ):
@@ -987,37 +1057,22 @@ def _human_render(  # pylint: disable=too-many-return-statements
 def _render_publication_outcome(data: dict[str, Any]) -> str:
     """Render operation state without inventing a package or upload outcome."""
 
-    operation_id = _text(data["operation_id"])
-    safe_operation = shlex.quote(_without_controls(operation_id))
     state = _text(data.get("state") or "unknown")
     detail = data.get("detail")
-    enrollment = data.get("managed_enrollment")
-    managed_success = (
-        state.casefold() == "done"
-        and data.get("publication_state") == "published"
-        and isinstance(enrollment, dict)
-        and enrollment.get("state") == "managed"
-    )
     lines = ["Publication result"]
     if isinstance(detail, str) and detail:
         lines.append(_text(detail, limit=1024))
-    if not managed_success:
-        lines.append(f"Operation: {operation_id}")
     lines.append(f"State: {state}")
     for key, label in (
         ("phase", "Phase"), ("publication_state", "Publication state"),
-        ("remote_draft_id", "Remote draft"), ("code", "Code"),
     ):
-        if managed_success and key == "remote_draft_id":
-            continue
         value = data.get(key)
         if isinstance(value, str) and value:
             lines.append(f"{label}: {_text(value, limit=1024)}")
     if state.casefold() == "uncertain":
         lines.extend((
             "Do not submit again; reconcile the recorded operation instead.",
-            f"Status: hermes wisdom publication status {safe_operation}",
-            f"Reopen: hermes wisdom publication reopen {safe_operation}",
+            "Use `hermes wisdom publication status <skill-name>` to inspect it.",
         ))
     elif state.casefold() == "rejected":
         lines.append(
@@ -1039,7 +1094,14 @@ def _emit(
         from .terminal_presentation import emit_terminal  # pylint: disable=import-outside-toplevel
 
         summary = _human_render(command, value)
-        if not error and emit_terminal(command, value, stream, summary):
+        rows_key = "installations" if command == "installed" else "skills"
+        rows = value.get(rows_key) if isinstance(value, dict) else None
+        all_named = not isinstance(rows, list) or all(
+            isinstance(row, dict) and isinstance(row.get("slug"), str) and row["slug"]
+            for row in rows
+        )
+        if (not error and all_named and command not in {"show", "versions", "check"}
+                and emit_terminal(command, value, stream, summary)):
             return
         print(summary, file=stream)
     else:

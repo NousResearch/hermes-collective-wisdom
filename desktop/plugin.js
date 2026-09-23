@@ -30,7 +30,12 @@ const WISDOM_ROUTE = '/collective-wisdom'
 const ROOT_KEY = ['collective-wisdom']
 
 const text = value => (value == null ? '' : String(value))
-const label = item => item?.slug || item?.name || item?.id || item?.skill_id || 'Unknown skill'
+const label = item => {
+  const givenName = text(item?.name).trim()
+  if (givenName) return givenName
+  const fallback = text(item?.skill_name || item?.slug).trim()
+  return fallback && ![item?.id, item?.skill_id, item?.draft_id].includes(fallback) ? fallback : 'Name unavailable'
+}
 const versionOf = item =>
   item?.latest_version || item?.version || item?.latest_version_detail?.version?.version ||
   item?.latest_version_detail?.version || null
@@ -138,7 +143,21 @@ function FindingList({ empty = 'No findings reported.', items }) {
     : jsx('p', { className: 'text-xs text-(--ui-text-quaternary)', children: empty })
 }
 
-function CheckSummary({ check, title, authority = 'Check' }) {
+function BoundedFindings({ items }) {
+  const findings = Array.isArray(items) ? items : []
+  const counts = findings.reduce((totals, finding) => {
+    const level = String(finding?.severity || 'unspecified').toLowerCase()
+    totals[level] = (totals[level] || 0) + 1
+    return totals
+  }, {})
+  return jsxs('div', { className: 'space-y-1', children: [
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `${findings.length} findings: ${Object.entries(counts).map(([level, count]) => `${count} ${level}`).join(', ')}` }),
+    jsx(FindingList, { items: findings.slice(0, 3) }),
+    findings.length > 3 ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Showing the first three findings.' }) : null
+  ] })
+}
+
+function CheckSummary({ check, title, authority = 'Check', compact = false }) {
   const value = isObject(check) ? check : null
   const decision = value?.upload_allowed ?? value?.allowed ?? value?.passed ?? null
   const status = decision === true ? 'passed' : decision === false ? 'blocked' : text(value?.status || value?.verdict || value?.state || 'unavailable')
@@ -149,7 +168,7 @@ function CheckSummary({ check, title, authority = 'Check' }) {
       jsx(Badge, { children: `${authority}: ${status}` })
     ] }),
     jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: value?.summary || value?.verdict || value?.state || (value ? 'No summary supplied.' : 'The service did not supply this check.') }),
-    findings.length ? jsx(FindingList, { items: findings }) : null
+    findings.length ? jsx(compact ? BoundedFindings : FindingList, { items: findings }) : null
   ] })
 }
 
@@ -162,10 +181,10 @@ function Compatibility({ value }) {
       jsx('h4', { className: 'text-xs font-semibold', children: 'Compatibility' }),
       jsx(Badge, { children: value.outcome || 'unavailable' })
     ] }),
-    jsx(KeyValue, { name: 'Satisfied', value: Array.isArray(value.satisfied) ? value.satisfied.join(', ') || 'None' : 'Unavailable' }),
+    jsx(KeyValue, { name: 'Works with', value: Array.isArray(value.satisfied) ? value.satisfied.join(', ') || 'No checks reported' : 'Unavailable' }),
     jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Limitations' }), jsx(StringList, { items: value.limitations, empty: 'No limitations reported.' })] }),
-    jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Required setup (not authorized here)' }), jsx(StringList, { items: value.setup_actions, empty: 'No setup action reported.' })] }),
-    jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Blocking requirements' }), jsx(StringList, { items: value.blocked, empty: 'No blocked requirement reported.' })] })
+    jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Setup needing your attention' }), jsx(StringList, { items: value.setup_actions, empty: 'No additional setup reported.' })] }),
+    jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'What prevents installation' }), jsx(StringList, { items: value.blocked, empty: 'Nothing reported.' })] })
   ] })
 }
 
@@ -174,7 +193,7 @@ function FileManifest({ files, showContent }) {
   return jsx('ul', { className: 'space-y-2', children: values.map((file, index) =>
     jsxs('li', { className: 'space-y-1 rounded-[4px] border border-(--ui-stroke-secondary) p-2 text-xs', children: [
       jsx('div', { className: 'break-all font-mono', children: file?.path || file?.name || `file ${index + 1}` }),
-      jsx(KeyValue, { name: 'hash', value: file?.hash, mono: true }),
+
       jsx(KeyValue, { name: 'size', value: Number.isInteger(file?.size) ? `${file.size} bytes` : null }),
       showContent
         ? file?.content_utf8 != null
@@ -200,13 +219,13 @@ function dataHref(value) {
   return `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(value, null, 2))}`
 }
 
-function PreparedEditor({ draftId, editor, onChange, onSave, saving }) {
+function PreparedEditor({ draftId, draftName, editor, onChange, onSave, saving }) {
   const updateFile = (index, changes) => onChange({
     ...editor,
     files: editor.files.map((file, position) => position === index ? { ...file, ...changes } : file)
   })
   const removeFile = index => onChange({ ...editor, files: editor.files.filter((_file, position) => position !== index) })
-  const exportName = `wisdom-${text(draftId).replace(/[^a-zA-Z0-9._-]+/g, '-')}.json`
+  const exportName = `wisdom-${text(draftName).replace(/[^a-zA-Z0-9._-]+/g, '-')}.json`
   const exportPayload = {
     draft_id: draftId,
     author_description: editor.author_description,
@@ -260,14 +279,14 @@ function hasReviewableWarnings(value) {
 function safeWarningFindings(value) {
   const findings = scanGuard(value)?.findings
   return Array.isArray(findings) ? findings.filter(item => isObject(item) &&
-    ['severity', 'category', 'path', 'line', 'message', 'summary'].some(key => item[key] != null && item[key] !== '')) : []
+    ['severity', 'category', 'path', 'line', 'message', 'summary', 'detail'].some(key => item[key] != null && item[key] !== '')) : []
 }
 
 function warningIdentity(value) {
   return JSON.stringify(safeWarningFindings(value).map(item => ({
     severity: text(item.severity), category: text(item.category), path: text(item.path),
     line: Number.isInteger(item.line) ? item.line : null,
-    message: text(item.message), summary: text(item.summary)
+    message: text(item.message), summary: text(item.summary), detail: text(item.detail)
   })))
 }
 
@@ -275,40 +294,40 @@ function reviewProblems(review, kind, acknowledgements = {}) {
   const problems = []
   if (!isObject(review)) return ['Review response is missing.']
   if (kind === 'uninstall') {
-    if (!text(review.review_id)) problems.push('Uninstall review identity is missing.')
-    if (!isObject(review.installation) || !text(review.installation.skill_id)) problems.push('Installed snapshot is missing.')
+    if (!text(review.review_id)) problems.push('This removal review has expired. Start again.')
+    if (!isObject(review.installation) || !text(review.installation.skill_id)) problems.push('Your installed copy could not be checked. Try again.')
     return problems
   }
-  if (!text(review.receipt)) problems.push('Hash-bound receipt is missing.')
+  if (!text(review.receipt)) problems.push('This review has expired. Start again.')
   if (kind === 'publication') {
-    if (!text(review.draft_id)) problems.push('Draft identity is missing.')
+    if (!text(review.draft_id)) problems.push('This draft is unavailable. Open it again.')
     if (!isObject(review.hashes) || !['content', 'author_description', 'package_manifest'].every(key => text(review.hashes[key]))) {
-      problems.push('Exact publication hashes are incomplete.')
+      problems.push('The skill changed or could not be checked. Review it again.')
     }
-    if (!text(review.drafted_description || review.description || review.author_description)) problems.push('Author copy is missing.')
+    if (!text(review.drafted_description || review.description || review.author_description)) problems.push('Add a description before sharing.')
     if (!Array.isArray(review.files) || !review.files.length || review.files.some(file => !text(file?.path) || (typeof file?.content_utf8 !== 'string' && typeof file?.content_base64 !== 'string'))) {
-      problems.push('Full reviewed publication file contents are incomplete.')
+      problems.push('Some files could not be reviewed. Open the draft again.')
     }
-    if (!isObject(review.local_scan)) problems.push('Local package scan is missing.')
-    if (!isObject(review.professionalism_check)) problems.push('Professionalism assessment is missing.')
-    if (review.security_check?.upload_allowed !== true) problems.push('Local security check does not explicitly allow upload.')
-    if (!['open', 'moderated', 'managed'].includes(review.publication_mode) || !text(review.policy_version)) problems.push('Gateway publication policy is incomplete.')
+    if (!isObject(review.local_scan)) problems.push('Safety check is unavailable. Try again.')
+    if (!isObject(review.professionalism_check)) problems.push('Sharing check is unavailable. Try again.')
+    if (review.security_check?.upload_allowed !== true) problems.push('This skill is not cleared for sharing.')
+    if (!['open', 'moderated', 'managed'].includes(review.publication_mode) || !text(review.policy_version)) problems.push('Sharing is unavailable right now. Try again later.')
     return problems
   }
-  if (!text(review.skill_id) || !isPositiveInt(review.version)) problems.push('Skill/version identity is incomplete.')
-  if (!text(review.content_hash || review.hashes?.content) || !text(review.manifest_hash || review.hashes?.manifest)) problems.push('Exact package hashes are incomplete.')
-  if (!Array.isArray(review.files) || !review.files.length || review.files.some(file => !text(file?.path) || !text(file?.hash))) problems.push('Exact file manifest is incomplete.')
-  if (!isObject(review.compatibility) || !text(review.compatibility.outcome)) problems.push('Compatibility evaluation is unavailable.')
-  if (!isObject(review.local_scan) || !Object.hasOwn(review.local_scan, 'allowed')) problems.push('Local scanner result is unavailable.')
-  if (!isObject(review.server_checks)) problems.push('Server checks are unavailable.')
-  if (!isObject(review.policy)) problems.push('Review policy is unavailable.')
+  if (!text(review.skill_id) || !isPositiveInt(review.version)) problems.push('This skill version is unavailable. Open it again.')
+  if (!text(review.content_hash || review.hashes?.content) || !text(review.manifest_hash || review.hashes?.manifest)) problems.push('The skill could not be checked. Review it again.')
+  if (!Array.isArray(review.files) || !review.files.length || review.files.some(file => !text(file?.path) || !text(file?.hash))) problems.push('Some files could not be reviewed. Try again.')
+  if (!isObject(review.compatibility) || !text(review.compatibility.outcome)) problems.push('We could not check whether this skill will work here.')
+  if (!isObject(review.local_scan) || !Object.hasOwn(review.local_scan, 'allowed')) problems.push('Safety check is unavailable. Try again.')
+  if (!isObject(review.server_checks)) problems.push('Team checks are unavailable. Try again.')
+  if (!isObject(review.policy)) problems.push('This review is unavailable. Try again.')
   const warningAccepted = review.policy?.warning_acceptance?.accepted === true || review.policy?.accepted_warnings === true
   const partialAccepted = review.policy?.accepted_partial === true || acknowledgements.partial === true
-  if (review.policy?.scan_requires_confirmation === true && !warningAccepted) problems.push('A fresh review must bind acknowledgement of the displayed scanner warnings.')
-  if (review.policy?.compatibility_requires_confirmation === true && !partialAccepted) problems.push('Partial or setup-required compatibility requires explicit acknowledgement.')
-  if (review.allowed !== true) problems.push('The service did not authorize confirmation.')
+  if (review.policy?.scan_requires_confirmation === true && !warningAccepted) problems.push('Review and acknowledge the warnings to continue.')
+  if (review.policy?.compatibility_requires_confirmation === true && !partialAccepted) problems.push('Review what may not work or need setup to continue.')
+  if (review.allowed !== true) problems.push('This action cannot continue right now.')
   const action = kind === 'update' ? 'confirm_update' : 'confirm_install'
-  if (!Array.isArray(review.permitted_actions) || !review.permitted_actions.includes(action)) problems.push(`The service did not permit ${action.replace('_', ' ')}.`)
+  if (!Array.isArray(review.permitted_actions) || !review.permitted_actions.includes(action)) problems.push('This action is not available for this review.')
   if (kind === 'update') {
     const unknownLocal = review.from_version === null && review.local_baseline === 'unknown'
       && review.previous_installation?.version === null
@@ -316,21 +335,15 @@ function reviewProblems(review, kind, acknowledgements = {}) {
       && review.authorization?.kind === 'manual_receipt'
       && review.preservation?.action === 'preserve_unmanaged_copy'
       && review.policy?.accepted_modified_preservation === true
-    if ((!isPositiveInt(review.from_version) && !unknownLocal) || !isObject(review.previous_installation)) problems.push('Previous installation snapshot is incomplete.')
-    if (!Array.isArray(review.sensitive_expansion) || !isObject(review.preservation) || !isObject(review.authorization)) problems.push('Sensitive-change or preservation policy is incomplete.')
-    if (review.sensitive_expansion?.length && review.policy?.accepted_sensitive !== true) problems.push('Sensitive capability expansion requires explicit acknowledgement and re-review.')
+    if ((!isPositiveInt(review.from_version) && !unknownLocal) || !isObject(review.previous_installation)) problems.push('Your installed copy could not be checked. Try again.')
+    if (!Array.isArray(review.sensitive_expansion) || !isObject(review.preservation) || !isObject(review.authorization)) problems.push('We could not check how your local changes will be protected.')
+    if (review.sensitive_expansion?.length && review.policy?.accepted_sensitive !== true) problems.push('Review and acknowledge the new access this update needs.')
   }
   return problems
 }
 
-function reviewContinuation(review, kind) {
-  if (kind === 'publication') return review?.draft_id ? `hermes wisdom publication review ${review.draft_id}` : null
-  if (kind === 'update') return review?.skill_id ? `hermes wisdom update ${review.skill_id} --plan` : null
-  if (kind === 'install') {
-    const skill = review?.skill_id || review?.slug
-    return skill && isPositiveInt(review?.version) ? `hermes wisdom install ${skill}@v${review.version} --plan` : null
-  }
-  return null
+function reviewContinuation(kind) {
+  return ['publication', 'update', 'install'].includes(kind) ? 'the Wisdom review' : null
 }
 
 function ReviewAcknowledgements({ busy, kind, onChange, onReview, review, value }) {
@@ -342,120 +355,113 @@ function ReviewAcknowledgements({ busy, kind, onChange, onReview, review, value 
   const requiresReReview = scanRequired || sensitiveRequired || (kind === 'update' && partialRequired)
   const ready = (!scanRequired || (findings.length > 0 && value.warnings)) && (!partialRequired || value.partial) && (!sensitiveRequired || value.sensitive)
   return jsxs('section', { className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h4', { className: 'text-xs font-semibold', children: 'Required acknowledgements' }),
+    jsx('h4', { className: 'text-xs font-semibold', children: 'Before you continue' }),
     scanRequired ? jsxs('div', { className: 'space-y-2', children: [
-      jsx(FindingList, { items: findings, empty: 'Warning details are unavailable; acknowledgement is blocked.' }),
+      findings.length ? jsx(FindingList, { items: findings }) : jsx('p', { children: 'Warnings are unavailable. Try again later.' }),
       jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
         jsx(Checkbox, { 'aria-label': `Acknowledge ${kind} scanner warnings`, checked: value.warnings, disabled: findings.length === 0, onCheckedChange: checked => onChange({ ...value, warnings: checked === true }) }),
-        'I acknowledge these displayed scanner warnings for this exact package.'
+        'I have read these warnings.'
       ] })
     ] }) : null,
     partialRequired ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': `Accept ${kind} partial compatibility`, checked: value.partial, onCheckedChange: checked => onChange({ ...value, partial: checked === true }) }),
-      'I accept the displayed partial or setup-required compatibility. Installation still does not run setup.'
+      kind === 'install' && review?.setup_commands?.length ? 'I understand what may not work and what setup will run.' : 'I understand what may not work or need more setup.'
     ] }) : null,
     sensitiveRequired ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': 'Accept update sensitive capability expansion', checked: value.sensitive, onCheckedChange: checked => onChange({ ...value, sensitive: checked === true }) }),
-      'I accept the displayed sensitive capability expansion for this exact update.'
+      'I understand the new access this update needs.'
     ] }) : null,
-    requiresReReview ? jsx(Button, { disabled: busy || !ready, loading: busy, onClick: onReview, size: 'sm', type: 'button', children: 'Review with acknowledgements' }) : null
+    requiresReReview ? jsx(Button, { disabled: busy || !ready, loading: busy, onClick: onReview, size: 'sm', type: 'button', children: 'Continue review' }) : null
   ] })
 }
 
 function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onConfirm, review }) {
   const problems = reviewProblems(review, kind, acknowledgements)
-  const continuation = reviewContinuation(review, kind)
-  const hashes = isObject(review?.hashes) ? review.hashes : {}
+  const continuation = reviewContinuation(kind)
+
   const warnings = [
     ...(Array.isArray(review?.compatibility?.limitations) ? review.compatibility.limitations : []),
     ...(Array.isArray(review?.compatibility?.blocked) ? review.compatibility.blocked : []),
     ...(Array.isArray(review?.compatibility?.setup_actions) ? review.compatibility.setup_actions : []),
-    ...(Array.isArray(review?.sensitive_expansion) ? review.sensitive_expansion : []),
-    ...(Array.isArray(review?.local_scan?.findings) ? review.local_scan.findings : [])
+    ...(Array.isArray(review?.sensitive_expansion) ? review.sensitive_expansion : [])
   ]
   const isPublication = kind === 'publication'
   return jsxs('aside', { 'aria-label': 'Exact action review', className: 'space-y-4 rounded-[4px] border border-(--ui-stroke-secondary) p-4', children: [
     jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
-      jsx('h3', { className: 'text-sm font-semibold', children: `${kind} review` }),
+      jsx('h3', { className: 'text-sm font-semibold', children: `${{ install: 'Install', update: 'Update', uninstall: 'Remove', publication: 'Share' }[kind]} review` }),
       jsx(Badge, { children: problems.length ? 'confirmation blocked' : 'ready to confirm' })
     ] }),
     jsx(KeyValue, { name: 'skill', value: label(review) }),
     jsx(KeyValue, { name: 'version', value: review?.version }),
     jsx(KeyValue, { name: 'from version', value: review?.from_version ?? (kind === 'update' && review?.local_baseline === 'unknown' ? 'Local copy (published version unknown)' : undefined) }),
-    jsx(KeyValue, { name: 'receipt', value: review?.receipt || review?.review_id, mono: true }),
-    jsx(KeyValue, { name: 'content hash', value: review?.content_hash || hashes.content, mono: true }),
-    jsx(KeyValue, { name: 'manifest hash', value: review?.manifest_hash || hashes.manifest, mono: true }),
-    jsx(KeyValue, { name: 'description hash', value: hashes.author_description, mono: true }),
-    jsx(KeyValue, { name: 'package manifest hash', value: hashes.package_manifest, mono: true }),
+    jsx(KeyValue, { name: 'files', value: Array.isArray(review?.files) ? review.files.length : null }),
     isPublication ? jsx(KeyValue, { name: 'author copy', value: review?.drafted_description || review?.description || review?.author_description }) : null,
     isPublication ? jsx(KeyValue, { name: 'Gateway outcome', value: review?.publication_mode === 'moderated' ? 'Moderated: confirmation submits for team moderation' : review?.publication_mode === 'open' ? 'Open: confirmation may publish directly' : review?.publication_mode === 'managed' ? 'Managed: confirmation follows organization-managed Gateway handling' : 'Unavailable' }) : null,
-    isPublication ? jsx(KeyValue, { name: 'policy version', value: review?.policy_version }) : null,
+
     warnings.length ? jsxs('section', { className: 'space-y-1 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
       jsx('h4', { className: 'text-xs font-semibold', children: 'Material warnings and required follow-up' }),
-      jsx(StringList, { items: warnings })
+      jsx(StringList, { items: kind === 'install' ? warnings.slice(0, 3) : warnings }),
+      kind === 'install' && warnings.length > 3 ? jsx('p', { className: 'text-xs', children: `Showing three of ${warnings.length} notes.` }) : null
+    ] }) : null,
+    kind === 'install' && review?.setup_commands?.length ? jsxs('section', { className: 'space-y-1', children: [
+      jsx('h4', { className: 'text-xs font-semibold', children: 'Setup commands included in Install approval' }),
+      jsx('pre', { className: 'whitespace-pre-wrap break-all text-xs', children: review.setup_commands.map(command => JSON.stringify(command)).join('\n') })
     ] }) : null,
     kind === 'uninstall' ? jsxs('section', { className: 'space-y-1', children: [
-      jsx('h4', { className: 'text-xs font-semibold', children: 'Installed snapshot to remove' }),
+      jsx('h4', { className: 'text-xs font-semibold', children: 'Installed copy to remove' }),
       jsx(KeyValue, { name: 'skill', value: label(review?.installation) }),
-      jsx(KeyValue, { name: 'version', value: review?.installation?.version }),
-      jsx(KeyValue, { name: 'content hash', value: review?.installation?.content_hash, mono: true }),
-      jsx(KeyValue, { name: 'target', value: review?.installation?.target_path, mono: true })
+      jsx(KeyValue, { name: 'version', value: review?.installation?.version })
     ] }) : null,
     kind === 'install' || kind === 'update' ? jsx(Compatibility, { value: review?.compatibility }) : null,
-    kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Local scanner', check: review?.local_scan, authority: 'Local scan' }) : null,
-    kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Server security', check: review?.server_checks?.security_check || review?.server_checks?.scan, authority: 'Server' }) : null,
-    kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Server professionalism', check: review?.server_checks?.professionalism_check, authority: 'Server' }) : null,
+    kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Local scanner', check: review?.local_scan, authority: 'Local scan', compact: kind === 'install' }) : null,
+    kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Server security', check: review?.server_checks?.security_check || review?.server_checks?.scan, authority: 'Server', compact: kind === 'install' }) : null,
+    kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Server professionalism', check: review?.server_checks?.professionalism_check, authority: 'Server', compact: kind === 'install' }) : null,
     isPublication ? jsx(CheckSummary, { title: 'Local package scanner', check: review?.local_scan, authority: 'Local scan' }) : null,
     isPublication ? jsx(CheckSummary, { title: 'Local security and upload gate', check: review?.security_check, authority: 'Local security' }) : null,
     isPublication ? jsx(CheckSummary, { title: 'Professionalism review', check: review?.professionalism_check, authority: 'Assessment' }) : null,
     isPublication && isObject(review?.server_checks) ? jsx(CheckSummary, { title: 'Gateway security scan', check: review.server_checks.security_check || review.server_checks.scan, authority: 'Gateway' }) : null,
     kind === 'update' ? jsxs('section', { className: 'space-y-2', children: [
-      jsx('h4', { className: 'text-xs font-semibold', children: 'Update policy and sensitive changes' }),
-      jsx(KeyValue, { name: 'local modified', value: review?.modified }),
-      jsx(KeyValue, { name: 'preservation', value: review?.preservation?.action }),
-      jsx(KeyValue, { name: 'preserved copy', value: review?.preservation?.destination, mono: true }),
-      jsx(KeyValue, { name: 'authorization', value: review?.authorization?.kind }),
-      jsx(KeyValue, { name: 'update mode', value: review?.authorization?.mode }),
-      jsx(KeyValue, { name: 'accepted sensitive', value: review?.policy?.accepted_sensitive }),
-      jsx(KeyValue, { name: 'accepted partial', value: review?.policy?.accepted_partial }),
+      jsx('h4', { className: 'text-xs font-semibold', children: 'Local changes' }),
+      jsx('p', { className: 'text-xs', children: review?.modified ? review?.preservation?.action === 'preserve_unmanaged_copy' ? 'Your edited copy will be kept separately before updating.' : 'Local edits detected. Check how they will be protected before updating.' : 'No local edits reported.' }),
+      review?.preservation?.destination ? jsx(KeyValue, { name: 'saved copy', value: review.preservation.destination }) : null,
       jsx(StringList, { items: review?.sensitive_expansion, empty: 'No sensitive expansion reported.' })
     ] }) : null,
-    jsxs('details', { open: warnings.length > 0 || isPublication, children: [
-      jsx('summary', { className: 'cursor-pointer text-xs font-semibold', children: isPublication ? 'Full reviewed files and exact metadata' : 'Exact file manifest and policy details' }),
+    kind === 'install' || kind === 'uninstall' ? null : jsxs('details', { children: [
+      jsx('summary', { className: 'cursor-pointer text-xs font-semibold', children: 'Reviewed files' }),
       jsxs('div', { className: 'mt-3 space-y-3', children: [
-        jsx(FileManifest, { files: review?.files, showContent: isPublication }),
-        jsx(KeyValue, { name: 'requested mode', value: review?.policy?.requested_update_mode }),
-        jsx(KeyValue, { name: 'scan confirmation', value: review?.policy?.scan_requires_confirmation }),
-        jsx(KeyValue, { name: 'compat confirmation', value: review?.policy?.compatibility_requires_confirmation }),
-        jsx(KeyValue, { name: 'expires', value: review?.authorization_expires_at })
+        jsx(FileManifest, { files: review?.files, showContent: isPublication })
       ] })
     ] }),
     review?.notice ? jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: review.notice }) : null,
     problems.length ? jsxs('section', { className: 'space-y-1', children: [
       jsx('h4', { className: 'text-xs font-semibold', children: 'Cannot confirm this review' }),
       jsx(StringList, { items: problems }),
-      continuation ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `Keep this review unconfirmed. Continue in the terminal with ${continuation} to inspect and explicitly provide any acknowledgement this bounded Desktop view cannot collect.` }) : null
+      continuation ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `Keep this review unconfirmed. Continue with ${continuation} to inspect what needs attention.` }) : null
     ] }) : null,
     jsxs('div', { className: 'flex justify-end gap-2', children: [
       jsx(Button, { disabled: busy, onClick: onCancel, size: 'sm', type: 'button', variant: 'secondary', children: cancelLabel || (isPublication ? 'Keep draft; do not share' : 'Cancel') }),
-      jsx(Button, { disabled: busy || problems.length > 0, loading: busy, onClick: onConfirm, size: 'sm', type: 'button', children: isPublication ? 'Share this exact reviewed package' : kind === 'uninstall' ? 'Remove' : `Acknowledge and ${kind}` })
+      jsx(Button, { disabled: busy || problems.length > 0, loading: busy, onClick: onConfirm, size: 'sm', type: 'button', children: { publication: 'Share', uninstall: 'Remove', install: 'Install', update: 'Update' }[kind] })
     ] })
   ] })
 }
 
 function operationSucceeded(kind, result, name) {
   const key = { install: 'installed', update: 'updated', uninstall: 'uninstalled' }[kind]
-  return typeof name === 'string' && name.trim().length > 0 && result?.[key] === true &&
+  return typeof name === 'string' && name.trim().length > 0 && name !== 'Name unavailable' && result?.[key] === true &&
+    (kind !== 'install' || !result.setup || result.setup.state === 'passed') &&
     result.pending !== true && result.rejected !== true && !result.error &&
     [undefined, null, 'completed', 'done', 'inactive'].includes(result.state)
 }
 
 function OperationOutcome({ kind, result }) {
   if (!result) return null
-  const subject = result.skill_name || result.slug || (kind === 'Publication' ? 'this draft' : 'this skill')
+  const subject = label(result)
+  const setupIncomplete = result.installed === true && result.setup && result.setup.state !== 'passed'
+  const shareUnlinked = kind === 'Publication' && result.state === 'done' &&
+    result.publication_state === 'published' && result.managed_enrollment?.state === 'not_linked'
   return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: `${kind} requires attention for ${subject}` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: result.detail || result.error || 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    jsx('h3', { className: 'text-xs font-semibold', children: setupIncomplete ? `${subject}: files installed; setup needs attention` : `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupIncomplete ? `Setup ${text(result.setup.state || 'unknown')}${result.setup.step ? ` at step ${result.setup.step}` : ''}. Check the details before trying again.` : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
     jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
     jsxs('details', { children: [
       jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),
@@ -463,8 +469,7 @@ function OperationOutcome({ kind, result }) {
         jsx(KeyValue, { name: 'operation', value: result.operation_id, mono: true }),
         jsx(KeyValue, { name: 'state', value: result.state || (result.pending ? 'pending' : result.rejected ? 'rejected' : 'unknown') }),
         jsx(KeyValue, { name: 'phase', value: result.phase }),
-        jsx(KeyValue, { name: 'skill', value: result.skill_id }),
-        jsx(KeyValue, { name: 'remote draft', value: result.remote_draft_id, mono: true }),
+        jsx(KeyValue, { name: 'detail', value: result.detail || result.error }),
         jsx(KeyValue, { name: 'retry safe', value: result.retry_safe })
       ] })
     ] })
@@ -580,15 +585,18 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     const prepared = await (action === 'update'
       ? client.rest('/update/review', { method: 'POST', body: requestBody(viewId, { skill_id: item.id, preserve_modified: true, accept_sensitive: false, accept_partial: false, accept_warnings: false }) })
       : client.rest('/install/review', { method: 'POST', body: requestBody(viewId, { reference: version ? `${item.id}@v${version}` : item.id, accept_warnings: false }) }))
-    const review = { ...prepared, operation: action }
+    const review = { ...prepared, name: label(item) !== 'Name unavailable' ? label(item) : label(prepared), operation: action }
     if (!isCurrent(token)) throw Object.assign(new Error('This review is no longer current.'), { stale: true })
-    if (reviewProblems(review, action).length) return { review }
+    if (reviewProblems(review, action).length ||
+        (action === 'install' && Array.isArray(review.setup_commands) && review.setup_commands.length)) {
+      return { review }
+    }
     const result = await client.rest(action === 'update' ? '/update/confirm' : '/install/confirm', {
       method: 'POST', body: action === 'update'
         ? requestBody(viewId, { receipt: review.receipt })
         : requestBody(viewId, { receipt: review.receipt, accept_partial: false })
     })
-    return { operation: action, result: { ...result, skill_name: review.slug || review.skill_name || item.slug || item.skill_name || item.name } }
+    return { operation: action, result: { ...result, name: label(review) } }
   }, async (payload, token, isCurrent) => {
     setOutcome(null)
     setAcknowledgements({ warnings: false, partial: false, sensitive: false })
@@ -598,11 +606,11 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     }
     const { operation, result } = payload
     setReview(null)
-    if (operationSucceeded(operation, result, result?.skill_name)) {
+    if (operationSucceeded(operation, result, result?.name)) {
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
       await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-      if (isCurrent(token)) host.notify({ kind: 'success', message: operation === 'update' ? `✅ ${result.skill_name} updated` : `✅ ${result.skill_name} installed` })
+      if (isCurrent(token)) host.notify({ kind: 'success', message: operation === 'update' ? `✅ ${result.name} updated` : `✅ ${result.name} installed` })
     } else {
       setOutcome({ operation, result: result || { state: 'unknown' } })
     }
@@ -617,11 +625,11 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     if (current.content_hash !== next.content_hash || current.manifest_hash !== next.manifest_hash || warningIdentity(current) !== warningIdentity(next)) {
       throw new Error('The exact package or scanner findings changed. Start a fresh review and acknowledge the new facts.')
     }
-    return { ...next, operation: updating ? 'update' : 'install' }
+    return { ...next, name: label(current), operation: updating ? 'update' : 'install' }
   }, setReview, 'Could not bind the package acknowledgements')
   const confirm = useCurrentMutation(client, lifecycle, async current => ({
     operation: current.operation,
-    skillName: current.slug || current.skill_name,
+    skillName: label(current),
     result: await client.rest(current.operation === 'update' ? '/update/confirm' : '/install/confirm', {
       method: 'POST', body: current.operation === 'update'
         ? requestBody(viewId, { receipt: current.receipt })
@@ -629,7 +637,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     })
   }), async (payload, token, isCurrent) => {
     const { operation, result, skillName } = payload
-    const name = skillName || result?.skill_name || result?.slug
+    const name = skillName !== 'Name unavailable' ? skillName : label(result)
     setReview(null)
     if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
@@ -639,7 +647,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
         host.notify({ kind: 'success', message: operation === 'update' ? `✅ ${name} updated` : `✅ ${name} installed` })
       }
     } else {
-      setOutcome({ operation, result: result || { state: 'unknown' } })
+      setOutcome({ operation, result: { ...(result || { state: 'unknown' }), name } })
     }
   }, 'The reviewed package action was not applied')
   const skills = Array.isArray(catalog.data?.skills) ? catalog.data.skills : []
@@ -727,7 +735,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
   )
   const update = useCurrentMutation(client, lifecycle, item => client.rest('/update/review', {
     method: 'POST', body: requestBody(viewId, { skill_id: item.skill_id, preserve_modified: preserve, accept_sensitive: false, accept_partial: false, accept_warnings: false })
-  }), value => { setOutcome(null); setAcknowledgements({ warnings: false, partial: false, sensitive: false }); setReview({ ...value, operation: 'update' }) }, 'Could not prepare the update review')
+  }), value => { setOutcome(null); setAcknowledgements({ warnings: false, partial: false, sensitive: false }); setReview({ ...value, name: label(installations.find(item => item.skill_id === value.skill_id)), operation: 'update' }) }, 'Could not prepare the update review')
   const reReview = useCurrentMutation(client, lifecycle, async current => {
     const next = await client.rest('/update/review', {
       method: 'POST', body: requestBody(viewId, {
@@ -741,14 +749,14 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
     if (current.content_hash !== next.content_hash || current.manifest_hash !== next.manifest_hash || warningIdentity(current) !== warningIdentity(next)) {
       throw new Error('The exact update package or scanner findings changed. Start a fresh review and acknowledge the new facts.')
     }
-    return { ...next, operation: 'update' }
+    return { ...next, name: label(current), operation: 'update' }
   }, setReview, 'Could not bind the update acknowledgements')
   const uninstall = useCurrentMutation(client, lifecycle, item => client.rest('/uninstall/review', {
     method: 'POST', body: requestBody(viewId, { skill_id: item.skill_id })
-  }), value => { setOutcome(null); setReview({ ...value, operation: 'uninstall' }) }, 'Could not prepare the uninstall review')
+  }), value => { setOutcome(null); setReview({ ...value, name: label(value.installation), operation: 'uninstall' }) }, 'Could not prepare the uninstall review')
   const confirm = useCurrentMutation(client, lifecycle, async current => ({
     operation: current.operation,
-    skillName: current.slug || current.skill_name || current.installation?.slug || current.installation?.skill_name,
+    skillName: label(current),
     result: await client.rest(current.operation === 'uninstall' ? '/uninstall/confirm' : '/update/confirm', {
       method: 'POST', body: current.operation === 'uninstall'
         ? requestBody(viewId, { review_id: current.review_id })
@@ -757,7 +765,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
   }), async (payload, token, isCurrent) => {
     const { operation, result, skillName } = payload
     setReview(null)
-    const name = skillName || result?.skill_name || result?.slug
+    const name = skillName !== 'Name unavailable' ? skillName : label(result)
     if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
       if (isCurrent(token)) host.notify({
@@ -765,7 +773,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
         message: operation === 'uninstall' ? `✅ ${name} removed` : `✅ ${name} updated`
       })
     } else {
-      setOutcome({ ...(result || { state: 'unknown' }), kind: operation })
+      setOutcome({ ...(result || { state: 'unknown' }), name, kind: operation })
     }
   }, 'The reviewed action was not completed')
   const installations = Array.isArray(bootstrap?.installations) ? bootstrap.installations : []
@@ -801,13 +809,13 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
       return jsxs('li', { className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
         jsxs('div', { className: 'min-w-0 flex-1', children: [
           jsx('div', { className: 'text-sm font-medium', children: label(item) }),
-          jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
+          jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `Installed v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
           jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus }),
           jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome?.skill_id === item.skill_id ? outcome : null })
         ] }),
         jsxs('div', { className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
           jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Check for updates' }),
-          jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Uninstall' })
+          jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Remove' })
         ] })
       ] }, item.skill_id)
     }) }),
@@ -889,6 +897,10 @@ function Contributions({ client, lifecycle, viewId }) {
     ['candidates', lifecycle.key],
     () => client.rest(`/candidates?view_id=${encodeURIComponent(viewId)}`)
   ))
+  const savedDrafts = useQuery(queryOptions(
+    ['drafts', lifecycle.key],
+    () => client.rest(`/drafts?view_id=${encodeURIComponent(viewId)}`)
+  ))
   const acceptDraft = value => {
     setDraft(value)
     setPreparedReview(null)
@@ -899,16 +911,20 @@ function Contributions({ client, lifecycle, viewId }) {
     setReview(null)
     setOutcome(null)
   }
-  const prepareCandidate = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/prepare`, {
-    method: 'POST', body: requestBody(viewId)
+  const prepareCandidate = useCurrentMutation(client, lifecycle, async item => ({
+    ...await client.rest(`/candidates/${encodeURIComponent(item.event_id)}/prepare`, {
+      method: 'POST', body: requestBody(viewId)
+    }), name: label(item)
   }), acceptDraft, 'Could not prepare a private draft — nothing was uploaded or shared')
   const notNow = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/not-now`, {
     method: 'POST', body: requestBody(viewId)
   }), async () => {
     await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'candidates', lifecycle.key] })
   }, 'Could not save Not now')
-  const prepare = useCurrentMutation(client, lifecycle, () => client.rest('/drafts/prepare', {
-    method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
+  const prepare = useCurrentMutation(client, lifecycle, async () => ({
+    ...await client.rest('/drafts/prepare', {
+      method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
+    }), name: skillName.trim()
   }), acceptDraft, 'Share preparation failed — nothing was uploaded or shared')
   const inspectDraft = async () => client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}?view_id=${encodeURIComponent(viewId)}`)
   const reviewPrepared = (draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
@@ -975,43 +991,49 @@ function Contributions({ client, lifecycle, viewId }) {
     }
     return {
       ...reviewed,
+      name: label(draft),
       author_description: inspected.author_description,
       drafted_description: inspected.author_description,
       files: inspected.files,
       operation: 'publication'
     }
   }, value => { setOutcome(null); setReview(value) }, 'Could not prepare the publication review')
-  const publish = useCurrentMutation(client, lifecycle, current => client.rest('/publication/confirm', {
-    method: 'POST', body: requestBody(viewId, { receipt: current.receipt })
-  }), result => {
+  const publish = useCurrentMutation(client, lifecycle, async current => ({
+    result: await client.rest('/publication/confirm', {
+      method: 'POST', body: requestBody(viewId, { receipt: current.receipt })
+    }),
+    name: label(current)
+  }), ({ result, name }) => {
     setReview(null)
-    if (result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state) && result?.managed_enrollment?.state !== 'not_linked') {
-      const message = result.publication_state === 'published' ? 'Publication completed' : 'Submitted for team moderation'
-      host.notify({ kind: 'success', message })
+    const named = { ...(result || { state: 'unknown' }), name }
+    if (name !== 'Name unavailable' && result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state) && result?.managed_enrollment?.state !== 'not_linked') {
+      host.notify({ kind: 'success', message: result.publication_state === 'published' ? `✅ ${name} shared` : `${name} submitted for team review` })
     } else {
-      setOutcome(result || { state: 'unknown' })
+      setOutcome(named)
     }
   }, 'Publication was not completed')
   const warningRequired = hasReviewableWarnings(preparedReview)
   const warningFindings = safeWarningFindings(preparedReview)
   const busy = prepare.isPending || prepareCandidate.isPending || notNow.isPending || inspect.isPending || save.isPending || publicationReview.isPending || publish.isPending
   const shareCandidates = Array.isArray(candidates.data?.candidates) ? candidates.data.candidates : []
+  const localDrafts = Array.isArray(savedDrafts.data?.drafts) ? savedDrafts.data.drafts : []
   const keepDraft = () => {
     if (dirty || busy) return
-    setKeptDraft(draft?.draft_id || review?.draft_id)
+    setKeptDraft(label(draft))
     setReview(null)
     setDraft(null)
     setPreparedReview(null)
     setEditor(null)
     setSavedNotice(false)
     setWarningAccepted(false)
+    queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'drafts', lifecycle.key] })
   }
   return jsxs('div', { className: 'space-y-5', children: [
     shareCandidates.length ? jsx(Section, { title: 'Worth sharing with your team', description: 'These suggestions come from local use and refinement signals. Share only prepares a private draft for your review.', children:
       jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: shareCandidates.map(item =>
         jsxs('li', { 'data-testid': `share-candidate-${item.event_id}`, className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
           jsxs('div', { className: 'min-w-0', children: [
-            jsx('div', { className: 'text-sm font-medium', children: item.skill_name || item.skill_id || 'Local skill' }),
+            jsx('div', { className: 'text-sm font-medium', children: label(item) }),
             jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: describeCandidate(item) })
           ] }),
           jsxs('div', { className: 'flex flex-wrap justify-end gap-2', children: [
@@ -1022,18 +1044,30 @@ function Contributions({ client, lifecycle, viewId }) {
       ) })
     }) : null,
     candidates.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Sharing suggestions unavailable: ${text(candidates.error?.message || candidates.error)}` }) : null,
-    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: 'Preparing is local and private. Confirmation is enabled only after full exact bytes, author copy, hashes, checks, and Gateway policy are inspectable.' }),
+    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: 'Preparing a skill stays local and private. Review its files and warnings before choosing Share.' }),
     jsxs('div', { className: 'flex gap-2', children: [
       jsx(Input, { 'aria-label': 'Local skill name', onChange: event => setSkillName(event.target.value), placeholder: 'Local skill name', value: skillName }),
-      jsx(Button, { disabled: !skillName.trim() || dirty || busy, loading: prepare.isPending, onClick: () => prepare.mutate(), type: 'button', children: 'Prepare draft' })
+      jsx(Button, { disabled: !skillName.trim() || dirty || busy, loading: prepare.isPending, onClick: () => prepare.mutate(), type: 'button', children: 'Share' })
     ] }),
+    localDrafts.length ? jsx(Section, { title: 'Saved local drafts', children:
+      jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: localDrafts.map(item =>
+        jsxs('li', { className: 'flex items-center justify-between gap-3 py-2', children: [
+          jsxs('div', { className: 'min-w-0', children: [
+            jsx('span', { className: 'text-sm font-medium', children: label(item) }),
+            item.updated_at && !Number.isNaN(Date.parse(item.updated_at))
+              ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `Saved ${new Date(item.updated_at).toLocaleString()}` }) : null
+          ] }),
+          jsx(Button, { disabled: busy || dirty || !item.draft_id || label(item) === 'Name unavailable',
+            onClick: () => acceptDraft({ draft_id: item.draft_id, name: label(item) }),
+            size: 'sm', type: 'button', variant: 'secondary', children: 'Resume' })
+        ] }, item.draft_id)
+      ) }) }) : null,
+    savedDrafts.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'Saved drafts are unavailable right now.' }) : null,
     keptDraft ? jsxs(Section, { title: 'Draft kept', children: [
-      jsx(KeyValue, { name: 'draft id', value: keptDraft, mono: true }),
-      jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `Resume in the terminal with hermes wisdom prepared review ${keptDraft}. Nothing was shared.` })
+      jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `${keptDraft} was kept locally. Nothing was shared. Select Resume to continue later.` })
     ] }) : null,
     draft ? jsxs(Section, { title: 'Private draft', children: [
-      jsx(KeyValue, { name: 'draft id', value: draft.draft_id, mono: true }),
-      jsx(KeyValue, { name: 'skill', value: draft.skill_id || draft.skill_name }),
+      jsx(KeyValue, { name: 'skill', value: label(draft) }),
       jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Nothing has been uploaded. The original skill is unchanged.' }),
       jsxs('div', { className: 'flex flex-wrap gap-2', children: [
         jsx(Button, { disabled: dirty || busy, onClick: () => inspect.mutate(), size: 'sm', type: 'button', variant: 'secondary', children: 'Review and edit exact files' }),
@@ -1043,9 +1077,7 @@ function Contributions({ client, lifecycle, viewId }) {
     ] }) : null,
     preparedReview ? jsxs(Section, { title: 'Exact local package review', children: [
       jsx(KeyValue, { name: 'author copy', value: preparedReview.author_description }),
-      jsx(KeyValue, { name: 'content hash', value: preparedReview.expected_hashes?.content, mono: true }),
-      jsx(KeyValue, { name: 'description hash', value: preparedReview.expected_hashes?.author_description, mono: true }),
-      jsx(KeyValue, { name: 'package manifest hash', value: preparedReview.expected_hashes?.package_manifest, mono: true }),
+
       jsx(CheckSummary, { title: 'Local package scanner', check: preparedReview.local_scan, authority: 'Local scan' }),
       jsx(CheckSummary, { title: 'Local security and upload gate', check: preparedReview.security_check, authority: 'Local security' }),
       warningRequired ? jsxs('section', { className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
@@ -1061,7 +1093,7 @@ function Contributions({ client, lifecycle, viewId }) {
         jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-secondary)', children: 'Unsaved changes stay only in this page. Save and re-review or discard them before continuing or keeping the draft.' }),
         jsx(Button, { disabled: busy, onClick: () => setEditor(savedEditor), size: 'sm', type: 'button', variant: 'secondary', children: 'Discard unsaved edits' })
       ] }) : null,
-      editor ? jsx('fieldset', { disabled: busy, className: 'min-w-0 border-0 p-0', children: jsx(PreparedEditor, { draftId: draft?.draft_id, editor, onChange: value => { setEditor(value); setSavedNotice(false); setReview(null); setWarningAccepted(false) }, onSave: () => save.mutate(), saving: save.isPending }) }) : null,
+      editor ? jsx('fieldset', { disabled: busy, className: 'min-w-0 border-0 p-0', children: jsx(PreparedEditor, { draftId: draft?.draft_id, draftName: label(draft), editor, onChange: value => { setEditor(value); setSavedNotice(false); setReview(null); setWarningAccepted(false) }, onSave: () => save.mutate(), saving: save.isPending }) }) : null,
       savedNotice ? jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-secondary)', children: 'Draft saved and re-reviewed. Nothing was uploaded.' }) : null
     ] }) : null,
     review ? jsx(ReviewPanel, { busy: publish.isPending, kind: 'publication', onCancel: keepDraft, onConfirm: () => publish.mutate(review), review }) : null,
@@ -1157,7 +1189,7 @@ function WisdomDialogHost({ client }) {
     children: jsxs(DialogContent, { className: 'max-w-[48rem] text-(--ui-text-primary)', children: [
       jsxs(DialogHeader, { children: [
         jsx(DialogTitle, { children: 'Shared skills' }),
-        jsx(DialogDescription, { className: 'text-(--ui-text-tertiary)', children: 'Review the exact package, warnings and prerequisites before confirming. Installing does not authorize setup.' })
+        jsx(DialogDescription, { className: 'text-(--ui-text-tertiary)', children: 'Browse shared skills and check what Install or Update will do. Declared setup commands run with Install; other setup may need your attention.' })
       ] }),
       jsx('div', { className: 'max-h-[min(70vh,44rem)] overflow-y-auto border-t border-(--ui-stroke-secondary) pt-4', children: request.error
         ? jsx(EmptyState, { title: 'Shared skills unavailable', description: request.error })
@@ -1258,7 +1290,7 @@ export default {
         const result = await ctx.rest('/notices/end-turn', { method: 'POST' })
         if (!active || !Array.isArray(result?.notices)) return
         for (const notice of result.notices) {
-          const subject = notice.skill_name || notice.slug || notice.skill_id || 'A shared skill'
+          const subject = label(notice) === 'Name unavailable' ? 'A shared skill' : label(notice)
           host.notify({
             kind: 'info',
             message: `Collective Wisdom: ${subject} is available. Open Wisdom to review.`

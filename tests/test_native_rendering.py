@@ -102,11 +102,12 @@ def test_effect_review_retains_exact_security_compatibility_and_file_facts():
     }).to_text()
 
     for exact_fact in (
-        "receipt-exact", "sha256:content", "sha256:manifest",
+        "sha256:content", "sha256:manifest",
         'compatible_after_setup', '"accept_partial": true', "ask",
         "Review shell capability", "shell", "scripts/check.sh", "exec", "sha256:file",
     ):
         assert exact_fact in text
+    assert "receipt-exact" not in text
 
 
 def test_telegram_plain_fallback_removes_approval_when_escape_expansion_truncates():

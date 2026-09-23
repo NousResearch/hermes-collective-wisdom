@@ -8,8 +8,8 @@ and Gateway. Review a skill before installing it, prepare your own skills for
 sharing, and manage updates from Hermes.
 
 You stay in control: installing the plugin does not upload your skills or enroll
-your profile. Sharing requires approval, and installing a shared skill does not
-run its setup commands.
+your profile. Sharing requires approval. Installing a shared skill runs only
+its explicitly declared setup commands after the Install approval.
 
 > **Early access:** production enrollment and catalog reads have been exercised.
 > End-to-end sharing, installation, and platform delivery are still being
@@ -109,8 +109,8 @@ review rather than approving any effect. Contributions supports complete private
 draft editing and save-and-re-review, including text-file add/remove/rename and
 inert opaque-byte export. Catalog exposes Install; Installed exposes Check for
 updates and a separate exact-version Review update. Neither installs nor draft
-edits run setup scripts or authorize publication. Setup execution and uncertain
-operation recovery remain in the existing native controls.
+edits authorize publication. Install runs exact declared setup commands; manual
+setup and uncertain operation recovery remain in the existing native controls.
 Dashboard UI and full six-surface parity remain deferred.
 
 ## Common tasks
@@ -121,7 +121,7 @@ subcommand for its options.
 ### Install a skill
 
 ```bash
-hermes wisdom install <skill-id>@v1
+hermes wisdom install <skill-name>
 ```
 
 The explicit install command runs the checks and installs a clean package without
@@ -132,9 +132,9 @@ To inspect without installing, add `--plan`; an inspected receipt can also be ap
 hermes wisdom install --apply-receipt <receipt> --json
 ```
 
-Approval is bound to the reviewed version and files. A changed or expired plan
-needs another review. Installing files is separate from
-[approving skill setup](docs/WORKFLOWS.md#installed-skill-setup-terminal).
+Approval is bound to the reviewed version, files, and declared setup commands.
+A changed or expired plan needs another review. Setup instructions not explicitly
+declared as commands remain in the [manual setup flow](docs/WORKFLOWS.md#installed-skill-setup-terminal).
 If the Hermes scanner reports reviewable warnings, the interactive terminal
 shows the findings and offers explicit acknowledgement before final approval.
 Scripted reviews use `--accept-warnings` after authorized review; this is distinct

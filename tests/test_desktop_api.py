@@ -271,6 +271,54 @@ def test_install_confirmation_is_bound_to_server_issued_view_and_current_profile
         api.install_confirm(service_a, view["view_id"], plan["receipt"])
 
 
+def test_completed_desktop_actions_keep_reviewed_skill_name_with_thin_results(tmp_path):
+    class NamedService(Service):
+        def update_plan(self, skill_id, **options):
+            return {**super().update_plan(skill_id, **options), "slug": "one"}
+
+    api = DesktopWorkflowApi()
+    service = NamedService(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    installed = api.install_review(service, view_id, "one")
+    assert api.install_confirm(service, view_id, installed["receipt"])["skill_name"] == "one"
+    updated = api.update_review(service, view_id, "skill-1")
+    assert api.update_confirm(service, view_id, updated["receipt"])["skill_name"] == "one"
+    removed = api.uninstall_review(service, view_id, "skill-1")
+    assert api.uninstall_confirm(service, view_id, removed["review_id"])["skill_name"] == "one"
+
+
+def test_desktop_refuses_to_label_a_different_skill_as_reviewed(tmp_path):
+    class ContradictoryService(Service):
+        def install_apply(self, receipt, *, accept_partial=False, may_apply=None):
+            assert may_apply is not None and may_apply() is True
+            return {"installed": True, "skill_id": "not-reviewed"}
+
+    api = DesktopWorkflowApi()
+    service = ContradictoryService(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    receipt = api.install_review(service, view_id, "one")["receipt"]
+    result = api.install_confirm(service, view_id, receipt)
+    assert result["state"] == "unknown"
+    assert result["installed"] is False
+    assert result["skill_name"] == "one"
+    assert "Check installed skills" in result["detail"]
+
+
+def test_publication_result_keeps_reviewed_name(tmp_path):
+    class NamedService(Service):
+        def publication_review(self, draft_id, *, accept_warnings=False, may_apply=None):
+            return {**super().publication_review(
+                draft_id, accept_warnings=accept_warnings, may_apply=may_apply
+            ), "slug": "incident-helper"}
+
+    api = DesktopWorkflowApi()
+    service = NamedService(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    review = api.publication_review(service, view_id, "local:1")
+    result = api.publication_confirm(service, view_id, review["receipt"])
+    assert result["skill_name"] == "incident-helper"
+
+
 def test_uninstall_confirmation_rejects_changed_installation_after_review(tmp_path):
     api = DesktopWorkflowApi()
     service = Service(tmp_path / "a")
@@ -321,6 +369,42 @@ def test_update_check_is_read_only_and_bound_to_the_current_view(tmp_path):
     api.close_view(service, view_id)
     with pytest.raises(WisdomAuthError, match="no longer current"):
         api.check_update(service, view_id, "skill-1")
+
+
+def test_saved_drafts_are_read_only_and_bound_to_a_live_view(tmp_path):
+    class DraftService(Service):
+        def prepared_drafts(self):
+            self.calls.append(("prepared_drafts",))
+            return [{"skill_name": "my-skill", "draft_id": "local:1",
+                     "updated_at": "2030-01-01T00:00:00Z"}]
+
+    api = DesktopWorkflowApi()
+    service = DraftService(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    assert api.prepared_drafts(service, view_id)["drafts"][0]["skill_name"] == "my-skill"
+    assert service.calls[-1] == ("prepared_drafts",)
+    api.close_view(service, view_id)
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        api.prepared_drafts(service, view_id)
+    assert service.calls.count(("prepared_drafts",)) == 1
+
+
+def test_saved_draft_list_route_requires_a_current_view(tmp_path):
+    class DraftService(Service):
+        def prepared_drafts(self):
+            return [{"skill_name": "my-skill", "draft_id": "local:1",
+                     "updated_at": "2030-01-01T00:00:00Z"}]
+
+    service = DraftService(tmp_path / "a")
+    app = FastAPI()
+    app.include_router(build_router(lambda: service), prefix="/wisdom")
+    assert _request(
+        app, "GET", "/wisdom/drafts", params={"view_id": "not-a-view"}
+    ).status_code == 401
+    view_id = _request(app, "POST", "/wisdom/views").json()["view_id"]
+    result = _request(app, "GET", "/wisdom/drafts", params={"view_id": view_id})
+    assert result.status_code == 200
+    assert result.json()["drafts"][0]["skill_name"] == "my-skill"
 
 
 def test_prepared_save_and_rereview_are_exact_view_bound_workflow_calls(tmp_path):
@@ -618,7 +702,8 @@ def test_fastapi_router_exposes_real_catalog_and_review_confirmation_flow(tmp_pa
         "/api/plugins/collective-wisdom/install/confirm",
         json={"view_id": view_id, "receipt": receipt},
     ))
-    assert applied.json() == {"installed": True, "skill_id": "skill-1", "version": 1}
+    assert applied.json() == {"installed": True, "skill_id": "skill-1",
+                              "version": 1, "skill_name": "one"}
 
     selected[0] = "b"
     stale = asyncio.run(request(
