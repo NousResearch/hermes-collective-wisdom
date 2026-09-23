@@ -250,10 +250,16 @@ def _review_check_lines(data: dict[str, Any]) -> list[str]:
     if data.get("modified") is True:
         preservation = data.get("preservation")
         preservation = preservation if isinstance(preservation, dict) else {}
-        lines.append(
-            "Local edits: detected; action: "
-            + text(preservation.get("action") or "blocked")
-        )
+        if data.get("local_baseline") == "unknown":
+            lines.append(
+                "Local published baseline: unknown; preservation required; action: "
+                + text(preservation.get("action") or "blocked")
+            )
+        else:
+            lines.append(
+                "Local edits: detected; action: "
+                + text(preservation.get("action") or "blocked")
+            )
     if data.get("sensitive_expansion"):
         lines.extend(_list_lines("New sensitive capabilities", data["sensitive_expansion"]))
     return lines

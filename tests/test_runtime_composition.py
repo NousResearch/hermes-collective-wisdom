@@ -1,5 +1,6 @@
 """Real runtime/service composition with only account, host and Gateway faked."""
 # pylint: disable=missing-function-docstring,too-few-public-methods
+# pylint: disable=protected-access,redefined-outer-name
 
 from collections import Counter
 from copy import deepcopy
@@ -85,6 +86,34 @@ def test_catalog_browse_renders_owner_local_managed_install_status(tmp_path, mon
         "installed_version": 1, "latest_version": 2,
     }
     assert "Installed v1 · update to v2 available" in rendered
+
+
+def test_public_update_routes_resolve_unique_skill_name_before_review():
+    service = InvocationService.__new__(InvocationService)
+    calls = []
+    reviewer = SimpleNamespace(
+        check=lambda skill_id, **values: (
+            calls.append(("check", skill_id, values)) or {"ok": True}
+        ),
+        plan=lambda skill_id, **values: (
+            calls.append(("plan", skill_id, values)) or {"receipt": "r"}
+        ),
+    )
+    service._update_services = lambda: (reviewer, None)
+    service.resolve_skill = lambda reference: {
+        "skill": {"id": "skill-1", "slug": "hermes-agent-dev", "reference": reference}
+    }
+    service.check_owner = lambda: None
+
+    assert service.check_update("hermes-agent-dev") == {"ok": True}
+    assert service.update_plan("hermes-agent-dev", preserve_modified=True) == {"receipt": "r"}
+    assert calls == [
+        ("check", "skill-1", {"slug": "hermes-agent-dev"}),
+        ("plan", "skill-1", {
+            "slug": "hermes-agent-dev", "preserve_modified": True,
+            "accept_sensitive": False, "accept_partial": False, "accept_warnings": False,
+        }),
+    ]
 
 
 @pytest.mark.parametrize(

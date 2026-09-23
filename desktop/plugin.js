@@ -310,7 +310,13 @@ function reviewProblems(review, kind, acknowledgements = {}) {
   const action = kind === 'update' ? 'confirm_update' : 'confirm_install'
   if (!Array.isArray(review.permitted_actions) || !review.permitted_actions.includes(action)) problems.push(`The service did not permit ${action.replace('_', ' ')}.`)
   if (kind === 'update') {
-    if (!isPositiveInt(review.from_version) || !isObject(review.previous_installation)) problems.push('Previous installation snapshot is incomplete.')
+    const unknownLocal = review.from_version === null && review.local_baseline === 'unknown'
+      && review.previous_installation?.version === null
+      && review.previous_installation?.target_provenance?.kind === 'local_source'
+      && review.authorization?.kind === 'manual_receipt'
+      && review.preservation?.action === 'preserve_unmanaged_copy'
+      && review.policy?.accepted_modified_preservation === true
+    if ((!isPositiveInt(review.from_version) && !unknownLocal) || !isObject(review.previous_installation)) problems.push('Previous installation snapshot is incomplete.')
     if (!Array.isArray(review.sensitive_expansion) || !isObject(review.preservation) || !isObject(review.authorization)) problems.push('Sensitive-change or preservation policy is incomplete.')
     if (review.sensitive_expansion?.length && review.policy?.accepted_sensitive !== true) problems.push('Sensitive capability expansion requires explicit acknowledgement and re-review.')
   }
@@ -375,7 +381,7 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
     ] }),
     jsx(KeyValue, { name: 'skill', value: label(review) }),
     jsx(KeyValue, { name: 'version', value: review?.version }),
-    jsx(KeyValue, { name: 'from version', value: review?.from_version }),
+    jsx(KeyValue, { name: 'from version', value: review?.from_version ?? (kind === 'update' && review?.local_baseline === 'unknown' ? 'Local copy (published version unknown)' : undefined) }),
     jsx(KeyValue, { name: 'receipt', value: review?.receipt || review?.review_id, mono: true }),
     jsx(KeyValue, { name: 'content hash', value: review?.content_hash || hashes.content, mono: true }),
     jsx(KeyValue, { name: 'manifest hash', value: review?.manifest_hash || hashes.manifest, mono: true }),
@@ -538,6 +544,7 @@ function catalogStatus(item) {
 function catalogAction(item) {
   const status = catalogStatus(item)
   if (status.state === 'not_installed') return 'install'
+  if (status.state === 'unmanaged_local' && isPositiveInt(status.latest_version)) return 'update'
   if (status.state === 'installed' && isPositiveInt(status.latest_version) && isPositiveInt(status.installed_version) && status.latest_version > status.installed_version) return 'update'
   return null
 }

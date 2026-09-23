@@ -111,7 +111,7 @@ class CatalogInstallationStatus:  # pylint: disable=too-few-public-methods
             return {**_STATUS_UNAVAILABLE, "latest_version": latest}
         return {
             "state": "unmanaged_local",
-            "text": "Local copy · not managed by Wisdom",
+            "text": "Local copy · published version unknown",
             "installed_version": None, "latest_version": latest,
         }
 

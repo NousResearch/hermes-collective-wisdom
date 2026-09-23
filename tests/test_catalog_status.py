@@ -80,7 +80,7 @@ def test_no_record_distinguishes_absent_and_unmanaged_profile_copy(tmp_path, mon
 
     result = status.for_skill("skill-1", "incident-handoff", 2)
     assert result["state"] == "unmanaged_local"
-    assert result["text"] == "Local copy · not managed by Wisdom"
+    assert result["text"] == "Local copy · published version unknown"
     assert result["installed_version"] is None
 
 
