@@ -41,7 +41,7 @@ class Transport:
     def _is_user_authorized_for_source(self, source):
         return source.user_id == "fixture-human"
 
-    def _adapter_for_source(self, _source):
+    def _delivery_adapter_for(self, _source):
         return self.adapter
 
     def _session_key_for_source(self, _source):

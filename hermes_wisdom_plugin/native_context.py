@@ -148,7 +148,7 @@ class InvocationCapture:
             return None
         task = asyncio.current_task()
         session_for = getattr(gateway, "_session_key_for_source", None)
-        adapter_for = getattr(gateway, "_adapter_for_source", None)
+        adapter_for = getattr(gateway, "_delivery_adapter_for", None)
         if task is None or not callable(session_for) or not callable(adapter_for):
             return None
         try:
