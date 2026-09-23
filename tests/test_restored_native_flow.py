@@ -1,6 +1,8 @@
 """Restored journeys through real registered native callbacks; no live services."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
 import asyncio
+from datetime import datetime
+from html import unescape
 
 import pytest
 
@@ -225,7 +227,15 @@ def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
         identity = response["review_id"]
         await ui.click(identity, "settings")
         assert ui.record(identity)["operation"] == "settings"
-        assert "sharing and installation" in ui.view(identity).to_text()
+        view = ui.view(identity)
+        text = view.to_text()
+        assert "sharing suggestions and skill recommendations" in text
+        assert "not your teammates" in text
+        assert "Current: On" in text
+        assert not any(word in text for word in ("Gateway", "Revision", "None", "agent", "Org id"))
+        assert [action.label for action in view.actions] == [
+            "Mute one week", "Turn off automatic suggestions", "Cancel",
+        ]
         assert not changed
         assert not service.applied
     asyncio.run(scenario())
@@ -257,6 +267,9 @@ def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, s
             super().__init__()
             self.client = recording_client(session=session)
 
+        def native_owner(self):
+            return owner(organization_id="org-1")
+
         def notification_settings(self, **_kwargs):
             return {"delivery_mode": "agent", "mode_writable": True,
                     "mute_control": self.client.recommendation_mute().model_dump(mode="json")}
@@ -284,9 +297,19 @@ def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, s
         assert writes[0][2]["json"]["duration"] == "1_week"
         assert writes[0][2]["json"]["expected_revision"] == 7
         assert writes[0][2]["json"]["mutation_id"]
-        assert writes[0][2]["json"]["requested_at"]
+        requested_at = writes[0][2]["json"]["requested_at"]
+        assert datetime.fromisoformat(requested_at).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z") == requested_at
         assert ui.record(identity)["state"] == "completed"
+        assert transport.calls[-1][0] == "GET", "Confirmation needs Gateway readback"
         assert service.client.recommendation_mute().duration == "1_week"
+        confirmation = ui.view(identity)
+        assert confirmation.title == "Notifications muted"
+        assert "one week" in confirmation.summary
+        assert "only affects you" in confirmation.summary
+        assert confirmation.dismissed and not confirmation.actions
+        assert "Gateway" not in confirmation.to_text()
         await ui.click(identity, "settings.mute.1w")
         restarted = surface(tmp_path / "restart", MuteService(transport))
         another = restarted.runtime.begin_candidate(restarted.caller, "candidate-2")["review_id"]
@@ -294,6 +317,81 @@ def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, s
         await restarted.click(another, "settings")
         assert restarted.record(another)["plan"]["mute_control"]["duration"] == "1_week"
         assert len([call for call in transport.calls if call[0] == "PUT"]) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_failed_mute_click_replaces_card_with_uncertain_confirmation(tmp_path, surface):
+    class FailingMuteService(Service):
+        def notification_settings(self, **_kwargs):
+            return {"delivery_mode": "agent", "mode_writable": True,
+                    "mute_control": {"revision": 7, "muted": False}}
+
+        def choose_notification_mute(self, _revision, _duration, *, may_apply):
+            assert may_apply()
+            raise ConnectionError("unknown write outcome")
+
+    async def scenario():
+        ui = surface(tmp_path, FailingMuteService())
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "settings")
+        edit_count = len(ui.edits)
+        await ui.click(identity, "settings.mute.1w")
+        assert ui.record(identity)["state"] == "uncertain"
+        assert len(ui.edits) == edit_count + 1
+        assert "Couldn't confirm the change" in unescape(str(ui.edits[-1]))
+        assert not ui.view(identity).actions
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+@pytest.mark.parametrize("readback", ["unchanged", "stale_revision", "later_revision"])
+def test_mute_response_without_persisted_readback_never_confirms(tmp_path, surface, readback):
+    class UnconfirmedSession(Session):
+        written = False
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            if method == "PUT":
+                self.written = True
+            muted = method == "PUT" or (self.written and readback != "unchanged")
+            revision = (8 if method == "PUT" else
+                        9 if self.written and readback == "later_revision" else 7)
+            return Response(200, {
+                "org_id": "org-1", "muted": muted,
+                "duration": "1_week" if muted else None,
+                "muted_until": "2030-01-08T00:00:00Z" if muted else None,
+                "forever": False, "revision": revision,
+            })
+
+    class MuteService(Service):
+        choose_notification_mute = InvocationService.choose_notification_mute
+
+        def __init__(self, session):
+            super().__init__()
+            self.client = recording_client(session=session)
+
+        def native_owner(self):
+            return owner(organization_id="org-1")
+
+        def notification_settings(self, **_kwargs):
+            return {"delivery_mode": "agent", "mode_writable": True,
+                    "mute_control": self.client.recommendation_mute().model_dump(mode="json")}
+
+    async def scenario():
+        transport = UnconfirmedSession()
+        ui = surface(tmp_path, MuteService(transport))
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "settings")
+        await ui.click(identity, "settings.mute.1w")
+        assert [method for method, _url, _body in transport.calls][-2:] == ["PUT", "GET"]
+        assert ui.record(identity)["state"] == "uncertain"
+        assert ui.view(identity).title == "Couldn't confirm the change"
+        assert not ui.view(identity).actions
 
     asyncio.run(scenario())
 
