@@ -674,11 +674,22 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             duration,
             expected_revision=current.revision,
             mutation_id=str(uuid4()),
-            requested_at=datetime.now(timezone.utc).isoformat(),
+            requested_at=datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z"),
         )
         if self.native_owner() != owner:
             raise WisdomAuthError("Collective Wisdom notification owner changed")
-        return result.model_dump(mode="json")
+        confirmed = client.recommendation_mute()
+        if self.native_owner() != owner:
+            raise WisdomAuthError("Collective Wisdom notification owner changed")
+        if (confirmed.revision != result.revision or confirmed.duration != duration
+                or confirmed.muted != (duration is not None)
+                or confirmed.org_id != owner["organization_id"]):
+            raise WisdomConflict(
+                "Notification preference could not be confirmed; open settings again"
+            )
+        return confirmed.model_dump(mode="json")
 
     def mute(self, choice="status"):
         """Inspect or mutate the shared organization notification preference."""

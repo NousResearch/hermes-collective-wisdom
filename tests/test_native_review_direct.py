@@ -513,8 +513,9 @@ def test_settings_card_applies_an_exact_mode_choice(tmp_path: Path, monkeypatch)
     controller.bind_message(record["id"], invocation(), "card-1")
     view = controller.view(record)
 
-    assert "Delivery mode: agent" in view.to_text()
-    assert any(action.label == "Fixed notifications" for action in view.actions)
+    assert "Current: On" in view.to_text()
+    assert "Delivery mode" not in view.to_text()
+    assert any(action.label == "Turn off automatic suggestions" for action in view.actions)
 
     result = controller.act(
         record["id"], "settings.mode.fixed", service,
@@ -523,6 +524,7 @@ def test_settings_card_applies_an_exact_mode_choice(tmp_path: Path, monkeypatch)
 
     assert changed == [("fixed", "agent")]
     assert result["state"] == "completed"
+    assert controller.view(result).title == "Automatic suggestions off"
 
 
 def test_update_and_setup_requests_use_real_service_interfaces(tmp_path: Path, monkeypatch):

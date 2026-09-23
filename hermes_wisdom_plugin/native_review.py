@@ -421,28 +421,60 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
     raise WisdomValidationError("This review has no effect to confirm")
 
 
-def _settings_view(plan: dict[str, Any], state: str) -> NativeView:
-    item = NativeItem("Current settings", "\n".join(_fact_lines(plan)))
-    if state != "pending":
+def _settings_result_view(result: dict[str, Any]) -> NativeView:
+    if result.get("muted") is True and result.get("duration") == "1_week":
         return NativeView(
-            "Collective Wisdom settings", "Notification settings", [item],
-            notice=f"State: {state}", dismissed=True,
+            "Notifications muted",
+            "Skill recommendations and sharing suggestions are paused for one week. "
+            "This only affects you; you can still browse and install skills.", dismissed=True,
         )
+    if result.get("muted") is False:
+        return NativeView("Notifications unmuted", "Recommendations are on for you.", dismissed=True)
+    if result.get("delivery_mode") == "fixed":
+        return NativeView("Automatic suggestions off", "You can still browse and install skills.", dismissed=True)
+    if result.get("delivery_mode") == "agent":
+        return NativeView("Automatic suggestions on", "You can turn them off in settings.", dismissed=True)
+    return NativeView("Settings saved", "", dismissed=True)
+
+
+def _settings_view(record: dict[str, Any]) -> NativeView:
+    plan = record["plan"]
+    state = record["state"]
+    if state == "uncertain":
+        return NativeView(
+            "Couldn't confirm the change",
+            "Please open settings again to check your preference. We won't retry it automatically.",
+            dismissed=True,
+        )
+    if state != "pending":
+        result = record.get("result")
+        return _settings_result_view(result if isinstance(result, dict) else {})
+    control = plan.get("mute_control")
+    muted = isinstance(control, dict) and control.get("muted") is True
+    duration = control.get("duration") if muted else None
+    current = (
+        "Muted for one week" if duration == "1_week" else "Muted" if muted else
+        "On" if isinstance(control, dict) else "Mute status unavailable"
+    )
+    if plan.get("delivery_mode") == "fixed":
+        current += "; automatic suggestions off"
+    item = NativeItem(f"Current: {current}", "")
     actions = [NativeAction("Cancel", "cancel", destructive=True)]
     if plan.get("mode_writable") is True:
         mode = str(plan.get("delivery_mode") or "fixed")
         if mode == "agent":
-            actions.insert(0, NativeAction("Fixed notifications", "settings.mode.fixed"))
+            actions.insert(0, NativeAction("Turn off automatic suggestions", "settings.mode.fixed"))
         else:
-            actions.insert(0, NativeAction("Agent notifications", "settings.mode.agent"))
-    control = plan.get("mute_control")
+            actions.insert(0, NativeAction("Turn on automatic suggestions", "settings.mode.agent"))
     if isinstance(control, dict) and control.get("revision") is not None:
-        actions.insert(0, NativeAction("Unmute recommendations", "settings.mute.off"))
-        actions.insert(0, NativeAction("Mute one week", "settings.mute.1w"))
+        actions.insert(0, NativeAction(
+            "Unmute recommendations" if muted else "Mute one week",
+            "settings.mute.off" if muted else "settings.mute.1w",
+        ))
     return NativeView(
         "Collective Wisdom settings",
-        "These controls affect Collective Wisdom sharing and installation recommendations, "
-        "not just this skill. Opening settings changes nothing.", [item], actions=actions,
+        "Pause sharing suggestions and skill recommendations for you, not your teammates. "
+        "You can still browse and install skills.", [item], actions=actions,
     )
 
 
@@ -784,7 +816,7 @@ def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-m
     if record.get("operation") == "catalog":
         return _catalog_view(plan, state)
     if record.get("operation") == "settings":
-        return _settings_view(plan, state)
+        return _settings_view(record)
     authority, details = _authority_projection(record, plan)
     if record.get("operation") == "suggest":
         return _suggest_view(authority, state, record.get("result"))
@@ -1269,12 +1301,14 @@ class NativeReviewController:
             )
         try:
             outcome = _apply_review_action(action, operation, plan, service, current)
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             uncertain = {
                 **claimed, "state": "uncertain", "result": {"outcome": "unknown"},
                 "updated_at": self.clock(),
             }
-            self.state.compare_replace(claimed, uncertain)
+            if (self.state.compare_replace(claimed, uncertain)
+                    and operation == "settings" and not isinstance(exc, WisdomAuthError)):
+                return copy.deepcopy(uncertain)
             raise
         result = {
             **claimed, "state": "completed", "result": outcome,
