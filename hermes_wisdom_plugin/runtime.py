@@ -12,9 +12,11 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
@@ -659,11 +661,21 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Apply one exact revision-bound mute choice and attempt its idempotent sync."""
 
         owner = self.native_owner()
-        current = self.client.recommendation_mute()
-        if control_id != str(current.revision):
+        client = self.client
+        if client is None:
+            raise WisdomValidationError("Collective Wisdom service is unavailable")
+        current = client.recommendation_mute()
+        if current.revision is None or control_id != str(current.revision):
             raise WisdomConflict("Collective Wisdom mute setting changed; review it again")
         _require_current(may_apply)
-        result = self.client.set_recommendation_mute(duration)
+        if self.native_owner() != owner:
+            raise WisdomAuthError("Collective Wisdom notification owner changed")
+        result = client.set_recommendation_mute(
+            duration,
+            expected_revision=current.revision,
+            mutation_id=str(uuid4()),
+            requested_at=datetime.now(timezone.utc).isoformat(),
+        )
         if self.native_owner() != owner:
             raise WisdomAuthError("Collective Wisdom notification owner changed")
         return result.model_dump(mode="json")
@@ -675,7 +687,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         if choice == "status":
             result = self.client.recommendation_mute()
         else:
-            duration = None if choice == "off" else choice
+            duration = {"off": None, "1d": "1_day", "1w": "1_week",
+                        "30d": "30_days"}.get(choice, choice)
             result = self.client.set_recommendation_mute(duration)
         self.check_owner()
         return result.model_dump(mode="json")

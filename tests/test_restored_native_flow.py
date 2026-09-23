@@ -6,10 +6,12 @@ import pytest
 
 from native_test_support import owner
 from restoration_support import (
-    SlackHarness, assert_cancelled_review_is_inert,
+    SlackHarness, TelegramHarness, assert_cancelled_review_is_inert,
     assert_owner_switch_after_post_is_cleaned,
 )
+from test_client import Response, Session, client as recording_client
 from hermes_wisdom_plugin.errors import SharePackagingError
+from hermes_wisdom_plugin.runtime import InvocationService
 
 
 class Service:
@@ -229,9 +231,75 @@ def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+@pytest.mark.parametrize("stale", [False, True])
+def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, stale):
+    class MuteSession(Session):
+        def __init__(self):
+            super().__init__()
+            self.muted = False
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            if method == "PUT":
+                self.muted = True
+            return Response(200, {
+                "org_id": "org-1", "muted": self.muted,
+                "duration": "1_week" if self.muted else None,
+                "muted_until": "2030-01-08T00:00:00Z" if self.muted else None,
+                "forever": False, "revision": 8 if self.muted else 7,
+            })
+
+    class MuteService(Service):
+        choose_notification_mute = InvocationService.choose_notification_mute
+
+        def __init__(self, session):
+            super().__init__()
+            self.client = recording_client(session=session)
+
+        def notification_settings(self, **_kwargs):
+            return {"delivery_mode": "agent", "mode_writable": True,
+                    "mute_control": self.client.recommendation_mute().model_dump(mode="json")}
+
+    async def scenario():
+        transport = MuteSession()
+        service = MuteService(transport)
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "settings")
+        assert not [call for call in transport.calls if call[0] == "PUT"]
+        forged = ({"user": {"id": "U2"}} if ui.caller.platform == "slack"
+                  else {"actor_id": 22})
+        await ui.click(identity, "settings.mute.1w", **forged)
+        assert not [call for call in transport.calls if call[0] == "PUT"]
+        if stale:
+            transport.muted = True  # Another client changed the Gateway revision.
+            await ui.click(identity, "settings.mute.1w")
+            assert not [call for call in transport.calls if call[0] == "PUT"]
+            return
+        await ui.click(identity, "settings.mute.1w")
+        writes = [call for call in transport.calls if call[0] == "PUT"]
+        assert len(writes) == 1
+        assert writes[0][2]["json"]["duration"] == "1_week"
+        assert writes[0][2]["json"]["expected_revision"] == 7
+        assert writes[0][2]["json"]["mutation_id"]
+        assert writes[0][2]["json"]["requested_at"]
+        assert ui.record(identity)["state"] == "completed"
+        assert service.client.recommendation_mute().duration == "1_week"
+        await ui.click(identity, "settings.mute.1w")
+        restarted = surface(tmp_path / "restart", MuteService(transport))
+        another = restarted.runtime.begin_candidate(restarted.caller, "candidate-2")["review_id"]
+        await restarted.flush()
+        await restarted.click(another, "settings")
+        assert restarted.record(another)["plan"]["mute_control"]["duration"] == "1_week"
+        assert len([call for call in transport.calls if call[0] == "PUT"]) == 1
+
+    asyncio.run(scenario())
+
+
 def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch):
     from test_contribution_review import reviewer  # pylint: disable=import-outside-toplevel
-    from hermes_wisdom_plugin.runtime import InvocationService  # pylint: disable=import-outside-toplevel
     async def scenario():
         prepared, source, _owner = reviewer(tmp_path / "package")
         (source / "unsafe-link").symlink_to(source / "SKILL.md")
