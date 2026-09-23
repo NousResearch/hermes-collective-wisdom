@@ -19,6 +19,7 @@ from typing import Any, Callable
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
 from .errors import WisdomAuthError, WisdomConflict, WisdomError, WisdomValidationError
+from .package import PackagePolicyError
 
 
 def _require_current(may_apply: Callable[[], bool] | None) -> None:
@@ -566,8 +567,6 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         inspected = self.native_candidate_inspect(event_id)
         skill_name = str((inspected.get("facts") or {}).get("name") or "")
         from .errors import SharePackagingError  # pylint: disable=import-outside-toplevel
-        from .package import PackagePolicyError  # pylint: disable=import-outside-toplevel
-
         try:
             prepared = self.suggest(skill_name, allow_model_review=False)
         except (OSError, PackagePolicyError, WisdomValidationError):
@@ -706,6 +705,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             "automatic_updates": updates,
         }
 
+    def prepared_drafts(self):
+        """List current owner's saved local drafts without exposing package bytes."""
+        self._installation_owner()
+        result = self._contribution_reviewer().prepared_drafts()
+        self.check_owner()
+        return result
+
     def prepared_inspect(self, draft_id):
         """Export one complete exact owner-private editable draft payload."""
 
@@ -713,6 +719,81 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         result = self._contribution_reviewer().inspect_prepared(draft_id)
         self.check_owner()
         return result
+
+    def _named_local_state(self):
+        """Read one owner-fenced snapshot for terminal name resolution only."""
+        owner = self._installation_owner()
+        if self._direct_state is None:
+            raise WisdomError("Collective Wisdom local state is unavailable")
+        snapshot = self._direct_state._load()  # pylint: disable=protected-access
+        self.check_owner()
+        return owner, snapshot
+
+    def resolve_local_draft(self, reference):
+        """Resolve one owner-local prepared draft, refusing same-name ambiguity."""
+        owner, snapshot = self._named_local_state()
+        drafts = snapshot.get("drafts", {})
+        if not isinstance(drafts, dict):
+            raise WisdomValidationError("Local draft state is invalid")
+        if reference in drafts and isinstance(drafts[reference], dict):
+            if drafts[reference].get("owner") == owner:
+                return reference
+            raise WisdomAuthError("Local draft belongs to another owner")
+        matches = [key for key, row in drafts.items() if isinstance(row, dict)
+                   and row.get("owner") == owner and row.get("slug") == reference]
+        if len(matches) > 1:
+            raise WisdomConflict("Local draft name is ambiguous")
+        if not matches:
+            from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+            raise WisdomNotFound("Local draft not found")
+        return matches[0]
+
+    def resolve_publication_operation(self, reference):
+        """Bind a name to one retained operation; never select a newest operation."""
+        owner, snapshot = self._named_local_state()
+        operations = snapshot.get("publications", {})
+        drafts = snapshot.get("drafts", {})
+        if not isinstance(operations, dict) or not isinstance(drafts, dict):
+            raise WisdomValidationError("Local publication state is invalid")
+        if reference in operations and isinstance(operations[reference], dict):
+            if operations[reference].get("owner") == owner:
+                return reference
+            raise WisdomAuthError("Publication belongs to another owner")
+        matching_drafts = [key for key, row in drafts.items() if isinstance(row, dict)
+                           and row.get("owner") == owner and row.get("slug") == reference]
+        matches = [key for key, row in operations.items() if isinstance(row, dict)
+                   and row.get("owner") == owner
+                   and row.get("local_draft_id") in matching_drafts]
+        if len(matches) > 1:
+            raise WisdomConflict("Publication name is ambiguous")
+        if not matches:
+            from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+            raise WisdomNotFound("Publication not found")
+        return matches[0]
+
+    def resolve_publication_receipt(self, reference):
+        """Find one still-unconsumed, owner-bound review; submit rechecks expiry/bytes."""
+        from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+
+        owner, snapshot = self._named_local_state()
+        reviews = snapshot.get("publication_reviews", {})
+        drafts = snapshot.get("drafts", {})
+        if not isinstance(reviews, dict) or not isinstance(drafts, dict):
+            raise WisdomValidationError("Publication review state is invalid")
+        if reference in reviews and isinstance(reviews[reference], dict):
+            if reviews[reference].get("owner") != owner:
+                raise WisdomAuthError("Publication review belongs to another owner")
+            return reference
+        matching_drafts = [key for key, row in drafts.items() if isinstance(row, dict)
+                           and row.get("owner") == owner and row.get("slug") == reference]
+        matches = [key for key, row in reviews.items() if isinstance(row, dict)
+                   and row.get("owner") == owner and row.get("consumed_at") is None
+                   and row.get("draft_id") in matching_drafts]
+        if len(matches) > 1:
+            raise WisdomConflict("Publication reviews are ambiguous; review the skill again")
+        if not matches:
+            raise WisdomNotFound("Publication review not found; review the skill again")
+        return matches[0]
 
     def prepared_save(
         self, draft_id, *, author_description, files, expected_hashes,
@@ -958,7 +1039,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         resolved_id, slug = self._resolve_update_reference(skill_id)
         result = self._update_services()[0].check(resolved_id, slug=slug)
         self.check_owner()
-        return result
+        return {**result, "slug": slug}
 
     def _resolve_update_reference(self, reference):
         detail = self.resolve_skill(reference)
@@ -1186,16 +1267,65 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     ):
         """Apply or retry only the explicitly selected terminal receipt."""
 
-        result = self._installation_services()[1].apply(
+        reviewer, executor = self._installation_services()
+        plan = reviewer.receipts.load(receipt, allow_started=True)
+        result = executor.apply(
             receipt, accept_partial=accept_partial, may_apply=may_apply
         )
         self.check_owner()
         _require_current(may_apply)
-        return result
+        commands = plan.get("setup_commands")
+        if result.get("installed") is not True or not commands:
+            return result
+        try:
+            return self._apply_installed_setup(receipt, plan, result, may_apply=may_apply)
+        except (PackagePolicyError, WisdomError) as exc:
+            return {**result, "setup": {"state": "blocked", "detail": str(exc)}}
+
+    def _apply_installed_setup(self, receipt, plan, result, *, may_apply=None):
+        """Run only the exact commands declared by the installed, reviewed bytes."""
+        commands = plan["setup_commands"]
+        setup = self._setup_services()
+        info = setup.inspect(plan["skill_id"], version=plan["version"])
+        guidance = info.get("guidance")
+        if not isinstance(guidance, dict) or guidance.get("setup_commands") != commands:
+            raise PackagePolicyError("installed setup commands changed since approval")
+        for index, command in enumerate(commands):
+            _require_current(may_apply)
+            step = setup.plan_for_install(
+                plan["skill_id"], version=plan["version"], index=index,
+                command=command, install_receipt=receipt,
+            )
+            outcome = setup.apply(step["receipt"], may_apply=may_apply)
+            if outcome.get("state") != "passed":
+                return {**result, "setup": {"state": outcome.get("state"),
+                                           "step": index + 1}}
+        return {**result, "setup": {"state": "passed", "steps": len(commands)}}
 
     def list_installations(self):
         """Inspect private installation state only through the terminal entry."""
         return self._installation_services()[1].installed()
+
+    def resolve_managed_skill(self, reference):
+        """Resolve an exact active managed name or ID for terminal setup/removal."""
+        from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+
+        rows = self.list_installations()
+        self.check_owner()
+        matches = [row for row in rows if isinstance(row, dict)
+                   and row.get("state") == "active"
+                   and row.get("slug") == reference]
+        if len(matches) > 1:
+            raise WisdomConflict("Managed skill name is ambiguous; inspect installed --json")
+        if matches:
+            skill_id = matches[0].get("skill_id")
+            if isinstance(skill_id, str) and skill_id:
+                return skill_id
+            raise WisdomValidationError("Managed skill identity is unavailable")
+        if any(isinstance(row, dict) and row.get("state") == "active"
+               and row.get("skill_id") == reference for row in rows):
+            return reference
+        raise WisdomNotFound("Managed skill not found")
 
     def uninstall(
         self, skill_id, *, may_apply: Callable[[], bool] | None = None
@@ -1244,7 +1374,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
     def show(self, skill_id):
         """Inspect published metadata only."""
-        return self._discovery().show(skill_id)
+        return self.resolve_skill(skill_id)
 
     def resolve_skill(self, reference):
         """Resolve an ID or unique slug for readable slash navigation."""
@@ -1252,7 +1382,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
     def versions(self, skill_id):
         """Read published version history."""
-        return self._discovery().versions(skill_id)
+        detail = self.resolve_skill(skill_id)
+        skill = detail.get("skill") if isinstance(detail, dict) else None
+        resolved = skill.get("id") if isinstance(skill, dict) else None
+        if not isinstance(resolved, str) or not resolved:
+            raise WisdomValidationError("Wisdom skill identity is unavailable")
+        return self._discovery().versions(resolved)
 
     def close(self):
         """Close this invocation's client."""

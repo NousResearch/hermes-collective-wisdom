@@ -105,7 +105,9 @@ def test_public_update_routes_resolve_unique_skill_name_before_review():
     }
     service.check_owner = lambda: None
 
-    assert service.check_update("hermes-agent-dev") == {"ok": True}
+    assert service.check_update("hermes-agent-dev") == {
+        "ok": True, "slug": "hermes-agent-dev",
+    }
     assert service.update_plan("hermes-agent-dev", preserve_modified=True) == {"receipt": "r"}
     assert calls == [
         ("check", "skill-1", {"slug": "hermes-agent-dev"}),

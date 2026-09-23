@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -391,6 +392,49 @@ def test_direct_setup_review_apply_is_exact_and_idempotent(installed) -> None:
     assert result["state"] == "passed"
     assert setup.apply(review["receipt"]) == result
     assert execution.calls == [(command, target, execution.calls[0][2])]
+
+
+# pylint: disable-next=too-many-locals,no-member
+def test_install_approved_setup_command_uses_stable_receipt(installed) -> None:
+    """A repeated install apply cannot launch a setup command a second time."""
+    from hermes_wisdom_plugin.direct_services import DirectState, SetupService
+    from hermes_wisdom_plugin.package import verify_content_files
+    from hermes_wisdom_plugin.setup_document import PREFIX, SETUP_PATH, SUFFIX
+    from hermes_wisdom_plugin.contract import canonical_json_bytes
+    from hermes_wisdom_plugin.package import PackagePolicyError
+
+    installed_state, progress, host, target = installed
+    command = "printf configured"
+    guidance = json.loads((target / SETUP_PATH).read_text().split("```json\n", 1)[1]
+                          .split("\n```", 1)[0])
+    guidance["setup_commands"] = [command]
+    (target / SETUP_PATH).write_bytes(PREFIX.encode() + canonical_json_bytes(guidance)
+                                    + SUFFIX.encode())
+    files = [(name, "file", (target / name).read_bytes()) for name in
+             ("SKILL.md", "skill.manifest.json", SETUP_PATH)]
+    records, digest = verify_content_files(files)
+    installed_state.record_install({
+        **installed_state.installation("skill-1"), "content_hash": digest,
+        "baseline": {row.path: row.hash for row in records},
+    })
+    execution = SetupExecutionHost()
+    setup = SetupService(DirectState(installed_state.state, progress.root),
+                         installed_state, host, execution, lambda: dict(OWNER))
+    approval = "wip_" + "a" * 32
+    # Pylint's imported service inference misses the new method.
+    # pylint: disable=no-member
+    with pytest.raises(PackagePolicyError):
+        setup.plan_for_install("skill-1", version=1, index=0, command="other",
+                               install_receipt=approval)
+    plan = setup.plan_for_install("skill-1", version=1, index=0, command=command,
+                                  install_receipt=approval)
+    assert setup.apply(plan["receipt"])["state"] == "passed"
+    repeat = setup.plan_for_install("skill-1", version=1, index=0, command=command,
+                                    install_receipt=approval)
+    assert repeat["receipt"] == plan["receipt"]
+    assert setup.apply(repeat["receipt"])["state"] == "passed"
+    assert len(execution.calls) == 1
+    # pylint: enable=no-member
 
 
 def test_direct_setup_unknown_launch_requires_acknowledged_recovery(installed) -> None:

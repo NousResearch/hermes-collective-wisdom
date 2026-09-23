@@ -26,9 +26,10 @@ from .contract import (
     sha256_address,
 )
 from .discovery import Discovery
-from .errors import WisdomAuthError, WisdomNotFound, WisdomValidationError
+from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
 from .local_security import prepared_security_check
+from .setup_document import SETUP_PATH, parse_setup_document
 
 
 _OWNER_FIELDS = (
@@ -46,6 +47,7 @@ _REVIEW_FIELDS = (
     "update_mode",
     "manifest",
     "files",
+    "setup_commands",
     "compatibility",
     "server_checks",
     "local_scan",
@@ -149,11 +151,10 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         matches = [
             item for item in discovery.search_skills(slug) if item.get("slug") == slug
         ]
-        if (
-            len(matches) != 1
-            or not isinstance(matches[0].get("id"), str)
-            or not matches[0]["id"]
-        ):
+        if len(matches) > 1:
+            raise WisdomConflict("Wisdom skill name is ambiguous")
+        if (not matches or not isinstance(matches[0].get("id"), str)
+                or not matches[0]["id"]):
             raise WisdomNotFound("Wisdom skill not found")
         self._check_owner(owner)
         return matches[0]["id"]
@@ -161,15 +162,18 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
     def _skill_detail(
         self, skill_id: str, owner: dict[str, Any], *, check_existing: bool,
     ) -> tuple[str, Any, str | None]:
-        """Prefer a direct ID; resolve a missing reference by exact catalog slug."""
-        self._reject_existing(skill_id, owner, check_existing=check_existing)
-        try:
+        """Resolve user names for plans; rechecks use their bound skill ID."""
+        if not check_existing:
             return skill_id, self._request(owner, lambda: self.client.skill(skill_id)), None
-        except WisdomNotFound:
+        try:
             canonical_id = self._resolve_slug(skill_id, owner)
-            self._reject_existing(canonical_id, owner, check_existing=check_existing)
-            detail = self._request(owner, lambda: self.client.skill(canonical_id))
-            return canonical_id, detail, skill_id
+            requested_slug = skill_id
+        except WisdomNotFound:
+            canonical_id = skill_id
+            requested_slug = None
+        self._reject_existing(canonical_id, owner, check_existing=check_existing)
+        detail = self._request(owner, lambda: self.client.skill(canonical_id))
+        return canonical_id, detail, requested_slug
 
     @staticmethod
     def _review_slug(skill: dict[str, Any], skill_id: str, requested: str | None) -> str:
@@ -503,6 +507,7 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             "update_mode": update_mode,
             "manifest": manifest.model_dump(mode="json"),
             "files": inventory,
+            "setup_commands": _reviewed_setup_commands(files),
             "compatibility": compatibility,
             "server_checks": server_checks,
             "local_scan": local_scan,
@@ -611,6 +616,17 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             files=[(path, mode_value, bytes(body)) for path, mode_value, body in files],
             baseline=baseline,
         )
+
+
+def _reviewed_setup_commands(files: list[tuple[str, str, bytes]]) -> list[str]:
+    """Extract only structured, hash-covered commands; prose is never shell code."""
+    for path, _mode, body in files:
+        if path == SETUP_PATH:
+            try:
+                return parse_setup_document(body).setup_commands or []
+            except (UnicodeError, ValueError) as exc:
+                raise PackagePolicyError("published setup guidance is invalid") from exc
+    return []
 
 
 def _is_utf8(body: bytes) -> bool:

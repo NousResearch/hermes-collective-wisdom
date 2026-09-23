@@ -165,7 +165,8 @@ def test_exact_inspection_projects_persisted_owner_not_plan_owner(tmp_path):
 
     text = project_view(record).to_text()
     assert "Owner account: account-1" in text
-    assert '"draft_id": "local:draft-1"' in text
+    assert '"draft_id"' not in text
+    assert '"receipt"' not in text
     assert "Review expires: 123.0" in text
     assert '"account_id": "other"' not in text
 

@@ -302,7 +302,135 @@ function baseHandler(path, options, owner) {
   throw new Error(`unexpected REST ${options.method || 'GET'} ${path}`)
 }
 
-const button = (mounted, name) => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+const button = (mounted, name) => {
+  const labels = { 'Prepare draft': 'Share', 'Share this exact reviewed package': 'Share', 'Uninstall': 'Remove', 'Acknowledge and update': 'Update' }
+  const matches = [...mounted.container.querySelectorAll('button')].filter(item => item.textContent === (labels[name] || name))
+  if (name === 'Prepare draft') return matches.find(item => item.previousElementSibling?.getAttribute('aria-label') === 'Local skill name')
+  return name === 'Share this exact reviewed package' || name === 'Acknowledge and update' || (name === 'Remove' && mounted.container.querySelector('aside[aria-label="Exact action review"]')) ? matches.at(-1) : matches[0]
+}
+const reviewInstallButton = mounted => [...mounted.container.querySelectorAll('button')].filter(item => item.textContent === 'Install').at(-1)
+
+test('catalog and in-chat discovery show names and status without identifier fallbacks', async () => {
+  const skills = [
+    { id: 'uuid-one', name: 'Friendly Helper', latest_version: 2, installation_status: { state: 'installed', installed_version: 1, latest_version: 2, text: 'Installed v1 · Update available v2' } },
+    { id: 'uuid-two', latest_version: 1, installation_status: { state: 'not_installed', text: 'Not installed' } }
+  ]
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills }
+    if (path === '/catalog/uuid-one') return skills[0]
+    if (path === '/catalog/uuid-one/versions') return { versions: [{ version: 2, state: 'published' }] }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  assert.match(page.container.textContent, /Friendly Helper.*Installed v1/)
+  assert.match(page.container.textContent, /Name unavailable.*Not installed/)
+  assert.doesNotMatch(page.container.textContent, /uuid-one|uuid-two/)
+  await page.cleanup()
+  const chat = await renderComposerContribution(loaded)
+  await submitComposer(loaded, { text: '/wisdom show uuid-one' })
+  assert.match(chat.container.textContent, /Friendly Helper.*Installed v1/)
+  assert.doesNotMatch(chat.container.textContent, /uuid-one|requirements|Installing does not authorize setup/)
+  await chat.cleanup()
+})
+
+test('reviewed update and removal use name-first terse controls without technical identity', async () => {
+  const installation = { skill_id: 'uuid-one', name: 'Friendly Helper', version: 1, content_hash: hash('0'), target_path: '/managed/helper' }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap') return { ...bootstrap, installations: [installation] }
+    if (path === '/uninstall/review') return { review_id: 'remove-secret', installation }
+    if (path === '/uninstall/confirm') return { uninstalled: true, skill_id: 'uuid-one' }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Installed'))
+  assert.match(page.container.textContent, /Friendly Helper/)
+  await click(button(page, 'Remove'))
+  assert.match(page.container.textContent, /Friendly Helper/)
+  assert.doesNotMatch(page.container.textContent, /uuid-one|remove-secret|sha256:/)
+  await click([...page.container.querySelectorAll('button')].filter(item => item.textContent === 'Remove').at(-1))
+  assert.equal(loaded.calls.rest.find(([path]) => path === '/uninstall/confirm')?.[1].body.review_id, 'remove-secret')
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ Friendly Helper removed')
+  await page.cleanup()
+})
+
+test('Desktop does not celebrate an opaque identifier as a skill name', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'uuid-one', latest_version: 2, installation_status: { state: 'not_installed', text: 'Not installed' } }] }
+    if (path === '/install/review') return installReview({ skill_id: 'uuid-one', slug: 'uuid-one' })
+    if (path === '/install/confirm') return { installed: true, skill_id: 'uuid-one' }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Install'))
+  await click(reviewInstallButton(page))
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.doesNotMatch(page.container.textContent, /uuid-one/)
+  await page.cleanup()
+})
+
+test('partial setup result names the installed skill without announcing full success', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', name: 'Friendly Helper', latest_version: 2, installation_status: { state: 'not_installed', text: 'Not installed' } }] }
+    if (path === '/install/review') return installReview({ slug: 'Friendly Helper' })
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', setup: { state: 'failed', step: 2, detail: 'Command exited early' } }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Install'))
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.match(page.container.textContent, /Friendly Helper.*files installed|Friendly Helper.*Files installed/i)
+  assert.match(page.container.textContent, /setup.*failed/i)
+  assert.doesNotMatch(page.container.textContent, /skill-1/)
+  await page.cleanup()
+})
+
+test('saved private draft resumes by name in a fresh Desktop view without preparing again', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/candidates?')) return { candidates: [] }
+    if (path.startsWith('/drafts?')) return { drafts: [{ skill_name: 'Friendly Helper', draft_id: 'local:opaque-42', updated_at: 'now' }] }
+    if (path.startsWith('/drafts/local%3Aopaque-42?view_id=')) return {
+      draft_id: 'local:opaque-42', author_description: 'Helps the team',
+      files: [{ path: 'SKILL.md', content_utf8: '# Friendly Helper' }],
+      expected_hashes: { content: hash('a'), author_description: hash('b'), package_manifest: hash('c') }
+    }
+    if (path === '/drafts/local%3Aopaque-42/review') return {
+      draft_id: 'local:opaque-42', files: [{ path: 'SKILL.md', content_utf8: '# Friendly Helper' }],
+      hashes: { content: hash('a'), author_description: hash('b'), package_manifest: hash('c') }
+    }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Contribute'))
+  assert.match(page.container.textContent, /Friendly Helper/)
+  assert.doesNotMatch(page.container.textContent, /local:opaque-42/)
+  await click(button(page, 'Resume'))
+  assert.match(page.container.textContent, /Private draft.*Friendly Helper/)
+  await click(button(page, 'Review and edit exact files'))
+  assert.ok(loaded.calls.rest.some(([path]) => path.startsWith('/drafts/local%3Aopaque-42?')))
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/drafts/prepare'), false)
+  await page.cleanup()
+})
+
+test('contribution draft stays name-first while keeping its exact private transport identity', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/drafts/prepare') {
+      assert.equal(options.body.skill_name, 'Friendly Helper')
+      return { draft_id: 'local:opaque-42', skill_id: 'uuid-source' }
+    }
+    if (path.startsWith('/candidates?')) return { candidates: [] }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Contribute'))
+  await enter(page.container.querySelector('input[aria-label="Local skill name"]'), 'Friendly Helper')
+  await click(button(page, 'Prepare draft'))
+  assert.match(page.container.textContent, /Private draft.*Friendly Helper/)
+  assert.doesNotMatch(page.container.textContent, /uuid-source|local:opaque-42|sha256:/)
+  await click(button(page, 'Keep draft and exit'))
+  assert.match(page.container.textContent, /Friendly Helper was kept locally/)
+  assert.doesNotMatch(page.container.textContent, /local:opaque-42/)
+  await page.cleanup()
+})
 
 test('desktop slash dialog views read-only details and installs in one click', async () => {
   let catalogReads = 0
@@ -380,6 +508,36 @@ for (const strict of [false, true]) test(`desktop clean install has no second co
   await mounted.cleanup()
 })
 
+test('declared setup is shown before the sole Desktop Install approval', async () => {
+  const command = 'printf done > ../setup-ran'
+  const findings = Array.from({ length: 35 }, (_, index) => ({
+    severity: 'warning', category: 'fixture', message: `warning-${index}`
+  }))
+  const files = Array.from({ length: 230 }, (_, index) => ({
+    path: `references/file-${index}.md`, mode: 'file', hash: hash('a'), size: 8
+  }))
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview({
+      setup_commands: [command], files,
+      local_scan: { allowed: true, summary: 'Reviewed warnings', findings }
+    })
+    if (path === '/install/confirm') return { installed: true, setup: { state: 'passed', steps: 1 } }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Install'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 0)
+  assert.match(mounted.container.textContent, /files230/)
+  assert.match(mounted.container.textContent, /printf done > \.\.\/setup-ran/)
+  assert.match(mounted.container.textContent, /35 findings/)
+  assert.doesNotMatch(mounted.container.textContent, /references\/file-229/)
+  assert.doesNotMatch(mounted.container.textContent, /warning-34/)
+  await click(reviewInstallButton(mounted))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one installed')
+  await mounted.cleanup()
+})
+
 for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`desktop refuses contradictory install success ${JSON.stringify(contradiction)}`, async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/install/review') return installReview()
@@ -440,6 +598,7 @@ for (const local of [false, true]) for (const updated of [true, false]) test(`de
 test('desktop slash dialog offers local updates and blocks unavailable installs', async () => {
   const skills = Array.from({ length: 7 }, (_, index) => ({
     id: `skill-${index + 1}`,
+    name: `Helper ${index + 1}`,
     slug: `skill-${index + 1}`,
     latest_version: 1,
     installation_status: index === 5
@@ -460,7 +619,8 @@ test('desktop slash dialog offers local updates and blocks unavailable installs'
 
   assert.ok(button(mounted, 'Previous').disabled)
   await click(button(mounted, 'Next'))
-  assert.match(mounted.container.textContent, /skill-6/)
+  assert.match(mounted.container.textContent, /Helper 6/)
+  assert.doesNotMatch(mounted.container.textContent, /skill-6/)
   assert.equal(button(mounted, 'Next').disabled, true)
   assert.equal(button(mounted, 'Previous').disabled, false)
   await click(button(mounted, 'View'))
@@ -655,8 +815,8 @@ test('installed rows check first then expose exact Review update and local-edit 
   assert.match(mounted.container.textContent, /enable preservation to protect local edits/)
   await click(preserve)
   await click(button(mounted, 'Review update'))
-  assert.match(mounted.container.textContent, /update review/)
-  assert.match(mounted.container.textContent, /update-receipt/)
+  assert.match(mounted.container.textContent, /Update review/)
+  assert.doesNotMatch(mounted.container.textContent, /update-receipt/)
   await mounted.cleanup()
 })
 
@@ -685,8 +845,8 @@ test('unknown required install review fields fail closed', async () => {
   const mounted = await renderPage(loaded)
   await click(button(mounted, 'Install'))
   assert.match(mounted.container.textContent, /confirmation blocked/)
-  assert.match(mounted.container.textContent, /Compatibility evaluation is unavailable/)
-  assert.equal(button(mounted, 'Acknowledge and install').disabled, true)
+  assert.match(mounted.container.textContent, /We could not check whether this skill will work here/)
+  assert.equal(reviewInstallButton(mounted).disabled, true)
   await mounted.cleanup()
 })
 
@@ -743,13 +903,13 @@ test('install collects exact warning and partial acknowledgements before confirm
   await click(button(mounted, 'Install'))
   assert.match(mounted.container.textContent, /Requires setup before use/)
   assert.match(mounted.container.textContent, /Review host/)
-  assert.equal(button(mounted, 'Acknowledge and install').disabled, true)
+  assert.equal(reviewInstallButton(mounted).disabled, true)
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge install scanner warnings"]'))
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept install partial compatibility"]'))
-  await click(button(mounted, 'Review with acknowledgements'))
-  assert.match(mounted.container.textContent, /install-after-acks/)
-  assert.equal(button(mounted, 'Acknowledge and install').disabled, false)
-  await click(button(mounted, 'Acknowledge and install'))
+  await click(button(mounted, 'Continue review'))
+  assert.doesNotMatch(mounted.container.textContent, /install-after-acks/)
+  assert.equal(reviewInstallButton(mounted).disabled, false)
+  await click(reviewInstallButton(mounted))
   assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one installed')
   await mounted.cleanup()
 })
@@ -799,13 +959,13 @@ test('update re-review binds warning partial sensitive and preservation acknowle
   await click(button(mounted, 'Review update'))
   assert.match(mounted.container.textContent, /new network destinations/)
   assert.match(mounted.container.textContent, /Review update host/)
-  assert.match(mounted.container.textContent, /preserve_unmanaged_copy/)
+  assert.match(mounted.container.textContent, /edited copy will be kept separately/)
   assert.equal(button(mounted, 'Acknowledge and update').disabled, true)
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge update scanner warnings"]'))
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept update partial compatibility"]'))
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Accept update sensitive capability expansion"]'))
-  await click(button(mounted, 'Review with acknowledgements'))
-  assert.match(mounted.container.textContent, /update-after-acks/)
+  await click(button(mounted, 'Continue review'))
+  assert.doesNotMatch(mounted.container.textContent, /update-after-acks/)
   assert.equal(button(mounted, 'Acknowledge and update').disabled, false)
   await click(button(mounted, 'Acknowledge and update'))
   assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one updated')
@@ -828,8 +988,8 @@ test('uninstall requires the exact installed snapshot and confirms its review id
   const mounted = await renderPage(loaded)
   await click(button(mounted, 'Installed'))
   await click(button(mounted, 'Uninstall'))
-  assert.match(mounted.container.textContent, /Installed snapshot to remove/)
-  assert.match(mounted.container.textContent, new RegExp(hash('0')))
+  assert.match(mounted.container.textContent, /Installed copy to remove/)
+  assert.doesNotMatch(mounted.container.textContent, new RegExp(hash('0')))
   await click(button(mounted, 'Remove'))
   assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one removed')
   await mounted.cleanup()
@@ -951,7 +1111,7 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   await click(button(mounted, 'Continue to sharing review'))
   assert.match(mounted.container.textContent, /Exact author copy for teammates/)
   assert.match(mounted.container.textContent, /# Exact reviewed bytes/)
-  assert.match(mounted.container.textContent, new RegExp(hash('3')))
+  assert.doesNotMatch(mounted.container.textContent, new RegExp(hash('3')))
   assert.match(mounted.container.textContent, /Local security: passed/)
   assert.match(mounted.container.textContent, /Gateway security scan/)
   assert.match(mounted.container.textContent, /Gateway: advisory/)
@@ -961,7 +1121,7 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   assert.equal(mounted.container.querySelector('a[download="logo.bin"]').getAttribute('href'), 'data:application/octet-stream;base64,AAH/')
   assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
   await click(button(mounted, 'Share this exact reviewed package'))
-  assert.equal(loaded.calls.notify.at(-1)?.message, 'Submitted for team moderation')
+  assert.equal(loaded.calls.notify.at(-1)?.message, 'local-skill submitted for team review')
   await mounted.cleanup()
 })
 
@@ -1013,11 +1173,11 @@ for (const linked of [true, false]) {
     assert.equal(button(mounted, 'Share this exact reviewed package').disabled, false)
     await click(button(mounted, 'Share this exact reviewed package'))
     if (linked) {
-      assert.equal(loaded.calls.notify.at(-1)?.message, 'Publication completed')
+      assert.equal(loaded.calls.notify.at(-1)?.message, '✅ local-skill shared')
       assert.doesNotMatch(mounted.container.textContent, /Publication requires attention/)
     } else {
       assert.equal(loaded.calls.notify.length, 0)
-      assert.match(mounted.container.textContent, /Publication requires attention/)
+      assert.match(mounted.container.textContent, /Publication requires attention for local-skill/)
       assert.ok(mounted.container.textContent.includes(detail))
       assert.doesNotMatch(mounted.container.textContent, /did not report a completed successful outcome/)
     }
@@ -1043,7 +1203,7 @@ test('publication without an explicit security upload gate fails closed', async 
   await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
   await click(button(mounted, 'Prepare draft'))
   await click(button(mounted, 'Continue to sharing review'))
-  assert.match(mounted.container.textContent, /does not explicitly allow upload/)
+  assert.match(mounted.container.textContent, /This skill is not cleared for sharing/)
   assert.equal(button(mounted, 'Share this exact reviewed package').disabled, true)
   await mounted.cleanup()
 })
@@ -1106,10 +1266,10 @@ test('contribution review exposes complete files and warnings before a separate 
   await mounted.cleanup()
 })
 
-test('changed scanner warning provenance requires a fresh acknowledgement', async () => {
+test('changed scanner warning provenance requires a fresh acknowledgement', async t => {
   const hashes = { content: hash('6'), author_description: hash('7'), package_manifest: hash('8') }
-  const initialFinding = { severity: 'medium', category: 'network', path: 'SKILL.md', line: 4, message: 'Review host A.' }
-  const changedFinding = { ...initialFinding, message: 'Review host B.' }
+  const initialFinding = { severity: 'advisory', category: 'network', path: 'SKILL.md', line: 4, detail: 'Review host A.' }
+  const changedFinding = { ...initialFinding, detail: 'Review host B.' }
   const inspected = {
     draft_id: 'local:changed-warning', author_description: 'Copy', expected_hashes: hashes,
     files: [{ path: 'SKILL.md', content_utf8: '# Skill' }],
@@ -1132,6 +1292,7 @@ test('changed scanner warning provenance requires a fresh acknowledgement', asyn
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
   await click(button(mounted, 'Contribute'))
   await enter(mounted.container.querySelector('input[aria-label="Local skill name"]'), 'local-skill')
   await click(button(mounted, 'Prepare draft'))
@@ -1139,9 +1300,8 @@ test('changed scanner warning provenance requires a fresh acknowledgement', asyn
   await click(mounted.container.querySelector('[role="checkbox"][aria-label="Acknowledge displayed scanner warnings for this exact package"]'))
   await click(button(mounted, 'Continue to sharing review'))
 
-  assert.equal(button(mounted, 'Share this exact reviewed package'), undefined)
+  assert.equal(mounted.container.querySelector('aside[aria-label="Exact action review"]'), null)
   assert.match(loaded.calls.notify.at(-1)?.detail || '', /scanner findings changed/i)
-  await mounted.cleanup()
 })
 
 test('prepared editor saves and re-reviews exact add remove rename text and opaque files', async t => {
@@ -1201,8 +1361,9 @@ test('prepared editor saves and re-reviews exact add remove rename text and opaq
 
   t.after(() => mounted.cleanup())
   const opaqueExport = mounted.container.querySelector('a[download="logo.bin"]')
+  assert.ok(opaqueExport)
   assert.equal(opaqueExport.getAttribute('href'), 'data:application/octet-stream;base64,AAH/')
-  const draftExport = mounted.container.querySelector('a[download="wisdom-local-edit.json"]')
+  const draftExport = mounted.container.querySelector('a[download="wisdom-local-skill.json"]')
   const exportPayload = JSON.parse(decodeURIComponent(draftExport.getAttribute('href').split(',')[1]))
   assert.deepEqual(exportPayload, inspected)
 
@@ -1357,11 +1518,11 @@ test('pending actions remain visible in their own view after reopening', async t
   const mounted = await renderPage(loaded)
   t.after(() => mounted.cleanup())
   await click(button(mounted, 'Installed'))
-  assert.match(mounted.container.textContent, /Install requires attention for this skill/)
+  assert.match(mounted.container.textContent, /Install requires attention for Name unavailable/)
   assert.doesNotMatch(mounted.container.textContent, /op-share/)
-  assert.match(mounted.container.textContent, /hermes wisdom status --json/)
+  assert.match(mounted.container.textContent, /Check its status before trying again/)
   await click(button(mounted, 'Contribute'))
-  assert.match(mounted.container.textContent, /Publication requires attention for this draft/)
+  assert.match(mounted.container.textContent, /Publication requires attention for Name unavailable/)
   assert.doesNotMatch(mounted.container.textContent, /op-install/)
   assert.ok([...mounted.container.querySelectorAll('h3')].every(node => !node.textContent.includes('opaque-')))
   await click(button(mounted, 'Catalog'))
@@ -1402,12 +1563,13 @@ test('profile replacement clears an already-visible exceptional review', async (
   })
   const mounted = await renderPage(loaded)
   await click(button(mounted, 'Install'))
-  assert.match(mounted.container.textContent, /review-A/)
+  assert.match(mounted.container.textContent, /confirmation blocked/)
+  assert.doesNotMatch(mounted.container.textContent, /review-A/)
 
   await act(async () => loaded.profile.set('B'))
   await settle()
 
-  assert.doesNotMatch(mounted.container.textContent, /review-A/)
+  assert.doesNotMatch(mounted.container.textContent, /confirmation blocked/)
   assert.match(mounted.container.textContent, /profile B/)
   await mounted.cleanup()
 })

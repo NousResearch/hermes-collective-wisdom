@@ -35,7 +35,9 @@ def test_telegram_complete_inspection_then_quiet_dismissal(tmp_path, monkeypatch
             assert "confirm:" not in str(payload["reply_markup"])
             if not await ui.next_page(identity):
                 break
-        assert json.loads("".join(chunks)) == plan
+        assert json.loads("".join(chunks)) == {
+            key: value for key, value in plan.items() if key not in {"draft_id", "receipt"}
+        }
         await ui.click(identity, "back")
         before = ui.edits[-1]["text"]
         assert not service.applied

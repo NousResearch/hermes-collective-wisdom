@@ -332,6 +332,21 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
             if value.expires_at > now and value.view_id not in expired_views
         }
 
+    @staticmethod
+    def _named_outcome(result: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Carry the reviewed name through a thin executor result, never an ID guess."""
+        skill_id = snapshot.get("skill_id")
+        name = snapshot.get("slug") or snapshot.get("skill_name")
+        if skill_id and result.get("skill_id") not in (None, skill_id):
+            return {**result, "installed": False, "updated": False,
+                    "uninstalled": False, "state": "unknown",
+                    "skill_name": name if isinstance(name, str) else "",
+                    "detail": "The result did not match the reviewed skill. "
+                    "Check installed skills before trying again."}
+        if not isinstance(name, str) or not name:
+            return result
+        return {**result, "skill_name": name}
+
     def install_review(
         self,
         service: Any,
@@ -354,14 +369,15 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         self, service: Any, view_id: str, receipt: str, *, accept_partial: bool = False
     ) -> dict[str, Any]:
         """Confirm through the shared installer with late revocation checks."""
-        self._require_review(service, view_id, receipt, "install")
-        return service.install_apply(
+        review = self._require_review(service, view_id, receipt, "install")
+        result = service.install_apply(
             receipt,
             accept_partial=accept_partial,
             may_apply=lambda: self.current(
                 service, view_id, review_id=receipt, kind="install"
             ),
         )
+        return self._named_outcome(result, review.snapshot)
 
     def update_review(self, service: Any, view_id: str, skill_id: str, **options: Any):
         """Obtain an exact update plan, checking scope after I/O."""
@@ -378,13 +394,14 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
 
     def update_confirm(self, service: Any, view_id: str, receipt: str):
         """Apply the reviewed update through the existing receipt kernel."""
-        self._require_review(service, view_id, receipt, "update")
-        return service.update_apply(
+        review = self._require_review(service, view_id, receipt, "update")
+        result = service.update_apply(
             receipt,
             may_apply=lambda: self.current(
                 service, view_id, review_id=receipt, kind="update"
             ),
         )
+        return self._named_outcome(result, review.snapshot)
 
     def set_notification_mode(
         self,
@@ -496,6 +513,13 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
             event_id, may_apply=lambda: self.current(service, view_id)
         )
 
+    def prepared_drafts(self, service: Any, view_id: str) -> dict[str, Any]:
+        """List resumable private drafts without granting publication authority."""
+        self._require_view(service, view_id)
+        rows = service.prepared_drafts()
+        self._require_view(service, view_id)
+        return {"drafts": rows}
+
     def prepared_inspect(self, service: Any, view_id: str, draft_id: str):
         """Read complete inert draft bytes only for the originating live view."""
         self._require_view(service, view_id)
@@ -563,13 +587,14 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
 
     def publication_confirm(self, service: Any, view_id: str, receipt: str):
         """Submit only the previously reviewed private draft."""
-        self._require_review(service, view_id, receipt, "publication")
-        return service.publication_submit(
+        review = self._require_review(service, view_id, receipt, "publication")
+        result = service.publication_submit(
             receipt,
             may_apply=lambda: self.current(
                 service, view_id, review_id=receipt, kind="publication"
             ),
         )
+        return self._named_outcome(result, review.snapshot)
 
     def uninstall_review(self, service: Any, view_id: str, skill_id: str) -> dict[str, Any]:
         """Snapshot current managed installation facts before removal."""
@@ -615,7 +640,7 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         )
         with self._lock:
             self._reviews.pop(review_id, None)
-        return result
+        return self._named_outcome(result, review.snapshot)
 
 
 def _add_candidate_routes(router, api, invoke):
@@ -850,6 +875,10 @@ def build_router(  # pylint: disable=too-many-locals
         ))
 
     _add_candidate_routes(router, api, invoke)
+
+    @router.get("/drafts")
+    def draft_list(view_id: str = Query(min_length=8, max_length=128)):
+        return invoke(lambda service: api.prepared_drafts(service, view_id))
 
     @router.get("/drafts/{draft_id}")
     def draft_inspect(

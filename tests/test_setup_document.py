@@ -56,6 +56,27 @@ def test_parse_setup_document_accepts_only_complete_canonical_wire_bytes():
             parse_setup_document(changed)
 
 
+def test_explicit_setup_commands_are_canonical_and_separate_from_prose():
+    from hermes_wisdom_plugin.setup_document import parse_setup_document
+
+    value = _value()
+    value["setup_commands"] = ["python scripts/setup.py --local"]
+    parsed = parse_setup_document(_document(value))
+    assert parsed.setup_commands == ["python scripts/setup.py --local"]
+    assert parsed.setup_instructions == ["Configure the local example client."]
+    assert parse_setup_document(_document(_value())).setup_commands is None
+
+
+@pytest.mark.parametrize("command", ["", "printf ok\nrm -rf x", "printf \u202e"])
+def test_setup_commands_reject_empty_or_control_bearing_values(command):
+    from hermes_wisdom_plugin.setup_document import parse_setup_document
+
+    value = _value()
+    value["setup_commands"] = [command]
+    with pytest.raises(ValueError):
+        parse_setup_document(_document(value))
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

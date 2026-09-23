@@ -429,7 +429,8 @@ def test_real_pty_warning_review_acknowledgement_and_final_consent(tmp_path):
     assert sent_menu and sent_ack and sent_final
     assert "pty-warning" in rendered
     assert "Synthetic warning detail." in rendered
-    assert "Organization: team-pty" in rendered
+    assert "Skill: fixture" in rendered
+    assert "Organization: team-pty" not in rendered
     assert "RAW_PTY_SECRET" not in rendered
     assert "\x1b[2J" not in rendered
     assert call_log.read_text(encoding="utf-8") == (

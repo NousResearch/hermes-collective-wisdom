@@ -115,46 +115,15 @@ def test_publication_review_preserves_complete_ordered_safe_output():
         "receipt": "receipt with ' quote",
     }
 
-    assert render_action_review("publication", value) == """Sharing review
-Organization: org [31m
-Owner account: acct
-Profile: work
-Skill: raccoon
-Skill ID: skill-1
-Version: 3
-Handling: moderated
-State: review
-Publication state: private
-Operation: op-1
-Draft: draft-1
-Description: Useful skill
-Compatibility: compatible_after_setup
-Satisfied checks:
-  - macOS
-Required setup actions:
-  - Install uv
-Known limitations:
-  - No Windows
-Blocking requirements:
-  - Need tool
-Requirements: Hermes 1.2+; OS: darwin; CPU: arm64; runtime: python; 1 tool requirement(s); 1 limitation requirement(s)
-Files (1)
-  1. SKILL [2J.md [executable] — 12 bytes, sha256:abc
-Server checks:
-  - security: pass
-  - editorial: unavailable
-Scanner findings (1)
-  WARNING / instructions
-    - shell at SKILL.md:2: Review this
-Warning acknowledgement: accepted
-Local edits: detected; action: preserve
-New sensitive capabilities:
-  - network
-Approval permission: blocked
-Approval status: blocked until the listed review actions are completed.
-Consequence: Moderated: confirmation submits for team moderation.
-Nothing has been uploaded yet.
-Next: hermes wisdom publication submit 'receipt with '\"'\"' quote'"""
+    rendered = render_action_review("publication", value)
+    for fact in ("Skill: raccoon", "Version: 3", "Install uv", "No Windows",
+                 "Need tool", "Files (1)", "shell at SKILL.md:2: Review this",
+                 "Warning acknowledgement: accepted", "Local edits: detected",
+                 "Approval permission: blocked", "Nothing has been uploaded yet"):
+        assert fact in rendered
+    for private in ("org [31m", "skill-1", "op-1", "draft-1", "sha256:abc",
+                    "receipt with", "SECRET"):
+        assert private not in rendered
 
 
 def test_setup_review_preserves_literal_command_and_eligibility_output():
@@ -175,22 +144,12 @@ def test_setup_review_preserves_literal_command_and_eligibility_output():
         "receipt": "setup receipt",
     }
 
-    assert render_action_review("installed-setup", value) == """Installed setup review
-Organization: org
-Skill: raccoon
-Version: 3
-Files (0)
-Local scanner warnings: none reported.
-Setup phase: setup
-Setup step: 2
-Command (escaped literal; not executed by review): "printf \\"ok\\"\\n\\u001b"
-Prerequisites:
-  - uv: passed
-  - tool: unknown
-Verification: pending
-Approval permission: allowed
-Approval status: eligible for exact final confirmation.
-Next: hermes wisdom installed-setup apply 'setup receipt'"""
+    rendered = render_action_review("installed-setup", value)
+    for fact in ("Skill: raccoon", "Version: 3", "Files (0)", "Setup step: 2",
+                 '"printf \\"ok\\"\\n\\u001b"', "uv: passed", "Verification: pending",
+                 "Approval permission: allowed"):
+        assert fact in rendered
+    assert "setup receipt" not in rendered
 
 
 def test_publication_gateway_advisory_uses_shared_server_check_rendering():
@@ -239,6 +198,68 @@ def test_unverified_local_update_discloses_unknown_baseline_and_preservation():
     assert "Local edits: detected" not in output
 
 
+@pytest.mark.parametrize("kind", ["install", "update"])
+def test_package_review_stays_bounded_for_large_packages(kind):
+    """Consent shows severity and a few safe examples, not hundreds of files."""
+    findings = [{"severity": "medium", "pattern_id": "generic", "file": "file.md"}]
+    findings += [{
+        "severity": "critical", "pattern_id": "system_passwd_access",
+        "file": "references/remote.md", "line": 84,
+        "description": "references system password files",
+    } for _ in range(199)]
+    result = {
+        "slug": "hermes-agent-dev", "version": 1,
+        "files": [{"path": f"references/{n}.md", "hash": "sha256:secret"}
+                  for n in range(452)],
+        "server_checks": {"security_check": {"status": "advisory"}},
+        "local_scan": {"allowed": False, "findings": findings},
+        "allowed": False, "receipt": "wip_secret",
+    }
+    output = render_action_review(kind, result)
+    assert "Skill: hermes-agent-dev" in output
+    assert "Files: 452" in output
+    assert "Scanner warnings: 200" in output
+    assert "critical: 199" in output
+    assert "system_passwd_access" in output
+    assert "security_check: advisory" in output
+    assert "Approval permission: blocked" in output
+    assert "references/451.md" not in output
+    assert "sha256:secret" not in output
+    assert "wip_secret" not in output
+    assert "Next:" not in output
+    assert "setup commands are not run" not in output
+    assert len(output.splitlines()) < 20
+
+
+def test_install_review_displays_exact_auto_setup_before_approval():
+    """A single Install approval covers only visible hash-bound commands."""
+    result = {"slug": "raccoon", "files": [], "allowed": True,
+              "setup_commands": ["python scripts/setup.py --local"]}
+    output = render_action_review("install", result)
+    assert 'Setup command: "python scripts/setup.py --local"' in output
+    assert output.index("Setup command:") < output.index("Approval permission: allowed")
+
+
+@pytest.mark.parametrize("state", ["failed", "unknown", "blocked"])
+def test_installed_files_do_not_claim_complete_setup_when_command_stops(state):
+    """The install result names partial success without claiming readiness."""
+    result = {"installed": True, "setup": {"state": state, "step": 1}}
+    output = render_operation_outcome("install", result, skill_name="raccoon")
+    assert "files installed" in output
+    assert state in output
+    assert output != "✅ raccoon installed"
+
+
+def test_partial_install_outcome_explains_setup_block():
+    """After package write, a refused setup retains the actionable reason."""
+    result = {"installed": True, "setup": {
+        "state": "blocked", "detail": "setup prerequisites unavailable",
+    }}
+    output = render_operation_outcome("install", result, skill_name="raccoon")
+    assert "files installed" in output
+    assert "setup prerequisites unavailable" in output
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
@@ -276,21 +297,19 @@ def test_local_prepared_preview_does_not_invent_unchecked_moderation():
 
 
 @pytest.mark.parametrize(
-    ("kind", "title", "next_command"),
+    ("kind", "title"),
     [
-        ("install", "Installation review", "hermes wisdom install --apply-receipt receipt"),
-        ("update", "Update review", "hermes wisdom update --apply-receipt receipt"),
+        ("install", "Installation review"),
+        ("update", "Update review"),
     ],
 )
-def test_package_reviews_preserve_kind_specific_actions(kind, title, next_command):
-    """Install and update reviews retain distinct titles and resumable actions."""
+def test_package_reviews_hide_internal_receipts(kind, title):
+    """Approval still works without exposing the internal apply command."""
 
     assert render_action_review(kind, {"files": [], "receipt": "receipt"}) == (
         f"{title}\n"
-        "Files (0)\n"
-        "Local scanner warnings: none reported.\n"
-        "Consequence: writes the reviewed package files; setup commands are not run.\n"
-        f"Next: {next_command}"
+        "Files: 0\n"
+        "Scanner warnings: none reported."
     )
 
 

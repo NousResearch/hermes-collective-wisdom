@@ -128,14 +128,22 @@ class Discovery:
 
         raw = _reference(reference)
         try:
-            return self.show(raw)
-        except WisdomNotFound as exc:
-            matches = [
-                item for item in self.search_skills(raw) if item.get("slug") == raw
-            ]
-            if len(matches) != 1:
-                raise WisdomNotFound("Wisdom skill not found") from exc
+            detail = self.show(raw)
+        except WisdomNotFound:
+            detail = None
+        skill = detail.get("skill") if isinstance(detail, dict) else None
+        if detail is not None and isinstance(skill, dict) and skill.get("slug") == raw:
+            return detail
+        matches = [
+            item for item in self.search_skills(raw) if item.get("slug") == raw
+        ]
+        if len(matches) > 1:
+            raise WisdomNotFound("Wisdom skill not found")
+        if matches:
             return self.show(str(matches[0]["id"]))
+        if detail is not None:
+            return detail
+        raise WisdomNotFound("Wisdom skill not found")
 
     def show(self, skill_id: str) -> dict[str, Any]:
         """Return public metadata plus the newest positive published version."""

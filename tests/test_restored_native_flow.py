@@ -49,9 +49,9 @@ class Service:
         return {"state": "pending_moderation"}
 
     def install_plan(self, reference, **_kwargs):
-        skill_id = reference.split("@v", 1)[0]
+        assert reference in {"incident", "incident@v2", "skill", "skill-1", "skill-1@v2"}
         return {
-            "operation": "install", "skill_id": skill_id, "slug": "incident",
+            "operation": "install", "skill_id": "skill-1", "slug": "incident",
             "receipt": "exact-receipt", "allowed": True,
             "description": "Triage incidents", "version": 2,
         }
@@ -137,7 +137,9 @@ def test_complete_private_inspection_returns_without_authorizing(tmp_path, monke
                 break
             await ui.click(identity, next_action.action)
         import json  # pylint: disable=import-outside-toplevel
-        assert json.loads("".join(chunks)) == exact
+        assert json.loads("".join(chunks)) == {
+            key: value for key, value in exact.items() if key not in {"draft_id", "receipt"}
+        }
         assert ui.view(identity).actions[-1].label == "Looks good."
         await ui.click(identity, "back")
         assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
@@ -377,7 +379,9 @@ def test_slack_inspection_payload_preserves_literal_whitespace_and_markup(tmp_pa
             if following is None:
                 break
             await ui.click(identity, following.action)
-        assert json.loads("".join(chunks)) == plan
+        assert json.loads("".join(chunks)) == {
+            key: value for key, value in plan.items() if key not in {"draft_id", "receipt"}
+        }
     asyncio.run(scenario())
 
 

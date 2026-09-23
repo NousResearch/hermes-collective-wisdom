@@ -181,6 +181,24 @@ def test_resolve_prefers_id_then_uses_one_exact_case_sensitive_slug():
         _discovery(client).resolve_skill("Incident-Handoff")
 
 
+def test_resolve_prefers_exact_name_when_another_skill_has_matching_id():
+    class CollisionClient(_Client):
+        def __init__(self):
+            super().__init__()
+            self.pages = [_page([_item(id="skill-1", slug="incident-handoff")])]
+
+        def skill(self, skill_id):
+            self.skill_calls.append(skill_id)
+            if skill_id == "incident-handoff":
+                return _Model(value={"skill": {"id": skill_id, "slug": "other-skill"},
+                                     "versions": []}, versions=[])
+            return _detail(skill_id)
+
+    client = CollisionClient()
+    assert _discovery(client).resolve_skill("incident-handoff")["skill"]["id"] == "skill-1"
+    assert client.skill_calls == ["incident-handoff", "skill-1"]
+
+
 def test_resolve_keeps_missing_and_ambiguous_slug_opaque():
     client = _Client()
     client.skill = lambda _skill_id: (_ for _ in ()).throw(WisdomNotFound("secret"))

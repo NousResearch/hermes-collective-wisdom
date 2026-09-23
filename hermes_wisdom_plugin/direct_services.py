@@ -280,6 +280,17 @@ class DirectState:
     def draft(self, draft_id: str) -> dict[str, Any] | None:
         return copy.deepcopy(self._load()["drafts"].get(draft_id))
 
+    def prepared_drafts(self, owner: dict[str, str]) -> list[dict[str, str]]:
+        """List only this owner's resumable drafts, without private package content."""
+        rows = [
+            {"skill_name": row["slug"], "draft_id": row["id"],
+             "updated_at": row["updated_at"]}
+            for row in self._load()["drafts"].values()
+            if row.get("owner") == owner and row.get("state") == "prepared"
+            and isinstance(row.get("slug"), str) and isinstance(row.get("id"), str)
+        ]
+        return sorted(rows, key=lambda row: row["updated_at"], reverse=True)
+
     def has_draft(self, skill_id: str, source_hash: str) -> bool:
         return any(
             row.get("skill_id") == skill_id and row.get("source_hash") == source_hash
@@ -748,7 +759,7 @@ class SetupService:
             allowed = requirement["status"] != "missing"
             instruction = requirement["purpose"]
         elif step.phase == "setup":
-            instructions = guidance["setup_instructions"]
+            instructions = guidance.get("setup_commands") or guidance["setup_instructions"]
             if step.index >= len(instructions):
                 raise PackagePolicyError("setup step is not in the installed guidance")
             if any(
@@ -766,7 +777,7 @@ class SetupService:
             )
             setup_ready = all(
                 latest.get(("setup", index), {}).get("state") == "passed"
-                for index in range(len(guidance["setup_instructions"]))
+                for index in range(len(guidance.get("setup_commands") or guidance["setup_instructions"]))
             )
             if not prerequisites_ready or not setup_ready:
                 raise PackagePolicyError("finish declared prerequisites and setup before verification")
@@ -804,6 +815,41 @@ class SetupService:
         }
         if len(json.dumps(review, ensure_ascii=True).encode()) > 6 * MAX_METADATA_BYTES + 2_097_152:
             raise WisdomValidationError("Setup review exceeds the size limit")
+        self.state.save_setup_review(receipt, {
+            "plan": review, "owner": review["owner"], "operation_id": None, "result": None,
+        })
+        return copy.deepcopy(review)
+
+    def plan_for_install(
+        self, skill_id: str, *, version: int, index: int,
+        command: str, install_receipt: str,
+    ) -> dict[str, Any]:
+        """Bind one declared command to a stable receipt from the Install approval."""
+        if self._RECEIPT.fullmatch(install_receipt) is None:
+            raise WisdomValidationError("Invalid install approval receipt")
+        info = self.inspect(skill_id, version=version)
+        guidance = info.get("guidance")
+        commands = guidance.get("setup_commands") if isinstance(guidance, dict) else None
+        if not isinstance(commands, list) or index >= len(commands) or commands[index] != command:
+            raise PackagePolicyError("setup command is not in the approved installation")
+        step = SetupStep.model_validate(
+            {"phase": "setup", "index": index, "command": command}, strict=True
+        )
+        value = self._build_plan(info, step)
+        value["install_approval_receipt"] = install_receipt
+        receipt = "wip_" + hashlib.sha256(
+            json.dumps([install_receipt, value["setup_key"]], sort_keys=True).encode()
+        ).hexdigest()[:32]
+        existing = self.state.setup_review(receipt)
+        if existing is not None:
+            plan = existing.get("plan")
+            if not isinstance(plan, dict) or any(
+                plan.get(key) != value.get(key) for key in value
+            ):
+                raise WisdomConflict("approved setup step changed since installation")
+            return copy.deepcopy(plan)
+        review = {**value, "receipt": receipt, "operation": "installed_setup",
+                  "created_at": self.clock(), "expires_at": self.clock() + self.REVIEW_SECONDS}
         self.state.save_setup_review(receipt, {
             "plan": review, "owner": review["owner"], "operation_id": None, "result": None,
         })
