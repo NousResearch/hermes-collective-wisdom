@@ -741,11 +741,26 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise WisdomAuthError("Local draft belongs to another owner")
         matches = [key for key, row in drafts.items() if isinstance(row, dict)
                    and row.get("owner") == owner and row.get("slug") == reference]
-        if len(matches) > 1:
-            raise WisdomConflict("Local draft name is ambiguous")
-        if not matches:
+        had_multiple = len(matches) > 1
+        if had_multiple:
+            # Prior published drafts remain in history. Select only the one
+            # bound to the current, profile-local source; never guess by time.
+            if any(not isinstance(drafts[key].get("source_path"), str)
+                   or not isinstance(drafts[key].get("source_hash"), str)
+                   for key in matches):
+                raise WisdomConflict("Local draft name is ambiguous")
+            from .package import source_fingerprint  # pylint: disable=import-outside-toplevel
+            source = self._contribution_reviewer().source(reference)
+            current_hash = source_fingerprint(source)
+            self.check_owner()
+            matches = [key for key in matches
+                       if drafts[key]["source_path"] == str(source)
+                       and drafts[key]["source_hash"] == current_hash]
+        if not matches and not had_multiple:
             from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
             raise WisdomNotFound("Local draft not found")
+        if len(matches) != 1:
+            raise WisdomConflict("Local draft name is ambiguous")
         return matches[0]
 
     def resolve_publication_operation(self, reference):

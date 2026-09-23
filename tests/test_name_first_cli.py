@@ -8,6 +8,7 @@ import pytest
 
 from hermes_wisdom_plugin.commands import build_parser, run_cli
 from hermes_wisdom_plugin.errors import WisdomConflict, WisdomNotFound
+from hermes_wisdom_plugin.package import source_fingerprint
 from hermes_wisdom_plugin.runtime import InvocationService
 
 
@@ -155,6 +156,32 @@ def test_draft_name_resolution_refuses_ambiguous_and_binds_operation():
         service.resolve_publication_receipt("Friendly Skill")
     with pytest.raises(WisdomNotFound):
         service.resolve_local_draft("missing")
+
+
+def test_name_uses_current_source_when_prior_published_draft_is_retained(tmp_path):
+    name = "journey-smoke"
+    source = tmp_path / name
+    source.mkdir()
+    (source / "SKILL.md").write_text("---\nname: journey-smoke\n---\n\nv1\n")
+    old_hash = source_fingerprint(source)
+    (source / "SKILL.md").write_text("---\nname: journey-smoke\n---\n\nv2\n")
+    current_hash = source_fingerprint(source)
+    owner = {"profile_name": "demo"}
+    rows = {"drafts": {
+        "local:old": {"id": "local:old", "slug": name, "owner": owner,
+                      "source_path": str(source), "source_hash": old_hash, "state": "prepared"},
+        "local:new": {"id": "local:new", "slug": name, "owner": owner,
+                      "source_path": str(source), "source_hash": current_hash, "state": "prepared"},
+    }}
+    service = cast(Any, InvocationService.__new__(InvocationService))
+    service._direct_state = SimpleNamespace(_load=lambda: rows)
+    service._installation_owner = lambda: owner
+    service.check_owner = lambda: None
+    service._contribution_reviewer = lambda: SimpleNamespace(source=lambda _name: source)
+    assert service.resolve_local_draft(name) == "local:new"
+    (source / "SKILL.md").write_text("---\nname: journey-smoke\n---\n\nv3\n")
+    with pytest.raises(WisdomConflict, match="ambiguous"):
+        service.resolve_local_draft(name)
 
 
 def test_prepared_and_publication_names_bind_internal_ids(capsys):
