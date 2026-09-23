@@ -401,7 +401,7 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
         control = plan.get("mute_control")
         if not isinstance(control, dict) or control.get("revision") is None:
             raise WisdomValidationError("Notification mute control is unavailable")
-        duration = "1w" if action.endswith(".1w") else None
+        duration = "1_week" if action.endswith(".1w") else None
         return service.choose_notification_mute(
             str(control["revision"]), duration, may_apply=may_apply,
         )

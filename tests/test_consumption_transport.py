@@ -5,9 +5,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from test_client import Response, Session
 
 from hermes_wisdom_plugin.client import WisdomClient, WisdomGatewayCredentials
+from hermes_wisdom_plugin.runtime import InvocationService
 
 
 def _credentials():
@@ -47,6 +50,35 @@ def test_shared_transport_uses_exact_gateway_routes_and_request_seam():
     assert session.calls[0][2]["params"] == {"installation_id": "hwi_test"}
     assert session.calls[1][2]["params"] == {"include_revision": "1"}
     assert session.calls[2][2]["json"] == {"keys": [key]}
+
+
+@pytest.mark.parametrize("choice,duration", [
+    ("1d", "1_day"), ("1w", "1_week"), ("30d", "30_days"),
+])
+def test_terminal_mute_aliases_use_gateway_durations(choice, duration):
+    session = Session(Response(200, {
+        "org_id": "org-1", "muted": True, "duration": duration,
+        "muted_until": "2030-01-08T00:00:00Z", "forever": False, "revision": 8,
+    }))
+
+    class MuteService:  # pylint: disable=too-few-public-methods
+        """Minimal service with the production mute method and a recording client."""
+        mute = InvocationService.mute
+
+        def __init__(self):
+            self.client = WisdomClient(
+                _credentials, "org-1", owner_user_id="user-1",
+                session=session,  # type: ignore[arg-type] - recording transport
+            )
+
+        def _installation_owner(self):
+            return "owner"
+
+        def check_owner(self):
+            return None
+
+    assert MuteService().mute(choice)["duration"] == duration
+    assert session.calls[0][2]["json"]["duration"] == duration
 
 
 def test_terminal_parser_exposes_explicit_consumption_controls():
