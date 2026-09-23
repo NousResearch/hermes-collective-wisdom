@@ -1036,7 +1036,12 @@ def _emit(
             file=stream,
         )
     elif isinstance(value, (dict, list)):
-        print(_human_render(command, value), file=stream)
+        from .terminal_presentation import emit_terminal  # pylint: disable=import-outside-toplevel
+
+        summary = _human_render(command, value)
+        if not error and emit_terminal(command, value, stream, summary):
+            return
+        print(summary, file=stream)
     else:
         print(_without_controls(value), file=stream)
 
