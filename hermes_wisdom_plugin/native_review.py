@@ -936,9 +936,6 @@ class NativeReviewController:
             **plan, "installation_status": _local_installation_label(service, plan),
         }, explanation=explanation)
 
-    def request_install_modes(self, service: Any, invocation: NativeInvocation, reference: str) -> dict[str, Any]:
-        return self.request_install(service, invocation, reference)
-
     def request_update(
         self, service: Any, invocation: NativeInvocation, skill_id: str
     ) -> dict[str, Any]:

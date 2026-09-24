@@ -630,19 +630,26 @@ def test_model_setup_request_queues_setup_not_install(tmp_path: Path, monkeypatc
     def discard(coroutine, **_kwargs):
         coroutine.close()
 
-    runtime = NativeSurfaceRuntime(
-        tmp_path, "default", lambda: service, None, discard,
-        installed_state=JsonState(tmp_path),
-    )
-    caller = invocation()
-    result = runtime.queue_model_consent(caller, {
-        "kind": "setup", "identity": "skill-1", "version": 3,
-        "step": {"phase": "setup", "index": 0, "command": "python configure.py"},
-    })
+    async def scenario():
+        runtime = NativeSurfaceRuntime(
+            tmp_path, "default", lambda: service, None, discard,
+            installed_state=JsonState(tmp_path),
+        )
+        adapter = SimpleNamespace(_owner_profile="default")
+        def register(_pattern):
+            return lambda handler: handler
+        runtime.wire_slack(SimpleNamespace(command=register, action=register), adapter)
+        caller = replace(invocation(), adapter=adapter)
+        result = runtime.queue_model_consent(caller, {
+            "kind": "setup", "identity": "skill-1", "version": 3,
+            "step": {"phase": "setup", "index": 0, "command": "python configure.py"},
+        })
+        review = runtime.reviews.load(result["review_id"])
+        assert review["operation"] == "setup"
+        assert review["plan"]["receipt"] == "setup-receipt"
+        runtime.close()
 
-    review = runtime.reviews.load(result["review_id"])
-    assert review["operation"] == "setup"
-    assert review["plan"]["receipt"] == "setup-receipt"
+    asyncio.run(scenario())
 
 
 def test_expired_native_review_cannot_apply(tmp_path: Path):

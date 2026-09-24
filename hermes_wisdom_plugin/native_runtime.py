@@ -15,7 +15,8 @@ from typing import Any, Callable
 
 from .errors import WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
-from .native_review import NativeReviewController, parse_callback
+from .native_review import NativeReviewController, NativeView, parse_callback
+from .terminal_ui import has_reviewable_warnings
 from .review_state import ReviewState
 
 
@@ -343,6 +344,125 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         except PermissionError:
             return None
 
+    def _direct_route(self, invocation: NativeInvocation) -> tuple[Any, object, asyncio.AbstractEventLoop]:
+        route = (invocation.platform, id(invocation.adapter))
+        with self._lock:
+            native, token, loop = (
+                self._native.get(route), self._leases.get(route), self._loops.get(route)
+            )
+        if (native is None or token is None or loop is None
+                or not self._notice_route_current(invocation, native, token, loop)):
+            raise PermissionError("Collective Wisdom command route is no longer current")
+        return native, token, loop
+
+    def _direct_authorized(
+        self, invocation: NativeInvocation, native: Any, token: object,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        if (not self._notice_route_current(invocation, native, token, loop)
+                or invocation.chat_type.casefold() not in {"dm", "private", "im"}
+                or not all((invocation.actor_id, invocation.chat_id, invocation.session_key))):
+            return False
+        adapter = invocation.adapter
+        try:
+            if invocation.platform == "slack":
+                authorize = getattr(adapter, "_is_interactive_user_authorized", None)
+                return bool(authorize(
+                    invocation.actor_id, channel_id=invocation.chat_id,
+                    user_name=invocation.actor_name, team_id=invocation.scope_id,
+                )) if callable(authorize) else False
+            if invocation.platform == "telegram":
+                authorize = getattr(adapter, "_is_callback_user_authorized", None)
+                return bool(authorize(
+                    invocation.actor_id, chat_id=invocation.chat_id,
+                    chat_type=invocation.chat_type, thread_id=invocation.thread_id or None,
+                    user_name=invocation.actor_name,
+                )) if callable(authorize) else False
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+        return False
+
+    def install_direct(  # pylint: disable=too-many-locals
+        self, invocation: NativeInvocation, reference: str
+    ) -> NativeView:
+        """Treat an admitted install command as consent for a clean checked package."""
+        native, token, loop = self._direct_route(invocation)
+        def current() -> bool:
+            return self._direct_authorized(invocation, native, token, loop)
+        if not current():
+            raise PermissionError("Collective Wisdom installation is no longer authorized")
+        service = self.service_factory()
+        try:
+            owner = service.native_owner()
+            if owner.get("profile_name") != invocation.profile:
+                raise PermissionError("Collective Wisdom installation owner changed")
+            plan = service.install_plan(reference)
+            policy = plan.get("policy") if isinstance(plan, dict) else None
+            scan = plan.get("local_scan") if isinstance(plan, dict) else None
+            compatible = plan.get("compatibility") if isinstance(plan, dict) else None
+            clean = (
+                isinstance(plan, dict) and plan.get("operation") == "install"
+                and plan.get("allowed") is True and not has_reviewable_warnings(plan)
+                and isinstance(scan, dict) and scan.get("allowed") is True
+                and scan.get("available") is True
+                and isinstance(compatible, dict) and compatible.get("outcome") == "compatible"
+                and isinstance(policy, dict)
+                and policy.get("scan_requires_confirmation") is False
+                and policy.get("compatibility_requires_confirmation") is False
+                and plan.get("setup_commands") == []
+            )
+            if not clean:
+                display_name = plan.get("slug") if isinstance(plan, dict) else None
+                if not isinstance(display_name, str) or not display_name:
+                    display_name = reference
+                return NativeView(
+                    "Collective Wisdom", f"⚠️ {display_name} wasn't installed",
+                    notice="A safety check or setup is required. No skill was installed.",
+                    dismissed=True,
+                )
+            receipt, slug = plan.get("receipt"), plan.get("slug")
+            if not isinstance(receipt, str) or not receipt or not isinstance(slug, str) or not slug:
+                raise WisdomValidationError("Collective Wisdom install plan is incomplete")
+            if not current():
+                raise PermissionError("Collective Wisdom installation is no longer authorized")
+            result = service.install_apply(receipt, may_apply=current)
+            if not isinstance(result, dict) or result.get("pending") is True:
+                return NativeView(
+                    "Collective Wisdom", f"{slug} installation needs checking",
+                    notice="The outcome is uncertain. Check installed skills before trying again.",
+                    dismissed=True,
+                )
+            if (result.get("installed") is not True or result.get("rejected") is True
+                    or result.get("setup_required") is True or result.get("setup")):
+                return NativeView(
+                    "Collective Wisdom", f"{slug} installation needs attention",
+                    notice="Check its installation status; do not retry blindly.", dismissed=True,
+                )
+            return NativeView("Collective Wisdom", f"✅ {slug} installed", dismissed=True)
+        finally:
+            service.close()
+
+    async def send_direct_result(self, invocation: NativeInvocation, view: NativeView) -> None:
+        """Send one result card without creating another consent/review record."""
+        native, token, loop = self._direct_route(invocation)
+        if asyncio.get_running_loop() is not loop or not self._direct_authorized(invocation, native, token, loop):
+            raise PermissionError("Collective Wisdom command route changed")
+        if invocation.platform == "slack":
+            from .native_slack import blocks  # pylint: disable=import-outside-toplevel
+            payload: dict[str, Any] = {
+                "channel": invocation.chat_id, "text": view.to_text(),
+                "blocks": blocks(view, ""),
+            }
+            if invocation.thread_id:
+                payload["thread_ts"] = invocation.thread_id
+            await native.client.chat_postMessage(**payload)
+        else:
+            from .native_telegram import send  # pylint: disable=import-outside-toplevel
+            await send(
+                invocation.adapter._bot, view, "",  # pylint: disable=protected-access
+                chat_id=invocation.chat_id, thread_id=invocation.thread_id,
+            )
+
     def _lease(self, platform: str, native: Any, adapter: Any) -> object:
         loop = asyncio.get_running_loop()
         token = object()
@@ -543,6 +663,23 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 return
         self.reviews.bind_message(record["id"], invocation, message_id)
 
+    def _schedule_review_post(
+        self, invocation: NativeInvocation, record: dict[str, Any],
+        native: Any, token: object, loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Create the supervised review task on its adapter's event loop."""
+        if not self._notice_route_current(invocation, native, token, loop):
+            return
+        coroutine = self._post_review(
+            invocation, record,
+            route_authority=lambda: self._notice_route_current(invocation, native, token, loop),
+        )
+        try:
+            self.spawn_task(coroutine, name=f"wisdom-review:{invocation.session_key}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            coroutine.close()
+            logger.warning("Collective Wisdom review dispatch failed (%s)", type(exc).__name__)
+
     def _begin(
         self, invocation: NativeInvocation, build: Callable[[Any], dict[str, Any]], *,
         expected_owner: dict[str, str] | None = None,
@@ -554,19 +691,28 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             record = build(service)
         finally:
             service.close()
-        coroutine = self._post_review(invocation, record)
-        if self._closed:
-            coroutine.close()
+        route = (invocation.platform, id(invocation.adapter))
+        with self._lock:
+            native = self._native.get(route)
+            token = self._leases.get(route)
+            loop = self._loops.get(route)
+        if (native is None or token is None or loop is None
+                or not self._notice_route_current(invocation, native, token, loop)):
             return {"state": "unavailable"}
         try:
-            self.spawn_task(coroutine, name=f"wisdom-review:{invocation.session_key}")
-        except Exception:
-            coroutine.close()
-            raise
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is loop:
+            self._schedule_review_post(invocation, record, native, token, loop)
+        else:
+            try:
+                loop.call_soon_threadsafe(
+                    self._schedule_review_post, invocation, record, native, token, loop,
+                )
+            except RuntimeError:
+                return {"state": "unavailable"}
         return {"state": "queued", "review_id": record["id"]}
-
-    def begin_install_modes(self, invocation: NativeInvocation, reference: str):
-        return self._begin(invocation, lambda service: self.reviews.request_install_modes(service, invocation, reference))
 
     def begin_update(self, invocation: NativeInvocation, skill_id: str):
         return self._begin(

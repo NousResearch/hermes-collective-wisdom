@@ -8,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from installed_test_support import JsonState
 from native_test_support import owner
 from restoration_support import (
     SlackHarness, TelegramHarness, assert_cancelled_review_is_inert,
@@ -60,6 +61,26 @@ def test_registered_slack_wisdom_slash_uses_host_admission(tmp_path, monkeypatch
         ui.runtime.close()
         await ui.command_handler(ack, command)
         assert len(events) == 1
+
+    asyncio.run(scenario())
+
+
+def test_slack_review_started_by_host_command_worker_posts_one_card(tmp_path):
+    async def scenario():
+        ui = SlackHarness(tmp_path, Service())
+
+        def host_spawn(coroutine, **_kwargs):
+            assert asyncio.get_running_loop().is_running()
+            ui.tasks.append(coroutine)
+
+        ui.runtime.spawn_task = host_spawn
+        result = await asyncio.to_thread(ui.runtime.begin, ui.caller, "incident")
+        assert result["state"] == "queued"
+        await asyncio.sleep(0)
+        await ui.flush()
+        assert len(ui.posts) == 1
+        assert [action.label for action in ui.view(result["review_id"]).actions][-1] == "Install"
+        ui.runtime.close()
 
     asyncio.run(scenario())
 
@@ -123,6 +144,95 @@ class Service:
         assert may_apply()
         self.applied.append(receipt)
         return {"updated": True}
+
+
+def _clean_install_plan(service, reference):
+    return {
+        **Service.install_plan(service, reference),
+        "setup_commands": [], "compatibility": {"outcome": "compatible"},
+        "local_scan": {"allowed": True, "available": True},
+        "policy": {"scan_requires_confirmation": False,
+                   "compatibility_requires_confirmation": False},
+    }
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_explicit_install_applies_clean_skill_without_review(tmp_path, harness):
+    class CleanService(Service):
+        def install_plan(self, reference, **_kwargs):
+            return _clean_install_plan(self, reference)
+
+    async def scenario():
+        service = CleanService()
+        ui = harness(tmp_path, service)
+        initial = JsonState(tmp_path).get("wisdom-reviews")
+        view = await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert service.applied == ["exact-receipt"]
+        assert view.summary == "✅ incident installed"
+        assert JsonState(tmp_path).get("wisdom-reviews") == initial
+        await ui.runtime.send_direct_result(ui.caller, view)
+        assert len(ui.posts) == 1
+        assert "incident installed" in ui.posts[0]["text"]
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("unsafe", ["setup", "warning", "scanner", "compatibility", "missing_scan"])
+def test_explicit_install_stops_on_nonclean_plan(tmp_path, unsafe):
+    class UnsafeService(Service):
+        def install_plan(self, reference, **_kwargs):
+            plan = _clean_install_plan(self, reference)
+            if unsafe == "setup":
+                plan["setup_commands"] = ["needs setup"]
+            elif unsafe == "warning":
+                plan["policy"]["scan_requires_confirmation"] = True
+            elif unsafe == "scanner":
+                plan["local_scan"]["allowed"] = False
+            elif unsafe == "compatibility":
+                plan["compatibility"]["outcome"] = "review"
+            else:
+                del plan["local_scan"]
+            return plan
+
+    async def scenario():
+        service = UnsafeService()
+        ui = SlackHarness(tmp_path, service)
+        view = await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert view.summary == "⚠️ incident wasn't installed"
+        assert "No skill was installed" in view.notice
+        assert not service.applied
+        assert not view.actions
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_install_rechecks_authority_before_apply(tmp_path):
+    class RevokedService(Service):
+        def __init__(self):
+            super().__init__()
+            self.revoke = lambda: None
+
+        def install_plan(self, reference, **_kwargs):
+            self.revoke()
+            return _clean_install_plan(self, reference)
+
+    async def scenario():
+        service = RevokedService()
+        ui = SlackHarness(tmp_path, service)
+        def revoke():
+            ui.adapter._is_interactive_user_authorized = (  # pylint: disable=protected-access
+                lambda *_args, **_kw: False
+            )
+
+        service.revoke = revoke
+        with pytest.raises(PermissionError):
+            await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert not service.applied
+        ui.runtime.close()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
