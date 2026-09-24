@@ -2308,6 +2308,7 @@ def test_telegram_actual_dispatch_and_callback_edits_bound_card_without_upload(
             review_id = next(iter(runtime.native.reviews.state._load()["records"]))  # pylint: disable=protected-access
             await pending.pop(0)
             assert requests[0][0] == "sendRichMessage"
+            assert requests[0][1]["rich_message"]["html"].startswith("<p>")
             assert "Continue to sharing review" in requests[0][1]["rich_message"]["html"]
             assert runtime.native.reviews.load(review_id)["message_id"] == "77"
 
@@ -2321,6 +2322,7 @@ def test_telegram_actual_dispatch_and_callback_edits_bound_card_without_upload(
                 await app.handler.callback(SimpleNamespace(callback_query=query), None)
             assert answers == [True]
             assert requests[-1][0] == "editMessageText"
+            assert requests[-1][1]["rich_message"]["html"].startswith("<p>")
             assert "Acknowledge displayed warnings and continue" in (
                 requests[-1][1]["rich_message"]["html"]
             )
