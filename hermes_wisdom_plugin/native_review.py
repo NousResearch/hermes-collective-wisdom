@@ -287,7 +287,9 @@ def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
                 facts.append(f"{label}: {_safe(row[key])}")
         actions = []
         skill_id = row.get("id") or row.get("skill_id")
-        if skill_id:
+        status = row.get("installation_status")
+        if (skill_id and isinstance(status, dict)
+                and status.get("state") == "not_installed"):
             actions.append(NativeAction("Install", f"catalog.install.{index}", primary=True))
         if row.get("portal_url"):
             actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
@@ -769,15 +771,12 @@ def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     plan = record.get("plan")
     name = _skill_name(plan if isinstance(plan, dict) else {})
     if record.get("state") == "failed" and result.get("install_blocked") is True:
-        detail = ("Already installed; check local changes or use Update."
-                  if result.get("already_managed") else "Install unavailable; no changes made.")
-        return NativeView(f"⚠️ {name} unchanged", detail, dismissed=True)
-    if record.get("state") != "completed":
-        return None
-    if result.get("already_installed") is True:
-        return NativeView(f"✅ {name} already installed", "", dismissed=True)
-    if (result.get("publication_state") == "published"
-            and isinstance(result.get("detail"), str) and result["detail"]):
+        return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
+                          dismissed=True)
+    if record.get("state") == "completed" and (
+        result.get("publication_state") == "published"
+        and isinstance(result.get("detail"), str) and result["detail"]
+    ):
         return NativeView("Publication result", f"{name}\n{_safe(result['detail'])}", dismissed=True)
     return None
 
@@ -1304,51 +1303,11 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
 
-    def _existing_catalog_install(
-        self, record: dict[str, Any], service: Any,
-        invocation: NativeInvocation, authority: Callable[[], bool],
-    ) -> tuple[dict[str, Any] | None, bool]:
-        """Acknowledge a verified existing version without a second install."""
-        plan = record["plan"]
-        status = plan.get("installation_status")
-        if (plan.get("receipt") or not isinstance(status, dict)
-                or status.get("state") != "installed"):
-            return None, False
-        listed = getattr(service, "list_installations", None)
-        rows = listed() if callable(listed) else []
-        managed_rows = [
-            row for row in rows if isinstance(row, dict)
-            and row.get("skill_id") == plan.get("skill_id")
-            and row.get("owner") == record.get("owner")
-            and row.get("state") == "active"
-        ] if isinstance(rows, list) else []
-        version = plan.get("version")
-        if (not isinstance(version, int) or isinstance(version, bool) or version <= 0
-                or not any(row.get("version") == version
-                           and row.get("modified") is False
-                           and row.get("pending_operation") is None
-                           for row in managed_rows)):
-            return None, bool(managed_rows)
-        if not authority() or not _owner_matches(record, service, invocation):
-            raise WisdomAuthError("Collective Wisdom review owner changed")
-        completed = {
-            **record, "state": "completed", "result": {"already_installed": True},
-            "effect_action": "install", "display_ready": False,
-            "updated_at": self.clock(),
-        }
-        if not self.state.compare_replace(record, completed):
-            raise WisdomConflict("Collective Wisdom review changed; open it again")
-        return completed, True
-
     def _one_click_package(
         self, record: dict[str, Any], action: str, service: Any,
         invocation: NativeInvocation, authority: Callable[[], bool],
     ) -> dict[str, Any]:
         """Prepare and spend a fresh exact receipt inside the explicit click."""
-        existing, managed = (self._existing_catalog_install(record, service, invocation, authority)
-                             if action == "install" else (None, False))
-        if existing is not None:
-            return existing
         plan = record["plan"]
         claimed = {
             **record, "state": "preparing", "display_ready": False,
@@ -1366,7 +1325,7 @@ class NativeReviewController:
                     raise WisdomAuthError("Collective Wisdom review owner changed") from None
                 blocked = {
                     **record, "state": "failed", "display_ready": False,
-                    "result": {"install_blocked": True, "already_managed": managed},
+                    "result": {"install_blocked": True},
                     "updated_at": self.clock(),
                 }
                 if not self.state.compare_replace(claimed, blocked):

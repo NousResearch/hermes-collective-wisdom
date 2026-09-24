@@ -23,7 +23,9 @@ def test_binding_does_not_overwrite_a_newer_pending_presentation(tmp_path, monke
 
 def test_catalog_selection_does_not_overwrite_a_newer_pending_plan(tmp_path, monkeypatch):
     service = Service()
-    monkeypatch.setattr(service, "search_skills", lambda _q: [{"id": "skill-1"}], raising=False)
+    monkeypatch.setattr(service, "search_skills", lambda _q: [{
+        "id": "skill-1", "installation_status": {"state": "not_installed", "text": "Not installed"},
+    }], raising=False)
     ui = SlackHarness(tmp_path, service)
     controller = ui.runtime.reviews
     record = controller.request_catalog(service, ui.caller, "browse")
