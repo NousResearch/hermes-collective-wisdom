@@ -131,6 +131,9 @@ def test_catalog_show_uses_skill_envelope_not_unnamed_versions(tmp_path):
     assert "Name unavailable" not in text
     assert "Installation status unavailable" not in text
     assert "opaque-id" not in text
+    assert rich_html(controller.view(record), "card-1").startswith(
+        "<h5>Collective Wisdom catalog</h5>"
+    )
 
 
 @pytest.mark.parametrize("command", ["show", "browse", "versions"])
