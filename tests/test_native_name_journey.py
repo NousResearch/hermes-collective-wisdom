@@ -1,13 +1,15 @@
 """Native cards use verified names, leaving opaque authority in controller state."""
 # pylint: disable=missing-function-docstring,missing-class-docstring
-
+import asyncio
 from dataclasses import replace
 
 import pytest
 
 from installed_test_support import JsonState
-from native_test_support import direct_owner
+from native_test_support import direct_owner, owner
+from restoration_support import SlackHarness, TelegramHarness
 from hermes_wisdom_plugin.errors import WisdomValidationError
+from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.native_context import NativeInvocation
 from hermes_wisdom_plugin.native_review import NativeReviewController, project_view
 from hermes_wisdom_plugin.review_state import ReviewState
@@ -119,6 +121,98 @@ def test_catalog_show_uses_skill_envelope_not_unnamed_versions(tmp_path):
     assert "Name unavailable" not in text
     assert "Installation status unavailable" not in text
     assert "opaque-id" not in text
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+@pytest.mark.parametrize("version,modified", [(1, False), (1, True), (2, False)])
+def test_show_install_click_reports_existing_exact_install(tmp_path, surface, version, modified):
+    """A managed skill's Install control acknowledges the existing version."""
+    class Service:
+        def native_owner(self):
+            return owner()
+
+        def show(self, _reference):
+            return {
+                "skill": {"id": "opaque-id", "slug": "team-helper", "state": "active"},
+                "latest_version_detail": {"version": {"version": version}},
+                "installation_status": {"text": "Installed v1", "state": "installed"},
+            }
+
+        def list_installations(self):
+            return [{"skill_id": "opaque-id", "slug": "team-helper", "version": 1,
+                     "state": "active", "owner": self.native_owner(), "modified": modified,
+                     "pending_operation": None}]
+
+        def install_plan(self, _reference, **_kwargs):
+            raise PackagePolicyError("skill is already managed; use the update workflow")
+
+        def close(self):
+            return None
+
+    async def scenario():
+        ui = surface(tmp_path, Service())
+        identity = ui.runtime.begin_catalog(ui.caller, "show", "team-helper")["review_id"]
+        await ui.flush()
+        assert "catalog.install.0" in {action.action for item in ui.view(identity).items
+                                       for action in item.actions}
+        await ui.click(identity, "catalog.install.0")
+        if version == 1 and not modified:
+            assert ui.record(identity)["state"] == "completed"
+            assert ui.edits[-1]["text"] == "✅ team-helper already installed"
+        else:
+            assert ui.record(identity)["state"] == "failed"
+            assert "team-helper unchanged" in ui.edits[-1]["text"]
+            assert "already installed" in ui.edits[-1]["text"].lower()
+        assert "opaque-id" not in ui.edits[-1]["text"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_show_install_click_applies_uninstalled_skill_and_confirms(tmp_path, surface):
+    """The Show action uses the same direct checked install and named receipt."""
+    class Service:
+        applied = 0
+
+        def native_owner(self):
+            return owner()
+
+        def show(self, _reference):
+            return {
+                "skill": {"id": "opaque-id", "slug": "team-helper", "state": "active"},
+                "latest_version_detail": {"version": {"version": 1}},
+                "installation_status": {"text": "Not installed", "state": "not_installed"},
+            }
+
+        def install_plan(self, reference, **_kwargs):
+            assert reference == "opaque-id@v1"
+            return {"operation": "install", "owner": self.native_owner(),
+                    "skill_id": "opaque-id", "slug": "team-helper", "version": 1,
+                    "receipt": "private-receipt", "allowed": True}
+
+        def native_install_inspect(self, _receipt):
+            return [{"path": "SKILL.md", "content": "inert fixture"}]
+
+        def install_apply(self, _receipt, *, may_apply, accept_partial=False):
+            assert may_apply() and not accept_partial
+            self.applied += 1
+            return {"installed": True, "skill_id": "opaque-id", "version": 1}
+
+        def close(self):
+            return None
+
+    async def scenario():
+        service = Service()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_catalog(ui.caller, "show", "team-helper")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "catalog.install.0")
+        assert service.applied == 1
+        assert ui.record(identity)["state"] == "completed"
+        assert ui.edits[-1]["text"] == "✅ team-helper installed"
+        assert "opaque-id" not in ui.edits[-1]["text"]
+
+    asyncio.run(scenario())
 
 
 def test_catalog_versions_preserves_multiline_description(tmp_path):
