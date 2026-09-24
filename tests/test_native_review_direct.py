@@ -393,6 +393,9 @@ def test_runtime_unload_revokes_an_inflight_slack_effect(tmp_path: Path, monkeyp
                     return handler
                 return register
 
+            def command(self, _pattern):
+                return lambda handler: handler
+
         service = Service()
         runtime = NativeSurfaceRuntime(
             tmp_path, "default", lambda: service, None,

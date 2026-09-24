@@ -4,6 +4,7 @@
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -20,7 +21,9 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
         self.deletes = []
         self.tasks = []
         self.handler = None
-        self.post_response = None
+        self.command_handler: Any = None
+        self.command_pattern = None
+        self.post_response: Any = None
         self.client = self
         self.adapter = SimpleNamespace(
             _owner_profile="default",
@@ -44,6 +47,13 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
     def action(self, _pattern):
         def register(handler):
             self.handler = handler
+            return handler
+        return register
+
+    def command(self, pattern):
+        def register(handler):
+            self.command_pattern = pattern
+            self.command_handler = handler
             return handler
         return register
 

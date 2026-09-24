@@ -82,6 +82,23 @@ def test_capture_is_one_shot_task_local_and_reauthorizes():
     asyncio.run(scenario())
 
 
+def test_admitted_slack_slash_crosses_into_host_synchronous_command_worker():
+    async def scenario():
+        captures = InvocationCapture()
+        captures.hook(event=event(args="install incident"), gateway=Gateway())
+        invocation = await asyncio.to_thread(
+            captures.consume_command, "install incident", profile_name="default"
+        )
+        assert invocation.actor_id == "U1"
+        assert invocation.session_key == "slack:W1:D1:U1"
+        with pytest.raises(PermissionError, match="current admitted"):
+            await asyncio.to_thread(
+                captures.consume_command, "install incident", profile_name="default"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_capture_rejects_unrelated_internal_profile_and_other_task():
     async def scenario():
         captures = InvocationCapture()

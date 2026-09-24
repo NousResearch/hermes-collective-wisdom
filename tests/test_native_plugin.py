@@ -204,6 +204,25 @@ def test_admitted_slash_routes_only_explicit_native_actions(tmp_path, monkeypatc
         runtime.native.close()
 
 
+@pytest.mark.parametrize("raw, method", [
+    ("browse incident", "begin_catalog"), ("settings", "begin_settings"),
+])
+def test_admitted_native_card_does_not_echo_internal_review_id(tmp_path, monkeypatch, raw, method):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path),
+        llm=None, spawn_task=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: object())
+    monkeypatch.setattr(
+        runtime.native, method,
+        lambda *_args: {"state": "queued", "review_id": "internal-only"},
+    )
+    try:
+        assert runtime.slash(raw) == ""
+    finally:
+        runtime.native.close()
+
+
 @pytest.mark.parametrize("raw", ["", "help", "--help", "-h", "--help extra", "-h extra"])
 def test_unadmitted_slash_help_aliases_render_help(tmp_path, monkeypatch, raw):
     """Empty input and documented aliases share the local help view."""

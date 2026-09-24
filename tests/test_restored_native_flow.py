@@ -1,8 +1,10 @@
 """Restored journeys through real registered native callbacks; no live services."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
 import asyncio
+import sys
 from datetime import datetime
 from html import unescape
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,52 @@ from restoration_support import (
 from test_client import Response, Session, client as recording_client
 from hermes_wisdom_plugin.errors import SharePackagingError
 from hermes_wisdom_plugin.runtime import InvocationService
+
+
+def test_registered_slack_wisdom_slash_uses_host_admission(tmp_path, monkeypatch):
+    """A menu-registered /wisdom must reach the admitted host command path."""
+    async def scenario():
+        ui = SlackHarness(tmp_path, Service())
+        assert ui.command_handler is not None
+        assert ui.command_pattern == "/wisdom"
+        events, acknowledgements = [], []
+
+        async def handle_message(event):
+            events.append(event)
+
+        ui.adapter.build_source = SimpleNamespace
+        ui.adapter.handle_message = handle_message
+        event_module = ModuleType("gateway.platforms.event")
+        event_module.__dict__.update(
+            MessageEvent=SimpleNamespace, MessageType=SimpleNamespace(COMMAND="command")
+        )
+        for name in ("gateway", "gateway.platforms"):
+            monkeypatch.setitem(sys.modules, name, ModuleType(name))
+        monkeypatch.setitem(sys.modules, "gateway.platforms.event", event_module)
+
+        async def ack(**details):
+            acknowledgements.append(details)
+
+        command = {
+            "command": "/wisdom", "text": "install incident",
+            "user_id": "U1", "channel_id": "D1", "team_id": "W1",
+        }
+        await ui.command_handler(ack, command)
+        assert len(acknowledgements) == 1
+        assert len(events) == 1
+        assert events[0].text == "/wisdom install incident"
+        assert events[0].message_type == "command"
+        assert events[0].source.chat_id == "D1"
+        assert events[0].source.user_id == "U1"
+        assert events[0].source.scope_id == "W1"
+
+        await ui.command_handler(ack, {**command, "channel_id": "C1"})
+        assert len(events) == 1
+        ui.runtime.close()
+        await ui.command_handler(ack, command)
+        assert len(events) == 1
+
+    asyncio.run(scenario())
 
 
 class Service:

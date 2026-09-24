@@ -1556,7 +1556,7 @@ def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path,
     )
 
     try:
-        assert runtime.slash("suggest local-skill") == {"state": "queued"}
+        assert runtime.slash("suggest local-skill") == ""
         assert seen == [(invocation, "local-skill")]
     finally:
         runtime.close()
@@ -2067,6 +2067,9 @@ def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmati
                     return handler
                 return register
 
+            def command(self, _pattern):
+                return lambda handler: handler
+
         def spawn(coroutine, **_kwargs):
             pending.append(coroutine)
 
@@ -2100,9 +2103,10 @@ def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmati
 
         try:
             result = runtime.slash("suggest local-skill")
-            assert result["state"] == "queued"
+            assert result == ""
+            review_id = next(iter(runtime.native.reviews.state._load()["records"]))  # pylint: disable=protected-access
             await pending.pop(0)
-            assert runtime.native.reviews.load(result["review_id"])["message_id"] == "card-1"
+            assert runtime.native.reviews.load(review_id)["message_id"] == "card-1"
             assert "Nothing has been uploaded" in posts[0]["text"]
             assert not any(call[0].startswith("publication_") for call in service.calls)
 
@@ -2115,13 +2119,13 @@ def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmati
 
             await click("Share this exact reviewed package")
             assert service.calls.count(("publication_submit", "wpub_review")) == 1
-            assert runtime.native.reviews.load(result["review_id"])["state"] == "completed"
+            assert runtime.native.reviews.load(review_id)["state"] == "completed"
             before = len(edits)
             await app.handler(
                 lambda: asyncio.sleep(0),
                 {"user": {"id": "native-user"}, "channel": {"id": "C1"},
                  "team": {"id": "W1"}, "message": {"ts": "card-1"}},
-                {"value": f"wi:agent:suggest.confirm:{result['review_id']}"},
+                {"value": f"wi:agent:suggest.confirm:{review_id}"},
             )
             assert len(edits) == before
             assert service.calls.count(("publication_submit", "wpub_review")) == 1
@@ -2191,14 +2195,15 @@ def test_telegram_actual_dispatch_and_callback_edits_bound_card_without_upload(
 
         try:
             result = runtime.slash("suggest local-skill")
+            assert result == ""
+            review_id = next(iter(runtime.native.reviews.state._load()["records"]))  # pylint: disable=protected-access
             await pending.pop(0)
-            assert result["state"] == "queued"
             assert requests[0][0] == "sendRichMessage"
             assert "Continue to sharing review" in requests[0][1]["rich_message"]["html"]
-            assert runtime.native.reviews.load(result["review_id"])["message_id"] == "77"
+            assert runtime.native.reviews.load(review_id)["message_id"] == "77"
 
             query = SimpleNamespace(
-                data=callback_value(result["review_id"], "suggest.share"),
+                data=callback_value(review_id, "suggest.share"),
                 from_user=SimpleNamespace(id="native-user", username="Shannon", first_name=""),
                 message=message, answer=answer,
                 edit_message_text=lambda **_kwargs: pytest.fail("rich edit should be used"),

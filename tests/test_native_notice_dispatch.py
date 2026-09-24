@@ -78,6 +78,10 @@ class SlackNative:
     def action(_pattern):
         return lambda callback: callback
 
+    @staticmethod
+    def command(_pattern):
+        return lambda callback: callback
+
     async def chat_postMessage(self, **payload):
         self.posts.append((asyncio.get_running_loop(), payload))
         self.sent.set()

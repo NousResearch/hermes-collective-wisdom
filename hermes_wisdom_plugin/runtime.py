@@ -32,6 +32,11 @@ def _require_current(may_apply: Callable[[], bool] | None) -> None:
 SLASH_BUDGET_SECONDS = 25.0
 NATIVE_INSPECTION_CHARS = 500
 _UNAVAILABLE = "Collective Wisdom is unavailable. Complete setup in your terminal."
+
+def _native_review_reply(result: Any) -> Any:
+    """The original native card is the reply; never echo its internal review ID."""
+    return "" if isinstance(result, dict) and result.get("state") == "queued" else result
+
 _BOOTSTRAP = """
 import importlib.util, json, sys
 from pathlib import Path
@@ -1520,11 +1525,11 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 "suggest": self.native.begin_suggest,
             }.get(command)
             if effect_review is not None:
-                return effect_review(invocation, target)
+                return _native_review_reply(effect_review(invocation, target))
             if command in {"browse", "show", "versions"}:
-                return self.native.begin_catalog(invocation, command, target)
+                return _native_review_reply(self.native.begin_catalog(invocation, command, target))
             if command == "settings":
-                return self.native.begin_settings(invocation)
+                return _native_review_reply(self.native.begin_settings(invocation))
         # Capture the calling profile before the host moves an awaitable to a thread.
         context = contextvars.copy_context()
 

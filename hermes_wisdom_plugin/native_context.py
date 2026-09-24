@@ -191,7 +191,7 @@ class InvocationCapture:
         """Consume the matching admitted slash command once."""
         return self._consume(
             profile_name=profile_name, expected_command="wisdom",
-            expected_args=str(raw_args or "").strip(),
+            expected_args=str(raw_args or "").strip(), allow_sync_worker=True,
         )
 
     def consume_lifecycle(  # pylint: disable=too-many-arguments

@@ -367,6 +367,30 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
     def wire_slack(self, native: Any, adapter: Any) -> None:
         token = self._lease("slack", native, adapter)
 
+        @native.command("/wisdom")
+        async def slash(ack: Any, command: dict[str, Any]) -> None:
+            """Route the app's slash through ordinary Gateway admission.
+
+            The host's 50-command matcher can omit an already-registered plugin
+            command; its public message path still owns authentication and dispatch.
+            """
+            chat_id = str(command.get("channel_id") or "")
+            if not chat_id.startswith("D"):
+                await ack(response_type="ephemeral", text="Open a private chat to use Collective Wisdom.")
+                return
+            await ack()
+            if not self._lease_current("slack", adapter, token) or adapter_profile(adapter) != self.profile_name:
+                return
+            from gateway.platforms.event import MessageEvent, MessageType  # pylint: disable=import-outside-toplevel,import-error
+            source = adapter.build_source(
+                chat_id=chat_id, chat_type="dm", user_id=str(command.get("user_id") or ""),
+                scope_id=str(command.get("team_id") or "") or None,
+            )
+            await adapter.handle_message(MessageEvent(
+                text="/wisdom " + str(command.get("text") or ""),
+                message_type=MessageType.COMMAND, source=source, raw_message=command,
+            ))
+
         async def callback(ack: Any, body: dict[str, Any], action: dict[str, Any]) -> None:
             await ack()
             try:
