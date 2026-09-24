@@ -102,7 +102,11 @@ def _rich_row(actions: list[Any], record_id: str) -> str:
 def rich_html(view: NativeView, record_id: str) -> str:
     """Render a bounded Bot API rich-message card with embedded controls."""
 
-    heading = f"<p>{_escaped(view.title, 1_000)}</p>"
+    compact_receipt = view.dismissed and not any((
+        view.summary, view.items, view.actions, view.navigation_actions, view.notice,
+    ))
+    heading_tag = "p" if compact_receipt else "h5"
+    heading = f"<{heading_tag}>{_escaped(view.title, 1_000)}</{heading_tag}>"
     parts = [heading]
     navigation = _rich_row(view.navigation_actions, record_id)
     if navigation:
