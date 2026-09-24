@@ -78,7 +78,7 @@ class Service:
 
 
 @pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
-def test_not_now_defers_exact_version_once_without_a_status_message(tmp_path, harness):
+def test_not_now_defers_exact_version_once_and_collapses_original_card(tmp_path, harness):
     class DeferringService(Service):
         def __init__(self):
             super().__init__()
@@ -110,7 +110,8 @@ def test_not_now_defers_exact_version_once_without_a_status_message(tmp_path, ha
         assert not service.applied
         assert ui.view(identity).actions == []
         assert len(ui.posts) == 1
-        assert ui.edits[-1].get("text") == original
+        assert ui.edits[-1].get("text") == "⏸ incident postponed"
+        assert ui.edits[-1].get("text") != original
         if harness is SlackHarness:
             assert not any(block["type"] == "actions" for block in ui.edits[-1]["blocks"])
         await ui.click(identity, "defer")

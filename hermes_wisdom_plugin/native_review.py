@@ -777,6 +777,13 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
             "The local skill could not be packaged. Review its files and try again. "
             "Nothing has been uploaded or published.", dismissed=True,
         )
+    if (record.get("state") == "cancelled" and record.get("effect_action") == "defer"
+            and isinstance(result, dict) and result.get("preference_sync") == "confirmed"):
+        plan = record.get("plan")
+        return NativeView(
+            f"⏸ {_skill_name(plan if isinstance(plan, dict) else {})} postponed",
+            "", dismissed=True,
+        )
     if record.get("state") == "cancelled":
         original = project_view({**record, "state": "pending"})
         return replace(
