@@ -16,7 +16,7 @@ from typing import Any, Callable
 from .errors import WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_review import NativeReviewController, NativeView, parse_callback
-from .terminal_ui import has_reviewable_warnings
+from .terminal_ui import has_reviewable_warnings, render_operation_outcome
 from .review_state import ReviewState
 
 
@@ -384,8 +384,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
     def install_direct(  # pylint: disable=too-many-locals
         self, invocation: NativeInvocation, reference: str
-    ) -> NativeView:
-        """Treat an admitted install command as consent for a clean checked package."""
+    ) -> NativeView | dict[str, str]:
+        """Admitted install applies clean files or reviews undisclosed setup."""
         native, token, loop = self._direct_route(invocation)
         def current() -> bool:
             return self._direct_authorized(invocation, native, token, loop)
@@ -409,7 +409,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 and isinstance(policy, dict)
                 and policy.get("scan_requires_confirmation") is False
                 and policy.get("compatibility_requires_confirmation") is False
-                and plan.get("setup_commands") == []
+                and isinstance(plan.get("setup_commands"), list)
             )
             if not clean:
                 display_name = plan.get("slug") if isinstance(plan, dict) else None
@@ -425,6 +425,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 raise WisdomValidationError("Collective Wisdom install plan is incomplete")
             if not current():
                 raise PermissionError("Collective Wisdom installation is no longer authorized")
+            if plan["setup_commands"]:
+                # A slash command cannot approve commands it has not yet shown.
+                return self._begin(
+                    invocation,
+                    lambda review_service: self.reviews.request_install(
+                        review_service, invocation, reference, plan=plan,
+                    ),
+                )
             result = service.install_apply(receipt, may_apply=current)
             if not isinstance(result, dict) or result.get("pending") is True:
                 return NativeView(
@@ -433,12 +441,15 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     dismissed=True,
                 )
             if (result.get("installed") is not True or result.get("rejected") is True
-                    or result.get("setup_required") is True or result.get("setup")):
+                    or result.get("error")):
                 return NativeView(
                     "Collective Wisdom", f"{slug} installation needs attention",
                     notice="Check its installation status; do not retry blindly.", dismissed=True,
                 )
-            return NativeView("Collective Wisdom", f"✅ {slug} installed", dismissed=True)
+            return NativeView(
+                "Collective Wisdom",
+                render_operation_outcome("install", result, skill_name=slug), dismissed=True,
+            )
         finally:
             service.close()
 

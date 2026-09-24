@@ -552,8 +552,10 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
            if record.get("explanation") else []),
         notice=f"Would you like to {verb} this skill? View Details shows the files and checks. "
         "If there's something to review first, we'll show it before you continue. "
-        "Any setup included with Install is shown before you choose it. "
-        "If setup cannot finish, we'll tell you. Mute changes recommendations for all skills.",
+        + (("New setup is shown above; check setup status after updating. "
+            if updating else "Declared setup is shown above and runs with Install. ")
+           if setup_commands else "")
+        + "Mute changes recommendations for all skills.",
         actions=[
             NativeAction("View Details", "details"), NativeAction("Not Now", "defer"),
             NativeAction("Mute Skill Recommendations", "settings"),
@@ -943,12 +945,17 @@ class NativeReviewController:
         self.state.save(record)
         return copy.deepcopy(record)
 
-    def request_install(self, service: Any, invocation: NativeInvocation, reference: str, *, update_mode: str | None = None, explanation: str = "") -> dict[str, Any]:
-        plan = service.install_plan(reference, update_mode=update_mode)
-        if plan.get("operation") != "install":
+    def request_install(  # pylint: disable=too-many-arguments
+        self, service: Any, invocation: NativeInvocation, reference: str, *,
+        update_mode: str | None = None, explanation: str = "",
+        plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        review_plan: dict[str, Any] = (service.install_plan(reference, update_mode=update_mode)
+                                       if plan is None else plan)
+        if review_plan.get("operation") != "install":
             raise WisdomValidationError("native install review is invalid")
         return self._insert(service, invocation, "install", {
-            **plan, "installation_status": _local_installation_label(service, plan),
+            **review_plan, "installation_status": _local_installation_label(service, review_plan),
         }, explanation=explanation)
 
     def request_update(

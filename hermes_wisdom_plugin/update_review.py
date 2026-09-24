@@ -28,7 +28,7 @@ _UPDATE_MODES = frozenset({"MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"})
 _INCOMING_FIELDS = (
     "slug", "version", "content_hash", "manifest_hash", "takedown_generation",
     "update_mode", "manifest", "files", "compatibility", "server_checks",
-    "local_scan", "security_check", "hashes",
+    "local_scan", "security_check", "hashes", "setup_commands",
 )
 
 

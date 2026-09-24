@@ -1592,6 +1592,33 @@ def test_admitted_slash_install_directly_applies_and_sends_result(tmp_path, monk
     asyncio.run(scenario())
 
 
+def test_admitted_install_with_setup_sends_only_the_bound_review(tmp_path, monkeypatch):
+    """A queued setup review is the reply, not an extra success card."""
+    async def scenario():
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+        )
+        caller = _native_invocation()
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: caller)
+        monkeypatch.setattr(runtime.native, "install_direct", lambda *_args: {
+            "state": "queued", "review_id": "internal-receipt",
+        })
+
+        async def unexpected_send(*_args):
+            pytest.fail("do not send a second result before reviewed setup")
+
+        monkeypatch.setattr(runtime.native, "send_direct_result", unexpected_send)
+        try:
+            response = runtime.slash("install incident")
+            assert inspect.isawaitable(response)
+            assert await response == ""
+        finally:
+            runtime.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("raw, method", [("browse", "begin_catalog")])
 def test_admitted_native_failure_does_not_fall_through_to_unknown_command(
     tmp_path, monkeypatch, raw, method,

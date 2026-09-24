@@ -178,14 +178,53 @@ def test_explicit_install_applies_clean_skill_without_review(tmp_path, harness):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("unsafe", ["setup", "warning", "scanner", "compatibility", "missing_scan"])
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_explicit_install_with_declared_setup_shows_exact_review_before_effect(
+    tmp_path, harness,
+):
+    class SetupService(Service):
+        def __init__(self):
+            super().__init__()
+            self.plans = []
+
+        def install_plan(self, reference, **_kwargs):
+            self.plans.append(reference)
+            return {**_clean_install_plan(self, reference),
+                    "setup_commands": ["connect example account"]}
+
+        def install_apply(self, receipt, *, may_apply, **_kwargs):
+            assert may_apply()
+            self.applied.append(receipt)
+            return {"installed": True, "setup_required": True, "ready_to_use": None,
+                    "setup": {"state": "passed", "steps": 1}}
+
+    async def scenario():
+        service = SetupService()
+        ui = harness(tmp_path, service)
+        queued = await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert queued["state"] == "queued"
+        assert not service.applied
+        assert service.plans == ["incident"]
+        await ui.flush()
+        identity = queued["review_id"]
+        assert "connect example account" in ui.view(identity).to_text()
+        assert len(ui.posts) == 1
+        await ui.click(identity, "install")
+        assert service.applied == ["exact-receipt"]
+        assert "files installed; setup incomplete" in ui.view(identity).to_text()
+        await ui.click(identity, "install")
+        assert service.applied == ["exact-receipt"]
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("unsafe", ["warning", "scanner", "compatibility", "missing_scan"])
 def test_explicit_install_stops_on_nonclean_plan(tmp_path, unsafe):
     class UnsafeService(Service):
         def install_plan(self, reference, **_kwargs):
             plan = _clean_install_plan(self, reference)
-            if unsafe == "setup":
-                plan["setup_commands"] = ["needs setup"]
-            elif unsafe == "warning":
+            if unsafe == "warning":
                 plan["policy"]["scan_requires_confirmation"] = True
             elif unsafe == "scanner":
                 plan["local_scan"]["allowed"] = False
@@ -663,6 +702,59 @@ def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
         await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
         assert ui.view(identity).to_text() == "✅ incident installed"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_native_install_shows_setup_before_one_click(tmp_path, harness):
+    class SetupService(Service):
+        def install_plan(self, reference, **_kwargs):
+            return {**super().install_plan(reference),
+                    "setup_commands": ["connect example account"]}
+
+        def install_apply(self, receipt, *, may_apply, **_kwargs):
+            assert may_apply()
+            self.applied.append(receipt)
+            return {"installed": True, "setup_required": True, "ready_to_use": None,
+                    "setup": {"state": "passed", "steps": 1}}
+
+    async def scenario():
+        service = SetupService()
+        ui = harness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        assert "connect example account" in ui.view(identity).to_text()
+        assert "shown above and runs with Install" in ui.view(identity).to_text()
+        await ui.click(identity, "details")
+        assert not service.applied
+        await ui.click(identity, "back")
+        await ui.click(identity, "install")
+        assert service.applied == ["exact-receipt"]
+        assert "files installed; setup incomplete" in ui.view(identity).to_text()
+        assert not ui.view(identity).actions
+        await ui.click(identity, "install")
+        assert service.applied == ["exact-receipt"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_update_with_setup_does_not_promise_install_setup_execution(
+    tmp_path, harness, monkeypatch,
+):
+    async def scenario():
+        service = Service()
+        monkeypatch.setattr(service, "update_plan", lambda _skill: {
+            **service.install_plan("incident"), "operation": "update",
+            "setup_commands": ["verify new version"],
+        }, raising=False)
+        ui = harness(tmp_path, service)
+        identity = ui.runtime.begin_update(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        text = ui.view(identity).to_text()
+        assert "verify new version" in text
+        assert "runs with Install" not in text
+        assert "setup" in text.lower()
     asyncio.run(scenario())
 
 

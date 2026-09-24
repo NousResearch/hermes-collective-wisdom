@@ -128,6 +128,17 @@ def executor(tmp_path):
     return value, store, client, receipts, plan, target, owner
 
 
+def test_updated_version_with_declared_setup_is_not_reported_ready(executor):
+    value, _store, client, receipts, original, target, _owner = executor
+    plan = receipts.create({**original, "setup_commands": ["printf connected"]})
+    result = value.apply(plan["receipt"])
+    assert result["updated"] is True
+    assert result["setup_required"] is True
+    assert result["ready_to_use"] is None
+    assert target.joinpath("SKILL.md").read_bytes() == V2
+    assert len(client.record_calls) == 1
+
+
 def test_manual_success_commits_exact_bytes_and_complete_result(executor):
     value, store, client, receipts, plan, target, _owner = executor
 

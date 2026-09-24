@@ -384,6 +384,20 @@ test('partial setup result names the installed skill without announcing full suc
   await page.cleanup()
 })
 
+test('passed setup command with unknown readiness is not a Desktop install success', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', name: 'Friendly Helper', latest_version: 2, installation_status: { state: 'not_installed', text: 'Not installed' } }] }
+    if (path === '/install/review') return installReview({ slug: 'Friendly Helper' })
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', setup_required: true, ready_to_use: null, setup: { state: 'passed', steps: 1 } }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Install'))
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.match(page.container.textContent, /Friendly Helper.*files installed; setup incomplete/i)
+  await page.cleanup()
+})
+
 test('saved private draft resumes by name in a fresh Desktop view without preparing again', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/candidates?')) return { candidates: [] }
@@ -592,6 +606,27 @@ for (const local of [false, true]) for (const updated of [true, false]) test(`de
     assert.match(mounted.container.textContent, /pending-update/)
     assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   }
+  await mounted.cleanup()
+})
+
+test('updated files with new setup are not a Desktop readiness success', async () => {
+  const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['verify new version'] })
+    if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true, ready_to_use: null }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
+  await click(button(mounted, 'Update'))
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.match(mounted.container.textContent, /one.*files updated; setup incomplete/i)
+  assert.match(mounted.container.textContent, /This version needs setup/i)
+  assert.doesNotMatch(mounted.container.textContent, /Setup ran/i)
   await mounted.cleanup()
 })
 

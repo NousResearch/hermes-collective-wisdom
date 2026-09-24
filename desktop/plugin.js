@@ -445,10 +445,17 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
   ] })
 }
 
+function setupIncompleteResult(kind, result) {
+  const key = { install: 'installed', update: 'updated' }[kind.toLowerCase()]
+  return !!key && result?.[key] === true && result.pending !== true && result.rejected !== true && !result.error &&
+    [undefined, null, 'completed', 'done', 'inactive'].includes(result.state) &&
+    ((result.setup && result.setup.state !== 'passed') || (result.setup_required === true && result.ready_to_use !== true))
+}
+
 function operationSucceeded(kind, result, name) {
   const key = { install: 'installed', update: 'updated', uninstall: 'uninstalled' }[kind]
   return typeof name === 'string' && name.trim().length > 0 && name !== 'Name unavailable' && result?.[key] === true &&
-    (kind !== 'install' || !result.setup || result.setup.state === 'passed') &&
+    !setupIncompleteResult(kind, result) &&
     result.pending !== true && result.rejected !== true && !result.error &&
     [undefined, null, 'completed', 'done', 'inactive'].includes(result.state)
 }
@@ -456,12 +463,17 @@ function operationSucceeded(kind, result, name) {
 function OperationOutcome({ kind, result }) {
   if (!result) return null
   const subject = label(result)
-  const setupIncomplete = result.installed === true && result.setup && result.setup.state !== 'passed'
+  const setupIncomplete = setupIncompleteResult(kind, result)
+  const setupStopped = result.setup?.state && result.setup.state !== 'passed'
+  let setupDetail = 'Setup is required; readiness has not been verified. Check setup status before use.'
+  if (kind === 'Update') setupDetail = 'This version needs setup; readiness has not been verified. Check setup status before use.'
+  if (result.setup?.state === 'passed') setupDetail = 'Setup ran, but readiness has not been verified. Check setup status before use.'
+  if (setupStopped) setupDetail = `Setup ${text(result.setup.state)}${result.setup.step ? ` at step ${result.setup.step}` : ''}. Check its status before trying again.`
   const shareUnlinked = kind === 'Publication' && result.state === 'done' &&
     result.publication_state === 'published' && result.managed_enrollment?.state === 'not_linked'
   return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: setupIncomplete ? `${subject}: files installed; setup needs attention` : `${kind} requires attention for ${subject}` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupIncomplete ? `Setup ${text(result.setup.state || 'unknown')}${result.setup.step ? ` at step ${result.setup.step}` : ''}. Check the details before trying again.` : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    jsx('h3', { className: 'text-xs font-semibold', children: setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
     jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
     jsxs('details', { children: [
       jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),

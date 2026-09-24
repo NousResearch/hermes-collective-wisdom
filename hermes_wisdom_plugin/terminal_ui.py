@@ -450,20 +450,24 @@ def render_action_review(kind: str, value: object) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _partial_setup_outcome(data: dict, name: str) -> str | None:
+def _partial_setup_outcome(data: dict, name: str, kind: str) -> str | None:
     """Separate the file-write result from setup's independently tracked state."""
     setup = data.get("setup")
-    if data.get("installed") is not True or not isinstance(setup, dict):
+    if data.get("installed" if kind == "install" else "updated") is not True:
         return None
-    if setup.get("state") == "passed":
+    verb = "installed" if kind == "install" else "updated"
+    incomplete = f"{name or 'This skill'}: files {verb}; setup incomplete."
+    if not isinstance(setup, dict) or setup.get("state") == "passed":
+        if data.get("setup_required") is True and data.get("ready_to_use") is not True:
+            return incomplete + " Check setup status before use."
         return None
     step = setup.get("step")
     position = f" at step {step}" if isinstance(step, int) and step > 0 else ""
     details = str(setup.get("detail") or "").splitlines()
     reason = details[0][:200] if details else ""
     detail = f": {reason}" if reason else ""
-    return (f"{name or 'This skill'}: files installed; setup "
-            f"{text(setup.get('state') or 'unknown')}{position}{detail}")
+    return (f"{incomplete} Setup {text(setup.get('state') or 'unknown')}"
+            f"{position}{detail}")
 
 
 def render_operation_outcome(
@@ -485,7 +489,8 @@ def render_operation_outcome(
         and not data.get("error")
         and data.get("state") in (None, "completed", "done", "inactive")
     )
-    partial_setup = _partial_setup_outcome(data, name) if kind == "install" else None
+    partial_setup = (_partial_setup_outcome(data, name, kind)
+                     if kind in {"install", "update"} and complete else None)
     if partial_setup is not None:
         return partial_setup
     if key and name and complete and data.get(key) is True:
