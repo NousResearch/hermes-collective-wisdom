@@ -251,8 +251,6 @@ def _catalog_rows(data: Any) -> list[dict[str, Any]]:
         return []
     if isinstance(data.get("skills"), list):
         return [row for row in data["skills"] if isinstance(row, dict)]
-    if isinstance(data.get("versions"), list):
-        return [row for row in data["versions"] if isinstance(row, dict)]
     latest = data.get("latest_version_detail")
     skill = data.get("skill")
     if isinstance(skill, dict):
@@ -263,6 +261,8 @@ def _catalog_rows(data: Any) -> list[dict[str, Any]]:
         combined["installation_status"] = data.get("installation_status")
         combined["portal_url"] = data.get("portal_url")
         return [combined]
+    if isinstance(data.get("versions"), list):
+        return [row for row in data["versions"] if isinstance(row, dict)]
     return [data]
 
 
@@ -279,7 +279,7 @@ def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
         if version is not None:
             facts.append(f"Version: v{_safe(version)}")
         if detail:
-            facts.append(_safe(detail))
+            facts.append(_safe(" ".join(str(detail).split())))
         facts.append(_installed_label(row))
         for label, key in (("Status", "state"), ("Author", "created_by_display_name")):
             if row.get(key):

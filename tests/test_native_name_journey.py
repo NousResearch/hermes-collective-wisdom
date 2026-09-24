@@ -90,6 +90,69 @@ def test_catalog_name_missing_is_honest_and_status_visible():
         assert "opaque-id" not in text
 
 
+def test_catalog_show_uses_skill_envelope_not_unnamed_versions(tmp_path):
+    class Service:
+        def native_owner(self):
+            return direct_owner()
+
+        def show(self, _reference):
+            return {
+                "skill": {"id": "opaque-id", "slug": "team-helper", "state": "active"},
+                "versions": [{"version": 1, "author_description": "Published helper"}],
+                "latest_version_detail": {"version": {
+                    "version": 1, "author_description": "Published helper",
+                }},
+                "installation_status": {"text": "Installed v1"},
+            }
+
+    caller = NativeInvocation(
+        platform="slack", profile="default", chat_type="private", chat_id="C1",
+        actor_id="user", actor_name="", thread_id="", scope_id="",
+        message_id="command", session_key="private:C1", adapter=object(),
+    )
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    record = controller.request_catalog(Service(), caller, "show", "team-helper")
+    text = controller.view(record).to_text()
+    assert "Show: team-helper" in text
+    assert "Published helper" in text
+    assert "Installed v1" in text
+    assert "Name unavailable" not in text
+    assert "Installation status unavailable" not in text
+    assert "opaque-id" not in text
+
+
+def test_catalog_versions_preserves_multiline_description(tmp_path):
+    class Service:
+        def native_owner(self):
+            return direct_owner()
+
+        def versions(self, _reference):
+            return {"versions": [{
+                "version": 1,
+                "author_description": "Disposable team helper.\n\nUsage notes for its publisher.",
+                "installation_status": {"text": "Installed v1"},
+            }]}
+
+        def show(self, _reference):
+            return {"skill": {"id": "opaque-id", "slug": "team-helper"}}
+
+    caller = NativeInvocation(
+        platform="slack", profile="default", chat_type="private", chat_id="C1",
+        actor_id="user", actor_name="", thread_id="", scope_id="",
+        message_id="command", session_key="private:C1", adapter=object(),
+    )
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    record = controller.request_catalog(Service(), caller, "versions", "team-helper")
+    _, surfaces = _surfaces(record)
+    for text in surfaces:
+        assert "Versions: team-helper" in text
+        assert "Disposable team helper." in text
+        assert "Usage notes for its publisher." in text
+        assert "Installed v1" in text
+        assert "Unknown" not in text
+        assert "opaque-id" not in text
+
+
 def test_update_status_and_versions_use_read_only_service_facts(tmp_path):
     class Service:
         def native_owner(self):
