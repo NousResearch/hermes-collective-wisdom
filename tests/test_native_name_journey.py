@@ -24,6 +24,16 @@ def _surfaces(record):
                   plain_html(view), rich_html(view, "card-1"))
 
 
+def test_telegram_postponed_result_uses_normal_message_text():
+    view = project_view({
+        "state": "cancelled", "effect_action": "defer",
+        "plan": {"slug": "incident-triage"},
+        "result": {"preference_sync": "confirmed"},
+    })
+
+    assert rich_html(view, "card-1") == "<p>⏸ incident-triage postponed</p>"
+
+
 def test_install_and_update_cards_name_and_status_without_opaque_fields():
     for operation in ("install", "update"):
         view, surfaces = _surfaces({

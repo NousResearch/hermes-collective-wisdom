@@ -102,7 +102,8 @@ def _rich_row(actions: list[Any], record_id: str) -> str:
 def rich_html(view: NativeView, record_id: str) -> str:
     """Render a bounded Bot API rich-message card with embedded controls."""
 
-    parts = [f"<h3>{_escaped(view.title, 1_000)}</h3>"]
+    heading = f"<p>{_escaped(view.title, 1_000)}</p>"
+    parts = [heading]
     navigation = _rich_row(view.navigation_actions, record_id)
     if navigation:
         parts.append(navigation)
@@ -131,7 +132,6 @@ def rich_html(view: NativeView, record_id: str) -> str:
         controls.extend(_rich_row(item.actions, record_id) for item in view.items[:5])
         controls.append(actions)
         controls_html = "".join(control for control in controls if control)
-        heading = f"<h3>{_escaped(view.title, 1_000)}</h3>"
         available = RICH_TEXT_LIMIT - len(heading) - len(controls_html) - len("<p></p>")
         if available < 1:
             raise RichProjectionUnsupported("Telegram rich controls exceed the API limit")
