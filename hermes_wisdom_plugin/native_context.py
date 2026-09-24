@@ -105,10 +105,13 @@ class InvocationCapture:
     def _host_route_key(host_context: Any) -> tuple[str, ...] | None:
         if not isinstance(host_context, dict):
             return None
-        return tuple(str(host_context.get(name) or "") for name in (
-            "platform", "profile", "chat_id", "user_id", "thread_id", "scope_id",
-            "message_id", "session_key",
-        ))
+        return tuple(
+            str(host_context.get(name) or ("default" if name == "profile" else ""))
+            for name in (
+                "platform", "profile", "chat_id", "user_id", "thread_id", "scope_id",
+                "message_id", "session_key",
+            )
+        )
 
     def _prune_lifecycle_locked(self, now: float) -> None:
         while self._pending_lifecycle:
@@ -161,7 +164,9 @@ class InvocationCapture:
             return None
         invocation = NativeInvocation(
             platform=platform,
-            profile=str(getattr(source, "profile", "") or ""),
+            # A dedicated default-profile adapter leaves source.profile unset.
+            # Its host-owned adapter binding is the effective profile.
+            profile=str(getattr(source, "profile", "") or adapter_profile(adapter)),
             chat_type=str(getattr(source, "chat_type", "") or ""),
             chat_id=str(getattr(source, "chat_id", "") or ""),
             actor_id=str(getattr(source, "user_id", "") or ""),
@@ -191,7 +196,7 @@ class InvocationCapture:
         """Consume the matching admitted slash command once."""
         return self._consume(
             profile_name=profile_name, expected_command="wisdom",
-            expected_args=str(raw_args or "").strip(),
+            expected_args=str(raw_args or "").strip(), allow_sync_worker=True,
         )
 
     def consume_lifecycle(  # pylint: disable=too-many-arguments
@@ -274,8 +279,12 @@ class InvocationCapture:
         if any(str(getattr(source, attr, "") or "") != value for attr, value in (
             ("chat_id", invocation.chat_id), ("user_id", invocation.actor_id),
             ("thread_id", invocation.thread_id), ("scope_id", invocation.scope_id),
-            ("profile", invocation.profile),
         )):
+            raise PermissionError("Native Wisdom invocation identity changed.")
+        source_profile = str(
+            getattr(source, "profile", "") or adapter_profile(invocation.adapter)
+        )
+        if source_profile != invocation.profile:
             raise PermissionError("Native Wisdom invocation identity changed.")
         authorize = getattr(captured.gateway, "_is_user_authorized_for_source", None)
         try:

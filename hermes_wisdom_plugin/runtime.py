@@ -7,6 +7,7 @@ import asyncio
 import base64
 import contextvars
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -32,6 +33,21 @@ def _require_current(may_apply: Callable[[], bool] | None) -> None:
 SLASH_BUDGET_SECONDS = 25.0
 NATIVE_INSPECTION_CHARS = 500
 _UNAVAILABLE = "Collective Wisdom is unavailable. Complete setup in your terminal."
+_REVIEW_UNAVAILABLE = "Couldn't open Collective Wisdom right now. Please try again."
+_INSTALL_UNCERTAIN = (
+    "Couldn't confirm the installation. Check installed skills before trying again."
+)
+logger = logging.getLogger(__name__)
+
+def _native_review_reply(result: Any) -> Any:
+    """The original native card is the reply; never echo its internal review ID."""
+    if isinstance(result, dict):
+        if result.get("state") == "queued":
+            return ""
+        if result.get("state") == "unavailable":
+            return _REVIEW_UNAVAILABLE
+    return result
+
 _BOOTSTRAP = """
 import importlib.util, json, sys
 from pathlib import Path
@@ -1501,8 +1517,36 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         finally:
             self._close_service(service)
 
-    def slash(self, raw_args: str):
-        """Route exact effects to native review after real host admission."""
+    def _slash_native_install(self, invocation, args):
+        """Apply an admitted install without turning the command into another review."""
+        if len(args) != 1:
+            return "Usage: /wisdom install <skill-name>"
+        context = contextvars.copy_context()
+
+        async def apply_install():
+            try:
+                task = context.run(
+                    asyncio.create_task,
+                    asyncio.to_thread(self.native.install_direct, invocation, args[0]),
+                )
+                view = await task
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning("Collective Wisdom install failed (%s)", type(exc).__name__)
+                return _INSTALL_UNCERTAIN
+            try:
+                await self.native.send_direct_result(invocation, view)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Slack may have accepted the card; never send a second receipt.
+                logger.warning(
+                    "Collective Wisdom install card uncertain (%s)", type(exc).__name__
+                )
+                return _INSTALL_UNCERTAIN
+            return ""
+
+        return apply_install()
+
+    def slash(self, raw_args: str):  # pylint: disable=too-many-return-statements
+        """Route admitted native commands and read-only requests."""
         invocation = self.native.consume_request(raw_args)
         from .commands import parse_slash  # pylint: disable=import-outside-toplevel
         parsed = parse_slash(raw_args)
@@ -1510,21 +1554,28 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             return "Invalid Wisdom command. Use /wisdom help."
         command, args = parsed
         if invocation is not None:
-            target = " ".join(args)
-            if command == "suggest" and len(args) != 1:
-                return "Usage: /wisdom suggest <local-skill>"
-            effect_review = {
-                "install": self.native.begin_install_modes,
-                "update": self.native.begin_update,
-                "publish": self.native.begin_publication,
-                "suggest": self.native.begin_suggest,
-            }.get(command)
-            if effect_review is not None:
-                return effect_review(invocation, target)
-            if command in {"browse", "show", "versions"}:
-                return self.native.begin_catalog(invocation, command, target)
-            if command == "settings":
-                return self.native.begin_settings(invocation)
+            if command == "install":
+                return self._slash_native_install(invocation, args)
+            try:
+                target = " ".join(args)
+                if command == "suggest" and len(args) != 1:
+                    return "Usage: /wisdom suggest <local-skill>"
+                effect_review = {
+                    "update": self.native.begin_update,
+                    "publish": self.native.begin_publication,
+                    "suggest": self.native.begin_suggest,
+                }.get(command)
+                if effect_review is not None:
+                    return _native_review_reply(effect_review(invocation, target))
+                if command in {"browse", "show", "versions"}:
+                    return _native_review_reply(
+                        self.native.begin_catalog(invocation, command, target)
+                    )
+                if command == "settings":
+                    return _native_review_reply(self.native.begin_settings(invocation))
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning("Collective Wisdom review failed (%s)", type(exc).__name__)
+                return _REVIEW_UNAVAILABLE
         # Capture the calling profile before the host moves an awaitable to a thread.
         context = contextvars.copy_context()
 

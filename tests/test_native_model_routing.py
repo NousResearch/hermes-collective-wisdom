@@ -90,6 +90,9 @@ class SlackApp:
             return handler
         return register
 
+    def command(self, _pattern):
+        return lambda handler: handler
+
     async def chat_postMessage(self, **payload):
         self.posts.append(payload)
         return {"ok": True, "channel": payload["channel"], "ts": "card-1"}

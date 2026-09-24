@@ -95,6 +95,7 @@ def test_preparation_error_is_visible_retryable_and_not_packaging(
         await ui.click(identity, "share")
         assert ui.record(identity)["operation"] == "publish"
         assert not ui.record(identity).get("failure")
+        await ui.click(identity, "back")
         await ui.click(identity, "cancel")
         assert ui.record(identity)["state"] == "cancelled"
     asyncio.run(scenario())

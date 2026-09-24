@@ -1556,10 +1556,119 @@ def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path,
     )
 
     try:
-        assert runtime.slash("suggest local-skill") == {"state": "queued"}
+        assert runtime.slash("suggest local-skill") == ""
         assert seen == [(invocation, "local-skill")]
     finally:
         runtime.close()
+
+
+def test_admitted_slash_install_directly_applies_and_sends_result(tmp_path, monkeypatch):
+    async def scenario():
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+        )
+        caller = _native_invocation()
+        calls = []
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: caller)
+        monkeypatch.setattr(
+            runtime.native, "install_direct",
+            lambda invocation, name: calls.append((invocation, name))
+            or NativeView("Collective Wisdom", "✅ incident installed", dismissed=True),
+        )
+
+        async def send(invocation, view):
+            calls.append((invocation, view.summary))
+
+        monkeypatch.setattr(runtime.native, "send_direct_result", send)
+        try:
+            response = runtime.slash("install incident")
+            assert inspect.isawaitable(response)
+            assert await response == ""
+            assert calls == [(caller, "incident"), (caller, "✅ incident installed")]
+        finally:
+            runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raw, method", [("browse", "begin_catalog")])
+def test_admitted_native_failure_does_not_fall_through_to_unknown_command(
+    tmp_path, monkeypatch, raw, method,
+):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+        spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+    )
+    monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: _native_invocation())
+
+    def unavailable(*_args):
+        raise RuntimeError("internal review failure")
+
+    try:
+        monkeypatch.setattr(runtime.native, method, unavailable)
+        assert runtime.slash(raw) == "Couldn't open Collective Wisdom right now. Please try again."
+        monkeypatch.setattr(runtime.native, method, lambda *_args: {"state": "unavailable"})
+        assert runtime.slash(raw) == "Couldn't open Collective Wisdom right now. Please try again."
+    finally:
+        runtime.close()
+
+
+def test_direct_install_failure_reports_uncertain_outcome_not_unknown_command(
+    tmp_path, monkeypatch,
+):
+    async def scenario():
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+        )
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: _native_invocation())
+
+        def fail(*_args):
+            raise RuntimeError("internal error")
+
+        monkeypatch.setattr(runtime.native, "install_direct", fail)
+        try:
+            response = runtime.slash("install incident")
+            assert inspect.isawaitable(response)
+            assert await response == (
+                "Couldn't confirm the installation. Check installed skills before trying again."
+            )
+        finally:
+            runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_direct_install_card_failure_reports_uncertain_outcome(tmp_path, monkeypatch):
+    async def scenario():
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+        )
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: _native_invocation())
+        calls = []
+
+        def install(*_args):
+            calls.append("install")
+            return NativeView("Collective Wisdom", "✅ incident installed", dismissed=True)
+
+        async def failed_send(*_args):
+            raise RuntimeError("could have reached Slack")
+
+        monkeypatch.setattr(runtime.native, "install_direct", install)
+        monkeypatch.setattr(runtime.native, "send_direct_result", failed_send)
+        try:
+            response = runtime.slash("install incident")
+            assert inspect.isawaitable(response)
+            assert await response == (
+                "Couldn't confirm the installation. Check installed skills before trying again."
+            )
+            assert calls == ["install"]
+        finally:
+            runtime.close()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("raw", ["suggest", "suggest one two"])
@@ -2067,6 +2176,9 @@ def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmati
                     return handler
                 return register
 
+            def command(self, _pattern):
+                return lambda handler: handler
+
         def spawn(coroutine, **_kwargs):
             pending.append(coroutine)
 
@@ -2100,9 +2212,10 @@ def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmati
 
         try:
             result = runtime.slash("suggest local-skill")
-            assert result["state"] == "queued"
+            assert result == ""
+            review_id = next(iter(runtime.native.reviews.state._load()["records"]))  # pylint: disable=protected-access
             await pending.pop(0)
-            assert runtime.native.reviews.load(result["review_id"])["message_id"] == "card-1"
+            assert runtime.native.reviews.load(review_id)["message_id"] == "card-1"
             assert "Nothing has been uploaded" in posts[0]["text"]
             assert not any(call[0].startswith("publication_") for call in service.calls)
 
@@ -2115,13 +2228,13 @@ def test_slack_actual_dispatch_and_callbacks_require_warning_ack_then_confirmati
 
             await click("Share this exact reviewed package")
             assert service.calls.count(("publication_submit", "wpub_review")) == 1
-            assert runtime.native.reviews.load(result["review_id"])["state"] == "completed"
+            assert runtime.native.reviews.load(review_id)["state"] == "completed"
             before = len(edits)
             await app.handler(
                 lambda: asyncio.sleep(0),
                 {"user": {"id": "native-user"}, "channel": {"id": "C1"},
                  "team": {"id": "W1"}, "message": {"ts": "card-1"}},
-                {"value": f"wi:agent:suggest.confirm:{result['review_id']}"},
+                {"value": f"wi:agent:suggest.confirm:{review_id}"},
             )
             assert len(edits) == before
             assert service.calls.count(("publication_submit", "wpub_review")) == 1
@@ -2191,14 +2304,15 @@ def test_telegram_actual_dispatch_and_callback_edits_bound_card_without_upload(
 
         try:
             result = runtime.slash("suggest local-skill")
+            assert result == ""
+            review_id = next(iter(runtime.native.reviews.state._load()["records"]))  # pylint: disable=protected-access
             await pending.pop(0)
-            assert result["state"] == "queued"
             assert requests[0][0] == "sendRichMessage"
             assert "Continue to sharing review" in requests[0][1]["rich_message"]["html"]
-            assert runtime.native.reviews.load(result["review_id"])["message_id"] == "77"
+            assert runtime.native.reviews.load(review_id)["message_id"] == "77"
 
             query = SimpleNamespace(
-                data=callback_value(result["review_id"], "suggest.share"),
+                data=callback_value(review_id, "suggest.share"),
                 from_user=SimpleNamespace(id="native-user", username="Shannon", first_name=""),
                 message=message, answer=answer,
                 edit_message_text=lambda **_kwargs: pytest.fail("rich edit should be used"),

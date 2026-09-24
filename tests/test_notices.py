@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from installed_test_support import JsonState
+from hermes_wisdom_plugin.client import AgentLedPolicyResponse
 from hermes_wisdom_plugin.direct_services import DirectState
 from hermes_wisdom_plugin.notices import EndTurnNotices, suppression_key
 from hermes_wisdom_plugin.runtime import InvocationService
@@ -76,6 +77,45 @@ def event(identity="event-1", version=2):
         "skill_name": "Useful skill",
         "version": version,
     }
+
+
+def test_not_now_deferral_suppresses_the_feed_version_not_new_versions(tmp_path: Path):
+    owner = {"account_id": "account-1", "organization_id": "org-1"}
+    stored = {}
+
+    def suppress(key):
+        stored[key] = "2027-01-01T00:00:00+00:00"
+        return SimpleNamespace(org_id="org-1", key=key, suppress_until=stored[key])
+
+    client = SimpleNamespace(
+        agent_led_policy=lambda: AgentLedPolicyResponse.model_construct(
+            org_id="org-1", not_now_suppression_days=30,
+        ),
+        suppress_recommendation=suppress,
+        recommendation_mute=lambda: SimpleNamespace(org_id="org-1", muted=False),
+        recommendation_suppressions=lambda keys: [
+            SimpleNamespace(key=key, suppress_until=stored[key])
+            for key in keys if key in stored
+        ],
+    )
+    real = object.__new__(InvocationService)
+    real.__dict__["client"] = client
+    real.native_owner = lambda: dict(owner)
+    real._installation_owner = lambda: dict(owner)
+    plan = {"operation": "install", "owner": owner, "skill_id": "skill-1", "version": 2}
+    prepared = real.prepare_review_deferral(plan)
+    assert real.defer_review(prepared, may_apply=lambda: True)["preference_sync"] == "confirmed"
+
+    class ReofferService(Service):
+        def notice_preferences(self, references):
+            return real.notice_preferences(references)
+
+    service = ReofferService([Page([event("repeat", 2), event("repeat-again", 2),
+                                   event("updated", 3)], "next", False)])
+    rendered = []
+    result = notices(tmp_path, service, [1000]).run(renderer=rendered.extend)
+    assert result["offered"] == 1
+    assert [item["event_id"] for item in rendered] == ["updated"]
 
 
 def test_missing_renderer_is_successful_noop_before_network_or_state(tmp_path: Path):

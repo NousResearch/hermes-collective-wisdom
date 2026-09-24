@@ -44,7 +44,7 @@ class Gateway:
 
 
 def event(*, args="update skill-1", command="wisdom", internal=False, user="U1",
-          profile="default", message="M1"):
+          profile: str | None = "default", message="M1"):
     source = SimpleNamespace(
         platform=SimpleNamespace(value="slack"), profile=profile, chat_type="dm",
         chat_id="D1", user_id=user, user_name="shannon", thread_id="T1",
@@ -78,6 +78,56 @@ def test_capture_is_one_shot_task_local_and_reauthorizes():
         clock[0] = 13.0
         with pytest.raises(PermissionError, match="expired"):
             captures.consume_command("update skill-1", profile_name="default")
+
+    asyncio.run(scenario())
+
+
+def test_admitted_slack_slash_crosses_into_host_synchronous_command_worker():
+    async def scenario():
+        captures = InvocationCapture()
+        captures.hook(event=event(args="install incident"), gateway=Gateway())
+        invocation = await asyncio.to_thread(
+            captures.consume_command, "install incident", profile_name="default"
+        )
+        assert invocation.actor_id == "U1"
+        assert invocation.session_key == "slack:W1:D1:U1"
+        with pytest.raises(PermissionError, match="current admitted"):
+            await asyncio.to_thread(
+                captures.consume_command, "install incident", profile_name="default"
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("owner_profile, expected", [(None, "default"), ("codex", "codex")])
+def test_host_source_without_profile_retains_adapter_owner(owner_profile, expected):
+    async def scenario():
+        captures = InvocationCapture()
+        adapter = SimpleNamespace(_owner_profile=owner_profile)
+        captures.hook(event=event(profile=None, args="install incident"),
+                      gateway=Gateway(adapter=adapter))
+        invocation = await asyncio.to_thread(
+            captures.consume_command, "install incident", profile_name=expected
+        )
+        assert invocation.profile == expected
+        assert invocation.actor_id == "U1"
+
+    asyncio.run(scenario())
+
+
+def test_default_profile_cached_turn_matches_host_unset_profile():
+    async def scenario():
+        captures = InvocationCapture()
+        adapter = SimpleNamespace(_owner_profile=None)
+        captures.hook(event=event(profile=None, command="", args=""),
+                      gateway=Gateway(adapter=adapter))
+        context = {**HOST_CONTEXT, "profile": None}
+        invocation = await asyncio.to_thread(
+            contextvars.Context().run, captures.consume_lifecycle,
+            **LIFECYCLE, host_context=context,
+        )
+        assert invocation is not None
+        assert invocation.profile == "default"
 
     asyncio.run(scenario())
 

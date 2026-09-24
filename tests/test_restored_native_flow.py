@@ -1,11 +1,14 @@
 """Restored journeys through real registered native callbacks; no live services."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
 import asyncio
+import sys
 from datetime import datetime
 from html import unescape
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from installed_test_support import JsonState
 from native_test_support import owner
 from restoration_support import (
     SlackHarness, TelegramHarness, assert_cancelled_review_is_inert,
@@ -14,6 +17,72 @@ from restoration_support import (
 from test_client import Response, Session, client as recording_client
 from hermes_wisdom_plugin.errors import SharePackagingError
 from hermes_wisdom_plugin.runtime import InvocationService
+
+
+def test_registered_slack_wisdom_slash_uses_host_admission(tmp_path, monkeypatch):
+    """A menu-registered /wisdom must reach the admitted host command path."""
+    async def scenario():
+        ui = SlackHarness(tmp_path, Service())
+        assert ui.command_handler is not None
+        assert ui.command_pattern == "/wisdom"
+        events, acknowledgements = [], []
+
+        async def handle_message(event):
+            events.append(event)
+
+        ui.adapter.build_source = SimpleNamespace
+        ui.adapter.handle_message = handle_message
+        event_module = ModuleType("gateway.platforms.event")
+        event_module.__dict__.update(
+            MessageEvent=SimpleNamespace, MessageType=SimpleNamespace(COMMAND="command")
+        )
+        for name in ("gateway", "gateway.platforms"):
+            monkeypatch.setitem(sys.modules, name, ModuleType(name))
+        monkeypatch.setitem(sys.modules, "gateway.platforms.event", event_module)
+
+        async def ack(**details):
+            acknowledgements.append(details)
+
+        command = {
+            "command": "/wisdom", "text": "install incident",
+            "user_id": "U1", "channel_id": "D1", "team_id": "W1",
+        }
+        await ui.command_handler(ack, command)
+        assert len(acknowledgements) == 1
+        assert len(events) == 1
+        assert events[0].text == "/wisdom install incident"
+        assert events[0].message_type == "command"
+        assert events[0].source.chat_id == "D1"
+        assert events[0].source.user_id == "U1"
+        assert events[0].source.scope_id == "W1"
+
+        await ui.command_handler(ack, {**command, "channel_id": "C1"})
+        assert len(events) == 1
+        ui.runtime.close()
+        await ui.command_handler(ack, command)
+        assert len(events) == 1
+
+    asyncio.run(scenario())
+
+
+def test_slack_review_started_by_host_command_worker_posts_one_card(tmp_path):
+    async def scenario():
+        ui = SlackHarness(tmp_path, Service())
+
+        def host_spawn(coroutine, **_kwargs):
+            assert asyncio.get_running_loop().is_running()
+            ui.tasks.append(coroutine)
+
+        ui.runtime.spawn_task = host_spawn
+        result = await asyncio.to_thread(ui.runtime.begin, ui.caller, "incident")
+        assert result["state"] == "queued"
+        await asyncio.sleep(0)
+        await ui.flush()
+        assert len(ui.posts) == 1
+        assert [action.label for action in ui.view(result["review_id"]).actions][-1] == "Install"
+        ui.runtime.close()
+
+    asyncio.run(scenario())
 
 
 class Service:
@@ -77,21 +146,166 @@ class Service:
         return {"updated": True}
 
 
-def test_registered_dismissal_preserves_body_and_revokes_consent(tmp_path):
+def _clean_install_plan(service, reference):
+    return {
+        **Service.install_plan(service, reference),
+        "setup_commands": [], "compatibility": {"outcome": "compatible"},
+        "local_scan": {"allowed": True, "available": True},
+        "policy": {"scan_requires_confirmation": False,
+                   "compatibility_requires_confirmation": False},
+    }
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_explicit_install_applies_clean_skill_without_review(tmp_path, harness):
+    class CleanService(Service):
+        def install_plan(self, reference, **_kwargs):
+            return _clean_install_plan(self, reference)
+
     async def scenario():
-        service = Service()
-        ui = SlackHarness(tmp_path, service)
-        response = ui.runtime.begin(ui.caller, "incident")
-        await ui.flush()
-        identity = response["review_id"]
-        original = ui.posts[-1]["text"]
-        await ui.click(identity, "cancel")
-        assert ui.edits[-1]["text"] == original
-        assert not any(block["type"] == "actions" for block in ui.edits[-1]["blocks"])
+        service = CleanService()
+        ui = harness(tmp_path, service)
+        initial = JsonState(tmp_path).get("wisdom-reviews")
+        view = await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert service.applied == ["exact-receipt"]
+        assert view.summary == "✅ incident installed"
+        assert JsonState(tmp_path).get("wisdom-reviews") == initial
+        await ui.runtime.send_direct_result(ui.caller, view)
         assert len(ui.posts) == 1
-        await ui.click(identity, "confirm")
+        assert "incident installed" in ui.posts[0]["text"]
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("unsafe", ["setup", "warning", "scanner", "compatibility", "missing_scan"])
+def test_explicit_install_stops_on_nonclean_plan(tmp_path, unsafe):
+    class UnsafeService(Service):
+        def install_plan(self, reference, **_kwargs):
+            plan = _clean_install_plan(self, reference)
+            if unsafe == "setup":
+                plan["setup_commands"] = ["needs setup"]
+            elif unsafe == "warning":
+                plan["policy"]["scan_requires_confirmation"] = True
+            elif unsafe == "scanner":
+                plan["local_scan"]["allowed"] = False
+            elif unsafe == "compatibility":
+                plan["compatibility"]["outcome"] = "review"
+            else:
+                del plan["local_scan"]
+            return plan
+
+    async def scenario():
+        service = UnsafeService()
+        ui = SlackHarness(tmp_path, service)
+        view = await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert view.summary == "⚠️ incident wasn't installed"
+        assert "No skill was installed" in view.notice
         assert not service.applied
+        assert not view.actions
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_install_rechecks_authority_before_apply(tmp_path):
+    class RevokedService(Service):
+        def __init__(self):
+            super().__init__()
+            self.revoke = lambda: None
+
+        def install_plan(self, reference, **_kwargs):
+            self.revoke()
+            return _clean_install_plan(self, reference)
+
+    async def scenario():
+        service = RevokedService()
+        ui = SlackHarness(tmp_path, service)
+        def revoke():
+            ui.adapter._is_interactive_user_authorized = (  # pylint: disable=protected-access
+                lambda *_args, **_kw: False
+            )
+
+        service.revoke = revoke
+        with pytest.raises(PermissionError):
+            await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        assert not service.applied
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_not_now_defers_exact_version_once_and_collapses_original_card(tmp_path, harness):
+    class DeferringService(Service):
+        def __init__(self):
+            super().__init__()
+            self.deferrals = []
+
+        def prepare_review_deferral(self, plan):
+            assert (plan["skill_id"], plan["version"]) == ("skill-1", 2)
+            return {"reference": {"kind": "skill", "skill_id": "skill-1", "version": 2},
+                    "not_now_suppression_days": 30}
+
+        def defer_review(self, deferral, *, may_apply):
+            assert may_apply() is True
+            self.deferrals.append(deferral["reference"])
+            return {"deferred": True, "preference_sync": "confirmed"}
+
+    async def scenario():
+        service = DeferringService()
+        ui = harness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        original = ui.posts[-1].get("text")
+        assert next(action.action for action in ui.view(identity).actions
+                    if action.label == "Not Now") == "defer"
+        await ui.click(identity, "cancel")  # A hidden old callback must not skip suppression.
+        assert ui.record(identity)["state"] == "pending"
+        await ui.click(identity, "defer")
         assert ui.record(identity)["state"] == "cancelled"
+        assert service.deferrals == [{"kind": "skill", "skill_id": "skill-1", "version": 2}]
+        assert not service.applied
+        assert ui.view(identity).actions == []
+        assert len(ui.posts) == 1
+        assert ui.edits[-1].get("text") == "⏸ incident postponed"
+        assert ui.edits[-1].get("text") != original
+        if harness is SlackHarness:
+            assert not any(block["type"] == "actions" for block in ui.edits[-1]["blocks"])
+        await ui.click(identity, "defer")
+        await ui.click(identity, "install")
+        assert len(service.deferrals) == 1
+
+    asyncio.run(scenario())
+
+
+def test_not_now_does_not_claim_success_when_preference_is_unconfirmed(tmp_path):
+    class UnconfirmedService(Service):
+        def __init__(self):
+            super().__init__()
+            self.deferrals = []
+
+        def prepare_review_deferral(self, plan):
+            return {"reference": {"kind": "skill", "skill_id": plan["skill_id"],
+                                  "version": plan["version"]}}
+
+        def defer_review(self, prepared, *, may_apply):
+            assert may_apply() is True
+            self.deferrals.append(prepared)
+            return {"deferred": True, "preference_sync": "unknown"}
+
+    async def scenario():
+        service = UnconfirmedService()
+        ui = SlackHarness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "defer")
+        assert ui.record(identity)["state"] == "uncertain"
+        assert not ui.edits
+        await ui.click(identity, "defer")
+        assert len(service.deferrals) == 1
+        assert not service.applied
+
     asyncio.run(scenario())
 
 
@@ -113,6 +327,7 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path):
         assert ui.record(identity)["operation"] == "publish"
         assert ui.record(identity)["plan"]["receipt"] == "publication-receipt"
         assert not service.applied
+        await ui.click(identity, "back")
         await ui.click(identity, "cancel")
         assert not ui.view(identity).actions
     asyncio.run(scenario())

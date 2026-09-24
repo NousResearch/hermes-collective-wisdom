@@ -162,7 +162,6 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("install skill", ("begin_install_modes", ("skill",))),
     ("update skill", ("begin_update", ("skill",))),
     ("publish draft", ("begin_publication", ("draft",))),
     ("suggest local-skill", ("begin_suggest", ("local-skill",))),
@@ -177,14 +176,14 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
     ("\"", "Invalid Wisdom command. Use /wisdom help."),
 ])
 def test_admitted_slash_routes_only_explicit_native_actions(tmp_path, monkeypatch, raw, expected):
-    """Read/enrollment commands cannot accidentally become install reviews."""
+    """Read/enrollment commands cannot accidentally become install effects."""
     runtime = CommandRuntime(
         tmp_path, ('default', tmp_path), state=JsonState(tmp_path),
         llm=None, spawn_task=lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(runtime.native, 'consume_request', lambda _raw: object())
     for name in (
-        'begin_install_modes', 'begin_update', 'begin_publication',
+        'begin_update', 'begin_publication',
         'begin_suggest', 'begin_catalog', 'begin_settings', 'begin',
     ):
         monkeypatch.setattr(
@@ -200,6 +199,25 @@ def test_admitted_slash_routes_only_explicit_native_actions(tmp_path, monkeypatc
         if inspect.isawaitable(result):
             result = asyncio.run(result)
         assert result == expected
+    finally:
+        runtime.native.close()
+
+
+@pytest.mark.parametrize("raw, method", [
+    ("browse incident", "begin_catalog"), ("settings", "begin_settings"),
+])
+def test_admitted_native_card_does_not_echo_internal_review_id(tmp_path, monkeypatch, raw, method):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path),
+        llm=None, spawn_task=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: object())
+    monkeypatch.setattr(
+        runtime.native, method,
+        lambda *_args: {"state": "queued", "review_id": "internal-only"},
+    )
+    try:
+        assert runtime.slash(raw) == ""
     finally:
         runtime.native.close()
 
