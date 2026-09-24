@@ -16,6 +16,7 @@ from typing import Any, Callable
 from .errors import SharePackagingError, WisdomAuthError, WisdomConflict, WisdomValidationError
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
+from .package import PackagePolicyError
 from .review_state import ReviewState
 from .terminal_ui import (
     has_reviewable_warnings, render_action_review, render_file_preview,
@@ -761,16 +762,31 @@ def _authority_projection(
     return enriched, lines
 
 
-def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
+def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     result = record.get("result")
-    if (
-        record.get("state") == "completed" and isinstance(result, dict)
-        and result.get("publication_state") == "published"
-        and isinstance(result.get("detail"), str) and result["detail"]
-    ):
-        plan = record.get("plan")
-        name = _skill_name(plan if isinstance(plan, dict) else {})
+    if not isinstance(result, dict):
+        return None
+    plan = record.get("plan")
+    name = _skill_name(plan if isinstance(plan, dict) else {})
+    if record.get("state") == "failed" and result.get("install_blocked") is True:
+        detail = ("Already installed; check local changes or use Update."
+                  if result.get("already_managed") else "Install unavailable; no changes made.")
+        return NativeView(f"⚠️ {name} unchanged", detail, dismissed=True)
+    if record.get("state") != "completed":
+        return None
+    if result.get("already_installed") is True:
+        return NativeView(f"✅ {name} already installed", "", dismissed=True)
+    if (result.get("publication_state") == "published"
+            and isinstance(result.get("detail"), str) and result["detail"]):
         return NativeView("Publication result", f"{name}\n{_safe(result['detail'])}", dismissed=True)
+    return None
+
+
+def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
+    outcome = _completed_outcome_view(record)
+    if outcome is not None:
+        return outcome
+    result = record.get("result")
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",
@@ -1288,11 +1304,52 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
 
+    def _existing_catalog_install(
+        self, record: dict[str, Any], service: Any,
+        invocation: NativeInvocation, authority: Callable[[], bool],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Acknowledge a verified existing version without a second install."""
+        plan = record["plan"]
+        status = plan.get("installation_status")
+        if (plan.get("receipt") or not isinstance(status, dict)
+                or status.get("state") != "installed"):
+            return None, False
+        listed = getattr(service, "list_installations", None)
+        rows = listed() if callable(listed) else []
+        managed_rows = [
+            row for row in rows if isinstance(row, dict)
+            and row.get("skill_id") == plan.get("skill_id")
+            and row.get("owner") == record.get("owner")
+            and row.get("state") == "active"
+        ] if isinstance(rows, list) else []
+        version = plan.get("version")
+        if (not isinstance(version, int) or isinstance(version, bool) or version <= 0
+                or not any(row.get("version") == version
+                           and row.get("modified") is False
+                           and row.get("pending_operation") is None
+                           for row in managed_rows)):
+            return None, bool(managed_rows)
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        completed = {
+            **record, "state": "completed", "result": {"already_installed": True},
+            "effect_action": "install", "display_ready": False,
+            "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(record, completed):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return completed, True
+
     def _one_click_package(
         self, record: dict[str, Any], action: str, service: Any,
         invocation: NativeInvocation, authority: Callable[[], bool],
     ) -> dict[str, Any]:
         """Prepare and spend a fresh exact receipt inside the explicit click."""
+        existing, managed = (self._existing_catalog_install(record, service, invocation, authority)
+                             if action == "install" else (None, False))
+        if existing is not None:
+            return existing
+        plan = record["plan"]
         claimed = {
             **record, "state": "preparing", "display_ready": False,
             "updated_at": self.clock(),
@@ -1300,7 +1357,21 @@ class NativeReviewController:
         if not self.state.compare_replace(record, claimed):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         try:
-            fresh = _fresh_package_plan(record, action, service)
+            try:
+                fresh = _fresh_package_plan(record, action, service)
+            except PackagePolicyError:
+                if action != "install" or plan.get("receipt"):
+                    raise
+                if not authority() or not _owner_matches(record, service, invocation):
+                    raise WisdomAuthError("Collective Wisdom review owner changed") from None
+                blocked = {
+                    **record, "state": "failed", "display_ready": False,
+                    "result": {"install_blocked": True, "already_managed": managed},
+                    "updated_at": self.clock(),
+                }
+                if not self.state.compare_replace(claimed, blocked):
+                    raise WisdomConflict("Collective Wisdom review changed; open it again") from None
+                return blocked
             inspect = getattr(service, f"native_{action}_inspect")
             files = inspect(fresh["receipt"])
             ready = {
