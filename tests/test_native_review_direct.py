@@ -218,8 +218,8 @@ def test_native_catalog_renders_actual_results(tmp_path: Path, monkeypatch):
         "id": "skill-1", "slug": "incident-triage",
         "author_description": "Diagnose incident failures", "latest_version": 2,
         "installation_status": {
-            "state": "installed", "text": "Installed v1 · update to v2 available",
-            "installed_version": 1, "latest_version": 2,
+            "state": "not_installed", "text": "Not installed",
+            "installed_version": None, "latest_version": 2,
         },
     }], raising=False)
 
@@ -238,7 +238,7 @@ def test_native_catalog_renders_actual_results(tmp_path: Path, monkeypatch):
     assert "incident-triage" in text
     assert "Diagnose incident failures" in text
     assert "v2" in text
-    assert "Installed v1 · update to v2 available" in text
+    assert "Not installed" in text
     assert view.items[0].actions[0].label == "Install"
 
     controller.bind_message(record["id"], invocation(), "card-1")

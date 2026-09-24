@@ -123,10 +123,31 @@ def test_catalog_show_uses_skill_envelope_not_unnamed_versions(tmp_path):
     assert "opaque-id" not in text
 
 
+@pytest.mark.parametrize("command", ["show", "browse", "versions"])
+@pytest.mark.parametrize(
+    "local_state", ["installed", "unmanaged_local", "unavailable", "not_installed"]
+)
+def test_catalog_hides_install_unless_locally_known_not_installed(command, local_state):
+    status = {"state": local_state, "text": {
+        "installed": "Installed v1", "unmanaged_local": "Local copy",
+        "unavailable": "Installation status unavailable", "not_installed": "Not installed",
+    }[local_state]}
+    row = {"id": "opaque-id", "slug": "team-helper", "version": 1,
+           "installation_status": status}
+    data = ({"skill": {"id": row["id"], "slug": row["slug"]},
+             "latest_version_detail": {"version": {"version": 1}},
+             "installation_status": status} if command == "show" else
+            {"versions": [row]} if command == "versions" else [row])
+    view = project_view({"operation": "catalog", "state": "pending",
+                         "plan": {"command": command, "slug": row["slug"], "data": data}})
+    assert status["text"] in view.to_text()
+    offered = [action.action for item in view.items for action in item.actions
+               if action.action and action.action.startswith("catalog.install.")]
+    assert offered == (["catalog.install.0"] if local_state == "not_installed" else [])
+
+
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
-@pytest.mark.parametrize("version,modified", [(1, False), (1, True), (2, False)])
-def test_show_install_click_reports_existing_exact_install(tmp_path, surface, version, modified):
-    """A managed skill's Install control acknowledges the existing version."""
+def test_show_installed_skill_has_no_install_control_or_callback(tmp_path, surface):
     class Service:
         def native_owner(self):
             return owner()
@@ -134,43 +155,38 @@ def test_show_install_click_reports_existing_exact_install(tmp_path, surface, ve
         def show(self, _reference):
             return {
                 "skill": {"id": "opaque-id", "slug": "team-helper", "state": "active"},
-                "latest_version_detail": {"version": {"version": version}},
-                "installation_status": {"text": "Installed v1", "state": "installed"},
+                "latest_version_detail": {"version": {"version": 2}},
+                "installation_status": {"text": "Installed v1 · update to v2 available",
+                                        "state": "installed"},
             }
 
-        def list_installations(self):
-            return [{"skill_id": "opaque-id", "slug": "team-helper", "version": 1,
-                     "state": "active", "owner": self.native_owner(), "modified": modified,
-                     "pending_operation": None}]
-
         def install_plan(self, _reference, **_kwargs):
-            raise PackagePolicyError("skill is already managed; use the update workflow")
+            raise AssertionError("The hidden control must not plan an install")
 
         def close(self):
             return None
 
     async def scenario():
-        ui = surface(tmp_path, Service())
+        service = Service()
+        ui = surface(tmp_path, service)
         identity = ui.runtime.begin_catalog(ui.caller, "show", "team-helper")["review_id"]
         await ui.flush()
-        assert "catalog.install.0" in {action.action for item in ui.view(identity).items
-                                       for action in item.actions}
-        await ui.click(identity, "catalog.install.0")
-        if version == 1 and not modified:
-            assert ui.record(identity)["state"] == "completed"
-            assert ui.edits[-1]["text"] == "✅ team-helper already installed"
-        else:
-            assert ui.record(identity)["state"] == "failed"
-            assert "team-helper unchanged" in ui.edits[-1]["text"]
-            assert "already installed" in ui.edits[-1]["text"].lower()
-        assert "opaque-id" not in ui.edits[-1]["text"]
+        assert "Installed v1" in ui.view(identity).to_text()
+        assert not any(action.action == "catalog.install.0"
+                       for item in ui.view(identity).items for action in item.actions)
+        assert "catalog.install.0" not in str(ui.posts[-1])
+        with pytest.raises(WisdomValidationError, match="not offered"):
+            ui.runtime.reviews.act(identity, "catalog.install.0", service,
+                                   replace(ui.caller, message_id=ui.record(identity)["message_id"]))
+        assert ui.record(identity)["state"] == "pending"
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
-def test_show_install_click_applies_uninstalled_skill_and_confirms(tmp_path, surface):
-    """The Show action uses the same direct checked install and named receipt."""
+@pytest.mark.parametrize("blocked", [False, True])
+def test_show_install_click_reports_checked_outcome(tmp_path, surface, blocked):
+    """The Show action applies an eligible skill or visibly stops on policy."""
     class Service:
         applied = 0
 
@@ -186,6 +202,8 @@ def test_show_install_click_applies_uninstalled_skill_and_confirms(tmp_path, sur
 
         def install_plan(self, reference, **_kwargs):
             assert reference == "opaque-id@v1"
+            if blocked:
+                raise PackagePolicyError("install refused by package policy")
             return {"operation": "install", "owner": self.native_owner(),
                     "skill_id": "opaque-id", "slug": "team-helper", "version": 1,
                     "receipt": "private-receipt", "allowed": True}
@@ -207,9 +225,13 @@ def test_show_install_click_applies_uninstalled_skill_and_confirms(tmp_path, sur
         identity = ui.runtime.begin_catalog(ui.caller, "show", "team-helper")["review_id"]
         await ui.flush()
         await ui.click(identity, "catalog.install.0")
-        assert service.applied == 1
-        assert ui.record(identity)["state"] == "completed"
-        assert ui.edits[-1]["text"] == "✅ team-helper installed"
+        assert service.applied == (0 if blocked else 1)
+        assert ui.record(identity)["state"] == ("failed" if blocked else "completed")
+        if blocked:
+            assert "team-helper unchanged" in ui.edits[-1]["text"]
+            assert "Install unavailable" in ui.edits[-1]["text"]
+        else:
+            assert ui.edits[-1]["text"] == "✅ team-helper installed"
         assert "opaque-id" not in ui.edits[-1]["text"]
 
     asyncio.run(scenario())
