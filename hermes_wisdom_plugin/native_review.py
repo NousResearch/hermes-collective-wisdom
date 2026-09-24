@@ -552,7 +552,7 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
         "Any setup included with Install is shown before you choose it. "
         "If setup cannot finish, we'll tell you. Mute changes recommendations for all skills.",
         actions=[
-            NativeAction("View Details", "details"), NativeAction("Not Now", "cancel"),
+            NativeAction("View Details", "details"), NativeAction("Not Now", "defer"),
             NativeAction("Mute Skill Recommendations", "settings"),
             NativeAction("Update" if updating else "Install", verb, primary=True),
         ],
@@ -1204,6 +1204,10 @@ class NativeReviewController:
         ):
             raise WisdomAuthError("Collective Wisdom review is no longer current")
         if action == "cancel":
+            if record.get("effect_action") == "defer":
+                raise WisdomAuthError("Collective Wisdom review action is already in progress")
+            if state == "pending":
+                _validate_offered_action(record, action)
             result = {**record, "state": "cancelled", "updated_at": self.clock()}
             if not self.state.compare_replace(record, result):
                 raise WisdomConflict("Collective Wisdom review changed; open it again")
@@ -1217,7 +1221,7 @@ class NativeReviewController:
         _validate_offered_action(record, action)
         if state == "kept":
             return self._resume_kept(record, action, service, invocation, authority)
-        if action.startswith(("suggest.", "catalog.install.")):
+        if action == "defer" or action.startswith(("suggest.", "catalog.install.")):
             return self._act_special(
                 record_id, action, record, service, invocation, authority,
             )
@@ -1229,6 +1233,41 @@ class NativeReviewController:
         _validate_review_action(record, action)
 
         return self._apply(record, action, service, invocation, authority)
+
+    def _defer(
+        self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
+        authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Claim one card before persisting its exact-version preference."""
+        claimed = {**record, "state": "applying", "effect_action": "defer",
+                   "display_ready": False,
+                   "updated_at": self.clock()}
+        if not self.state.compare_replace(record, claimed):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+
+        def current() -> bool:
+            return _current_effect(
+                self.load(record["id"]), claimed, service, invocation, authority,
+            )
+
+        try:
+            preference = service.prepare_review_deferral(claimed["plan"])
+            if not current():
+                raise WisdomAuthError("Collective Wisdom review is no longer current")
+            outcome = service.defer_review(preference, may_apply=current)
+            if outcome.get("deferred") is not True or outcome.get("preference_sync") != "confirmed":
+                raise WisdomConflict("Collective Wisdom deferral was not confirmed")
+        except Exception:
+            self.state.compare_replace(claimed, {
+                **claimed, "state": "uncertain", "result": {"outcome": "unknown"},
+                "updated_at": self.clock(),
+            })
+            raise
+        result = {**claimed, "state": "cancelled", "result": outcome,
+                  "updated_at": self.clock()}
+        if not self.state.compare_replace(claimed, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(result)
 
     def _resume_kept(
         self, record: dict[str, Any], action: str, service: Any,
@@ -1323,6 +1362,8 @@ class NativeReviewController:
         invocation: NativeInvocation, authority: Callable[[], bool],
     ) -> dict[str, Any]:
         operation = record.get("operation")
+        if operation in {"install", "update"} and action == "defer":
+            return self._defer(record, service, invocation, authority)
         if operation == "suggest" and action.startswith("suggest."):
             return self._act_suggest(
                 record_id, action, record, service, invocation, authority=authority,

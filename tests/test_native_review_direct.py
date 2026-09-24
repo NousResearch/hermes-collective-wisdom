@@ -100,6 +100,59 @@ def test_click_executes_only_current_exact_review_and_records_result(tmp_path: P
     assert controller.pending(owner()) == []
 
 
+def test_not_now_cannot_be_cancelled_after_remote_preference_begins(tmp_path: Path):
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    clicked = replace(invocation(), message_id="card-1")
+
+    class DeferringService(Service):
+        def prepare_review_deferral(self, plan):
+            return plan
+
+        def defer_review(self, prepared, *, may_apply):
+            assert prepared["version"] == 2
+            with pytest.raises(WisdomAuthError, match="in progress"):
+                controller.act(created["id"], "cancel", self, clicked)
+            assert may_apply() is True
+            return {"deferred": True, "preference_sync": "confirmed"}
+
+    service = DeferringService()
+    created = controller.request_install(service, invocation(), "skill-1")
+    controller.bind_message(created["id"], invocation(), "card-1")
+    result = controller.act(created["id"], "defer", service, clicked)
+    assert result["state"] == "cancelled"
+    assert controller.load(created["id"])["state"] == "cancelled"
+
+
+def test_not_now_owner_change_during_preparation_blocks_preference_write(tmp_path: Path):
+    class SwitchingService(Service):
+        def __init__(self):
+            super().__init__()
+            self.current_owner = owner()
+            self.writes = 0
+
+        def native_owner(self):
+            return self.current_owner
+
+        def prepare_review_deferral(self, plan):
+            self.current_owner = {**owner(), "account_id": "another-account"}
+            return plan
+
+        def defer_review(self, _prepared, *, may_apply):
+            assert may_apply() is False
+            self.writes += 1
+            raise AssertionError("Owner change must block the preference write")
+
+    service = SwitchingService()
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    created = controller.request_install(service, invocation(), "skill-1")
+    controller.bind_message(created["id"], invocation(), "card-1")
+    with pytest.raises(WisdomAuthError, match="no longer current"):
+        controller.act(created["id"], "defer", service,
+                       replace(invocation(), message_id="card-1"))
+    assert service.writes == 0
+    assert controller.load(created["id"])["state"] == "uncertain"
+
+
 def test_install_click_refreshes_exact_visible_version_and_applies_once(tmp_path: Path):
     class OneClickService(Service):
         def __init__(self):
@@ -607,11 +660,17 @@ def test_expired_native_review_cannot_apply(tmp_path: Path):
             replace(invocation(), message_id="card-1"),
         )
 
-    cancelled = controller.act(
-        record["id"], "cancel", service,
-        replace(invocation(), message_id="card-1"),
-    )
-    assert cancelled["state"] == "cancelled"
+    with pytest.raises(WisdomAuthError, match="expired"):
+        controller.act(
+            record["id"], "defer", service,
+            replace(invocation(), message_id="card-1"),
+        )
+    with pytest.raises(WisdomValidationError, match="not offered"):
+        controller.act(
+            record["id"], "cancel", service,
+            replace(invocation(), message_id="card-1"),
+        )
+    assert controller.load(record["id"])["state"] == "pending"
     assert not service.applied
 
 

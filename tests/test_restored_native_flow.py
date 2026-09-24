@@ -77,21 +77,76 @@ class Service:
         return {"updated": True}
 
 
-def test_registered_dismissal_preserves_body_and_revokes_consent(tmp_path):
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_not_now_defers_exact_version_once_without_a_status_message(tmp_path, harness):
+    class DeferringService(Service):
+        def __init__(self):
+            super().__init__()
+            self.deferrals = []
+
+        def prepare_review_deferral(self, plan):
+            assert (plan["skill_id"], plan["version"]) == ("skill-1", 2)
+            return {"reference": {"kind": "skill", "skill_id": "skill-1", "version": 2},
+                    "not_now_suppression_days": 30}
+
+        def defer_review(self, deferral, *, may_apply):
+            assert may_apply() is True
+            self.deferrals.append(deferral["reference"])
+            return {"deferred": True, "preference_sync": "confirmed"}
+
     async def scenario():
-        service = Service()
-        ui = SlackHarness(tmp_path, service)
-        response = ui.runtime.begin(ui.caller, "incident")
+        service = DeferringService()
+        ui = harness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
         await ui.flush()
-        identity = response["review_id"]
-        original = ui.posts[-1]["text"]
-        await ui.click(identity, "cancel")
-        assert ui.edits[-1]["text"] == original
-        assert not any(block["type"] == "actions" for block in ui.edits[-1]["blocks"])
-        assert len(ui.posts) == 1
-        await ui.click(identity, "confirm")
-        assert not service.applied
+        original = ui.posts[-1].get("text")
+        assert next(action.action for action in ui.view(identity).actions
+                    if action.label == "Not Now") == "defer"
+        await ui.click(identity, "cancel")  # A hidden old callback must not skip suppression.
+        assert ui.record(identity)["state"] == "pending"
+        await ui.click(identity, "defer")
         assert ui.record(identity)["state"] == "cancelled"
+        assert service.deferrals == [{"kind": "skill", "skill_id": "skill-1", "version": 2}]
+        assert not service.applied
+        assert ui.view(identity).actions == []
+        assert len(ui.posts) == 1
+        assert ui.edits[-1].get("text") == original
+        if harness is SlackHarness:
+            assert not any(block["type"] == "actions" for block in ui.edits[-1]["blocks"])
+        await ui.click(identity, "defer")
+        await ui.click(identity, "install")
+        assert len(service.deferrals) == 1
+
+    asyncio.run(scenario())
+
+
+def test_not_now_does_not_claim_success_when_preference_is_unconfirmed(tmp_path):
+    class UnconfirmedService(Service):
+        def __init__(self):
+            super().__init__()
+            self.deferrals = []
+
+        def prepare_review_deferral(self, plan):
+            return {"reference": {"kind": "skill", "skill_id": plan["skill_id"],
+                                  "version": plan["version"]}}
+
+        def defer_review(self, prepared, *, may_apply):
+            assert may_apply() is True
+            self.deferrals.append(prepared)
+            return {"deferred": True, "preference_sync": "unknown"}
+
+    async def scenario():
+        service = UnconfirmedService()
+        ui = SlackHarness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "defer")
+        assert ui.record(identity)["state"] == "uncertain"
+        assert not ui.edits
+        await ui.click(identity, "defer")
+        assert len(service.deferrals) == 1
+        assert not service.applied
+
     asyncio.run(scenario())
 
 
@@ -113,6 +168,7 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path):
         assert ui.record(identity)["operation"] == "publish"
         assert ui.record(identity)["plan"]["receipt"] == "publication-receipt"
         assert not service.applied
+        await ui.click(identity, "back")
         await ui.click(identity, "cancel")
         assert not ui.view(identity).actions
     asyncio.run(scenario())
