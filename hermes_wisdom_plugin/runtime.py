@@ -25,6 +25,7 @@ from .commands import read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
 )
+from .install_review import confirmed_file_install
 from .package import PackagePolicyError
 
 
@@ -1323,22 +1324,32 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self, receipt, *, accept_partial=False,
         may_apply: Callable[[], bool] | None = None,
     ):
-        """Apply or retry only the explicitly selected Install receipt."""
+        """Install reviewed files without treating file consent as command consent."""
 
-        reviewer, executor = self._installation_services()
-        plan = reviewer.receipts.load(receipt, allow_started=True)
+        _reviewer, executor = self._installation_services()
         result = executor.apply(
             receipt, accept_partial=accept_partial, may_apply=may_apply,
         )
         self.check_owner()
         _require_current(may_apply)
+        return result
+
+    def install_setup_apply(self, receipt, *, may_apply: Callable[[], bool] | None = None):
+        """Execute declared setup only after a distinct, current permission action."""
+        reviewer, _executor = self._installation_services()
+        plan = reviewer.receipts.load(receipt, allow_started=True)
+        installed = reviewer.receipts.outcome(receipt)
+        self.check_owner()
+        _require_current(may_apply)
         commands = plan.get("setup_commands")
-        if result.get("installed") is not True or not commands:
-            return result
+        if not confirmed_file_install(installed):
+            raise PackagePolicyError("files are not confirmed installed for this review")
+        if not isinstance(commands, list) or not commands:
+            raise PackagePolicyError("this installation has no declared setup commands")
         try:
-            return self._apply_installed_setup(receipt, plan, result, may_apply=may_apply)
+            return self._apply_installed_setup(receipt, plan, installed, may_apply=may_apply)
         except (PackagePolicyError, WisdomError) as exc:
-            return {**result, "setup": {"state": "blocked", "detail": str(exc)}}
+            return {**installed, "setup": {"state": "blocked", "detail": str(exc)}}
 
     def _apply_installed_setup(self, receipt, plan, result, *, may_apply=None):
         """Run only the exact commands declared by the installed, reviewed bytes."""
@@ -1346,7 +1357,11 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         setup = self._setup_services()
         info = setup.inspect(plan["skill_id"], version=plan["version"])
         guidance = info.get("guidance")
-        if not isinstance(guidance, dict) or guidance.get("setup_commands") != commands:
+        if (
+            info.get("content_hash") != plan.get("content_hash")
+            or not isinstance(guidance, dict)
+            or commands != guidance.get("setup_commands")
+        ):
             raise PackagePolicyError("installed setup commands changed since approval")
         for index, command in enumerate(commands):
             _require_current(may_apply)

@@ -32,6 +32,18 @@ from .local_security import prepared_security_check
 from .setup_document import SETUP_PATH, parse_setup_document
 
 
+def confirmed_file_install(value: object) -> bool:
+    """An affirmative flag cannot override a pending or uncertain file operation."""
+    return (
+        isinstance(value, dict)
+        and value.get("installed") is True
+        and value.get("pending") is not True
+        and value.get("rejected") is not True
+        and not value.get("error")
+        and value.get("state") in (None, "completed", "done")
+    )
+
+
 _OWNER_FIELDS = (
     "profile_name", "profile_home", "account_id",
     "organization_id", "base_url", "installation_id",

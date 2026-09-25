@@ -522,7 +522,7 @@ for (const strict of [false, true]) test(`desktop clean install has no second co
   await mounted.cleanup()
 })
 
-test('declared setup is shown before the sole Desktop Install approval', async () => {
+test('Desktop installs files, then asks permission before running declared setup', async () => {
   const command = 'printf done > ../setup-ran'
   const findings = Array.from({ length: 35 }, (_, index) => ({
     severity: 'warning', category: 'fixture', message: `warning-${index}`
@@ -535,7 +535,8 @@ test('declared setup is shown before the sole Desktop Install approval', async (
       setup_commands: [command], files,
       local_scan: { allowed: true, summary: 'Reviewed warnings', findings }
     })
-    if (path === '/install/confirm') return { installed: true, setup: { state: 'passed', steps: 1 } }
+    if (path === '/install/confirm') return { installed: true, setup_required: true, ready_to_use: null }
+    if (path === '/install/setup') return { installed: true, setup_required: true, ready_to_use: null, setup: { state: 'passed', steps: 1 } }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
@@ -548,21 +549,47 @@ test('declared setup is shown before the sole Desktop Install approval', async (
   assert.doesNotMatch(mounted.container.textContent, /warning-34/)
   await click(reviewInstallButton(mounted))
   assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
-  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one installed')
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 0)
+  assert.match(mounted.container.textContent, /setup incomplete/i)
+  assert.ok(button(mounted, 'Run setup'))
+  await click(button(mounted, 'Run setup'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 1)
+  assert.equal(loaded.calls.notify.some(item => item.message === '✅ one installed'), false)
+  assert.match(mounted.container.textContent, /Setup ran, but readiness has not been verified/i)
   await mounted.cleanup()
 })
 
-for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`desktop refuses contradictory install success ${JSON.stringify(contradiction)}`, async () => {
+test('Desktop Not now leaves installed files visible as setup incomplete', async t => {
   const loaded = await loadPlugin((path, options, owner) => {
-    if (path === '/install/review') return installReview()
+    if (path === '/install/review') return installReview({ setup_commands: ['printf safe'] })
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', setup_required: true, ready_to_use: null }
+    if (path === '/install/setup') throw new Error('setup must not run')
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  await click(button(mounted, 'Install'))
+  await click(reviewInstallButton(mounted))
+  await click(button(mounted, 'Not now'))
+  assert.equal(button(mounted, 'Run setup'), undefined)
+  assert.match(mounted.container.textContent, /files installed; setup incomplete/i)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 0)
+})
+
+for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`desktop refuses contradictory install success ${JSON.stringify(contradiction)}`, { timeout: 5000 }, async t => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview({ setup_commands: ['printf safe'] })
     if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', ...contradiction }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
   await click(button(mounted, 'Install'))
+  await click(reviewInstallButton(mounted))
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   assert.match(mounted.container.textContent, /Install requires attention/)
-  await mounted.cleanup()
+  assert.equal(button(mounted, 'Run setup'), undefined)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 0)
 })
 
 for (const local of [false, true]) for (const updated of [true, false]) test(`desktop slash dialog handles ${updated ? 'completed' : 'pending'} checked updates (local=${local})`, async t => {

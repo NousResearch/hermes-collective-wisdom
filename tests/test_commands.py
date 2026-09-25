@@ -42,6 +42,7 @@ from hermes_wisdom_plugin.native_review import (
 from hermes_wisdom_plugin.native_slack import blocks as slack_blocks
 from hermes_wisdom_plugin.native_slack import callback_invocation as slack_callback
 from hermes_wisdom_plugin.native_telegram import callback_invocation as telegram_callback
+from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.review_state import ReviewState
 from hermes_wisdom_plugin.runtime import CommandRuntime
 
@@ -1685,6 +1686,82 @@ def test_admitted_slash_install_directly_applies_and_sends_result(tmp_path, monk
             assert inspect.isawaitable(response)
             assert await response == ""
             assert calls == [(caller, "incident"), (caller, "✅ incident installed")]
+        finally:
+            runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("platform", ["telegram", "slack"])
+def test_repeat_native_install_reports_existing_setup_instead_of_uncertainty(
+    tmp_path, monkeypatch, platform,
+):
+    class AlreadyInstalled:
+        def __init__(self):
+            self.calls = []
+
+        def native_owner(self):
+            return _native_owner()
+
+        def install_plan(self, reference):
+            self.calls.append(("plan", reference))
+            raise PackagePolicyError("skill is already managed; use the update workflow")
+
+        def list_installations(self):
+            self.calls.append(("installed",))
+            return [{"slug": "incident", "skill_id": "skill-1", "state": "active", "version": 1}]
+
+        def installed_setup_inspect(self, skill_id, *, version=None):
+            self.calls.append(("inspect", skill_id, version))
+            return {
+                "slug": "incident", "files_installed": True, "state": "setup_required",
+                "ready_to_use": None, "version": 1,
+                "setup_progress": [{"phase": "setup", "index": 0, "state": "passed"}],
+                "verification": {"state": "not_recorded"},
+                "guidance": {
+                    "setup_commands": ["printf 'setup ok'"],
+                    "verification_step": "Check that the local service responds.",
+                },
+            }
+
+        def close(self):
+            pass
+
+    async def scenario():
+        runtime = CommandRuntime(
+            tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
+            spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
+        )
+        caller = _native_invocation(platform)
+        service = AlreadyInstalled()
+        views = []
+        monkeypatch.setattr(runtime.native, "consume_request", lambda _raw: caller)
+        monkeypatch.setattr(runtime.native, "service_factory", lambda: service)
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(
+            runtime.native, "_direct_route", lambda _caller: (object(), object(), loop)
+        )
+        monkeypatch.setattr(runtime.native, "_direct_authorized", lambda *_args: True)
+
+        async def send(_caller, view):
+            views.append(view)
+
+        monkeypatch.setattr(runtime.native, "send_direct_result", send)
+        try:
+            response = runtime.slash("install incident")
+            assert inspect.isawaitable(response)
+            assert await response == ""
+            assert len(views) == 1
+            text = views[0].to_text()
+            assert "incident" in text
+            assert "already installed" in text
+            assert "setup incomplete" in text.casefold()
+            assert "Setup commands passed; verification not recorded." in text
+            assert "Check that the local service responds." in text
+            assert "uncertain" not in text.casefold()
+            assert service.calls == [
+                ("plan", "incident"), ("installed",), ("inspect", "skill-1", 1),
+            ]
         finally:
             runtime.close()
 

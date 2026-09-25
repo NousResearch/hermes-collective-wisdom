@@ -375,7 +375,7 @@ function ReviewAcknowledgements({ busy, kind, onChange, onReview, review, value 
     ] }) : null,
     partialRequired ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': `Accept ${kind} partial compatibility`, checked: value.partial, onCheckedChange: checked => onChange({ ...value, partial: checked === true }) }),
-      kind === 'install' && review?.setup_commands?.length ? 'I understand what may not work and what setup will run.' : 'I understand what may not work or need more setup.'
+      kind === 'install' && review?.setup_commands?.length ? 'I understand what may not work; setup will ask separately.' : 'I understand what may not work or need more setup.'
     ] }) : null,
     sensitiveRequired ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': 'Accept update sensitive capability expansion', checked: value.sensitive, onCheckedChange: checked => onChange({ ...value, sensitive: checked === true }) }),
@@ -414,7 +414,7 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
       kind === 'install' && warnings.length > 3 ? jsx('p', { className: 'text-xs', children: `Showing three of ${warnings.length} notes.` }) : null
     ] }) : null,
     kind === 'install' && review?.setup_commands?.length ? jsxs('section', { className: 'space-y-1', children: [
-      jsx('h4', { className: 'text-xs font-semibold', children: 'Setup commands included in Install approval' }),
+      jsx('h4', { className: 'text-xs font-semibold', children: 'Setup commands (run only after separate permission)' }),
       jsx('pre', { className: 'whitespace-pre-wrap break-all text-xs', children: review.setup_commands.map(command => JSON.stringify(command)).join('\n') })
     ] }) : null,
     kind === 'uninstall' ? jsxs('section', { className: 'space-y-1', children: [
@@ -598,6 +598,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   const [selected, setSelected] = useState(initialSelected)
   const [page, setPage] = useState(0)
   const [review, setReview] = useState(null)
+  const [setupPermission, setSetupPermission] = useState(null)
   const [acknowledgements, setAcknowledgements] = useState({ warnings: false, partial: false, sensitive: false })
   const [outcome, setOutcome] = useState(null)
   const catalog = useQuery(queryOptions(['catalog', lifecycle.key, search], () => client.rest(`/catalog?q=${encodeURIComponent(search.trim())}`)))
@@ -654,6 +655,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   }, setReview, 'Could not bind the package acknowledgements')
   const confirm = useCurrentMutation(client, lifecycle, async current => ({
     operation: current.operation,
+    reviewed: current,
     skillName: label(current),
     result: await client.rest(current.operation === 'update' ? '/update/confirm' : '/install/confirm', {
       method: 'POST', body: current.operation === 'update'
@@ -661,9 +663,18 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
         : requestBody(viewId, { receipt: current.receipt, accept_partial: acknowledgements.partial })
     })
   }), async (payload, token, isCurrent) => {
-    const { operation, result, skillName } = payload
+    const { operation, result, skillName, reviewed } = payload
     const name = skillName !== 'Name unavailable' ? skillName : label(result)
     setReview(null)
+    if (operation === 'install' && Array.isArray(reviewed.setup_commands) && reviewed.setup_commands.length &&
+        result?.installed === true && result.pending !== true && result.rejected !== true && !result.error &&
+        [undefined, null, 'completed', 'done'].includes(result.state)) {
+      setSetupPermission({ receipt: reviewed.receipt, commands: reviewed.setup_commands, name })
+      setOutcome({ operation, result: { ...result, name, setup_required: true, ready_to_use: null } })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
+      return
+    }
     if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
@@ -675,6 +686,17 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
       setOutcome({ operation, result: { ...(result || { state: 'unknown' }), name } })
     }
   }, 'The reviewed package action was not applied')
+  const runSetup = useCurrentMutation(client, lifecycle, async pending => ({
+    pending,
+    result: await client.rest('/install/setup', {
+      method: 'POST', body: requestBody(viewId, { receipt: pending.receipt })
+    })
+  }), ({ pending, result }) => {
+    setSetupPermission(null)
+    setOutcome({ operation: 'install', result: { ...result, name: pending.name } })
+  }, 'Could not confirm setup. Check its status before trying again.', () => {
+    setSetupPermission(null) // A lost acknowledgement cannot authorize another click.
+  })
   const skills = Array.isArray(catalog.data?.skills) ? catalog.data.skills : []
   const chosen = skills.find(item => item.id === selected)
   const detailedSkill = detail.data?.skill || detail.data
@@ -744,6 +766,16 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     ] }) : null,
     review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: review.operation, onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, cancelLabel: dialog ? 'Back' : undefined, kind: review.operation, onCancel: back, onConfirm: () => confirm.mutate(review), review }) : null,
+    setupPermission ? jsxs('section', { 'aria-label': 'Setup permission', className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-4', children: [
+      jsx('h3', { className: 'text-sm font-semibold', children: `Setup needed for ${setupPermission.name}` }),
+      jsx('p', { className: 'text-xs', children: 'The files are installed, but this skill is not ready yet. Hermes will run these commands on this computer if you choose Run setup:' }),
+      jsx('pre', { className: 'whitespace-pre-wrap break-all text-xs', children: setupPermission.commands.join('\n') }),
+      jsx('p', { className: 'text-xs', children: 'Run setup now? Not now leaves the files installed without running the commands.' }),
+      jsxs('div', { className: 'flex justify-end gap-2', children: [
+        jsx(Button, { disabled: runSetup.isPending, onClick: () => setSetupPermission(null), size: 'sm', type: 'button', variant: 'secondary', children: 'Not now' }),
+        jsx(Button, { disabled: runSetup.isPending, loading: runSetup.isPending, onClick: () => runSetup.mutate(setupPermission), size: 'sm', type: 'button', children: 'Run setup' })
+      ] })
+    ] }) : null,
     jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
   ] })
 }

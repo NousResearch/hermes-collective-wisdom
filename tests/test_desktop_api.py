@@ -1,7 +1,7 @@
 """Desktop workflow adapter authority and exact-review tests."""
 # Recording service methods deliberately match the production interface.
 # pylint: disable=missing-function-docstring,missing-class-docstring,unused-argument
-# pylint: disable=too-few-public-methods
+# pylint: disable=too-few-public-methods,too-many-lines
 
 from __future__ import annotations
 
@@ -270,6 +270,61 @@ def test_install_confirmation_is_bound_to_server_issued_view_and_current_profile
     now[0] = 161.0
     with pytest.raises(WisdomAuthError, match="no longer current"):
         api.install_confirm(service_a, view["view_id"], plan["receipt"])
+
+
+def test_desktop_setup_requires_installed_files_and_current_review(tmp_path):
+    class SetupService(Service):
+        def install_plan(self, reference, **kwargs):
+            return {**super().install_plan(reference, **kwargs),
+                    "setup_commands": ["printf harmless"]}
+
+        def install_setup_apply(self, receipt, *, may_apply):
+            assert may_apply() is True
+            self.calls.append(("install_setup_apply", receipt))
+            return {"installed": True, "skill_id": "skill-1", "setup_required": True,
+                    "ready_to_use": None, "setup": {"state": "passed"}}
+
+    api = DesktopWorkflowApi()
+    service = SetupService(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    plan = api.install_review(service, view_id, "one")
+    with pytest.raises(WisdomConflict):
+        api.install_setup_confirm(service, view_id, plan["receipt"])
+    assert not any(call[0] == "install_setup_apply" for call in service.calls)
+    assert api.install_confirm(service, view_id, plan["receipt"])["installed"] is True
+    assert (
+        api.install_setup_confirm(service, view_id, plan["receipt"])["setup"]["state"]
+        == "passed"
+    )
+    api.close_view(service, view_id)
+    with pytest.raises(WisdomAuthError):
+        api.install_setup_confirm(service, view_id, plan["receipt"])
+    assert [call[0] for call in service.calls].count("install_setup_apply") == 1
+
+
+@pytest.mark.parametrize("contradiction", [
+    {"pending": True}, {"rejected": True}, {"state": "uncertain"},
+])
+def test_desktop_does_not_offer_setup_after_unconfirmed_install(tmp_path, contradiction):
+    class UnconfirmedService(Service):
+        def install_plan(self, reference, **kwargs):
+            return {**super().install_plan(reference, **kwargs),
+                    "setup_commands": ["printf harmless"]}
+
+        def install_apply(self, receipt, *, may_apply=None, **kwargs):
+            assert may_apply is not None and may_apply() is True
+            return {"installed": True, **contradiction}
+
+        def install_setup_apply(self, receipt, *, may_apply):
+            pytest.fail("unconfirmed file install cannot authorize setup")
+
+    api = DesktopWorkflowApi()
+    service = UnconfirmedService(tmp_path / "a")
+    view_id = api.open_view(service)["view_id"]
+    plan = api.install_review(service, view_id, "one")
+    api.install_confirm(service, view_id, plan["receipt"])
+    with pytest.raises(WisdomConflict, match="Setup permission"):
+        api.install_setup_confirm(service, view_id, plan["receipt"])
 
 
 def test_completed_desktop_actions_keep_reviewed_skill_name_with_thin_results(tmp_path):

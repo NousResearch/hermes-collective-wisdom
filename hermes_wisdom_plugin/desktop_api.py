@@ -26,6 +26,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .direct_services import WISDOM_DISCLOSURE
+from .install_review import confirmed_file_install
 
 
 _PRE_ENROLLMENT_CODES = frozenset({
@@ -143,6 +144,8 @@ class _Review:
     subject: str
     snapshot: dict[str, Any]
     expires_at: float
+    files_installed: bool = False
+    setup_claimed: bool = False
 
 
 class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
@@ -374,6 +377,26 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         result = service.install_apply(
             receipt,
             accept_partial=accept_partial,
+            may_apply=lambda: self.current(
+                service, view_id, review_id=receipt, kind="install"
+            ),
+        )
+        if confirmed_file_install(result) and review.snapshot.get("setup_commands"):
+            with self._lock:
+                if self._reviews.get(receipt) is review:
+                    review.files_installed = True
+        return self._named_outcome(result, review.snapshot)
+
+    def install_setup_confirm(self, service: Any, view_id: str, receipt: str) -> dict[str, Any]:
+        """Spend separate setup consent only for this view's completed file install."""
+        review = self._require_review(service, view_id, receipt, "install")
+        with self._lock:
+            if (not review.files_installed or review.setup_claimed
+                    or not review.snapshot.get("setup_commands")):
+                raise WisdomConflict("Setup permission is not available for this installation")
+            review.setup_claimed = True
+        result = service.install_setup_apply(
+            receipt,
             may_apply=lambda: self.current(
                 service, view_id, review_id=receipt, kind="install"
             ),
@@ -796,6 +819,12 @@ def build_router(  # pylint: disable=too-many-locals
             body.view_id,
             body.receipt,
             accept_partial=body.accept_partial,
+        ))
+
+    @router.post("/install/setup")
+    def install_setup_confirm(body: ReceiptBody):
+        return invoke(lambda service: api.install_setup_confirm(
+            service, body.view_id, body.receipt,
         ))
 
     @router.post("/update/review")

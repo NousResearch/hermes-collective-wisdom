@@ -8,8 +8,8 @@ and Gateway. Review a skill before installing it, prepare your own skills for
 sharing, and manage updates from Hermes.
 
 You stay in control: installing the plugin does not upload your skills or enroll
-your profile. Sharing requires approval. Installing a shared skill runs only
-its explicitly declared setup commands after the Install approval.
+your profile. Sharing requires approval. Installing a shared skill adds only the reviewed
+files; declared external setup commands require a separate Run setup choice.
 
 > **Early access:** production enrollment and catalog reads have been exercised.
 > End-to-end sharing, installation, and platform delivery are still being
@@ -109,8 +109,9 @@ review rather than approving any effect. Contributions supports complete private
 draft editing and save-and-re-review, including text-file add/remove/rename and
 inert opaque-byte export. Catalog exposes Install; Installed exposes Check for
 updates and a separate exact-version Review update. Neither installs nor draft
-edits authorize publication. Install runs exact declared setup commands; manual
-setup and uncertain operation recovery remain in the existing native controls.
+edits authorize publication. Install writes only the reviewed files; a declared
+setup command requires a separate Run setup choice. Manual setup and uncertain
+operation recovery remain in the existing native controls.
 Dashboard UI and full six-surface parity remain deferred.
 
 ## Common tasks

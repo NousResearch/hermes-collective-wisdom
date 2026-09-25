@@ -164,10 +164,13 @@ def test_interactive_install_displays_bounded_safe_warning_before_apply(
 
 
 @pytest.mark.parametrize("warning", [False, True])
-def test_install_shows_setup_without_extra_approval(warning, capsys, monkeypatch):
-    """The install command itself authorizes reviewed setup; warnings still need acknowledgement."""
+@pytest.mark.parametrize("run_setup", [False, True])
+def test_interactive_install_asks_separately_for_setup(
+    warning, run_setup, capsys, monkeypatch,
+):
+    """Install writes files; setup needs its own explicit, command-specific choice."""
     class SetupService(Service):
-        """Plan a disposable package with a declared command."""
+        """Plan and record a disposable declared command."""
         def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
             plan = super().install_plan(reference, update_mode=update_mode,
                                         accept_warnings=accept_warnings)
@@ -177,17 +180,28 @@ def test_install_shows_setup_without_extra_approval(warning, capsys, monkeypatch
                 plan["allowed"] = True
             return plan
 
+        def install_setup_apply(self, receipt):
+            self.calls.append(("setup", receipt))
+            return {"installed": True, "setup": {"state": "passed"},
+                    "ready_to_use": None}
+
     service = SetupService()
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
     prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "yes")
+    def answer(prompt):
+        prompts.append(prompt)
+        return "yes" if "warnings" in prompt.lower() or run_setup else "n"
+    monkeypatch.setattr("builtins.input", answer)
     assert run_cli(_args("install", "skill"), service) == 0
     output = capsys.readouterr().out
     assert 'Setup command: "python scripts/setup.py --local"' in output
-    assert len(prompts) == (1 if warning else 0)
+    assert "Files installed; setup is still needed" in output
+    assert len(prompts) == (2 if warning else 1)
+    assert "Run setup now?" in prompts[-1]
     if warning:
         assert "warnings" in prompts[0].lower()
-    assert service.calls[-1][0] == "apply"
+        assert "setup" not in prompts[0].lower()
+    assert service.calls[-1][0] == ("setup" if run_setup else "apply")
 
 
 def test_piped_warning_install_requires_explicit_warning_flag_without_applying(
