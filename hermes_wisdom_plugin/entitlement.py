@@ -94,7 +94,7 @@ def current_entitlement(
     *,
     now: float | None = None,
 ) -> Entitlement | None:
-    """Read and validate current claims without refreshing or caching credentials."""
+    """Read and validate current claims without caching credentials."""
     try:
         claims = read_claims()
         return _validate_claims(claims, time.time() if now is None else now)
