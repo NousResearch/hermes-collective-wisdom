@@ -238,6 +238,10 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             "path": str(target), "content_hash": payload["content_hash"],
             "preserved_copy": payload["preservation"].get("destination"),
             "recovery_path": str(recovery), "effective_update_mode": mode,
+            "setup_required": bool(payload.get("setup_commands")) or
+            payload.get("compatibility", {}).get("outcome") in {
+                "partial", "compatible_after_setup",
+            },
             "setup_execution_authorized": False, "ready_to_use": None,
         }
         return self._record_outcome(operation_id, payload, result)

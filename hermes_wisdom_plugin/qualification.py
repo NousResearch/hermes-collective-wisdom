@@ -588,7 +588,7 @@ class QualificationController:
 
 
 class LifecycleBridge:
-    """Lazy, refresh-free host bridge that creates no state while signed out."""
+    """Lazy host bridge that creates no state while signed out."""
 
     def __init__(
         self, data_root: Path, profile: tuple[str, Path], *,

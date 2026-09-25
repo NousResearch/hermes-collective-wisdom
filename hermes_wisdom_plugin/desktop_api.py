@@ -22,6 +22,7 @@ from .errors import (
     WisdomConflict,
     WisdomError,
     WisdomNotFound,
+    WisdomUnavailable,
     WisdomValidationError,
 )
 from .direct_services import WISDOM_DISCLOSURE
@@ -692,6 +693,8 @@ def build_router(  # pylint: disable=too-many-locals
             return operation(service)
         except WisdomAuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except WisdomUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except WisdomNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (WisdomConflict, WisdomValidationError) as exc:

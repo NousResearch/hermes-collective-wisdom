@@ -13,10 +13,10 @@ import threading
 import time
 from typing import Any, Callable
 
-from .errors import WisdomValidationError
+from .errors import WisdomUnavailable, WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_review import NativeReviewController, NativeView, parse_callback
-from .terminal_ui import has_reviewable_warnings
+from .terminal_ui import has_reviewable_warnings, render_operation_outcome
 from .review_state import ReviewState
 
 
@@ -384,8 +384,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
     def install_direct(  # pylint: disable=too-many-locals
         self, invocation: NativeInvocation, reference: str
-    ) -> NativeView:
-        """Treat an admitted install command as consent for a clean checked package."""
+    ) -> NativeView | dict[str, str]:
+        """Admitted install applies clean files or reviews undisclosed setup."""
         native, token, loop = self._direct_route(invocation)
         def current() -> bool:
             return self._direct_authorized(invocation, native, token, loop)
@@ -409,7 +409,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 and isinstance(policy, dict)
                 and policy.get("scan_requires_confirmation") is False
                 and policy.get("compatibility_requires_confirmation") is False
-                and plan.get("setup_commands") == []
+                and isinstance(plan.get("setup_commands"), list)
             )
             if not clean:
                 display_name = plan.get("slug") if isinstance(plan, dict) else None
@@ -425,6 +425,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 raise WisdomValidationError("Collective Wisdom install plan is incomplete")
             if not current():
                 raise PermissionError("Collective Wisdom installation is no longer authorized")
+            if plan["setup_commands"]:
+                # A slash command cannot approve commands it has not yet shown.
+                return self._begin(
+                    invocation,
+                    lambda review_service: self.reviews.request_install(
+                        review_service, invocation, reference, plan=plan,
+                    ),
+                )
             result = service.install_apply(receipt, may_apply=current)
             if not isinstance(result, dict) or result.get("pending") is True:
                 return NativeView(
@@ -433,12 +441,15 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     dismissed=True,
                 )
             if (result.get("installed") is not True or result.get("rejected") is True
-                    or result.get("setup_required") is True or result.get("setup")):
+                    or result.get("error")):
                 return NativeView(
                     "Collective Wisdom", f"{slug} installation needs attention",
                     notice="Check its installation status; do not retry blindly.", dismissed=True,
                 )
-            return NativeView("Collective Wisdom", f"✅ {slug} installed", dismissed=True)
+            return NativeView(
+                "Collective Wisdom",
+                render_operation_outcome("install", result, skill_name=slug), dismissed=True,
+            )
         finally:
             service.close()
 
@@ -553,27 +564,62 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             query = getattr(update, "callback_query", None)
             if query is None:
                 return
-            await query.answer()
+            read_failed = False
+            acknowledged = False
+            invocation = None
+            record = None
             try:
                 self._check_lease("telegram", adapter, token)
                 record_id, selected = parse_callback(str(getattr(query, "data", "") or ""))
                 record = self.reviews.load(record_id)
+                if selected not in {"details", "review"} or record.get("operation") not in {"install", "update"}:
+                    await query.answer()
+                    acknowledged = True
                 from .native_telegram import (  # pylint: disable=import-outside-toplevel
                     callback_invocation, edit,
                 )
                 invocation = callback_invocation(adapter, query, record)
                 service = self.service_factory()
                 try:
-                    updated = await asyncio.to_thread(
-                        self.reviews.act, record_id, selected, service, invocation,
-                        authority=lambda: self._lease_current("telegram", adapter, token),
-                    )
+                    try:
+                        updated = await asyncio.to_thread(
+                            self.reviews.act, record_id, selected, service, invocation,
+                            authority=lambda: self._lease_current("telegram", adapter, token),
+                        )
+                    except WisdomUnavailable:
+                        read_failed = selected in {"details", "review"} and record.get(
+                            "operation"
+                        ) in {"install", "update"}
+                        raise
                 finally:
                     service.close()
+                if not acknowledged:
+                    await query.answer()
+                    acknowledged = True
                 with self.reviews.displaying(updated):
                     await edit(query, self.reviews.view(updated), record_id)
+            except WisdomUnavailable:
+                show_alert = False
+                if read_failed and invocation is not None and isinstance(record, dict):
+                    expected_owner = record.get("owner")
+                    show_alert = (
+                        isinstance(expected_owner, dict)
+                        and invocation.chat_type == "private"
+                        and self._lease_current("telegram", adapter, token)
+                        and await asyncio.to_thread(
+                            self._post_owner_current, expected_owner
+                        )
+                    )
+                if show_alert and not acknowledged:
+                    await query.answer(
+                        text="Collective Wisdom is temporarily unavailable. Try this read-only control again later.",
+                        show_alert=True,
+                    )
+                elif not acknowledged:
+                    await query.answer()
             except Exception:  # pylint: disable=broad-exception-caught
-                pass
+                if not acknowledged:
+                    await query.answer()
             raise ApplicationHandlerStop
 
         native.add_handler(CallbackQueryHandler(callback, pattern=r"^wi:agent:", block=True), group=-10)
@@ -730,7 +776,20 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         )
 
     def begin_catalog(self, invocation: NativeInvocation, command: str, target: str = ""):
-        return self._begin(invocation, lambda service: self.reviews.request_catalog(service, invocation, command, target))
+        try:
+            return self._begin(
+                invocation,
+                lambda service: self.reviews.request_catalog(service, invocation, command, target),
+            )
+        except WisdomUnavailable as exc:
+            if invocation.platform not in {"telegram", "slack"}:
+                raise
+            if invocation.platform == "slack":
+                return f"{exc} Resend your /wisdom {command} command to retry."
+            return (
+                "Collective Wisdom is temporarily unavailable. "
+                f"Resend /wisdom {command}" + (f" {target}" if target else "") + " to try again."
+            )
 
     def begin_settings(self, invocation: NativeInvocation):
         return self._begin(invocation, lambda service: self.reviews.request_settings(service, invocation))

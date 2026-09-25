@@ -1,4 +1,4 @@
-"""Refresh-free adapter for the current Hermes Nous account."""
+"""Host-bound adapter for the current Hermes Nous account."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ class HermesAccountAdapter:
         _read_snapshot: SnapshotReader | None = None,
         _clock: Callable[[], float] = time.time,
     ) -> HermesAccountAdapter:
-        """Bind the current valid Hermes account without refreshing credentials."""
+        """Bind the current Hermes account; the host can refresh an expired token."""
 
         reader = _read_snapshot or _read_current_host_account
         try:
@@ -183,12 +183,11 @@ class HermesAccountAdapter:
 
 
 def _read_current_host_account() -> _HostAccountSnapshot:  # pylint: disable=too-many-locals
-    """Read current Hermes state through the pinned, refresh-free host APIs."""
+    """Read Hermes state, letting the host refresh an expired shared login."""
 
-    get_provider_auth_state = import_module("hermes_cli.auth").get_provider_auth_state
-    resolve_portal_base_url = getattr(
-        import_module("hermes_cli.auth"), "_nous_portal_base_url"
-    )
+    host_auth = import_module("hermes_cli.auth")
+    get_provider_auth_state = host_auth.get_provider_auth_state
+    resolve_portal_base_url = getattr(host_auth, "_nous_portal_base_url")
     decode_jwt_claims = getattr(
         import_module("hermes_cli.auth_constants"), "_decode_jwt_claims"
     )
@@ -205,7 +204,8 @@ def _read_current_host_account() -> _HostAccountSnapshot:  # pylint: disable=too
     profile_name = get_active_profile_name()
     profile_home = _resolved_home(get_hermes_home())
     state = get_provider_auth_state("nous")
-    if state is None:
+    from_pool = state is None
+    if from_pool:
         state = get_nous_auth_status_local()
         source = state.get("source") if isinstance(state, Mapping) else None
         if not isinstance(source, str) or not source.startswith("pool:"):
@@ -214,6 +214,15 @@ def _read_current_host_account() -> _HostAccountSnapshot:  # pylint: disable=too
         raise RuntimeError("Nous credentials are missing")
     token = state.get("access_token")
     claims = decode_jwt_claims(token)
+    expiry = _finite_number(claims.get("exp")) if isinstance(claims, Mapping) else None
+    if (not from_pool and expiry is not None and expiry <= time.time()
+            and _nonblank(state.get("refresh_token")) and not is_guest_state(state)):
+        host_auth.resolve_nous_runtime_credentials()
+        state = get_provider_auth_state("nous")
+        if not isinstance(state, Mapping):
+            raise RuntimeError("Nous credentials are missing")
+        token = state.get("access_token")
+        claims = decode_jwt_claims(token)
     base_url = resolve_sync_base_url()
     portal_base_url = resolve_portal_base_url(dict(state))
 

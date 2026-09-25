@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from .contract import SystemSpecification, parse_manifest_bytes
 from .errors import (
     WisdomAuthError,
+    WisdomUnavailable,
     WisdomConflict,
     WisdomError,
     WisdomNotFound,
@@ -509,6 +510,8 @@ class WisdomClient:
                 status=422,
                 code=code,
             )
+        if response.status_code in (502, 503, 504):
+            raise WisdomUnavailable(status=response.status_code, code=code)
         if not 200 <= response.status_code < 300:
             raise WisdomError(
                 f"Collective Wisdom Gateway failed ({response.status_code})",
@@ -562,13 +565,18 @@ class WisdomClient:
                 **request_options,
             )
             try:
-                body = self._read_response_body(response, max_bytes=response_limit)
+                try:
+                    body = self._read_response_body(response, max_bytes=response_limit)
+                except WisdomError as exc:
+                    if response.status_code in (502, 503, 504):
+                        raise WisdomUnavailable(status=response.status_code) from exc
+                    raise
             finally:
                 response.close()
         except requests.Timeout as exc:
-            raise WisdomError("Collective Wisdom Gateway timed out") from exc
+            raise WisdomUnavailable() from exc
         except requests.RequestException as exc:
-            raise WisdomError("Collective Wisdom Gateway is unavailable") from exc
+            raise WisdomUnavailable() from exc
         self._raise_for_status(response, body)
         if model is None:
             return body

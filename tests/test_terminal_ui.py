@@ -250,6 +250,40 @@ def test_installed_files_do_not_claim_complete_setup_when_command_stops(state):
     assert output != "✅ raccoon installed"
 
 
+def test_passed_setup_with_unknown_readiness_is_incomplete():
+    """A passed command alone is not proof of working setup."""
+    result = {"installed": True, "setup_required": True, "ready_to_use": None,
+              "setup": {"state": "passed", "steps": 1}}
+    output = render_operation_outcome("install", result, skill_name="raccoon")
+    assert "files installed; setup incomplete" in output
+    assert "✅" not in output
+
+
+def test_pending_setup_is_not_reported_complete():
+    """A successful file write is not a completed setup."""
+    result = {"installed": True, "setup_required": True, "ready_to_use": None}
+    output = render_operation_outcome("install", result, skill_name="raccoon")
+    assert "files installed; setup incomplete" in output
+    assert "✅" not in output
+
+
+def test_updated_files_with_new_setup_do_not_claim_readiness():
+    """A changed version cannot inherit completed setup from an earlier one."""
+    result = {"updated": True, "setup_required": True, "ready_to_use": None}
+    output = render_operation_outcome("update", result, skill_name="raccoon")
+    assert "files updated; setup incomplete" in output
+    assert "✅" not in output
+
+
+@pytest.mark.parametrize("key", ["pending", "rejected"])
+def test_uncertain_or_rejected_install_never_claims_files_installed(key):
+    """Contradictory result flags cannot produce even a partial-success receipt."""
+    result = {"installed": True, "setup_required": True, key: True}
+    output = render_operation_outcome("install", result, skill_name="raccoon")
+    assert "files installed" not in output
+    assert "✅" not in output
+
+
 def test_partial_install_outcome_explains_setup_block():
     """After package write, a refused setup retains the actionable reason."""
     result = {"installed": True, "setup": {

@@ -13,10 +13,11 @@ import pytest
 from review_test_support import _content, _files, _owner, _spec
 
 from hermes_wisdom_plugin.contract import (
-    org_directory_name, sha256_address,
+    canonical_json_bytes, org_directory_name, sha256_address,
 )
 from hermes_wisdom_plugin.errors import WisdomValidationError
 from hermes_wisdom_plugin.package import PackagePolicyError
+from hermes_wisdom_plugin.setup_document import PREFIX, SETUP_PATH, SUFFIX
 from hermes_wisdom_plugin.update_review import UpdateReviewer, VerifiedUpdate
 from test_install_review import Host
 
@@ -141,6 +142,24 @@ def _reviewer(tmp_path, *, client=None, host=None, skill_resolver=None):
     if skill_resolver is not None:
         value.skill_resolver = skill_resolver
     return value, store, target
+
+
+def test_update_review_carries_exact_declared_setup_for_new_version(tmp_path):
+    client = Client()
+    guidance = {
+        "schema_version": 1, "execution_requires_user_approval": True,
+        "requirements": [], "setup_instructions": [],
+        "setup_commands": ["printf connected"], "credential_handoff": [],
+        "compatibility_limits": [], "verification_step": "Check connection.",
+        "removed_or_generalized": [], "related_skills": [],
+    }
+    client.files[2].append((SETUP_PATH, "file",
+                            PREFIX.encode() + canonical_json_bytes(guidance) + SUFFIX.encode()))
+    reviewer, _store, _target = _reviewer(tmp_path, client=client)
+
+    plan = reviewer.plan("skill-1")
+    assert plan["setup_commands"] == ["printf connected"]
+    assert reviewer.verify(plan).plan["setup_commands"] == ["printf connected"]
 
 
 def test_unmanaged_local_copy_has_unknown_baseline_and_requires_preservation(tmp_path):

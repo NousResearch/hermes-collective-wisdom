@@ -21,7 +21,10 @@ from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
-from .errors import WisdomAuthError, WisdomConflict, WisdomError, WisdomValidationError
+from .commands import read_unavailable
+from .errors import (
+    WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
+)
 from .package import PackagePolicyError
 
 
@@ -1320,12 +1323,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self, receipt, *, accept_partial=False,
         may_apply: Callable[[], bool] | None = None,
     ):
-        """Apply or retry only the explicitly selected terminal receipt."""
+        """Apply or retry only the explicitly selected Install receipt."""
 
         reviewer, executor = self._installation_services()
         plan = reviewer.receipts.load(receipt, allow_started=True)
         result = executor.apply(
-            receipt, accept_partial=accept_partial, may_apply=may_apply
+            receipt, accept_partial=accept_partial, may_apply=may_apply,
         )
         self.check_owner()
         _require_current(may_apply)
@@ -1353,9 +1356,10 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             )
             outcome = setup.apply(step["receipt"], may_apply=may_apply)
             if outcome.get("state") != "passed":
-                return {**result, "setup": {"state": outcome.get("state"),
-                                           "step": index + 1}}
-        return {**result, "setup": {"state": "passed", "steps": len(commands)}}
+                return {**result, "setup_execution_authorized": True,
+                        "setup": {"state": outcome.get("state"), "step": index + 1}}
+        return {**result, "setup_execution_authorized": True,
+                "setup": {"state": "passed", "steps": len(commands)}}
 
     def list_installations(self):
         """Inspect private installation state only through the terminal entry."""
@@ -1533,6 +1537,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning("Collective Wisdom install failed (%s)", type(exc).__name__)
                 return _INSTALL_UNCERTAIN
+            if isinstance(view, dict):
+                return _native_review_reply(view)
             try:
                 await self.native.send_direct_result(invocation, view)
             except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -1604,6 +1610,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             result = await asyncio.shield(task)
             service.check_owner()
             return result
+        except WisdomUnavailable:
+            return read_unavailable(parsed) or str(WisdomUnavailable())
         except Exception:  # pylint: disable=broad-exception-caught
             return _UNAVAILABLE
         finally:
@@ -1651,7 +1659,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             while not cancel.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return "Collective Wisdom request timed out. Please retry."
+                    return read_unavailable(parsed) or str(WisdomUnavailable())
                 try:
                     output, _ = child.communicate(payload, timeout=min(0.1, remaining))
                     result = json.loads(output) if child.returncode == 0 else None
@@ -1701,6 +1709,10 @@ def worker_main(request) -> str:
         result = run_slash((request["command"][0], request["command"][1]), service)
         service.check_owner()
         return result
+    except WisdomUnavailable:
+        return read_unavailable((request["command"][0], request["command"][1])) or str(
+            WisdomUnavailable()
+        )
     except WisdomError:
         return _UNAVAILABLE
     finally:

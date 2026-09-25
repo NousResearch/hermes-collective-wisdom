@@ -1,4 +1,4 @@
-"""Tests for the refresh-free Hermes account adapter."""
+"""Tests for the Hermes account adapter."""
 
 from __future__ import annotations
 
@@ -315,6 +315,83 @@ def test_present_provider_state_takes_precedence_over_pool(monkeypatch) -> None:
     assert calls == ["provider"]
     assert result.account_id == "provider-user"
     assert result.portal_base_url == "https://provider-portal.example"
+
+def test_expired_host_token_refreshes_through_host_before_read(monkeypatch) -> None:
+    """An unattended CLI can recover an expired shared login via Hermes auth."""
+    calls = []
+    state = {**_provider_state("expired-token"), "refresh_token": "private-refresh"}
+    modules = _host_modules(state, _pool_status(), calls)
+
+    def claims_for(token):
+        return {
+            "sub": "provider-user", "org_id": "provider-org",
+            "exp": NOW - 1 if token == "expired-token" else NOW + 600,
+            "nbf": 0, "wisdom_scopes": ["wisdom:read"],
+        }
+
+    setattr(modules["hermes_cli.auth_constants"], "_decode_jwt_claims", claims_for)
+
+    def refresh():
+        calls.append("refresh")
+        state["access_token"] = "fresh-token"
+
+    modules["hermes_cli.auth"].resolve_nous_runtime_credentials = refresh
+    monkeypatch.setattr("hermes_wisdom_plugin.account.import_module", lambda name: modules[name])
+    monkeypatch.setattr("hermes_wisdom_plugin.account.time.time", lambda: NOW)
+
+    result = _read_current_host_account()
+
+    assert result.access_token == "fresh-token"
+    assert calls == ["provider", "refresh", "provider"]
+
+
+def test_refresh_cannot_change_a_bound_adapter_account(monkeypatch) -> None:
+    """The host may renew a token, but a switched actor remains unauthorized."""
+    calls = []
+    state = {**_provider_state(), "refresh_token": "private-refresh"}
+    modules = _host_modules(state, _pool_status(), calls)
+
+    def claims_for(token):
+        changed = token == "fresh-other-user"
+        return {
+            "sub": "other-user" if changed else "provider-user",
+            "org_id": "other-org" if changed else "provider-org",
+            "exp": NOW - 1 if token == "expired-token" else NOW + 600,
+            "nbf": 0, "wisdom_scopes": ["wisdom:read"],
+        }
+
+    def refresh():
+        calls.append("refresh")
+        state.update(access_token="fresh-other-user", user_id="other-user", org_id="other-org")
+
+    setattr(modules["hermes_cli.auth_constants"], "_decode_jwt_claims", claims_for)
+    modules["hermes_cli.auth"].resolve_nous_runtime_credentials = refresh
+    monkeypatch.setattr("hermes_wisdom_plugin.account.import_module", lambda name: modules[name])
+    monkeypatch.setattr("hermes_wisdom_plugin.account.time.time", lambda: NOW)
+
+    adapter = HermesAccountAdapter.current(_clock=lambda: NOW)
+    state["access_token"] = "expired-token"
+    with pytest.raises(WisdomAuthError, match="credentials are unavailable"):
+        adapter.credentials()
+    assert calls == ["provider", "provider", "refresh", "provider"]
+
+
+def test_expired_pool_projection_never_refreshes_as_shared_login(monkeypatch) -> None:
+    """A pool identity must not be swapped to a different shared OAuth login."""
+    calls = []
+    pool = {**_pool_status(), "refresh_token": "private-refresh"}
+    modules = _host_modules(None, pool, calls)
+    setattr(modules["hermes_cli.auth_constants"], "_decode_jwt_claims", lambda token: {
+        "sub": "pool-user", "org_id": "pool-org", "exp": NOW - 1,
+        "nbf": 0, "wisdom_scopes": ["wisdom:read"],
+    })
+    modules["hermes_cli.auth"].resolve_nous_runtime_credentials = lambda: calls.append("refresh")
+    monkeypatch.setattr("hermes_wisdom_plugin.account.import_module", lambda name: modules[name])
+    monkeypatch.setattr("hermes_wisdom_plugin.account.time.time", lambda: NOW)
+
+    with pytest.raises(RuntimeError, match="credentials are invalid"):
+        _read_current_host_account()
+    assert calls == ["provider", "pool"]
 
 
 def test_invalid_present_provider_state_never_falls_back_to_pool(monkeypatch) -> None:

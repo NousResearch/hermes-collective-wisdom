@@ -528,8 +528,8 @@ class InstallExecutor:
             "effective_update_mode": mode,
             "compatibility": payload.get("compatibility"),
             "local_scan": payload.get("local_scan"),
-            "setup_required": _compatibility_outcome(payload)
-            in {"partial", "compatible_after_setup"},
+            "setup_required": bool(payload.get("setup_commands")) or
+            _compatibility_outcome(payload) in {"partial", "compatible_after_setup"},
             "setup_execution_authorized": False,
             "ready_to_use": None,
         }

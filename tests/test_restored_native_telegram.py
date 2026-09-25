@@ -4,12 +4,109 @@ import asyncio
 import html
 import json
 
+import pytest
+
 from restoration_support import (
     TelegramHarness, assert_cancelled_review_is_inert,
     assert_owner_switch_after_post_is_cleaned,
 )
 from native_test_support import owner
 from test_restored_native_flow import Service
+from hermes_wisdom_plugin.errors import WisdomUnavailable
+
+
+@pytest.mark.parametrize("command,target", [
+    ("browse", "incident"), ("show", "skill-1"), ("versions", "skill-1"),
+])
+def test_telegram_failed_catalog_read_offers_manual_retry_without_card(
+    tmp_path, monkeypatch, command, target,
+):
+    async def scenario():
+        service = Service()
+        calls = []
+
+        def unavailable(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise WisdomUnavailable()
+
+        method = {"browse": "search_skills", "show": "show", "versions": "versions"}[command]
+        monkeypatch.setattr(service, method, unavailable, raising=False)
+        ui = TelegramHarness(tmp_path, service)
+        result = ui.runtime.begin_catalog(ui.caller, command, target)
+        assert result == (
+            "Collective Wisdom is temporarily unavailable. "
+            f"Resend /wisdom {command} {target} to try again."
+        )
+        assert len(calls) == 1
+        assert not ui.posts and not ui.edits and not service.applied
+        assert ui.runtime.reviews.pending(owner()) == []
+
+    asyncio.run(scenario())
+
+
+def test_telegram_failed_read_card_alert_does_not_edit_or_replay(tmp_path, monkeypatch):
+    async def scenario():
+        service = Service()
+        ui = TelegramHarness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        before = ui.record(identity)
+        answers = []
+
+        async def answer(**kwargs):
+            answers.append(kwargs)
+
+        monkeypatch.setattr(ui, "_answer", answer)
+        calls = []
+
+        def unavailable(receipt):
+            calls.append(receipt)
+            raise WisdomUnavailable()
+
+        monkeypatch.setattr(service, "native_install_inspect", unavailable)
+        await ui.click(identity, "details")
+        assert calls == ["exact-receipt"]
+        assert answers == [{
+            "text": (
+                "Collective Wisdom is temporarily unavailable. "
+                "Try this read-only control again later."
+            ),
+            "show_alert": True,
+        }]
+        assert ui.record(identity) == before
+        assert not ui.edits and not service.applied
+        await ui.click(identity, "details", actor_id=22)
+        assert calls == ["exact-receipt"]
+        assert answers[-1] == {}
+
+    asyncio.run(scenario())
+
+
+def test_telegram_read_failure_after_owner_change_has_no_retry_alert(tmp_path, monkeypatch):
+    async def scenario():
+        service = Service()
+        current_owner = {"value": owner()}
+        monkeypatch.setattr(service, "native_owner", lambda: current_owner["value"])
+        ui = TelegramHarness(tmp_path, service)
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
+        await ui.flush()
+        answers = []
+
+        async def answer(**kwargs):
+            answers.append(kwargs)
+
+        monkeypatch.setattr(ui, "_answer", answer)
+
+        def unavailable(_receipt):
+            current_owner["value"] = owner(account_id="other")
+            raise WisdomUnavailable()
+
+        monkeypatch.setattr(service, "native_install_inspect", unavailable)
+        await ui.click(identity, "details")
+        assert answers == [{}]
+        assert not ui.edits and not service.applied
+
+    asyncio.run(scenario())
 
 
 def test_telegram_complete_inspection_then_quiet_dismissal(tmp_path, monkeypatch):

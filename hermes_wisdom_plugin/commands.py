@@ -24,6 +24,7 @@ from .errors import (
     WisdomConflict,
     WisdomError,
     WisdomNotFound,
+    WisdomUnavailable,
     WisdomValidationError,
 )
 from .package import (
@@ -370,6 +371,29 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         if (command, getattr(args, "publication_action", None)) == ("publication", "submit"):
             return _publication_result_exit(cast(dict[str, Any], result))
         return 0
+    except WisdomUnavailable as exc:
+        if as_json:
+            _emit(
+                {"ok": False, "error": str(exc), "category": exc.exit_code},
+                as_json=True, error=True,
+            )
+        else:
+            retry_safe = (
+                command in {"status", "inbox", "list", "browse", "show", "versions",
+                            "installed", "check"}
+                or command == "settings" and args.notification_mode == "status"
+                or command == "mute" and args.mute_duration == "status"
+                or command == "notifications" and not args.mark_seen
+                or command == "prepared" and args.prepared_action == "inspect"
+                or command == "publication" and args.publication_action == "status"
+                or command == "installed-setup" and args.setup_action == "inspect"
+            )
+            instruction = (
+                "Retry this read-only command later." if retry_safe else
+                "Check the current status before retrying; the action may have completed."
+            )
+            _emit(f"{exc} {instruction}", as_json=False, error=True)
+        return exc.exit_code
     except WisdomError as exc:
         _emit(
             {"ok": False, "error": str(exc), "category": exc.exit_code},
@@ -503,11 +527,29 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
             return _render_versions(service.resolve_skill(reference), page)
     except _SlashUsageError as exc:
         return str(exc)
+    except WisdomUnavailable as exc:
+        return read_unavailable(parsed) or str(exc)
     except (WisdomNotFound, WisdomAuthError, WisdomConflict, WisdomValidationError) as exc:
         return _safe_service_error(exc)
     except Exception:  # pylint: disable=broad-exception-caught
         return "Collective Wisdom is temporarily unavailable. Try again shortly."
     return _unsupported_command()
+
+
+def read_unavailable(parsed: tuple[str, list[str]]) -> str | None:
+    """Offer a manual retry only for a read, not an ambiguous effect."""
+    command, args = parsed
+    if command not in {"status", "list", "browse", "show", "versions"}:
+        return None
+    retry = shlex.join((command, *args))
+    retry = "".join(
+        " " if unicodedata.category(char) in {"Cc", "Cf"} else char
+        for char in retry
+    )
+    return (
+        "Collective Wisdom is temporarily unavailable.\n"
+        f"Run /wisdom {retry} again to retry."
+    )
 
 
 def _uninstall_cli(args, service):
