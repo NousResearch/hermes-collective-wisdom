@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from installed_test_support import JsonState
+from hermes_wisdom_plugin.commands import read_unavailable
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomUnavailable
 from hermes_wisdom_plugin.runtime import CommandRuntime
 
@@ -304,7 +305,7 @@ def test_slash_runtime_preserves_transient_vs_owner_errors(tmp_path, monkeypatch
     monkeypatch.setattr(runtime, "_service", lambda: service)
     monkeypatch.setattr(runtime, "_run_worker", lambda *_args: (_ for _ in ()).throw(error))
     try:
-        result = asyncio.run(runtime._slash(("browse", ["incident handoff"])))
+        result = asyncio.run(runtime._slash(("browse", ["incident handoff"])))  # pylint: disable=protected-access
         assert expected in result
         assert ("again to retry" in result) is isinstance(error, WisdomUnavailable)
     finally:
@@ -336,7 +337,7 @@ def test_slash_worker_deadline_offers_manual_retry_without_replay(tmp_path, monk
     monkeypatch.setattr("hermes_wisdom_plugin.runtime.subprocess.Popen", lambda *_a, **_k: Child())
     monkeypatch.setattr("hermes_wisdom_plugin.runtime.SLASH_BUDGET_SECONDS", 0)
     try:
-        result = runtime._run_worker(("list", []), {}, threading.Event())
+        result = runtime._run_worker(("list", []), {}, threading.Event())  # pylint: disable=protected-access
         assert result == (
             "Collective Wisdom is temporarily unavailable.\n"
             "Run /wisdom list again to retry."
@@ -347,8 +348,6 @@ def test_slash_worker_deadline_offers_manual_retry_without_replay(tmp_path, monk
 
 
 def test_slash_retry_affordance_excludes_effects_and_terminal_handoffs():
-    from hermes_wisdom_plugin.commands import read_unavailable
-
     for command in ("install", "update", "publish", "setup", "installed-setup"):
         assert read_unavailable((command, ["skill-1"])) is None
 
@@ -362,7 +361,7 @@ def test_slash_unavailable_effect_handoff_does_not_offer_replay(tmp_path, monkey
         WisdomUnavailable()
     ))
     try:
-        assert asyncio.run(runtime._slash(("install", ["skill-1"]))) == (
+        assert asyncio.run(runtime._slash(("install", ["skill-1"]))) == (  # pylint: disable=protected-access
             "Collective Wisdom is temporarily unavailable."
         )
     finally:
