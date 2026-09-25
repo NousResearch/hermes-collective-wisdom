@@ -1664,3 +1664,132 @@ test('401 drops the old view and offers a fresh ownership recheck', async () => 
   assert.ok(loaded.calls.rest.filter(([path]) => path === '/views').length >= 2)
   await mounted.cleanup()
 })
+
+const transient = () => new Error('Error invoking remote method: 503: {"detail":"Collective Wisdom is temporarily unavailable."}')
+
+test('page Retry refetches only failed bootstrap data, not a fresh view or effect', async () => {
+  let failing = true
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap' && failing) throw transient()
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  assert.match(mounted.container.textContent, /Collective Wisdom is temporarily unavailable\./)
+  assert.doesNotMatch(mounted.container.textContent, /upstream credentials|Reload with a fresh review/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/bootstrap').length, 1)
+  failing = false
+  await click(button(mounted, 'Retry'))
+  assert.match(mounted.container.textContent, /Useful skill/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/bootstrap').length, 2)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/views').length, 1)
+  assert.equal(loaded.calls.rest.some(([, options]) => ['PATCH', 'PUT', 'DELETE'].includes(options.method) || options.method === 'POST' && options.body), false)
+  await mounted.cleanup()
+})
+
+test('slash catalog Retry refetches read-only catalog and never invokes install', async () => {
+  let failing = true
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?') && failing) throw transient()
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  await submitComposer(loaded, { text: '/wisdom browse helper' })
+  assert.match(mounted.container.textContent, /Collective Wisdom is temporarily unavailable\./)
+  assert.equal(button(mounted, 'Install'), undefined)
+  failing = false
+  await click(button(mounted, 'Retry'))
+  assert.match(mounted.container.textContent, /Useful skill/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/catalog?q=helper').length, 2)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/views').length, 1)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('failed detail read hides approval and Retry only reads detail', async () => {
+  let failing = true
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/catalog/skill-1' && failing) throw transient()
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  await submitComposer(loaded, { text: '/wisdom show skill-1' })
+  assert.equal(button(mounted, 'Install'), undefined)
+  assert.match(mounted.container.textContent, /Collective Wisdom is temporarily unavailable\./)
+  failing = false
+  await click(button(mounted, 'Retry'))
+  assert.ok(button(mounted, 'Install'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/catalog/skill-1').length, 2)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('transient effect failure never replays an Install confirmation or offers read Retry', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview()
+    if (path === '/install/confirm') throw transient()
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Install'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.equal(button(mounted, 'Retry'), undefined)
+  assert.equal(loaded.calls.notify.at(-1)?.message, 'Collective Wisdom is temporarily unavailable.')
+  assert.equal(loaded.calls.notify.at(-1)?.detail, 'Collective Wisdom is temporarily unavailable.')
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  await mounted.cleanup()
+})
+
+test('slash dialog retries failed view creation only while its origin remains current', async () => {
+  let failing = true
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views' && failing) throw transient()
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  await submitComposer(loaded, { text: '/wisdom' })
+  assert.match(mounted.container.textContent, /Collective Wisdom is temporarily unavailable\./)
+  failing = false
+  await click(button(mounted, 'Retry'))
+  assert.match(mounted.container.textContent, /Useful skill/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/views').length, 2)
+  assert.equal(loaded.calls.rest.some(([path]) => path.includes('/install/')), false)
+  await mounted.cleanup()
+})
+
+test('auth failure in slash catalog is not treated as transient Retry', async () => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) throw Object.assign(new Error('401 owner changed'), { status: 401 })
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  await submitComposer(loaded, { text: '/wisdom' })
+  assert.match(mounted.container.textContent, /401 owner changed/)
+  assert.equal(button(mounted, 'Retry'), undefined)
+  assert.equal(loaded.calls.rest.filter(([path]) => path.startsWith('/catalog?')).length, 1)
+  await mounted.cleanup()
+})
+
+test('update-check Retry repeats only the owner-bound read, never update review or apply', async () => {
+  let failing = true
+  const installed = { skill_id: 'skill-1', name: 'one', version: 1 }
+  const path = '/updates/skill-1?view_id=view-remote-a-A'
+  const loaded = await loadPlugin((request, options, owner) => {
+    if (request === '/bootstrap') return { ...bootstrap, installations: [installed] }
+    if (request === path) {
+      if (failing) throw transient()
+      return { skill_id: 'skill-1', state: 'update_available', latest_version: 2 }
+    }
+    return baseHandler(request, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Installed'))
+  await click(button(mounted, 'Check for updates'))
+  assert.match(mounted.container.textContent, /Collective Wisdom is temporarily unavailable\./)
+  assert.equal(loaded.calls.rest.filter(([request]) => request === path).length, 1)
+  failing = false
+  await click(button(mounted, 'Retry'))
+  assert.match(mounted.container.textContent, /v2 is available/)
+  assert.equal(loaded.calls.rest.filter(([request]) => request === path).length, 2)
+  assert.equal(loaded.calls.rest.some(([request]) => request.startsWith('/update/review') || request.startsWith('/update/confirm')), false)
+  await mounted.cleanup()
+})

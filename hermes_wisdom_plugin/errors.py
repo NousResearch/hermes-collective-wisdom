@@ -14,6 +14,16 @@ class WisdomError(RuntimeError):
         self.code = code
 
 
+class WisdomUnavailable(WisdomError):
+    """Transient Gateway failure; never implies that a write can be replayed."""
+
+    def __init__(self, *, status: int | None = None, code: str | None = None):
+        super().__init__(
+            "Collective Wisdom is temporarily unavailable.",
+            status=status, code=code or "gateway_unavailable",
+        )
+
+
 class SharePackagingError(WisdomError):
     """A local candidate could not be packaged; no upload was attempted."""
 

@@ -224,7 +224,7 @@ def test_authoritative_org_head_failed_read_is_not_treated_as_empty():
         publish_credential_provider=credentials([], "publish"),
     )
 
-    with pytest.raises(WisdomError, match="failed"):
+    with pytest.raises(WisdomError, match="temporarily unavailable"):
         value.organization_head()
 
 

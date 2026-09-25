@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from installed_test_support import JsonState
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomUnavailable
 from hermes_wisdom_plugin.runtime import CommandRuntime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -276,5 +277,93 @@ def test_slash_worker_receives_parsed_command_and_captured_profile(tmp_path, mon
         assert captured["request"]["command"] == ["browse", ["incident handoff"]]
         assert captured["environment"]["HERMES_HOME"] == str(tmp_path)
         assert 0 < captured["timeout"] <= 0.1
+    finally:
+        runtime.native.close()
+
+
+@pytest.mark.parametrize("error, expected", [
+    (WisdomUnavailable(), "Run /wisdom browse 'incident handoff' again to retry."),
+    (WisdomAuthError("owner changed"), "Complete setup in your terminal."),
+])
+def test_slash_runtime_preserves_transient_vs_owner_errors(tmp_path, monkeypatch, error, expected):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path),
+        llm=None, spawn_task=lambda *_args, **_kwargs: None,
+    )
+    class Service:
+        def binding(self):
+            return {"account_id": "owner"}
+
+        def check_owner(self):
+            return None
+
+        def close(self):
+            return None
+
+    service = Service()
+    monkeypatch.setattr(runtime, "_service", lambda: service)
+    monkeypatch.setattr(runtime, "_run_worker", lambda *_args: (_ for _ in ()).throw(error))
+    try:
+        result = asyncio.run(runtime._slash(("browse", ["incident handoff"])))
+        assert expected in result
+        assert ("again to retry" in result) is isinstance(error, WisdomUnavailable)
+    finally:
+        runtime.native.close()
+
+
+def test_slash_worker_deadline_offers_manual_retry_without_replay(tmp_path, monkeypatch):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path),
+        llm=None, spawn_task=lambda *_args, **_kwargs: None,
+    )
+    calls = []
+
+    class Child:
+        returncode = None
+
+        def communicate(self, _payload=None, timeout=None):
+            calls.append(timeout)
+            if timeout is not None:
+                raise __import__("subprocess").TimeoutExpired("worker", timeout)
+            return "", ""
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            calls.append("killed")
+
+    monkeypatch.setattr("hermes_wisdom_plugin.runtime.subprocess.Popen", lambda *_a, **_k: Child())
+    monkeypatch.setattr("hermes_wisdom_plugin.runtime.SLASH_BUDGET_SECONDS", 0)
+    try:
+        result = runtime._run_worker(("list", []), {}, threading.Event())
+        assert result == (
+            "Collective Wisdom is temporarily unavailable.\n"
+            "Run /wisdom list again to retry."
+        )
+        assert calls == ["killed", None]
+    finally:
+        runtime.native.close()
+
+
+def test_slash_retry_affordance_excludes_effects_and_terminal_handoffs():
+    from hermes_wisdom_plugin.commands import read_unavailable
+
+    for command in ("install", "update", "publish", "setup", "installed-setup"):
+        assert read_unavailable((command, ["skill-1"])) is None
+
+
+def test_slash_unavailable_effect_handoff_does_not_offer_replay(tmp_path, monkeypatch):
+    runtime = CommandRuntime(
+        tmp_path, ("default", tmp_path), state=JsonState(tmp_path),
+        llm=None, spawn_task=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(runtime, "_service", lambda: (_ for _ in ()).throw(
+        WisdomUnavailable()
+    ))
+    try:
+        assert asyncio.run(runtime._slash(("install", ["skill-1"]))) == (
+            "Collective Wisdom is temporarily unavailable."
+        )
     finally:
         runtime.native.close()

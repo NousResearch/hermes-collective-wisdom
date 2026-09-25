@@ -32,7 +32,8 @@ from hermes_wisdom_plugin.commands import (
     run_slash as render_slash,
 )
 from hermes_wisdom_plugin.errors import (
-    WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+    WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomUnavailable,
+    WisdomValidationError,
 )
 from hermes_wisdom_plugin.native_context import NativeInvocation
 from hermes_wisdom_plugin.native_review import (
@@ -1157,6 +1158,68 @@ def test_cli_preserves_typed_error_exit_codes(error, capsys):
     assert json.loads(capsys.readouterr().out)["category"] == error.exit_code
 
 
+@pytest.mark.parametrize("argv,method,retry_safe", [
+    (["status"], "status", True),
+    (["list"], "list_skills", True),
+    (["publication", "status", "op-1"], "publication_status", True),
+    (["publication", "submit", "wpub_review"], "publication_submit", False),
+    (["install", "--apply-receipt", "wip_install"], "install_apply", False),
+])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cli_unavailable_retry_guidance(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    argv, method, retry_safe, as_json, capsys, monkeypatch
+):
+    service = _Service()
+    attempts = []
+
+    def unavailable(*_args, **_kwargs):
+        attempts.append(1)
+        raise WisdomUnavailable(status=503)
+
+    monkeypatch.setattr(service, method, unavailable)
+    assert run_cli(_parser().parse_args(argv + (["--json"] if as_json else [])), service) == 8
+    output = capsys.readouterr()
+    assert len(attempts) == 1
+    if as_json:
+        assert not output.err
+        assert json.loads(output.out) == {
+            "ok": False, "error": "Collective Wisdom is temporarily unavailable.",
+            "category": 8,
+        }
+    else:
+        assert not output.out
+        assert "Collective Wisdom is temporarily unavailable." in output.err
+        assert ("Retry this read-only command later." in output.err) == retry_safe
+        assert ("Check the current status before retrying" in output.err) != retry_safe
+        assert "sign in" not in output.err.lower()
+
+
+@pytest.mark.parametrize("argv,retry_safe", [
+    (["notifications"], True),
+    (["notifications", "--mark-seen"], False),
+    (["settings", "status"], True),
+    (["settings", "fixed"], False),
+    (["mute", "status"], True),
+    (["mute", "forever"], False),
+    (["prepared", "inspect", "local:draft"], True),
+    (["prepared", "review", "local:draft"], False),
+    (["installed-setup", "inspect", "skill-1"], True),
+    (["installed-setup", "apply", "wip_setup"], False),
+])
+def test_cli_unavailable_nested_and_option_retry_safety(argv, retry_safe, capsys):
+    class FailingService:
+        def __getattr__(self, _name):
+            def unavailable(*_args, **_kwargs):
+                raise WisdomUnavailable()
+            return unavailable
+
+    assert run_cli(_parser().parse_args(argv), FailingService()) == 8
+    output = capsys.readouterr()
+    assert not output.out
+    assert ("Retry this read-only command later." in output.err) is retry_safe
+    assert ("Check the current status before retrying" in output.err) is not retry_safe
+
+
 def test_publication_terminal_commands_are_explicit_and_inspectable(capsys):
     parser = _parser()
     service = _Service()
@@ -1510,6 +1573,42 @@ def test_slash_exceptions_are_redacted(error):
 
     assert "secret" not in output
     assert "/Users/private" not in output
+
+
+@pytest.mark.parametrize("raw, method", [
+    ("status", "status"),
+    ("list", "search_skills"),
+    ('browse "incident handoff" --page 2', "search_skills"),
+    ("show skill-1", "resolve_skill"),
+    ("versions skill-1 --page 2", "resolve_skill"),
+])
+def test_slash_transient_read_offers_original_manual_retry(raw, method):
+    service = _Service()
+    parsed = parse_slash(raw)
+    assert parsed is not None
+    command, args = parsed
+    setattr(service, method, lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        WisdomUnavailable(status=503)
+    ))
+
+    output = run_slash(raw, service)
+
+    assert output == (
+        "Collective Wisdom is temporarily unavailable.\n"
+        f"Run /wisdom {shlex.join((command, *args))} again to retry."
+    )
+    assert "Sign in" not in output
+    assert len([call for call in service.calls if call[0] == "require_setup"]) <= 1
+
+
+def test_slash_auth_failure_does_not_offer_transient_retry():
+    service = _Service()
+    service.require_setup = lambda: (_ for _ in ()).throw(WisdomAuthError("private"))
+
+    output = run_slash("browse incident", service)
+
+    assert "Sign in again" in output
+    assert "again to retry" not in output
 
 
 def _native_invocation(platform="slack", *, adapter=None, message_id="command-1"):

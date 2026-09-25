@@ -17,6 +17,7 @@ from hermes_wisdom_plugin.desktop_api import DesktopWorkflowApi, build_router
 from hermes_wisdom_plugin.errors import (
     WisdomAuthError,
     WisdomConflict,
+    WisdomUnavailable,
     WisdomValidationError,
 )
 from hermes_wisdom_plugin.direct_services import WISDOM_DISCLOSURE
@@ -738,19 +739,25 @@ def test_mute_route_rejects_unknown_duration_before_workflow_dispatch():
     assert result.status_code == 422
 
 
-def test_service_factory_auth_failure_is_reported_as_auth_error():
+@pytest.mark.parametrize(("failure", "status_code"), [
+    (WisdomAuthError("Credentials unavailable"), 401),
+    (WisdomUnavailable(status=503), 503),
+])
+def test_service_factory_failure_preserves_auth_and_unavailable(failure, status_code):
     def unavailable():
-        raise WisdomAuthError("Credentials unavailable")
+        raise failure
 
     app = FastAPI()
     app.include_router(build_router(unavailable))
     result = _request(app, "POST", "/views")
-    assert result.status_code == 401
+    assert result.status_code == status_code
+    assert result.json()["detail"] == str(failure)
 
 
 @pytest.mark.parametrize(
     ("failure", "status_code"),
     [
+        (WisdomUnavailable(status=502), 503),
         (PermissionError("operation is not permitted"), 403),
         (ValueError("documented validation failure"), 422),
     ],

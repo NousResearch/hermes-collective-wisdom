@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from .errors import WisdomValidationError
+from .errors import WisdomUnavailable, WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_review import NativeReviewController, NativeView, parse_callback
 from .terminal_ui import has_reviewable_warnings, render_operation_outcome
@@ -564,27 +564,62 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             query = getattr(update, "callback_query", None)
             if query is None:
                 return
-            await query.answer()
+            read_failed = False
+            acknowledged = False
+            invocation = None
+            record = None
             try:
                 self._check_lease("telegram", adapter, token)
                 record_id, selected = parse_callback(str(getattr(query, "data", "") or ""))
                 record = self.reviews.load(record_id)
+                if selected not in {"details", "review"} or record.get("operation") not in {"install", "update"}:
+                    await query.answer()
+                    acknowledged = True
                 from .native_telegram import (  # pylint: disable=import-outside-toplevel
                     callback_invocation, edit,
                 )
                 invocation = callback_invocation(adapter, query, record)
                 service = self.service_factory()
                 try:
-                    updated = await asyncio.to_thread(
-                        self.reviews.act, record_id, selected, service, invocation,
-                        authority=lambda: self._lease_current("telegram", adapter, token),
-                    )
+                    try:
+                        updated = await asyncio.to_thread(
+                            self.reviews.act, record_id, selected, service, invocation,
+                            authority=lambda: self._lease_current("telegram", adapter, token),
+                        )
+                    except WisdomUnavailable:
+                        read_failed = selected in {"details", "review"} and record.get(
+                            "operation"
+                        ) in {"install", "update"}
+                        raise
                 finally:
                     service.close()
+                if not acknowledged:
+                    await query.answer()
+                    acknowledged = True
                 with self.reviews.displaying(updated):
                     await edit(query, self.reviews.view(updated), record_id)
+            except WisdomUnavailable:
+                show_alert = False
+                if read_failed and invocation is not None and isinstance(record, dict):
+                    expected_owner = record.get("owner")
+                    show_alert = (
+                        isinstance(expected_owner, dict)
+                        and invocation.chat_type == "private"
+                        and self._lease_current("telegram", adapter, token)
+                        and await asyncio.to_thread(
+                            self._post_owner_current, expected_owner
+                        )
+                    )
+                if show_alert and not acknowledged:
+                    await query.answer(
+                        text="Collective Wisdom is temporarily unavailable. Try this read-only control again later.",
+                        show_alert=True,
+                    )
+                elif not acknowledged:
+                    await query.answer()
             except Exception:  # pylint: disable=broad-exception-caught
-                pass
+                if not acknowledged:
+                    await query.answer()
             raise ApplicationHandlerStop
 
         native.add_handler(CallbackQueryHandler(callback, pattern=r"^wi:agent:", block=True), group=-10)
@@ -741,7 +776,20 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         )
 
     def begin_catalog(self, invocation: NativeInvocation, command: str, target: str = ""):
-        return self._begin(invocation, lambda service: self.reviews.request_catalog(service, invocation, command, target))
+        try:
+            return self._begin(
+                invocation,
+                lambda service: self.reviews.request_catalog(service, invocation, command, target),
+            )
+        except WisdomUnavailable as exc:
+            if invocation.platform not in {"telegram", "slack"}:
+                raise
+            if invocation.platform == "slack":
+                return f"{exc} Resend your /wisdom {command} command to retry."
+            return (
+                "Collective Wisdom is temporarily unavailable. "
+                f"Resend /wisdom {command}" + (f" {target}" if target else "") + " to try again."
+            )
 
     def begin_settings(self, invocation: NativeInvocation):
         return self._begin(invocation, lambda service: self.reviews.request_settings(service, invocation))

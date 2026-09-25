@@ -20,6 +20,7 @@ from hermes_wisdom_plugin.errors import (
     WisdomConflict,
     WisdomError,
     WisdomNotFound,
+    WisdomUnavailable,
     WisdomValidationError,
 )
 
@@ -365,7 +366,9 @@ def test_invalid_discovery_requests_fail_before_credentials_and_http(
         (404, WisdomNotFound, 4),
         (409, WisdomConflict, 5),
         (422, WisdomValidationError, 6),
-        (503, WisdomError, 8),
+        (502, WisdomUnavailable, 8),
+        (503, WisdomUnavailable, 8),
+        (504, WisdomUnavailable, 8),
     ],
 )
 def test_http_failures_preserve_status_code_and_exit_contract(
@@ -381,6 +384,8 @@ def test_http_failures_preserve_status_code_and_exit_contract(
     assert raised.value.status == status
     assert raised.value.code == "stable_error_code"
     assert raised.value.exit_code == exit_code
+    if isinstance(raised.value, WisdomUnavailable):
+        assert str(raised.value) == "Collective Wisdom is temporarily unavailable."
 
 
 @pytest.mark.parametrize(
@@ -400,6 +405,20 @@ def test_malformed_json_and_headers_fail_closed_and_close_response(response):
     with pytest.raises(WisdomError, match="malformed response|invalid response headers"):
         value.list_skills()
 
+    assert response.closed is True
+
+
+@pytest.mark.parametrize("response", [
+    Response(503, raw=b"<html>upstream unavailable</html>",
+             headers={"Content-Type": "text/html"}),
+    Response(502, raw=b""),
+])
+def test_proxy_outage_without_json_still_uses_transient_error(response):
+    """A proxy's HTML/empty outage response is still a transient failure."""
+    value = client(response)
+    with pytest.raises(WisdomUnavailable, match="temporarily unavailable") as raised:
+        value.list_skills()
+    assert raised.value.status == response.status_code
     assert response.closed is True
 
 
@@ -426,8 +445,8 @@ def test_declared_and_streamed_response_limits_are_enforced():
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (requests.Timeout("slow"), "timed out"),
-        (requests.ConnectionError("offline"), "unavailable"),
+        (requests.Timeout("slow"), "temporarily unavailable"),
+        (requests.ConnectionError("offline"), "temporarily unavailable"),
     ],
 )
 def test_transport_failures_are_stable_and_do_not_echo_details(error, message):
@@ -435,10 +454,12 @@ def test_transport_failures_are_stable_and_do_not_echo_details(error, message):
 
     value = client(session=Session(request_error=error))
 
-    with pytest.raises(WisdomError, match=message) as raised:
+    with pytest.raises(WisdomUnavailable, match=message) as raised:
         value.list_skills()
     assert "slow" not in str(raised.value)
     assert "offline" not in str(raised.value)
+    assert raised.value.code == "gateway_unavailable"
+    assert raised.value.exit_code == 8
 
 
 def test_stream_timeout_closes_response():
@@ -447,7 +468,7 @@ def test_stream_timeout_closes_response():
     response = Response(200, stream_error=requests.Timeout("slow body"))
     value = client(response)
 
-    with pytest.raises(WisdomError, match="timed out"):
+    with pytest.raises(WisdomUnavailable, match="temporarily unavailable"):
         value.list_skills()
 
     assert response.closed is True

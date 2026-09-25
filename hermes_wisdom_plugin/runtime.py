@@ -21,7 +21,10 @@ from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
-from .errors import WisdomAuthError, WisdomConflict, WisdomError, WisdomValidationError
+from .commands import read_unavailable
+from .errors import (
+    WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
+)
 from .package import PackagePolicyError
 
 
@@ -1607,6 +1610,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             result = await asyncio.shield(task)
             service.check_owner()
             return result
+        except WisdomUnavailable:
+            return read_unavailable(parsed) or str(WisdomUnavailable())
         except Exception:  # pylint: disable=broad-exception-caught
             return _UNAVAILABLE
         finally:
@@ -1654,7 +1659,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             while not cancel.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return "Collective Wisdom request timed out. Please retry."
+                    return read_unavailable(parsed) or str(WisdomUnavailable())
                 try:
                     output, _ = child.communicate(payload, timeout=min(0.1, remaining))
                     result = json.loads(output) if child.returncode == 0 else None
@@ -1704,6 +1709,10 @@ def worker_main(request) -> str:
         result = run_slash((request["command"][0], request["command"][1]), service)
         service.check_owner()
         return result
+    except WisdomUnavailable:
+        return read_unavailable((request["command"][0], request["command"][1])) or str(
+            WisdomUnavailable()
+        )
     except WisdomError:
         return _UNAVAILABLE
     finally:

@@ -43,6 +43,16 @@ const requestBody = (viewId, fields = {}) => ({ view_id: viewId, ...fields })
 const isObject = value => value != null && typeof value === 'object' && !Array.isArray(value)
 const isPositiveInt = value => Number.isInteger(value) && value > 0
 const isAuthError = error => error?.status === 401 || error?.statusCode === 401 || /\b401\b/.test(text(error?.message))
+// Electron IPC may preserve only the HTTP error message, not statusCode.
+const isUnavailable = error => error?.status === 503 || error?.statusCode === 503 || /\b503\b/.test(text(error?.message))
+const UNAVAILABLE_MESSAGE = 'Collective Wisdom is temporarily unavailable.'
+
+function ReadFailure({ error, onRetry, title }) {
+  return jsxs('div', { className: 'space-y-3', children: [
+    jsx(EmptyState, { title, description: isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
+    isUnavailable(error) ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
+  ] })
+}
 
 const slashDialog = {
   hosts: [],
@@ -534,7 +544,10 @@ function useCurrentMutation(client, lifecycle, operation, onSuccess, failureMess
     },
     onError: (error, variables) => {
       onFailure?.(error, variables)
-      if (!error?.stale && isCurrent(lifecycle)) host.notifyError(error, failureMessage)
+      if (!error?.stale && isCurrent(lifecycle)) host.notifyError(
+        isUnavailable(error) ? new Error(UNAVAILABLE_MESSAGE) : error,
+        isUnavailable(error) ? UNAVAILABLE_MESSAGE : failureMessage
+      )
     }
   })
 }
@@ -670,6 +683,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     installation_status: detail.data?.installation_status || detailedSkill?.installation_status || chosen?.installation_status
   } : null
   const detailAction = catalogAction(detailItem)
+  const catalogFailure = catalog.error || (selected && (detail.error || versions.error))
   const pageCount = Math.max(1, Math.ceil(skills.length / 5))
   const visibleSkills = dialog ? skills.slice(page * 5, page * 5 + 5) : skills
   useEffect(() => { setPage(0) }, [search])
@@ -683,9 +697,13 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
 
   return jsxs('div', { className: 'space-y-5', children: [
     (!dialog || (!selected && !review)) ? jsx(Input, { 'aria-label': 'Search shared skills', onChange: event => setSearch(event.target.value), placeholder: 'Search shared skills', type: 'search', value: search }) : null,
-    catalog.error ? jsx(EmptyState, { title: 'Catalog unavailable', description: text(catalog.error?.message || catalog.error) }) : null,
-    !catalog.isLoading && !catalog.error && skills.length === 0 ? jsx(EmptyState, { title: 'No shared skills', description: 'No published skills match this search.' }) : null,
-    (!dialog || (!selected && !review)) ? jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: visibleSkills.map(item => {
+    catalogFailure ? jsx(ReadFailure, { error: catalogFailure, title: 'Catalog unavailable', onRetry: () => {
+      if (catalog.error) catalog.refetch()
+      if (detail.error) detail.refetch()
+      if (versions.error) versions.refetch()
+    } }) : null,
+    !catalog.isLoading && !catalogFailure && skills.length === 0 ? jsx(EmptyState, { title: 'No shared skills', description: 'No published skills match this search.' }) : null,
+    !catalogFailure && (!dialog || (!selected && !review)) ? jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: visibleSkills.map(item => {
       const status = catalogStatus(item)
       const action = catalogAction(item)
       return (
@@ -704,12 +722,12 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
       ] }, item.id)
       )
     }) }) : null,
-    dialog && !selected && !review && skills.length > 5 ? jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
+    dialog && !catalogFailure && !selected && !review && skills.length > 5 ? jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
       jsx(Button, { disabled: page === 0, onClick: () => setPage(value => value - 1), size: 'sm', type: 'button', variant: 'secondary', children: 'Previous' }),
       jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: `${page + 1} / ${pageCount}` }),
       jsx(Button, { disabled: page + 1 >= pageCount, onClick: () => setPage(value => value + 1), size: 'sm', type: 'button', variant: 'secondary', children: 'Next' })
     ] }) : null,
-    selected && !review ? jsxs(Section, { title: `${dialog ? '' : 'Details — '}${label(detailItem)}`, children: [
+    selected && !review && !catalogFailure ? jsxs(Section, { title: `${dialog ? '' : 'Details — '}${label(detailItem)}`, children: [
       jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: detailItem?.author_description || detail.data?.latest_version_detail?.version?.author_description || 'No description supplied.' }),
       jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(catalogStatus(detailItem).text || 'Installation status unavailable') }),
       jsx('h3', { className: 'text-xs font-semibold', children: 'Version history' }),
@@ -743,7 +761,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
     item => client.rest(`/updates/${encodeURIComponent(item.skill_id)}?view_id=${encodeURIComponent(viewId)}`),
     result => setChecks(current => ({ ...current, [result.skill_id]: { result } })),
     'Could not check for updates',
-    (error, item) => setChecks(current => ({ ...current, [item.skill_id]: { error: text(error?.message || error) } }))
+    (error, item) => setChecks(current => ({ ...current, [item.skill_id]: { error: isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error), transient: isUnavailable(error) } }))
   )
   const update = useCurrentMutation(client, lifecycle, item => client.rest('/update/review', {
     method: 'POST', body: requestBody(viewId, { skill_id: item.skill_id, preserve_modified: preserve, accept_sensitive: false, accept_partial: false, accept_warnings: false })
@@ -826,7 +844,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
           jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome?.skill_id === item.skill_id ? outcome : null })
         ] }),
         jsxs('div', { className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
-          jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Check for updates' }),
+          jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: checked?.transient ? 'Retry' : 'Check for updates' }),
           jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Remove' })
         ] })
       ] }, item.skill_id)
@@ -863,6 +881,7 @@ function Settings({ bootstrap, client, lifecycle, viewId }) {
   }, 'Your notification mute was not changed')
   const muteState = current.gateway_mute
   const muteControl = current.mute_control
+  if (settings.error && isUnavailable(settings.error)) return jsx(ReadFailure, { error: settings.error, title: 'Settings unavailable', onRetry: () => settings.refetch() })
   return jsxs('div', { className: 'space-y-6', children: [
     jsx(Section, { title: 'Recommendations', description: mode === 'fixed'
       ? 'Off: proactive Wisdom recommendations are paused. You can still browse and review skills here.'
@@ -1040,6 +1059,11 @@ function Contributions({ client, lifecycle, viewId }) {
     setWarningAccepted(false)
     queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'drafts', lifecycle.key] })
   }
+  const transientRead = [candidates.error, savedDrafts.error].find(isUnavailable)
+  if (transientRead) return jsx(ReadFailure, { error: transientRead, title: 'Sharing data unavailable', onRetry: () => {
+    if (candidates.error) candidates.refetch()
+    if (savedDrafts.error) savedDrafts.refetch()
+  } })
   return jsxs('div', { className: 'space-y-5', children: [
     shareCandidates.length ? jsx(Section, { title: 'Worth sharing with your team', description: 'These suggestions come from local use and refinement signals. Share only prepares a private draft for your review.', children:
       jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: shareCandidates.map(item =>
@@ -1123,6 +1147,7 @@ function Enrollment({ client, lifecycle, viewId }) {
     await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
     if (isCurrent(token)) host.notify({ kind: 'success', message: 'Collective Wisdom enrolled for this profile' })
   }, 'Enrollment was not completed')
+  if (disclosure.error && isUnavailable(disclosure.error)) return jsx(ReadFailure, { error: disclosure.error, title: 'Disclosure unavailable', onRetry: () => disclosure.refetch() })
   return jsx(Section, { title: 'Enroll this profile', description: disclosure.data?.text || 'Loading disclosure…', children:
     jsxs('div', { className: 'space-y-3', children: [
       disclosure.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Disclosure unavailable: ${text(disclosure.error?.message || disclosure.error)}` }) : null,
@@ -1170,7 +1195,7 @@ function WisdomDialogCatalog({ client, request }) {
   }, [current, request.id, tracker])
 
   if (!current) return null
-  if (view.error) return jsx(EmptyState, { title: 'Shared skills unavailable', description: text(view.error?.message || view.error) })
+  if (view.error) return jsx(ReadFailure, { error: view.error, onRetry: () => { if (current) view.refetch() }, title: 'Shared skills unavailable' })
   if (!view.data) return jsx('p', { className: 'text-sm text-(--ui-text-tertiary)', children: 'Loading Shared skills…' })
   return jsx(Catalog, {
     client: boundClient,
@@ -1231,10 +1256,13 @@ function WisdomPage({ client }) {
       jsx(Button, { onClick: () => setManualGeneration(value => value + 1), type: 'button', variant: 'secondary', children: 'Recheck connection' })
     ] })
   } else if (bootstrap.error || view.error) {
-    const error = bootstrap.error || view.error
+    const error = [bootstrap.error, view.error].find(isAuthError) || bootstrap.error || view.error
     content = jsxs('div', { className: 'space-y-3', children: [
-      jsx(EmptyState, { title: isAuthError(error) ? 'Ownership must be rechecked' : 'Collective Wisdom unavailable', description: isAuthError(error) ? 'The backend rejected this owner/view. Cached data was dropped; create a fresh view for the current connection and profile.' : text(error?.message || error) }),
-      jsx(Button, { onClick: () => setManualGeneration(value => value + 1), type: 'button', variant: 'secondary', children: 'Reload with a fresh review' })
+      jsx(EmptyState, { title: isAuthError(error) ? 'Ownership must be rechecked' : 'Collective Wisdom unavailable', description: isAuthError(error) ? 'The backend rejected this owner/view. Cached data was dropped; create a fresh view for the current connection and profile.' : isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
+      jsx(Button, { onClick: isUnavailable(error) ? () => {
+        if (bootstrap.error) bootstrap.refetch()
+        if (view.error) view.refetch()
+      } : () => setManualGeneration(value => value + 1), type: 'button', variant: 'secondary', children: isUnavailable(error) ? 'Retry' : 'Reload with a fresh review' })
     ] })
   } else if (!bootstrap.data || !view.data) {
     content = jsx('p', { className: 'p-5 text-sm text-(--ui-text-tertiary)', children: 'Loading owner-bound Wisdom data…' })
