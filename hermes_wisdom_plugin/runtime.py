@@ -25,7 +25,7 @@ from .commands import read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
 )
-from .install_review import confirmed_file_install
+from .install_review import confirmed_file_change
 from .package import PackagePolicyError
 
 
@@ -1335,21 +1335,29 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         return result
 
     def install_setup_apply(self, receipt, *, may_apply: Callable[[], bool] | None = None):
-        """Execute declared setup only after a distinct, current permission action."""
-        reviewer, _executor = self._installation_services()
+        """Execute declared setup only after distinct permission for installed files."""
+        return self._file_setup_apply(receipt, "installed", may_apply=may_apply)
+
+    def update_setup_apply(self, receipt, *, may_apply: Callable[[], bool] | None = None):
+        """Execute new-version setup only after distinct permission for updated files."""
+        return self._file_setup_apply(receipt, "updated", may_apply=may_apply)
+
+    def _file_setup_apply(self, receipt, action, *, may_apply=None):
+        reviewer = (self._installation_services()[0] if action == "installed"
+                    else self._update_services()[0])
         plan = reviewer.receipts.load(receipt, allow_started=True)
-        installed = reviewer.receipts.outcome(receipt)
+        changed = reviewer.receipts.outcome(receipt)
         self.check_owner()
         _require_current(may_apply)
         commands = plan.get("setup_commands")
-        if not confirmed_file_install(installed):
-            raise PackagePolicyError("files are not confirmed installed for this review")
+        if not confirmed_file_change(changed, action=action):
+            raise PackagePolicyError(f"files are not confirmed {action} for this review")
         if not isinstance(commands, list) or not commands:
-            raise PackagePolicyError("this installation has no declared setup commands")
+            raise PackagePolicyError("this version has no declared setup commands")
         try:
-            return self._apply_installed_setup(receipt, plan, installed, may_apply=may_apply)
+            return self._apply_installed_setup(receipt, plan, changed, may_apply=may_apply)
         except (PackagePolicyError, WisdomError) as exc:
-            return {**installed, "setup": {"state": "blocked", "detail": str(exc)}}
+            return {**changed, "setup": {"state": "blocked", "detail": str(exc)}}
 
     def _apply_installed_setup(self, receipt, plan, result, *, may_apply=None):
         """Run only the exact commands declared by the installed, reviewed bytes."""

@@ -26,7 +26,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .direct_services import WISDOM_DISCLOSURE
-from .install_review import confirmed_file_install
+from .install_review import confirmed_file_change, confirmed_file_install
 
 
 _PRE_ENROLLMENT_CODES = frozenset({
@@ -144,7 +144,7 @@ class _Review:
     subject: str
     snapshot: dict[str, Any]
     expires_at: float
-    files_installed: bool = False
+    files_changed: bool = False
     setup_claimed: bool = False
 
 
@@ -384,21 +384,29 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         if confirmed_file_install(result) and review.snapshot.get("setup_commands"):
             with self._lock:
                 if self._reviews.get(receipt) is review:
-                    review.files_installed = True
+                    review.files_changed = True
         return self._named_outcome(result, review.snapshot)
 
     def install_setup_confirm(self, service: Any, view_id: str, receipt: str) -> dict[str, Any]:
         """Spend separate setup consent only for this view's completed file install."""
-        review = self._require_review(service, view_id, receipt, "install")
+        return self._setup_confirm(service, view_id, receipt, kind="install")
+
+    def update_setup_confirm(self, service: Any, view_id: str, receipt: str) -> dict[str, Any]:
+        """Spend separate setup consent only for this view's completed file update."""
+        return self._setup_confirm(service, view_id, receipt, kind="update")
+
+    def _setup_confirm(self, service: Any, view_id: str, receipt: str, *, kind: str):
+        review = self._require_review(service, view_id, receipt, kind)
         with self._lock:
-            if (not review.files_installed or review.setup_claimed
+            if (not review.files_changed or review.setup_claimed
                     or not review.snapshot.get("setup_commands")):
-                raise WisdomConflict("Setup permission is not available for this installation")
+                raise WisdomConflict("Setup permission is not available for this file change")
             review.setup_claimed = True
-        result = service.install_setup_apply(
+        apply = service.install_setup_apply if kind == "install" else service.update_setup_apply
+        result = apply(
             receipt,
             may_apply=lambda: self.current(
-                service, view_id, review_id=receipt, kind="install"
+                service, view_id, review_id=receipt, kind=kind
             ),
         )
         return self._named_outcome(result, review.snapshot)
@@ -425,6 +433,11 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
                 service, view_id, review_id=receipt, kind="update"
             ),
         )
+        if (confirmed_file_change(result, action="updated")
+                and review.snapshot.get("setup_commands")):
+            with self._lock:
+                if self._reviews.get(receipt) is review:
+                    review.files_changed = True
         return self._named_outcome(result, review.snapshot)
 
     def set_notification_mode(
@@ -843,6 +856,12 @@ def build_router(  # pylint: disable=too-many-locals
     def update_confirm(body: ReceiptBody):
         return invoke(lambda service: api.update_confirm(
             service, body.view_id, body.receipt
+        ))
+
+    @router.post("/update/setup")
+    def update_setup_confirm(body: ReceiptBody):
+        return invoke(lambda service: api.update_setup_confirm(
+            service, body.view_id, body.receipt,
         ))
 
     @router.post("/uninstall/review")

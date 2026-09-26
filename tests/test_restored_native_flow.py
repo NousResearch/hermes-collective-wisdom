@@ -792,22 +792,58 @@ def test_native_install_discloses_setup_then_asks_separate_permission(tmp_path, 
 
 
 @pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
-def test_update_with_setup_does_not_promise_install_setup_execution(
-    tmp_path, harness, monkeypatch,
+@pytest.mark.parametrize("decision", ["setup.run", "setup.defer"])
+def test_update_with_new_setup_requires_separate_command_permission(
+    tmp_path, harness, decision,
 ):
+    class SetupUpdateService(Service):
+        def update_plan(self, _skill):
+            return {**self.install_plan("incident"), "operation": "update",
+                    "setup_commands": ["printf 'new version\\n'"]}
+
+        def update_apply(self, receipt, *, may_apply, **_kwargs):
+            assert may_apply()
+            self.applied.append(receipt)
+            return {"updated": True, "setup_required": True, "ready_to_use": None}
+
+        def update_setup_apply(self, receipt, *, may_apply):
+            assert may_apply()
+            self.applied.append("setup:" + receipt)
+            return {"updated": True, "setup_required": True, "ready_to_use": None,
+                    "setup_execution_authorized": True,
+                    "setup": {"state": "passed", "steps": 1}}
+
     async def scenario():
-        service = Service()
-        monkeypatch.setattr(service, "update_plan", lambda _skill: {
-            **service.install_plan("incident"), "operation": "update",
-            "setup_commands": ["verify new version"],
-        }, raising=False)
+        service = SetupUpdateService()
         ui = harness(tmp_path, service)
         identity = ui.runtime.begin_update(ui.caller, "incident")["review_id"]
         await ui.flush()
-        text = ui.view(identity).to_text()
-        assert "verify new version" in text
-        assert "runs with Install" not in text
-        assert "setup" in text.lower()
+        assert "printf 'new version" in ui.view(identity).to_text()
+        await ui.click(identity, "details")
+        assert not service.applied
+        await ui.click(identity, "back")
+        await ui.click(identity, "update")
+        assert service.applied == ["exact-receipt"]
+        view = ui.view(identity)
+        assert "files updated; setup incomplete" in view.to_text()
+        assert [a.label for a in view.actions] == ["Run setup", "Not now"]
+        await ui.click(identity, "update")
+        assert service.applied == ["exact-receipt"]
+        await ui.click(identity, decision)
+        if decision == "setup.run":
+            assert service.applied == ["exact-receipt", "setup:exact-receipt"]
+            receipt = ui.view(identity).to_text()
+            assert "✅ incident updated. Setup ran successfully" in receipt
+            assert "readiness is not verified" in receipt
+            assert "setup incomplete" not in receipt
+        else:
+            assert service.applied == ["exact-receipt"]
+            assert "setup incomplete" in ui.view(identity).to_text()
+        await ui.click(identity, "setup.run")
+        assert service.applied == (["exact-receipt", "setup:exact-receipt"]
+                                   if decision == "setup.run" else ["exact-receipt"])
+        ui.runtime.close()
+
     asyncio.run(scenario())
 
 

@@ -639,7 +639,34 @@ for (const local of [false, true]) for (const updated of [true, false]) test(`de
   await mounted.cleanup()
 })
 
-test('updated files with new setup are not a Desktop readiness success', async () => {
+test('Installed updates ask before running the new setup command', async () => {
+  const installation = { skill_id: 'skill-1', name: 'one', version: 1, content_hash: hash('0'), target_path: '/managed/one' }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap') return { ...bootstrap, installations: [installation] }
+    if (path.startsWith('/updates/skill-1?')) return { skill_id: 'skill-1', state: 'update_available', latest_version: 2 }
+    if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['printf new-version'] })
+    if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true, ready_to_use: null }
+    if (path === '/update/setup') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true,
+      ready_to_use: null, setup_execution_authorized: true, setup: { state: 'passed', steps: 1 } }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Installed'))
+  await click(button(page, 'Check for updates'))
+  await click(button(page, 'Review update'))
+  assert.match(page.container.textContent, /printf new-version/)
+  await click(button(page, 'Acknowledge and update'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, 0)
+  assert.ok(button(page, 'Run setup'))
+  assert.match(page.container.textContent, /files updated; setup incomplete/i)
+  await click(button(page, 'Run setup'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, 1)
+  assert.match(page.container.textContent, /✅ one updated\. Setup ran successfully/)
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  await page.cleanup()
+})
+
+for (const decision of ['Run setup', 'Not now']) test(`updated files require separate Desktop setup choice: ${decision}`, async () => {
   const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
@@ -648,15 +675,45 @@ test('updated files with new setup are not a Desktop readiness success', async (
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['verify new version'] })
     if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true, ready_to_use: null }
+    if (path === '/update/setup') return { updated: true, skill_id: 'skill-1', version: 2,
+      setup_required: true, ready_to_use: null, setup_execution_authorized: true,
+      setup: { state: 'passed', steps: 1 } }
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderComposerContribution(loaded)
   assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
   await click(button(mounted, 'Update'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/confirm').length, 1)
+  assert.match(mounted.container.textContent, /verify new version/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, 0)
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   assert.match(mounted.container.textContent, /one.*files updated; setup incomplete/i)
-  assert.match(mounted.container.textContent, /This version needs setup/i)
-  assert.doesNotMatch(mounted.container.textContent, /Setup ran/i)
+  assert.ok(button(mounted, 'Run setup'))
+  await click(button(mounted, decision))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, decision === 'Run setup' ? 1 : 0)
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.match(mounted.container.textContent, decision === 'Run setup' ? /✅ one updated\. Setup ran successfully/ : /files updated; setup incomplete/i)
+  if (decision === 'Run setup') assert.match(mounted.container.textContent, /readiness is not verified/i)
+  await mounted.cleanup()
+})
+
+for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`Desktop does not offer update setup for ${JSON.stringify(contradiction)}`, async () => {
+  const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['printf new-version'] })
+    if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', setup_required: true, ...contradiction }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
+  await click(button(mounted, 'Update'))
+  assert.equal(button(mounted, 'Run setup'), undefined)
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/update/setup'), false)
   await mounted.cleanup()
 })
 

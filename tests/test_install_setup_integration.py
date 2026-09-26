@@ -1,8 +1,6 @@
 """An isolated Install defers declared commands until setup consent."""
 
-import subprocess
-
-from installed_test_support import JsonState
+from installed_test_support import JsonState, ShellSetupHost
 from review_test_support import _content
 from test_install_execution import invocation_executor  # pylint: disable=unused-import
 from test_installed_setup import Host as InspectionHost
@@ -39,23 +37,7 @@ def test_install_files_do_not_run_setup_until_separate_consent(
     assert plan["setup_commands"] == [command]
     assert not target.exists()
 
-    class DisposableHost:  # pylint: disable=too-few-public-methods
-        """Actually execute only in the temporary fixture's managed directory."""
-
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, exact, *, workdir, task_id, on_started):
-            assert workdir == target
-            self.calls.append(exact)
-            on_started({"session_id": "fixture", "task_id": task_id,
-                        "workdir": str(workdir)})
-            run = subprocess.run(exact, shell=True, cwd=workdir, check=False,
-                                 capture_output=True, text=True, timeout=10)
-            return {"state": "passed" if run.returncode == 0 else "failed",
-                    "exit_code": run.returncode, "output": run.stdout + run.stderr}
-
-    host = DisposableHost()
+    host = ShellSetupHost(target)
     progress = DirectState(JsonState(store.root), store.root)
     setup = SetupService(progress, store, InspectionHost(executor.host.skills_root),
                          host, executor._owner)  # pylint: disable=protected-access

@@ -127,3 +127,86 @@ def test_setup_policy_failure_reports_files_already_installed(monkeypatch, error
     assert result["installed"] is True
     assert result["setup"]["state"] == "blocked"
     assert str(error) in result["setup"]["detail"]
+
+
+def test_update_setup_uses_completed_update_receipt_and_runs_only_new_command(monkeypatch):
+    """Updated files alone do not grant permission to run the new command."""
+    command = "printf new-version"
+    calls = []
+    reviewer = SimpleNamespace(receipts=SimpleNamespace(
+        load=lambda receipt, **_kw: {
+            "receipt": receipt, "operation": "update", "skill_id": "skill-1",
+            "version": 2, "setup_commands": [command], "content_hash": "new-hash",
+        },
+        outcome=lambda _receipt: {"updated": True, "setup_required": True,
+                                  "ready_to_use": None},
+    ))
+    setup = SimpleNamespace(
+        inspect=lambda *_args, **_kwargs: {
+            "content_hash": "new-hash", "guidance": {"setup_commands": [command]}},
+        plan_for_install=lambda _skill, **kwargs: calls.append(("plan", kwargs)) or
+        {"receipt": "wip_setup"},
+        apply=lambda receipt, **_kwargs: calls.append(("run", receipt)) or
+        {"state": "passed"},
+    )
+    monkeypatch.setattr(InvocationService, "_update_services",
+                        lambda self: (reviewer, SimpleNamespace()))
+    monkeypatch.setattr(InvocationService, "_setup_services", lambda self: setup)
+    monkeypatch.setattr(InvocationService, "check_owner", lambda self: None)
+    service = object.__new__(InvocationService)
+    result = service.update_setup_apply("wip_" + "a" * 32)
+    assert result["updated"] is True
+    assert result["setup_execution_authorized"] is True
+    assert result["setup"] == {"state": "passed", "steps": 1}
+    assert calls[0][1]["version"] == 2
+    assert calls[0][1]["command"] == command
+    assert calls[1] == ("run", "wip_setup")
+
+
+@pytest.mark.parametrize("contradiction", [
+    {"pending": True}, {"rejected": True}, {"state": "uncertain"},
+])
+def test_update_setup_refuses_unconfirmed_file_receipt(monkeypatch, contradiction):
+    """An update in doubt never grants command authority."""
+    reviewer = SimpleNamespace(receipts=SimpleNamespace(
+        load=lambda *_args, **_kwargs: {
+            "skill_id": "skill-1", "version": 2, "setup_commands": ["printf safe"]},
+        outcome=lambda _receipt: {"updated": True, **contradiction},
+    ))
+    monkeypatch.setattr(InvocationService, "_update_services",
+                        lambda self: (reviewer, SimpleNamespace()))
+    monkeypatch.setattr(InvocationService, "_setup_services",
+                        lambda self: pytest.fail("unconfirmed update ran setup"))
+    monkeypatch.setattr(InvocationService, "check_owner", lambda self: None)
+    with pytest.raises(PackagePolicyError, match="not confirmed updated"):
+        object.__new__(InvocationService).update_setup_apply("wip_" + "a" * 32)
+
+
+@pytest.mark.parametrize("installed_hash,installed_command", [
+    ("new-hash", "different"), ("old-hash", "printf safe"),
+])
+def test_update_setup_refuses_changed_installed_version(
+    monkeypatch, installed_hash, installed_command,
+):
+    """A changed installed hash or command cannot spend the update approval."""
+    reviewer = SimpleNamespace(receipts=SimpleNamespace(
+        load=lambda *_args, **_kwargs: {
+            "skill_id": "skill-1", "version": 2, "content_hash": "new-hash",
+            "setup_commands": ["printf safe"]},
+        outcome=lambda _receipt: {"updated": True, "setup_required": True},
+    ))
+    setup = SimpleNamespace(
+        inspect=lambda *_args, **_kwargs: {
+            "content_hash": installed_hash,
+            "guidance": {"setup_commands": [installed_command]}},
+        plan_for_install=lambda *_args, **_kwargs:
+        pytest.fail("changed package planned a setup command"),
+    )
+    monkeypatch.setattr(InvocationService, "_update_services",
+                        lambda self: (reviewer, SimpleNamespace()))
+    monkeypatch.setattr(InvocationService, "_setup_services", lambda self: setup)
+    monkeypatch.setattr(InvocationService, "check_owner", lambda self: None)
+    result = object.__new__(InvocationService).update_setup_apply("wip_" + "a" * 32)
+    assert result["updated"] is True
+    assert result["setup"]["state"] == "blocked"
+    assert "changed" in result["setup"]["detail"]

@@ -32,16 +32,22 @@ from .local_security import prepared_security_check
 from .setup_document import SETUP_PATH, parse_setup_document
 
 
-def confirmed_file_install(value: object) -> bool:
-    """An affirmative flag cannot override a pending or uncertain file operation."""
+def confirmed_file_change(value: object, *, action: str) -> bool:
+    """An affirmative file-write flag cannot override an uncertain outcome."""
     return (
         isinstance(value, dict)
-        and value.get("installed") is True
+        and action in {"installed", "updated"}
+        and value.get(action) is True
         and value.get("pending") is not True
         and value.get("rejected") is not True
         and not value.get("error")
         and value.get("state") in (None, "completed", "done")
     )
+
+
+def confirmed_file_install(value: object) -> bool:
+    """Confirm file installation without contradictory outcome state."""
+    return confirmed_file_change(value, action="installed")
 
 
 _OWNER_FIELDS = (

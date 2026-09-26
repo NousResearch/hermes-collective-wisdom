@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 from pathlib import Path
 
 from hermes_wisdom_plugin.installed_state import InstalledState
@@ -36,3 +37,21 @@ class JsonState:
 def installed_store(root: Path) -> InstalledState:
     root = Path(root)
     return InstalledState(JsonState(root), root)
+
+
+class ShellSetupHost:  # pylint: disable=too-few-public-methods
+    """Execute inert commands only inside a disposable installed-skill directory."""
+
+    def __init__(self, target: Path):
+        self.target = target
+        self.calls = []
+
+    def execute(self, exact, *, workdir, task_id, on_started):
+        assert workdir == self.target
+        self.calls.append(exact)
+        on_started({"session_id": "fixture", "task_id": task_id,
+                    "workdir": str(workdir)})
+        run = subprocess.run(exact, shell=True, cwd=workdir, check=False,
+                             capture_output=True, text=True, timeout=10)
+        return {"state": "passed" if run.returncode == 0 else "failed",
+                "exit_code": run.returncode, "output": run.stdout + run.stderr}
