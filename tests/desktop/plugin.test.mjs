@@ -536,7 +536,8 @@ test('Desktop installs files, then asks permission before running declared setup
       local_scan: { allowed: true, summary: 'Reviewed warnings', findings }
     })
     if (path === '/install/confirm') return { installed: true, setup_required: true, ready_to_use: null }
-    if (path === '/install/setup') return { installed: true, setup_required: true, ready_to_use: null, setup: { state: 'passed', steps: 1 } }
+    if (path === '/install/setup') return { installed: true, setup_required: true, ready_to_use: null,
+      setup_execution_authorized: true, setup: { state: 'passed', steps: 1 } }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
@@ -555,7 +556,9 @@ test('Desktop installs files, then asks permission before running declared setup
   await click(button(mounted, 'Run setup'))
   assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 1)
   assert.equal(loaded.calls.notify.some(item => item.message === '✅ one installed'), false)
-  assert.match(mounted.container.textContent, /Setup ran, but readiness has not been verified/i)
+  assert.match(mounted.container.textContent, /✅ one installed\. Setup ran successfully/)
+  assert.match(mounted.container.textContent, /readiness is not verified/i)
+  assert.doesNotMatch(mounted.container.textContent, /setup incomplete|Check its status before trying again/i)
   await mounted.cleanup()
 })
 

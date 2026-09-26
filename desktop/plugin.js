@@ -474,17 +474,17 @@ function OperationOutcome({ kind, result }) {
   if (!result) return null
   const subject = label(result)
   const setupIncomplete = setupIncompleteResult(kind, result)
+  const setupRan = setupIncomplete && result.setup?.state === 'passed' && result.setup_execution_authorized === true
   const setupStopped = result.setup?.state && result.setup.state !== 'passed'
   let setupDetail = 'Setup is required; readiness has not been verified. Check setup status before use.'
   if (kind === 'Update') setupDetail = 'This version needs setup; readiness has not been verified. Check setup status before use.'
-  if (result.setup?.state === 'passed') setupDetail = 'Setup ran, but readiness has not been verified. Check setup status before use.'
   if (setupStopped) setupDetail = `Setup ${text(result.setup.state)}${result.setup.step ? ` at step ${result.setup.step}` : ''}. Check its status before trying again.`
   const shareUnlinked = kind === 'Publication' && result.state === 'done' &&
     result.publication_state === 'published' && result.managed_enrollment?.state === 'not_linked'
   return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
-    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
+    jsx('h3', { className: 'text-xs font-semibold', children: setupRan ? `✅ ${subject} ${kind === 'Update' ? 'updated' : 'installed'}. Setup ran successfully.` : setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupRan ? "Readiness is not verified. Follow the skill's verification instructions before use." : setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    setupRan ? null : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
     jsxs('details', { children: [
       jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),
       jsxs('div', { className: 'mt-2 space-y-1', children: [
