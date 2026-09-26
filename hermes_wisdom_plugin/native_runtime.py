@@ -50,23 +50,25 @@ def _already_installed_view(
     guidance = status.get("guidance")
     commands = guidance.get("setup_commands") if isinstance(guidance, dict) else None
     progress = status.get("setup_progress")
-    command_passed = (isinstance(commands, list) and bool(commands)
-                      and isinstance(progress, list) and len(progress) == len(commands)
-                      and all(isinstance(step, dict) and step.get("phase") == "setup"
-                              and step.get("index") == index and step.get("state") == "passed"
-                              for index, step in enumerate(progress)))
-    detail = "Setup commands passed; verification not recorded." if (
-        command_passed and isinstance(status.get("verification"), dict)
-        and status["verification"].get("state") == "not_recorded"
-    ) else (
-        "Setup is not complete; check its recorded progress before continuing."
-    )
+    passed_unverified = (isinstance(commands, list) and bool(commands)
+                         and isinstance(progress, list) and len(progress) == len(commands)
+                         and isinstance(status.get("verification"), dict)
+                         and status["verification"].get("state") == "not_recorded"
+                         and all(isinstance(step, dict) and step.get("phase") == "setup"
+                                 and step.get("index") == index and step.get("state") == "passed"
+                                 for index, step in enumerate(progress)))
     next_step = guidance.get("verification_step") if isinstance(guidance, dict) else None
     if not isinstance(next_step, str) or not next_step.strip():
         next_step = "Ask the skill's author how to verify its setup."
+    summary = (f"{reference} is already installed (v{version}). Setup ran successfully; "
+               "readiness is not verified." if passed_unverified else
+               f"{reference} is already installed (v{version}); setup incomplete")
     return NativeView(
-        "Collective Wisdom", f"{reference} is already installed (v{version}); setup incomplete",
-        [NativeItem("Setup", detail), NativeItem("Next step", next_step)],
+        "Collective Wisdom", summary,
+        [NativeItem("Setup", "Setup commands passed; verification not recorded." if
+                    passed_unverified else
+                    "Setup is not complete; check its recorded progress before continuing."),
+         NativeItem("Next step", next_step)],
         notice="Don't install it again. It isn't ready to use until setup is verified.",
         dismissed=True,
     )

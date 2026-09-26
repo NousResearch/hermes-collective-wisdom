@@ -1693,8 +1693,9 @@ def test_admitted_slash_install_directly_applies_and_sends_result(tmp_path, monk
 
 
 @pytest.mark.parametrize("platform", ["telegram", "slack"])
-def test_repeat_native_install_reports_existing_setup_instead_of_uncertainty(
-    tmp_path, monkeypatch, platform,
+@pytest.mark.parametrize("command_state", ["passed", "pending"])
+def test_repeat_native_install_distinguishes_setup_execution_from_readiness(
+    tmp_path, monkeypatch, platform, command_state,
 ):
     class AlreadyInstalled:
         def __init__(self):
@@ -1716,7 +1717,8 @@ def test_repeat_native_install_reports_existing_setup_instead_of_uncertainty(
             return {
                 "slug": "incident", "files_installed": True, "state": "setup_required",
                 "ready_to_use": None, "version": 1,
-                "setup_progress": [{"phase": "setup", "index": 0, "state": "passed"}],
+                "setup_progress": ([{"phase": "setup", "index": 0, "state": "passed"}]
+                                   if command_state == "passed" else []),
                 "verification": {"state": "not_recorded"},
                 "guidance": {
                     "setup_commands": ["printf 'setup ok'"],
@@ -1755,8 +1757,14 @@ def test_repeat_native_install_reports_existing_setup_instead_of_uncertainty(
             text = views[0].to_text()
             assert "incident" in text
             assert "already installed" in text
-            assert "setup incomplete" in text.casefold()
-            assert "Setup commands passed; verification not recorded." in text
+            if command_state == "passed":
+                assert "Setup ran successfully" in text
+                assert "readiness is not verified" in text
+                assert "setup incomplete" not in text.casefold()
+                assert "Setup commands passed; verification not recorded." in text
+            else:
+                assert "setup incomplete" in text.casefold()
+                assert "Setup ran successfully" not in text
             assert "Check that the local service responds." in text
             assert "uncertain" not in text.casefold()
             assert service.calls == [
