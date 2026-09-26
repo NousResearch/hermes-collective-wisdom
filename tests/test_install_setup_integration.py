@@ -1,8 +1,6 @@
-"""An isolated Install applies only the reviewed files and declared setup."""
+"""An isolated Install defers declared commands until setup consent."""
 
-import subprocess
-
-from installed_test_support import JsonState
+from installed_test_support import JsonState, ShellSetupHost
 from review_test_support import _content
 from test_install_execution import invocation_executor  # pylint: disable=unused-import
 from test_installed_setup import Host as InspectionHost
@@ -16,7 +14,7 @@ from hermes_wisdom_plugin.setup_document import PREFIX, SETUP_PATH, SUFFIX
 # This fixture owns an isolated filesystem, local state, and fake Gateway.
 # pylint: disable=missing-function-docstring,redefined-outer-name,too-many-locals
 
-def test_install_runs_exact_declared_setup_once_without_second_prompt(
+def test_install_files_do_not_run_setup_until_separate_consent(
     invocation_executor, monkeypatch,
 ):
     executor, store, client, _receipts, _original_plan, target, _authority = (
@@ -39,23 +37,7 @@ def test_install_runs_exact_declared_setup_once_without_second_prompt(
     assert plan["setup_commands"] == [command]
     assert not target.exists()
 
-    class DisposableHost:  # pylint: disable=too-few-public-methods
-        """Actually execute only in the temporary fixture's managed directory."""
-
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, exact, *, workdir, task_id, on_started):
-            assert workdir == target
-            self.calls.append(exact)
-            on_started({"session_id": "fixture", "task_id": task_id,
-                        "workdir": str(workdir)})
-            run = subprocess.run(exact, shell=True, cwd=workdir, check=False,
-                                 capture_output=True, text=True, timeout=10)
-            return {"state": "passed" if run.returncode == 0 else "failed",
-                    "exit_code": run.returncode, "output": run.stdout + run.stderr}
-
-    host = DisposableHost()
+    host = ShellSetupHost(target)
     progress = DirectState(JsonState(store.root), store.root)
     setup = SetupService(progress, store, InspectionHost(executor.host.skills_root),
                          host, executor._owner)  # pylint: disable=protected-access
@@ -70,14 +52,21 @@ def test_install_runs_exact_declared_setup_once_without_second_prompt(
     assert first["installed"] is True
     assert first["setup_required"] is True
     assert first["ready_to_use"] is None
-    assert first["setup"]["state"] == "passed"
-    assert first["setup_execution_authorized"] is True
-    assert (target.parent / "setup-ran").read_text() == "done"
-    assert host.calls == [command]
+    assert first.get("setup_execution_authorized") is not True
+    assert not (target.parent / "setup-ran").exists()
+    assert not host.calls
     assert len(client.record_calls) == 1
 
-    # Replaying the same Install receipt cannot launch setup or install twice.
+    # Replaying Install does not turn file consent into command consent.
     second = service.install_apply(plan["receipt"])
     assert second == first
+    assert not host.calls
+
+    setup_result = service.install_setup_apply(plan["receipt"])
+    assert setup_result["setup"]["state"] == "passed"
+    assert setup_result["setup_execution_authorized"] is True
+    assert (target.parent / "setup-ran").read_text() == "done"
+    assert host.calls == [command]
+    assert service.install_setup_apply(plan["receipt"])["setup"]["state"] == "passed"
     assert host.calls == [command]
     assert len(client.record_calls) == 1

@@ -35,6 +35,7 @@ from .package import (
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
 from .direct_services import WISDOM_DISCLOSURE
+from .install_review import confirmed_file_install as _confirmed_file_install
 from .terminal_ui import (
     edit_prepared as _edit_prepared,
     has_reviewable_warnings as _has_reviewable_warnings,
@@ -730,9 +731,7 @@ def _acknowledged_install_plan(args, service, plan):
             "install has scanner warnings; inspect --plan and explicitly use --accept-warnings"
         )
     _emit(plan, as_json=False, command="install")
-    action = (" and install with the displayed setup commands"
-              if plan.get("setup_commands") else "")
-    if input(f"Acknowledge the scanner warnings{action}? [y/N] ").strip().casefold() not in {
+    if input("Acknowledge the scanner warnings? [y/N] ").strip().casefold() not in {
         "y", "yes",
     }:
         return None
@@ -782,6 +781,17 @@ def _install_cli(args, service):  # pylint: disable=too-many-return-statements,t
             and (args.accept_warnings or not _has_reviewable_warnings(plan))):
         _emit(plan, as_json=False, command="install")
     result = service.install_apply(plan["receipt"], accept_partial=args.accept_partial)
+    if (plan.get("setup_commands") and not args.json and sys.stdin.isatty()
+            and _confirmed_file_install(result)):
+        print("Files installed; setup is still needed.")
+        print("Hermes will run these commands on this computer:")
+        for command in plan["setup_commands"]:
+            print(command)
+        answer = input(
+            "Run setup now? Not now keeps files installed but not ready. [y/N] "
+        )
+        if answer.strip().casefold() in {"y", "yes"}:
+            result = service.install_setup_apply(plan["receipt"])
     return _result_with_reviewed_slug(result, plan) if not args.json else result
 
 

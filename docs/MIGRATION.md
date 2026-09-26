@@ -46,8 +46,9 @@ A supported end-turn handler checks a bounded feed on each eligible turn and ren
 deterministic notice. Failure preserves the cursor and cannot fail the agent turn.
 Missing renderers are successful no-ops. A missed notice stays missed. View opens
 read-only details; an explicit Install action authorizes checked installation.
-Notification delivery alone never approves an effect. Install approval includes
-explicitly declared setup commands; manual setup remains separate.
+Notification delivery alone never approves an effect. Install approval covers
+reviewed files only; actual external setup commands require a separate Run setup
+choice. Manual setup remains separate.
 
 Plain CLI/TUI chat and unsupported clients receive no proactive notice. Explicit
 catalog, contribution, install, publish, settings, and recovery commands remain.

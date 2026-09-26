@@ -1,5 +1,5 @@
 """Restored journeys through real registered native callbacks; no live services."""
-# pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods
+# pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods,too-many-lines
 import asyncio
 import sys
 from datetime import datetime
@@ -195,7 +195,13 @@ def test_explicit_install_with_declared_setup_shows_exact_review_before_effect(
         def install_apply(self, receipt, *, may_apply, **_kwargs):
             assert may_apply()
             self.applied.append(receipt)
+            return {"installed": True, "setup_required": True, "ready_to_use": None}
+
+        def install_setup_apply(self, receipt, *, may_apply):
+            assert may_apply()
+            self.applied.append("setup:" + receipt)
             return {"installed": True, "setup_required": True, "ready_to_use": None,
+                    "setup_execution_authorized": True,
                     "setup": {"state": "passed", "steps": 1}}
 
     async def scenario():
@@ -211,8 +217,50 @@ def test_explicit_install_with_declared_setup_shows_exact_review_before_effect(
         assert len(ui.posts) == 1
         await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
-        assert "files installed; setup incomplete" in ui.view(identity).to_text()
+        assert "files installed" in ui.view(identity).to_text().lower()
+        assert "connect example account" in ui.view(identity).to_text()
+        assert [a.label for a in ui.view(identity).actions] == ["Run setup", "Not now"]
         await ui.click(identity, "install")
+        assert service.applied == ["exact-receipt"]
+        await ui.click(identity, "setup.run")
+        assert service.applied == ["exact-receipt", "setup:exact-receipt"]
+        receipt_text = ui.view(identity).to_text()
+        assert "✅ incident installed. Setup ran successfully" in receipt_text
+        assert "readiness is not verified" in receipt_text
+        assert "setup incomplete" not in receipt_text
+        await ui.click(identity, "setup.run")
+        assert service.applied == ["exact-receipt", "setup:exact-receipt"]
+        ui.runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_declining_setup_keeps_files_without_executing_command(tmp_path, harness):
+    class SetupService(Service):
+        def install_plan(self, reference, **_kwargs):
+            return {**_clean_install_plan(self, reference), "setup_commands": ["printf harmless"]}
+
+        def install_apply(self, receipt, *, may_apply, **_kwargs):
+            assert may_apply()
+            self.applied.append(receipt)
+            return {"installed": True, "setup_required": True, "ready_to_use": None}
+
+        def install_setup_apply(self, *_args, **_kwargs):
+            raise AssertionError("declined setup must not run")
+
+    async def scenario():
+        service = SetupService()
+        ui = harness(tmp_path, service)
+        queued = await asyncio.to_thread(ui.runtime.install_direct, ui.caller, "incident")
+        await ui.flush()
+        identity = queued["review_id"]
+        await ui.click(identity, "install")
+        assert [a.action for a in ui.view(identity).actions] == ["setup.run", "setup.defer"]
+        await ui.click(identity, "setup.defer")
+        assert service.applied == ["exact-receipt"]
+        assert "setup incomplete" in ui.view(identity).to_text()
+        await ui.click(identity, "setup.run")
         assert service.applied == ["exact-receipt"]
         ui.runtime.close()
 
@@ -706,7 +754,7 @@ def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
 
 
 @pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
-def test_native_install_shows_setup_before_one_click(tmp_path, harness):
+def test_native_install_discloses_setup_then_asks_separate_permission(tmp_path, harness):
     class SetupService(Service):
         def install_plan(self, reference, **_kwargs):
             return {**super().install_plan(reference),
@@ -715,6 +763,11 @@ def test_native_install_shows_setup_before_one_click(tmp_path, harness):
         def install_apply(self, receipt, *, may_apply, **_kwargs):
             assert may_apply()
             self.applied.append(receipt)
+            return {"installed": True, "setup_required": True, "ready_to_use": None}
+
+        def install_setup_apply(self, receipt, *, may_apply):
+            assert may_apply()
+            self.applied.append("setup:" + receipt)
             return {"installed": True, "setup_required": True, "ready_to_use": None,
                     "setup": {"state": "passed", "steps": 1}}
 
@@ -724,14 +777,14 @@ def test_native_install_shows_setup_before_one_click(tmp_path, harness):
         identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
         await ui.flush()
         assert "connect example account" in ui.view(identity).to_text()
-        assert "shown above and runs with Install" in ui.view(identity).to_text()
+        assert "choose whether to run setup afterward" in ui.view(identity).to_text()
         await ui.click(identity, "details")
         assert not service.applied
         await ui.click(identity, "back")
         await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
         assert "files installed; setup incomplete" in ui.view(identity).to_text()
-        assert not ui.view(identity).actions
+        assert [action.label for action in ui.view(identity).actions] == ["Run setup", "Not now"]
         await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
 
@@ -739,22 +792,58 @@ def test_native_install_shows_setup_before_one_click(tmp_path, harness):
 
 
 @pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
-def test_update_with_setup_does_not_promise_install_setup_execution(
-    tmp_path, harness, monkeypatch,
+@pytest.mark.parametrize("decision", ["setup.run", "setup.defer"])
+def test_update_with_new_setup_requires_separate_command_permission(
+    tmp_path, harness, decision,
 ):
+    class SetupUpdateService(Service):
+        def update_plan(self, _skill):
+            return {**self.install_plan("incident"), "operation": "update",
+                    "setup_commands": ["printf 'new version\\n'"]}
+
+        def update_apply(self, receipt, *, may_apply, **_kwargs):
+            assert may_apply()
+            self.applied.append(receipt)
+            return {"updated": True, "setup_required": True, "ready_to_use": None}
+
+        def update_setup_apply(self, receipt, *, may_apply):
+            assert may_apply()
+            self.applied.append("setup:" + receipt)
+            return {"updated": True, "setup_required": True, "ready_to_use": None,
+                    "setup_execution_authorized": True,
+                    "setup": {"state": "passed", "steps": 1}}
+
     async def scenario():
-        service = Service()
-        monkeypatch.setattr(service, "update_plan", lambda _skill: {
-            **service.install_plan("incident"), "operation": "update",
-            "setup_commands": ["verify new version"],
-        }, raising=False)
+        service = SetupUpdateService()
         ui = harness(tmp_path, service)
         identity = ui.runtime.begin_update(ui.caller, "incident")["review_id"]
         await ui.flush()
-        text = ui.view(identity).to_text()
-        assert "verify new version" in text
-        assert "runs with Install" not in text
-        assert "setup" in text.lower()
+        assert "printf 'new version" in ui.view(identity).to_text()
+        await ui.click(identity, "details")
+        assert not service.applied
+        await ui.click(identity, "back")
+        await ui.click(identity, "update")
+        assert service.applied == ["exact-receipt"]
+        view = ui.view(identity)
+        assert "files updated; setup incomplete" in view.to_text()
+        assert [a.label for a in view.actions] == ["Run setup", "Not now"]
+        await ui.click(identity, "update")
+        assert service.applied == ["exact-receipt"]
+        await ui.click(identity, decision)
+        if decision == "setup.run":
+            assert service.applied == ["exact-receipt", "setup:exact-receipt"]
+            receipt = ui.view(identity).to_text()
+            assert "✅ incident updated. Setup ran successfully" in receipt
+            assert "readiness is not verified" in receipt
+            assert "setup incomplete" not in receipt
+        else:
+            assert service.applied == ["exact-receipt"]
+            assert "setup incomplete" in ui.view(identity).to_text()
+        await ui.click(identity, "setup.run")
+        assert service.applied == (["exact-receipt", "setup:exact-receipt"]
+                                   if decision == "setup.run" else ["exact-receipt"])
+        ui.runtime.close()
+
     asyncio.run(scenario())
 
 

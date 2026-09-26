@@ -250,13 +250,17 @@ def test_installed_files_do_not_claim_complete_setup_when_command_stops(state):
     assert output != "✅ raccoon installed"
 
 
-def test_passed_setup_with_unknown_readiness_is_incomplete():
-    """A passed command alone is not proof of working setup."""
+def test_passed_setup_with_unknown_readiness_confirms_command_not_readiness():
+    """A passed setup command gets its own success receipt, not a readiness claim."""
     result = {"installed": True, "setup_required": True, "ready_to_use": None,
+              "setup_execution_authorized": True,
               "setup": {"state": "passed", "steps": 1}}
     output = render_operation_outcome("install", result, skill_name="raccoon")
-    assert "files installed; setup incomplete" in output
-    assert "✅" not in output
+    assert output.startswith("✅ raccoon installed.")
+    assert "Setup ran successfully" in output
+    assert "readiness is not verified" in output
+    assert "setup incomplete" not in output
+    assert "Check setup status" not in output
 
 
 def test_pending_setup_is_not_reported_complete():

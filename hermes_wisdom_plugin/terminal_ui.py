@@ -459,6 +459,11 @@ def _partial_setup_outcome(data: dict, name: str, kind: str) -> str | None:
     incomplete = f"{name or 'This skill'}: files {verb}; setup incomplete."
     if not isinstance(setup, dict) or setup.get("state") == "passed":
         if data.get("setup_required") is True and data.get("ready_to_use") is not True:
+            if (isinstance(setup, dict) and setup.get("state") == "passed"
+                    and data.get("setup_execution_authorized") is True):
+                return (f"✅ {name or 'This skill'} {verb}. Setup ran successfully; "
+                        "readiness is not verified. Follow the skill's verification "
+                        "instructions before use.")
             return incomplete + " Check setup status before use."
         return None
     step = setup.get("step")

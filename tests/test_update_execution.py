@@ -11,19 +11,25 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from installed_test_support import installed_store
+from installed_test_support import JsonState, ShellSetupHost, installed_store
 from review_test_support import _content
 
-from hermes_wisdom_plugin.contract import org_directory_name, sha256_address
+from hermes_wisdom_plugin.contract import (
+    canonical_json_bytes, org_directory_name, sha256_address,
+)
+from hermes_wisdom_plugin.direct_services import DirectState, SetupService
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin import package_application
-from hermes_wisdom_plugin.package import PackagePolicyError
+from hermes_wisdom_plugin.package import PackagePolicyError, verify_content_files
+from hermes_wisdom_plugin.runtime import InvocationService
+from hermes_wisdom_plugin.setup_document import PREFIX, SETUP_PATH, SUFFIX
 from hermes_wisdom_plugin.update_execution import UpdateExecutor
 from hermes_wisdom_plugin.update_receipts import UpdateReceipts
 from hermes_wisdom_plugin.update_review import (
     UpdateAuthorityRejected, UpdateReviewer, VerifiedUpdate,
 )
 from test_install_review import Host as ReviewHost
+from test_installed_setup import Host as SetupInspectionHost
 from test_update_review import Client as ReviewClient
 
 OWNER = {
@@ -137,6 +143,65 @@ def test_updated_version_with_declared_setup_is_not_reported_ready(executor):
     assert result["ready_to_use"] is None
     assert target.joinpath("SKILL.md").read_bytes() == V2
     assert len(client.record_calls) == 1
+
+
+def test_updated_version_executes_exact_new_setup_only_after_permission(executor, monkeypatch):
+    """Real isolated update, setup receipt and shell host keep file and command consent separate."""
+    value, store, client, receipts, original, target, _owner = executor
+    command = "printf updated-v2 > ../setup-ran"
+    guidance = {
+        "schema_version": 1, "execution_requires_user_approval": True,
+        "requirements": [], "setup_instructions": [], "setup_commands": [command],
+        "credential_handoff": [], "compatibility_limits": [],
+        "verification_step": "Inspect the recorded result.",
+        "removed_or_generalized": [], "related_skills": [],
+    }
+    manifest = canonical_json_bytes({
+        "schema_version": 1, "name": "managed-skill", "requirements": {
+            "hermes": {"minimum_version": "0.1.0"},
+            "platforms": [], "architectures": [], "model": {}, "tools": [], "plugins": [],
+            "credentials": [], "connections": [], "filesystem": {}, "network": {},
+            "runtime": {}, "hardware": [], "known_limitations": [],
+        },
+    })
+    files = [("SKILL.md", "file", V2),
+             ("skill.manifest.json", "file", manifest),
+             (SETUP_PATH, "file", PREFIX.encode() + canonical_json_bytes(guidance)
+              + SUFFIX.encode())]
+    records, content_hash = verify_content_files(files)
+    baseline = {item.path: item.hash for item in records}
+    plan = receipts.create({**original, "baseline": baseline,
+                            "content_hash": content_hash, "setup_commands": [command]})
+    monkeypatch.setattr(value.reviewer, "verify", lambda fresh, **_kwargs: VerifiedUpdate(
+        plan=dict(fresh), files=files, baseline=baseline,
+        previous_snapshot=dict(fresh["local_snapshot"]),
+    ))
+
+    execution_host = ShellSetupHost(target)
+    setup = SetupService(
+        DirectState(JsonState(store.root), store.root), store,
+        SetupInspectionHost(value.host.skills_root), execution_host, value._owner,
+    )
+    monkeypatch.setattr(InvocationService, "_update_services",
+                        lambda self: (SimpleNamespace(receipts=receipts), value))
+    monkeypatch.setattr(InvocationService, "_setup_services", lambda self: setup)
+    monkeypatch.setattr(InvocationService, "check_owner", lambda self: None)
+    service = object.__new__(InvocationService)
+    updated = service.update_apply(plan["receipt"])
+    assert updated["updated"] is True and updated["setup_required"] is True
+    assert updated["setup_execution_authorized"] is False
+    assert not execution_host.calls and not (target.parent / "setup-ran").exists()
+    assert service.update_apply(plan["receipt"]) == updated
+    assert not execution_host.calls
+    completed = service.update_setup_apply(plan["receipt"])
+    assert completed["setup"] == {"state": "passed", "steps": 1}
+    assert completed["setup_execution_authorized"] is True
+    assert completed["ready_to_use"] is None
+    assert (target.parent / "setup-ran").read_text() == "updated-v2"
+    assert service.update_setup_apply(plan["receipt"])["setup"]["state"] == "passed"
+    assert execution_host.calls == [command]
+    assert len(client.record_calls) == 1
+
 
 
 def test_manual_success_commits_exact_bytes_and_complete_result(executor):

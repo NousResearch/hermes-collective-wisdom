@@ -15,12 +15,63 @@ from typing import Any, Callable
 
 from .errors import WisdomUnavailable, WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
-from .native_review import NativeReviewController, NativeView, parse_callback
+from .native_review import NativeItem, NativeReviewController, NativeView, parse_callback
+from .package import PackagePolicyError
 from .terminal_ui import has_reviewable_warnings, render_operation_outcome
 from .review_state import ReviewState
 
 
 logger = logging.getLogger(__name__)
+
+
+def _already_installed_view(
+    service: Any, reference: str, error: PackagePolicyError, current: Callable[[], bool]
+) -> NativeView:
+    """Classify only an exact managed duplicate with a fresh owner-bound readback."""
+    if str(error) != "skill is already managed; use the update workflow":
+        raise error
+    rows = service.list_installations()
+    matches = [row for row in rows if isinstance(row, dict)
+               and row.get("state") == "active" and row.get("slug") == reference]
+    if len(matches) != 1:
+        raise error
+    skill_id, version = matches[0].get("skill_id"), matches[0].get("version")
+    if not isinstance(skill_id, str) or not skill_id or not isinstance(version, int):
+        raise error
+    status = service.installed_setup_inspect(skill_id, version=version)
+    if (not isinstance(status, dict) or status.get("files_installed") is not True
+            or status.get("slug") != reference or status.get("version") != version):
+        raise error
+    if not current():
+        raise error
+    if status.get("ready_to_use") is True:
+        return NativeView("Collective Wisdom", f"✅ {reference} is already installed and ready to use", dismissed=True)
+
+    guidance = status.get("guidance")
+    commands = guidance.get("setup_commands") if isinstance(guidance, dict) else None
+    progress = status.get("setup_progress")
+    passed_unverified = (isinstance(commands, list) and bool(commands)
+                         and isinstance(progress, list) and len(progress) == len(commands)
+                         and isinstance(status.get("verification"), dict)
+                         and status["verification"].get("state") == "not_recorded"
+                         and all(isinstance(step, dict) and step.get("phase") == "setup"
+                                 and step.get("index") == index and step.get("state") == "passed"
+                                 for index, step in enumerate(progress)))
+    next_step = guidance.get("verification_step") if isinstance(guidance, dict) else None
+    if not isinstance(next_step, str) or not next_step.strip():
+        next_step = "Ask the skill's author how to verify its setup."
+    summary = (f"{reference} is already installed (v{version}). Setup ran successfully; "
+               "readiness is not verified." if passed_unverified else
+               f"{reference} is already installed (v{version}); setup incomplete")
+    return NativeView(
+        "Collective Wisdom", summary,
+        [NativeItem("Setup", "Setup commands passed; verification not recorded." if
+                    passed_unverified else
+                    "Setup is not complete; check its recorded progress before continuing."),
+         NativeItem("Next step", next_step)],
+        notice="Don't install it again. It isn't ready to use until setup is verified.",
+        dismissed=True,
+    )
 
 
 def _message_id(response: Any, *, platform: str, chat_id: str) -> str:
@@ -396,7 +447,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             owner = service.native_owner()
             if owner.get("profile_name") != invocation.profile:
                 raise PermissionError("Collective Wisdom installation owner changed")
-            plan = service.install_plan(reference)
+            try:
+                plan = service.install_plan(reference)
+            except PackagePolicyError as exc:
+                return _already_installed_view(service, reference, exc, current)
             policy = plan.get("policy") if isinstance(plan, dict) else None
             scan = plan.get("local_scan") if isinstance(plan, dict) else None
             compatible = plan.get("compatibility") if isinstance(plan, dict) else None

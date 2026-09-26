@@ -18,6 +18,7 @@ from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
 from .package import PackagePolicyError
 from .review_state import ReviewState
+from .install_review import confirmed_file_change
 from .terminal_ui import (
     has_reviewable_warnings, render_action_review, render_file_preview,
     render_findings, render_operation_outcome, review_identity, safe_scan_details,
@@ -409,11 +410,15 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
             str(control["revision"]), duration, may_apply=may_apply,
         )
     if operation == "install":
+        if action == "setup.run":
+            return service.install_setup_apply(plan["receipt"], may_apply=may_apply)
         return service.install_apply(
             plan["receipt"], accept_partial=action == "confirm.partial",
             may_apply=may_apply,
         )
     if operation == "update":
+        if action == "setup.run":
+            return service.update_setup_apply(plan["receipt"], may_apply=may_apply)
         return service.update_apply(plan["receipt"], may_apply=may_apply)
     if operation == "publish":
         return service.publication_submit(plan["receipt"], may_apply=may_apply)
@@ -552,8 +557,8 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
            if record.get("explanation") else []),
         notice=f"Would you like to {verb} this skill? View Details shows the files and checks. "
         "If there's something to review first, we'll show it before you continue. "
-        + (("New setup is shown above; check setup status after updating. "
-            if updating else "Declared setup is shown above and runs with Install. ")
+        + (("New setup is shown above. You can choose whether to run it after updating. "
+            if updating else "Install adds the files. You can choose whether to run setup afterward. ")
            if setup_commands else "")
         + "Mute changes recommendations for all skills.",
         actions=[
@@ -561,6 +566,32 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
             NativeAction("Mute Skill Recommendations", "settings"),
             NativeAction("Update" if updating else "Install", verb, primary=True),
         ],
+    )
+
+
+def _setup_permission_view(record: dict[str, Any]) -> NativeView:
+    """File-write consent cannot authorize execution of setup commands."""
+    plan = record["plan"]
+    commands = plan.get("setup_commands")
+    if not isinstance(commands, list) or not commands or not all(
+        isinstance(command, str) and command for command in commands
+    ):
+        raise WisdomValidationError("Reviewed setup commands are unavailable")
+    verb = "updated" if record["operation"] == "update" else "installed"
+    view = NativeView(
+        "Setup needed", f"{_skill_name(plan)}: files {verb}; setup incomplete.",
+        [NativeItem("Commands Hermes will run on this computer", "\n".join(commands))],
+        notice="This skill requires setup before it can be used. Run the commands shown above? "
+        "Not now leaves the files installed but not ready.",
+        actions=[NativeAction("Run setup", "setup.run", primary=True),
+                 NativeAction("Not now", "setup.defer")],
+    )
+    if _approval_is_lossless(view):
+        return view
+    return replace(
+        view, actions=[NativeAction("Not now", "setup.defer")],
+        notice="Setup commands cannot be shown completely here. Use the terminal setup review; "
+        "the files are installed but not ready.",
     )
 
 
@@ -833,6 +864,9 @@ def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-m
         )
     if state == "pending" and record.get("screen") in {"details", "approval"}:
         return _inspection_view(record)
+    if (state == "pending" and record.get("operation") in {"install", "update"}
+            and record.get("screen") == "setup"):
+        return _setup_permission_view(record)
     if record.get("operation") in {"candidate", "publish"} and state == "pending":
         return _candidate_view(plan)
     if record.get("operation") in {"install", "update"} and state == "pending":
@@ -1219,7 +1253,7 @@ class NativeReviewController:
             raise WisdomAuthError("Collective Wisdom review owner changed")
         return result
 
-    def act(  # pylint: disable=too-many-branches
+    def act(  # pylint: disable=too-many-branches,too-many-return-statements
         self, record_id: str, action: str, service: Any,
         invocation: NativeInvocation, *, authority: Callable[[], bool] = lambda: True,
     ) -> dict[str, Any]:
@@ -1253,6 +1287,16 @@ class NativeReviewController:
             )
         if action in {"install", "update"} and action == record.get("operation"):
             return self._one_click_package(record, action, service, invocation, authority)
+        if (record.get("operation") in {"install", "update"}
+                and record.get("screen") == "setup"):
+            if action == "setup.defer":
+                finished = {**record, "state": "completed", "display_ready": False,
+                            "updated_at": self.clock()}
+                if not self.state.compare_replace(record, finished):
+                    raise WisdomConflict("Collective Wisdom review changed; open it again")
+                return copy.deepcopy(finished)
+            if action == "setup.run":
+                return self._apply(record, action, service, invocation, authority)
         navigated = self._navigation_action(record, action, service, invocation, authority)
         if navigated is not None:
             return navigated
@@ -1394,6 +1438,12 @@ class NativeReviewController:
             **claimed, "state": "completed", "result": outcome,
             "updated_at": self.clock(),
         }
+        if (operation in {"install", "update"} and action != "setup.run"
+                and plan.get("setup_commands")
+                and confirmed_file_change(outcome, action=(
+                    "installed" if operation == "install" else "updated"
+                ))):
+            result.update(state="pending", screen="setup", display_ready=False)
         if not self.state.compare_replace(claimed, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)

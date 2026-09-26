@@ -375,7 +375,7 @@ function ReviewAcknowledgements({ busy, kind, onChange, onReview, review, value 
     ] }) : null,
     partialRequired ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': `Accept ${kind} partial compatibility`, checked: value.partial, onCheckedChange: checked => onChange({ ...value, partial: checked === true }) }),
-      kind === 'install' && review?.setup_commands?.length ? 'I understand what may not work and what setup will run.' : 'I understand what may not work or need more setup.'
+      review?.setup_commands?.length ? 'I understand what may not work; setup will ask separately.' : 'I understand what may not work or need more setup.'
     ] }) : null,
     sensitiveRequired ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
       jsx(Checkbox, { 'aria-label': 'Accept update sensitive capability expansion', checked: value.sensitive, onCheckedChange: checked => onChange({ ...value, sensitive: checked === true }) }),
@@ -413,8 +413,8 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
       jsx(StringList, { items: kind === 'install' ? warnings.slice(0, 3) : warnings }),
       kind === 'install' && warnings.length > 3 ? jsx('p', { className: 'text-xs', children: `Showing three of ${warnings.length} notes.` }) : null
     ] }) : null,
-    kind === 'install' && review?.setup_commands?.length ? jsxs('section', { className: 'space-y-1', children: [
-      jsx('h4', { className: 'text-xs font-semibold', children: 'Setup commands included in Install approval' }),
+    ['install', 'update'].includes(kind) && review?.setup_commands?.length ? jsxs('section', { className: 'space-y-1', children: [
+      jsx('h4', { className: 'text-xs font-semibold', children: 'Setup commands (run only after separate permission)' }),
       jsx('pre', { className: 'whitespace-pre-wrap break-all text-xs', children: review.setup_commands.map(command => JSON.stringify(command)).join('\n') })
     ] }) : null,
     kind === 'uninstall' ? jsxs('section', { className: 'space-y-1', children: [
@@ -455,10 +455,14 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
   ] })
 }
 
-function setupIncompleteResult(kind, result) {
+function completedFileChange(kind, result) {
   const key = { install: 'installed', update: 'updated' }[kind.toLowerCase()]
   return !!key && result?.[key] === true && result.pending !== true && result.rejected !== true && !result.error &&
-    [undefined, null, 'completed', 'done', 'inactive'].includes(result.state) &&
+    [undefined, null, 'completed', 'done', 'inactive'].includes(result.state)
+}
+
+function setupIncompleteResult(kind, result) {
+  return completedFileChange(kind, result) &&
     ((result.setup && result.setup.state !== 'passed') || (result.setup_required === true && result.ready_to_use !== true))
 }
 
@@ -474,17 +478,17 @@ function OperationOutcome({ kind, result }) {
   if (!result) return null
   const subject = label(result)
   const setupIncomplete = setupIncompleteResult(kind, result)
+  const setupRan = setupIncomplete && result.setup?.state === 'passed' && result.setup_execution_authorized === true
   const setupStopped = result.setup?.state && result.setup.state !== 'passed'
   let setupDetail = 'Setup is required; readiness has not been verified. Check setup status before use.'
   if (kind === 'Update') setupDetail = 'This version needs setup; readiness has not been verified. Check setup status before use.'
-  if (result.setup?.state === 'passed') setupDetail = 'Setup ran, but readiness has not been verified. Check setup status before use.'
   if (setupStopped) setupDetail = `Setup ${text(result.setup.state)}${result.setup.step ? ` at step ${result.setup.step}` : ''}. Check its status before trying again.`
   const shareUnlinked = kind === 'Publication' && result.state === 'done' &&
     result.publication_state === 'published' && result.managed_enrollment?.state === 'not_linked'
   return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
-    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
+    jsx('h3', { className: 'text-xs font-semibold', children: setupRan ? `✅ ${subject} ${kind === 'Update' ? 'updated' : 'installed'}. Setup ran successfully.` : setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupRan ? "Readiness is not verified. Follow the skill's verification instructions before use." : setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    setupRan ? null : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
     jsxs('details', { children: [
       jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),
       jsxs('div', { className: 'mt-2 space-y-1', children: [
@@ -494,6 +498,20 @@ function OperationOutcome({ kind, result }) {
         jsx(KeyValue, { name: 'detail', value: result.detail || result.error }),
         jsx(KeyValue, { name: 'retry safe', value: result.retry_safe })
       ] })
+    ] })
+  ] })
+}
+
+function SetupPermission({ pending, busy, onDefer, onRun }) {
+  if (!pending) return null
+  return jsxs('section', { 'aria-label': 'Setup permission', className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-4', children: [
+    jsx('h3', { className: 'text-sm font-semibold', children: `Setup needed for ${pending.name}` }),
+    jsx('p', { className: 'text-xs', children: `The files are ${pending.operation === 'update' ? 'updated' : 'installed'}, but this skill is not ready yet. Hermes will run these commands on this computer if you choose Run setup:` }),
+    jsx('pre', { className: 'whitespace-pre-wrap break-all text-xs', children: pending.commands.join('\n') }),
+    jsx('p', { className: 'text-xs', children: `Run setup now? Not now leaves the files ${pending.operation === 'update' ? 'updated' : 'installed'} without running the commands.` }),
+    jsxs('div', { className: 'flex justify-end gap-2', children: [
+      jsx(Button, { disabled: busy, onClick: onDefer, size: 'sm', type: 'button', variant: 'secondary', children: 'Not now' }),
+      jsx(Button, { disabled: busy, loading: busy, onClick: onRun, size: 'sm', type: 'button', children: 'Run setup' })
     ] })
   ] })
 }
@@ -598,6 +616,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   const [selected, setSelected] = useState(initialSelected)
   const [page, setPage] = useState(0)
   const [review, setReview] = useState(null)
+  const [setupPermission, setSetupPermission] = useState(null)
   const [acknowledgements, setAcknowledgements] = useState({ warnings: false, partial: false, sensitive: false })
   const [outcome, setOutcome] = useState(null)
   const catalog = useQuery(queryOptions(['catalog', lifecycle.key, search], () => client.rest(`/catalog?q=${encodeURIComponent(search.trim())}`)))
@@ -621,7 +640,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
         ? requestBody(viewId, { receipt: review.receipt })
         : requestBody(viewId, { receipt: review.receipt, accept_partial: false })
     })
-    return { operation: action, result: { ...result, name: label(review) } }
+    return { operation: action, result: { ...result, name: label(review) }, reviewed: review }
   }, async (payload, token, isCurrent) => {
     setOutcome(null)
     setAcknowledgements({ warnings: false, partial: false, sensitive: false })
@@ -629,8 +648,17 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
       setReview(payload.review)
       return
     }
-    const { operation, result } = payload
+    const { operation, result, reviewed } = payload
     setReview(null)
+    if (operation === 'update' && Array.isArray(reviewed.setup_commands) && reviewed.setup_commands.length &&
+        completedFileChange(operation, result)) {
+      setSetupPermission({ receipt: reviewed.receipt, commands: reviewed.setup_commands,
+        name: result.name, operation })
+      setOutcome({ operation, result: { ...result, setup_required: true, ready_to_use: null } })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
+      return
+    }
     if (operationSucceeded(operation, result, result?.name)) {
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
@@ -654,6 +682,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   }, setReview, 'Could not bind the package acknowledgements')
   const confirm = useCurrentMutation(client, lifecycle, async current => ({
     operation: current.operation,
+    reviewed: current,
     skillName: label(current),
     result: await client.rest(current.operation === 'update' ? '/update/confirm' : '/install/confirm', {
       method: 'POST', body: current.operation === 'update'
@@ -661,9 +690,17 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
         : requestBody(viewId, { receipt: current.receipt, accept_partial: acknowledgements.partial })
     })
   }), async (payload, token, isCurrent) => {
-    const { operation, result, skillName } = payload
+    const { operation, result, skillName, reviewed } = payload
     const name = skillName !== 'Name unavailable' ? skillName : label(result)
     setReview(null)
+    if (['install', 'update'].includes(operation) && Array.isArray(reviewed.setup_commands) && reviewed.setup_commands.length &&
+        completedFileChange(operation, result)) {
+      setSetupPermission({ receipt: reviewed.receipt, commands: reviewed.setup_commands, name, operation })
+      setOutcome({ operation, result: { ...result, name, setup_required: true, ready_to_use: null } })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
+      await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
+      return
+    }
     if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'catalog', lifecycle.key] })
       await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'detail', lifecycle.key] })
@@ -675,6 +712,17 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
       setOutcome({ operation, result: { ...(result || { state: 'unknown' }), name } })
     }
   }, 'The reviewed package action was not applied')
+  const runSetup = useCurrentMutation(client, lifecycle, async pending => ({
+    pending,
+    result: await client.rest(pending.operation === 'update' ? '/update/setup' : '/install/setup', {
+      method: 'POST', body: requestBody(viewId, { receipt: pending.receipt })
+    })
+  }), ({ pending, result }) => {
+    setSetupPermission(null)
+    setOutcome({ operation: pending.operation, result: { ...result, name: pending.name } })
+  }, 'Could not confirm setup. Check its status before trying again.', () => {
+    setSetupPermission(null) // A lost acknowledgement cannot authorize another click.
+  })
   const skills = Array.isArray(catalog.data?.skills) ? catalog.data.skills : []
   const chosen = skills.find(item => item.id === selected)
   const detailedSkill = detail.data?.skill || detail.data
@@ -744,6 +792,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     ] }) : null,
     review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: review.operation, onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, cancelLabel: dialog ? 'Back' : undefined, kind: review.operation, onCancel: back, onConfirm: () => confirm.mutate(review), review }) : null,
+    jsx(SetupPermission, { pending: setupPermission, busy: runSetup.isPending, onDefer: () => setSetupPermission(null), onRun: () => runSetup.mutate(setupPermission) }),
     jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
   ] })
 }
@@ -752,6 +801,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
   const queryClient = useQueryClient()
   const [preserve, setPreserve] = useState(true)
   const [review, setReview] = useState(null)
+  const [setupPermission, setSetupPermission] = useState(null)
   const [acknowledgements, setAcknowledgements] = useState({ warnings: false, partial: false, sensitive: false })
   const [outcome, setOutcome] = useState(null)
   const [checks, setChecks] = useState({})
@@ -786,6 +836,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
   }), value => { setOutcome(null); setReview({ ...value, name: label(value.installation), operation: 'uninstall' }) }, 'Could not prepare the uninstall review')
   const confirm = useCurrentMutation(client, lifecycle, async current => ({
     operation: current.operation,
+    reviewed: current,
     skillName: label(current),
     result: await client.rest(current.operation === 'uninstall' ? '/uninstall/confirm' : '/update/confirm', {
       method: 'POST', body: current.operation === 'uninstall'
@@ -793,9 +844,16 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
         : requestBody(viewId, { receipt: current.receipt })
     })
   }), async (payload, token, isCurrent) => {
-    const { operation, result, skillName } = payload
+    const { operation, result, skillName, reviewed } = payload
     setReview(null)
     const name = skillName !== 'Name unavailable' ? skillName : label(result)
+    if (operation === 'update' && Array.isArray(reviewed.setup_commands) && reviewed.setup_commands.length &&
+        completedFileChange(operation, result)) {
+      setSetupPermission({ receipt: reviewed.receipt, commands: reviewed.setup_commands, name, operation })
+      setOutcome({ ...result, name, kind: operation, setup_required: true, ready_to_use: null })
+      await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
+      return
+    }
     if (operationSucceeded(operation, result, name)) {
       await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
       if (isCurrent(token)) host.notify({
@@ -806,6 +864,17 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
       setOutcome({ ...(result || { state: 'unknown' }), name, kind: operation })
     }
   }, 'The reviewed action was not completed')
+  const runSetup = useCurrentMutation(client, lifecycle, async pending => ({
+    pending,
+    result: await client.rest('/update/setup', {
+      method: 'POST', body: requestBody(viewId, { receipt: pending.receipt })
+    })
+  }), ({ pending, result }) => {
+    setSetupPermission(null)
+    setOutcome({ ...result, name: pending.name, kind: 'update' })
+  }, 'Could not confirm setup. Check its status before trying again.', () => {
+    setSetupPermission(null)
+  })
   const installations = Array.isArray(bootstrap?.installations) ? bootstrap.installations : []
   const decisions = installations.filter(item => checks[item.skill_id]?.result?.state === 'update_available')
   return jsxs('div', { className: 'space-y-4', children: [
@@ -851,6 +920,7 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
     }) }),
     review?.operation === 'update' ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: 'update', onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, kind: review.operation, onCancel: () => setReview(null), onConfirm: () => confirm.mutate(review), review }) : null,
+    jsx(SetupPermission, { pending: setupPermission, busy: runSetup.isPending, onDefer: () => setSetupPermission(null), onRun: () => runSetup.mutate(setupPermission) }),
     jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome && !installations.some(item => item.skill_id === outcome.skill_id) ? outcome : null })
   ] })
 }

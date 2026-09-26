@@ -522,7 +522,7 @@ for (const strict of [false, true]) test(`desktop clean install has no second co
   await mounted.cleanup()
 })
 
-test('declared setup is shown before the sole Desktop Install approval', async () => {
+test('Desktop installs files, then asks permission before running declared setup', async () => {
   const command = 'printf done > ../setup-ran'
   const findings = Array.from({ length: 35 }, (_, index) => ({
     severity: 'warning', category: 'fixture', message: `warning-${index}`
@@ -535,7 +535,9 @@ test('declared setup is shown before the sole Desktop Install approval', async (
       setup_commands: [command], files,
       local_scan: { allowed: true, summary: 'Reviewed warnings', findings }
     })
-    if (path === '/install/confirm') return { installed: true, setup: { state: 'passed', steps: 1 } }
+    if (path === '/install/confirm') return { installed: true, setup_required: true, ready_to_use: null }
+    if (path === '/install/setup') return { installed: true, setup_required: true, ready_to_use: null,
+      setup_execution_authorized: true, setup: { state: 'passed', steps: 1 } }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
@@ -548,21 +550,49 @@ test('declared setup is shown before the sole Desktop Install approval', async (
   assert.doesNotMatch(mounted.container.textContent, /warning-34/)
   await click(reviewInstallButton(mounted))
   assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
-  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one installed')
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 0)
+  assert.match(mounted.container.textContent, /setup incomplete/i)
+  assert.ok(button(mounted, 'Run setup'))
+  await click(button(mounted, 'Run setup'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 1)
+  assert.equal(loaded.calls.notify.some(item => item.message === '✅ one installed'), false)
+  assert.match(mounted.container.textContent, /✅ one installed\. Setup ran successfully/)
+  assert.match(mounted.container.textContent, /readiness is not verified/i)
+  assert.doesNotMatch(mounted.container.textContent, /setup incomplete|Check its status before trying again/i)
   await mounted.cleanup()
 })
 
-for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`desktop refuses contradictory install success ${JSON.stringify(contradiction)}`, async () => {
+test('Desktop Not now leaves installed files visible as setup incomplete', async t => {
   const loaded = await loadPlugin((path, options, owner) => {
-    if (path === '/install/review') return installReview()
+    if (path === '/install/review') return installReview({ setup_commands: ['printf safe'] })
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', setup_required: true, ready_to_use: null }
+    if (path === '/install/setup') throw new Error('setup must not run')
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  await click(button(mounted, 'Install'))
+  await click(reviewInstallButton(mounted))
+  await click(button(mounted, 'Not now'))
+  assert.equal(button(mounted, 'Run setup'), undefined)
+  assert.match(mounted.container.textContent, /files installed; setup incomplete/i)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 0)
+})
+
+for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`desktop refuses contradictory install success ${JSON.stringify(contradiction)}`, { timeout: 5000 }, async t => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/install/review') return installReview({ setup_commands: ['printf safe'] })
     if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', ...contradiction }
     return baseHandler(path, options, owner)
   })
   const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
   await click(button(mounted, 'Install'))
+  await click(reviewInstallButton(mounted))
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   assert.match(mounted.container.textContent, /Install requires attention/)
-  await mounted.cleanup()
+  assert.equal(button(mounted, 'Run setup'), undefined)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/setup').length, 0)
 })
 
 for (const local of [false, true]) for (const updated of [true, false]) test(`desktop slash dialog handles ${updated ? 'completed' : 'pending'} checked updates (local=${local})`, async t => {
@@ -609,7 +639,34 @@ for (const local of [false, true]) for (const updated of [true, false]) test(`de
   await mounted.cleanup()
 })
 
-test('updated files with new setup are not a Desktop readiness success', async () => {
+test('Installed updates ask before running the new setup command', async () => {
+  const installation = { skill_id: 'skill-1', name: 'one', version: 1, content_hash: hash('0'), target_path: '/managed/one' }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/bootstrap') return { ...bootstrap, installations: [installation] }
+    if (path.startsWith('/updates/skill-1?')) return { skill_id: 'skill-1', state: 'update_available', latest_version: 2 }
+    if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['printf new-version'] })
+    if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true, ready_to_use: null }
+    if (path === '/update/setup') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true,
+      ready_to_use: null, setup_execution_authorized: true, setup: { state: 'passed', steps: 1 } }
+    return baseHandler(path, options, owner)
+  })
+  const page = await renderPage(loaded)
+  await click(button(page, 'Installed'))
+  await click(button(page, 'Check for updates'))
+  await click(button(page, 'Review update'))
+  assert.match(page.container.textContent, /printf new-version/)
+  await click(button(page, 'Acknowledge and update'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, 0)
+  assert.ok(button(page, 'Run setup'))
+  assert.match(page.container.textContent, /files updated; setup incomplete/i)
+  await click(button(page, 'Run setup'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, 1)
+  assert.match(page.container.textContent, /✅ one updated\. Setup ran successfully/)
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  await page.cleanup()
+})
+
+for (const decision of ['Run setup', 'Not now']) test(`updated files require separate Desktop setup choice: ${decision}`, async () => {
   const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
@@ -618,15 +675,45 @@ test('updated files with new setup are not a Desktop readiness success', async (
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['verify new version'] })
     if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', version: 2, setup_required: true, ready_to_use: null }
+    if (path === '/update/setup') return { updated: true, skill_id: 'skill-1', version: 2,
+      setup_required: true, ready_to_use: null, setup_execution_authorized: true,
+      setup: { state: 'passed', steps: 1 } }
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderComposerContribution(loaded)
   assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
   await click(button(mounted, 'Update'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/confirm').length, 1)
+  assert.match(mounted.container.textContent, /verify new version/)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, 0)
   assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
   assert.match(mounted.container.textContent, /one.*files updated; setup incomplete/i)
-  assert.match(mounted.container.textContent, /This version needs setup/i)
-  assert.doesNotMatch(mounted.container.textContent, /Setup ran/i)
+  assert.ok(button(mounted, 'Run setup'))
+  await click(button(mounted, decision))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/update/setup').length, decision === 'Run setup' ? 1 : 0)
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.match(mounted.container.textContent, decision === 'Run setup' ? /✅ one updated\. Setup ran successfully/ : /files updated; setup incomplete/i)
+  if (decision === 'Run setup') assert.match(mounted.container.textContent, /readiness is not verified/i)
+  await mounted.cleanup()
+})
+
+for (const contradiction of [{ pending: true }, { rejected: true }, { state: 'uncertain' }]) test(`Desktop does not offer update setup for ${JSON.stringify(contradiction)}`, async () => {
+  const installedStatus = { state: 'installed', text: 'Installed v1 · Update available v2', installed_version: 1, latest_version: 2 }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }] }
+    if (path === '/catalog/skill-1') return { id: 'skill-1', slug: 'one', latest_version: 2, installation_status: installedStatus }
+    if (path === '/catalog/skill-1/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/update/review') return updateReview({ modified: false, sensitive_expansion: [], preservation: { action: 'none' }, setup_commands: ['printf new-version'] })
+    if (path === '/update/confirm') return { updated: true, skill_id: 'skill-1', setup_required: true, ...contradiction }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderComposerContribution(loaded)
+  assert.equal(await submitComposer(loaded, { text: '/wisdom show skill-1' }), null)
+  await click(button(mounted, 'Update'))
+  assert.equal(button(mounted, 'Run setup'), undefined)
+  assert.equal(loaded.calls.notify.some(item => item.kind === 'success'), false)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/update/setup'), false)
   await mounted.cleanup()
 })
 
