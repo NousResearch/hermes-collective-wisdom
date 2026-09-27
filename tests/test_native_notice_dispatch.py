@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from concurrent.futures import Future
 from types import SimpleNamespace
 import threading
@@ -414,15 +415,27 @@ class ContextService(NoticeService):
 
 class Decision:
     def __init__(self, index=0, unavailable=False):
-        self.index, self.unavailable, self.calls = index, unavailable, []
+        self.index, self.unavailable, self.calls, self.cancelled = index, unavailable, [], []
 
-    def complete_structured(self, *, default_model_only=False, **kwargs):
-        self.calls.append({"default_model_only": default_model_only, **kwargs})
-        assert default_model_only is True
-        assert "provider" not in kwargs and "model" not in kwargs and "task" not in kwargs
+    def launch(self, request):
+        self.calls.append(request)
+        assert request.private_default_route is True and request.role == "leaf"
+        assert request.parent_session_id == "session-1"
+        assert request.model is None and request.allowed_toolsets is None
         if self.unavailable:
             raise RuntimeError("default route unavailable")
-        return SimpleNamespace(parsed={"index": self.index})
+        return object()
+
+    def wait(self, _handle, *, timeout_seconds):
+        assert timeout_seconds <= 10
+        return SimpleNamespace(state="SUCCEEDED", completed=True, timed_out=False)
+
+    def result(self, _handle):
+        return SimpleNamespace(ready=True, terminal_state="SUCCEEDED",
+                               summary=str(self.index))
+
+    def cancel(self, handle, *, reason):
+        self.cancelled.append((handle, reason))
 
 
 @pytest.mark.parametrize("case", [
@@ -436,9 +449,12 @@ def test_context_relevance_end_turn_and_exact_version(tmp_path, case):
     decision = Decision(index=-1 if case == "unrelated" else 0,
                         unavailable=case == "unavailable")
     if case == "old_host":
-        decision.complete_structured = lambda **_kwargs: pytest.fail("old host called")
-    runtime = NativeSurfaceRuntime(tmp_path, "default", lambda: service, decision, host.spawn,
-                                   installed_state=JsonState(tmp_path))
+        decision = SimpleNamespace(
+            complete_structured=lambda **_kwargs: pytest.fail("raw LLM called")
+        )
+    runtime = NativeSurfaceRuntime(tmp_path, "default", lambda: service, None, host.spawn,
+                                   installed_state=JsonState(tmp_path),
+                                   subagent_lifecycle=decision)
     adapter = Adapter()
     try:
         native = _wire(runtime, "slack", host, adapter)
@@ -466,7 +482,7 @@ def test_context_relevance_end_turn_and_exact_version(tmp_path, case):
         runtime.end_turn(task_id="task-1", session_id="session-1")
         host.drain()
         assert (len(native.posts) == 1) == (case in {"relevant", "duplicate"})
-        assert (len(decision.calls) == 1) == (
+        assert (len(getattr(decision, "calls", [])) == 1) == (
             case in {"relevant", "unrelated", "unavailable", "duplicate"}
         )
         if case == "relevant":
@@ -479,14 +495,56 @@ def test_context_relevance_end_turn_and_exact_version(tmp_path, case):
         host.stop()
 
 
+def test_context_handoff_preserves_original_turn_scope_and_consumes_once(tmp_path):
+    scope: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+        "active_parent", default=None,
+    )
+    host = AdapterLoop().start()
+    service = ContextService()
+    decision = Decision()
+    original_launch = decision.launch
+
+    def launch(request):
+        assert scope.get() == "original-parent"
+        return original_launch(request)
+
+    decision.launch = launch
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", lambda: service, None, host.spawn,
+        installed_state=JsonState(tmp_path), subagent_lifecycle=decision,
+    )
+    adapter = Adapter()
+    try:
+        native = _wire(runtime, "slack", host, adapter)
+        _grant(runtime, "slack", adapter)
+        runtime.capture_context(
+            task_id="task-1", session_id="session-1", turn_id="turn-1",
+            user_message="Incident triage",
+            conversation_history=[{"role": "user", "content": "Incident triage"}],
+        )
+        token = scope.set("original-parent")
+        try:
+            assert runtime.end_turn(task_id="task-1", session_id="session-1")["scheduled"]
+            assert not runtime.end_turn(task_id="task-1", session_id="session-1")["supported"]
+        finally:
+            scope.reset(token)
+        host.drain()
+        assert len(decision.calls) == 1
+        assert len(native.posts) == 1
+    finally:
+        runtime.close()
+        host.stop()
+
+
 def test_context_capture_requires_admitted_private_human_turn(tmp_path):
     from test_native_model_routing import _event, _gateway  # pylint: disable=import-outside-toplevel
 
     host = AdapterLoop().start()
     service = ContextService()
     decision = Decision()
-    runtime = NativeSurfaceRuntime(tmp_path, "default", lambda: service, decision, host.spawn,
-                                   installed_state=JsonState(tmp_path))
+    runtime = NativeSurfaceRuntime(tmp_path, "default", lambda: service, None, host.spawn,
+                                   installed_state=JsonState(tmp_path),
+                                   subagent_lifecycle=decision)
     adapter = Adapter()
     try:
         native = _wire(runtime, "slack", host, adapter)

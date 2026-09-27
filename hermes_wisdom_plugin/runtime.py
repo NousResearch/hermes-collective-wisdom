@@ -1605,6 +1605,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
+        subagent_lifecycle: Any | None = None,
     ):
         from .native_runtime import NativeSurfaceRuntime  # pylint: disable=import-outside-toplevel
 
@@ -1628,6 +1629,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             self.root, profile[0], self._service, llm, spawn_task,
             installed_state=state,
             session_context=current_session_context,
+            subagent_lifecycle=subagent_lifecycle,
         )
 
     def _service(self):

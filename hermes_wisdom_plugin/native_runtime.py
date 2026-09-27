@@ -133,11 +133,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
     """Bind supported Slack/Telegram SDK routes without advisory queues or receipts."""
 
     def __init__(  # pylint: disable=too-many-arguments
-        self, root, profile_name: str, service_factory: Callable[[], Any], llm: Any,
+        self, root, profile_name: str, service_factory: Callable[[], Any], _llm: Any,
         spawn_task: Callable[..., Any], *, installed_state: Any | None = None,
         session_context: Callable[[], dict[str, str]] | None = None,
+        subagent_lifecycle: Any | None = None,
     ) -> None:
-        self.llm = llm
+        self.subagent_lifecycle = subagent_lifecycle
         self.root = root
         self.profile_name = profile_name
         self.service_factory = service_factory
@@ -397,7 +398,11 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             )
         return result
 
-    def _context_match(self, expected_owner: dict[str, str], excerpt: str) -> dict[str, Any] | None:
+    def _context_match(
+        self, expected_owner: dict[str, str], excerpt: str, parent_session_id: str,
+    ) -> dict[str, Any] | None:
+        if self.subagent_lifecycle is None:
+            return None
         service = self.service_factory()
         try:
             if service.native_owner() != expected_owner:
@@ -406,7 +411,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             candidates = eligible_candidates(service, identity)
             if not candidates or service.native_owner() != expected_owner:
                 return None
-            return relevant_skill(self.llm, excerpt, candidates)
+            return relevant_skill(self.subagent_lifecycle, excerpt, candidates, parent_session_id)
         finally:
             service.close()
 
@@ -420,7 +425,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if not authority() or not await asyncio.to_thread(self._post_owner_current, expected_owner):
             return
         try:
-            match = await asyncio.to_thread(self._context_match, expected_owner, excerpt)
+            match = await asyncio.to_thread(
+                self._context_match, expected_owner, excerpt, invocation.host_session_id,
+            )
             if (match is None or not authority()
                     or (match["skill_id"], match["version"]) in ordinary_skills):
                 return
