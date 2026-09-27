@@ -443,6 +443,7 @@ class Decision:
     "old_host", "muted", "suppressed", "duplicate", "credential_label",
     "credential_bare", "credential_bearer",
 ])
+@pytest.mark.usefixtures("private_lifecycle_contract")
 def test_context_relevance_end_turn_and_exact_version(tmp_path, case):
     host = AdapterLoop().start()
     service = ContextService()
@@ -495,6 +496,7 @@ def test_context_relevance_end_turn_and_exact_version(tmp_path, case):
         host.stop()
 
 
+@pytest.mark.usefixtures("private_lifecycle_contract")
 def test_context_handoff_preserves_original_turn_scope_and_consumes_once(tmp_path):
     scope: contextvars.ContextVar[str | None] = contextvars.ContextVar(
         "active_parent", default=None,
@@ -536,6 +538,7 @@ def test_context_handoff_preserves_original_turn_scope_and_consumes_once(tmp_pat
         host.stop()
 
 
+@pytest.mark.usefixtures("private_lifecycle_contract")
 def test_context_capture_requires_admitted_private_human_turn(tmp_path):
     from test_native_model_routing import _event, _gateway  # pylint: disable=import-outside-toplevel
 

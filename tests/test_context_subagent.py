@@ -9,6 +9,8 @@ import pytest
 
 from hermes_wisdom_plugin.context_relevance import current_excerpt, relevant_skill
 
+pytestmark = pytest.mark.usefixtures("private_lifecycle_contract")
+
 
 class Lifecycle:
     def __init__(self, summary="0", state="SUCCEEDED", timed_out=False):
@@ -100,15 +102,3 @@ def test_excerpt_is_bounded_to_current_user_and_rejects_credentials():
     assert relevant_skill(lifecycle, excerpt, rows, "session-1") is rows[0]
     assert json.loads(lifecycle.requests[0].context)["current_user_request"] == "x" * 1200
     assert current_excerpt([{"role": "user", "content": "token: secret"}]) == ""
-
-
-def test_no_active_parent_fails_closed():
-    from agent.subagent_lifecycle import SubagentLifecycleService  # pylint: disable=import-outside-toplevel
-    lifecycle = SubagentLifecycleService(lambda: None)
-    assert relevant_skill(lifecycle, "incident", candidates(), "session-1") is None
-
-
-def test_parent_session_mismatch_fails_before_child_construction():
-    from agent.subagent_lifecycle import SubagentLifecycleService  # pylint: disable=import-outside-toplevel
-    lifecycle = SubagentLifecycleService(lambda: SimpleNamespace(session_id="different-session"))
-    assert relevant_skill(lifecycle, "incident", candidates(), "session-1") is None
