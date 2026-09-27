@@ -256,9 +256,9 @@ def test_passed_setup_with_unknown_readiness_confirms_command_not_readiness():
               "setup_execution_authorized": True,
               "setup": {"state": "passed", "steps": 1}}
     output = render_operation_outcome("install", result, skill_name="raccoon")
-    assert output.startswith("✅ raccoon installed.")
+    assert output.startswith("✅ raccoon installed\nSetup ran successfully")
     assert "Setup ran successfully" in output
-    assert "readiness is not verified" in output
+    assert "Have your agent confirm the skill is ready" in output
     assert "setup incomplete" not in output
     assert "Check setup status" not in output
 

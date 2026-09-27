@@ -461,9 +461,9 @@ def _partial_setup_outcome(data: dict, name: str, kind: str) -> str | None:
         if data.get("setup_required") is True and data.get("ready_to_use") is not True:
             if (isinstance(setup, dict) and setup.get("state") == "passed"
                     and data.get("setup_execution_authorized") is True):
-                return (f"✅ {name or 'This skill'} {verb}. Setup ran successfully; "
-                        "readiness is not verified. Follow the skill's verification "
-                        "instructions before use.")
+                return (f"✅ {name or 'This skill'} {verb}\n"
+                        "Setup ran successfully. Have your agent confirm the skill is ready "
+                        "before using it.")
             return incomplete + " Check setup status before use."
         return None
     step = setup.get("step")

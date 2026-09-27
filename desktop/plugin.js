@@ -486,8 +486,8 @@ function OperationOutcome({ kind, result }) {
   const shareUnlinked = kind === 'Publication' && result.state === 'done' &&
     result.publication_state === 'published' && result.managed_enrollment?.state === 'not_linked'
   return jsxs('section', { 'aria-live': 'polite', className: 'mt-3 space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-    jsx('h3', { className: 'text-xs font-semibold', children: setupRan ? `✅ ${subject} ${kind === 'Update' ? 'updated' : 'installed'}. Setup ran successfully.` : setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
-    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupRan ? "Readiness is not verified. Follow the skill's verification instructions before use." : setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
+    jsx('h3', { className: 'text-xs font-semibold', children: setupRan ? `✅ ${subject} ${kind === 'Update' ? 'updated' : 'installed'}` : setupIncomplete ? `${subject}: files ${kind === 'Update' ? 'updated' : 'installed'}; setup incomplete` : `${kind} requires attention for ${subject}` }),
+    jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: setupRan ? 'Setup ran successfully. Have your agent confirm the skill is ready before using it.' : setupIncomplete ? setupDetail : shareUnlinked ? 'Shared successfully, but local updates are not linked yet. See details for recovery.' : 'The service did not report a completed result. Check current status before deciding what to do next.' }),
     setupRan ? null : jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Check its status before trying again. This action will not retry automatically.' }),
     jsxs('details', { children: [
       jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-tertiary)', children: 'Technical details' }),

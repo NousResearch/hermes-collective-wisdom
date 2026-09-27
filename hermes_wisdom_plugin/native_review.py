@@ -895,8 +895,10 @@ def _effect_view(
         operation = str(record.get("operation") or "")
         if operation in {"install", "update", "uninstall"} and isinstance(result, dict):
             name = _skill_name(plan)
-            terse = render_operation_outcome(operation, result, skill_name=name)
-            return NativeView(terse, "", dismissed=True)
+            title, _, summary = render_operation_outcome(
+                operation, result, skill_name=name,
+            ).partition("\n")
+            return NativeView(title, summary, dismissed=True)
         return NativeView(title, summary, [item], notice=f"State: {state}", dismissed=True)
     operation = str(record.get("operation") or "")
     actions = [NativeAction("Cancel", "cancel", destructive=True)]
