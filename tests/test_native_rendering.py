@@ -263,6 +263,27 @@ def test_native_completed_install_uses_plan_name_when_result_only_has_id():
     assert "uuid-value" not in view.to_text()
     assert view.dismissed and not view.actions
 
+@pytest.mark.parametrize("operation, verb", [("install", "installed"), ("update", "updated")])
+def test_completed_setup_receipt_keeps_full_slack_confirmation(operation, verb):
+    name = "wisdom-setup-slack-smoke-20260926"
+    view = project_view({
+        "state": "completed", "operation": operation,
+        "plan": {"slug": name, "version": 2},
+        "result": {
+            verb: True, "setup_required": True, "setup_execution_authorized": True,
+            "ready_to_use": None, "setup": {"state": "passed"},
+        },
+    })
+    rendered = blocks(view, "record-1")
+    assert view.title == f"✅ {name} {verb}"
+    assert rendered[0]["text"]["text"] == view.title
+    assert rendered[1]["text"]["text"] == (
+        "Setup ran successfully. Have your agent confirm the skill is ready "
+        "before using it."
+    )
+    assert rendered[1]["text"]["text"] in view.to_text()
+    assert view.dismissed and not view.actions
+
 
 def test_entity_heavy_owner_loss_removes_slack_and_telegram_approval():
     record = {

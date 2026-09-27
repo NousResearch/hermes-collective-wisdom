@@ -225,8 +225,8 @@ def test_explicit_install_with_declared_setup_shows_exact_review_before_effect(
         await ui.click(identity, "setup.run")
         assert service.applied == ["exact-receipt", "setup:exact-receipt"]
         receipt_text = ui.view(identity).to_text()
-        assert "✅ incident installed. Setup ran successfully" in receipt_text
-        assert "readiness is not verified" in receipt_text
+        assert "✅ incident installed\n\nSetup ran successfully" in receipt_text
+        assert "Have your agent confirm the skill is ready" in receipt_text
         assert "setup incomplete" not in receipt_text
         await ui.click(identity, "setup.run")
         assert service.applied == ["exact-receipt", "setup:exact-receipt"]
@@ -833,8 +833,8 @@ def test_update_with_new_setup_requires_separate_command_permission(
         if decision == "setup.run":
             assert service.applied == ["exact-receipt", "setup:exact-receipt"]
             receipt = ui.view(identity).to_text()
-            assert "✅ incident updated. Setup ran successfully" in receipt
-            assert "readiness is not verified" in receipt
+            assert "✅ incident updated\n\nSetup ran successfully" in receipt
+            assert "Have your agent confirm the skill is ready" in receipt
             assert "setup incomplete" not in receipt
         else:
             assert service.applied == ["exact-receipt"]
