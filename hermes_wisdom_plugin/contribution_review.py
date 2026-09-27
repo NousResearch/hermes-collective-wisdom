@@ -17,6 +17,7 @@ from typing import Any, Callable
 from .contract import author_description_hash, sha256_address
 from .editorial import (
     apply_editorial_metadata_to_overlay,
+    editorial_copy_complete,
     explicit_editorial_values,
     load_skill_editorial_metadata,
     resolve_editorial_metadata,
@@ -28,7 +29,7 @@ from .errors import (
     WisdomNotFound,
     WisdomValidationError,
 )
-from .local_security import prepared_security_check
+from .local_security import model_disclosure_ready, prepared_security_check
 from .package import (
 
     PackagePolicyError,
@@ -36,6 +37,7 @@ from .package import (
     load_manifest,
     prepare_package,
     read_validated_package_files,
+    read_validated_source_files,
     source_fingerprint,
     verify_content_files,
 )
@@ -44,6 +46,18 @@ from .publisher_evidence import evidence_block, publication_description
 
 
 OwnerProvider = Callable[[], dict[str, str]]
+
+def _scan_snapshot(host: Any, root: Path, files: list[tuple[str, str, bytes]]) -> dict:
+    """Scan exactly the bytes supplied to the model, not a moving source."""
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix="model-input-", dir=root) as directory:
+        stage = Path(directory)
+        for relative, mode, body in files:
+            target = stage.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target.write_bytes(body)
+            target.chmod(0o700 if mode == "exec" else 0o600)
+        return host.scan(stage)
 
 
 def exact_review_files(overlay: Path) -> tuple[list[dict[str, Any]], str]:
@@ -268,7 +282,11 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomConflict(
                 "Collective Wisdom prepared draft changed after the displayed disclosure"
             )
-        scan = self.host.scan(overlay)
+        scan = _scan_snapshot(
+            self.host, self.store.root / "model-inputs",
+            [(item["path"], item["mode"], base64.b64decode(item["content_base64"]))
+             for item in files],
+        )
         self._require_current(may_apply)
         guard = scan.get("guard") if isinstance(scan.get("guard"), dict) else scan
         security = prepared_security_check(
@@ -277,9 +295,12 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         security["content_hash"] = content_hash
         security["author_description_hash"] = str(draft["description_hash"])
         manifest, _manifest_bytes = load_manifest(overlay / "skill.manifest.json")
+        if exact_review_files(overlay)[1] != content_hash:
+            raise WisdomConflict("prepared package changed during local scan")
         professionalism = self._professionalism(
             draft,
             files=files,
+            security=security,
             allow_model_review=allow_model_review,
             expected_owner=expected_owner,
             may_apply=may_apply,
@@ -300,6 +321,10 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "drafted_description": str(draft["description"]),
             "system_specification": manifest.requirements.model_dump(mode="json"),
             **load_skill_editorial_metadata(overlay),
+            "editorial_status": (
+                "complete" if draft.get("editorial_complete_hash") == content_hash
+                else "incomplete"
+            ),
             "files": files,
             "hashes": {
                 "content": str(draft["content_hash"]),
@@ -487,6 +512,11 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "content_hash": package.content_hash,
                 "description_hash": package.description_hash,
                 "manifest_hash": package.manifest_hash,
+                "editorial_complete_hash": (
+                    package.content_hash if editorial_copy_complete(package.overlay, local["slug"])
+                    else None
+                ),
+                "author_edited": True,
             }
             result = self._result(
                 candidate, allow_model_review=False, expected_owner=expected_owner,
@@ -507,11 +537,12 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             if not retained:
                 _remove_unreferenced_edit(self.store, draft_id, edit_root)
 
-    def _professionalism(
+    def _professionalism(  # pylint: disable=too-many-arguments
         self,
         draft: dict[str, Any],
         *,
         files: list[dict[str, Any]],
+        security: dict[str, Any],
         allow_model_review: bool,
         expected_owner: dict[str, str],
         may_apply: Callable[[], bool] | None = None,
@@ -520,14 +551,22 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
 
         values = {
             "skill_id": str(draft["skill_id"]),
+            "owner": expected_owner,
+            "source_hash": str(draft["source_hash"]),
             "content_hash": str(draft["content_hash"]),
             "author_description_hash": str(draft["description_hash"]),
+            "manifest_hash": str(draft["manifest_hash"]),
         }
         existing = self.store.professionalism(values)
-        if existing is not None:
-            result = existing.get("result")
-            if isinstance(result, dict):
-                return result
+        disclosure_ready = model_disclosure_ready(
+            [(item["path"], item["mode"], base64.b64decode(item["content_base64"]))
+             for item in files], str(draft["description"])
+        )
+        if (existing is not None and disclosure_ready
+            and security.get("local_status") == "pass"
+            and isinstance(existing.get("result"), dict) and
+            existing["result"].get("status") in {"pass", "advisory"}):
+            return existing["result"]
         package = [
             {"path": item["path"], "content_utf8": item["content_utf8"]}
             for item in files if "content_utf8" in item
@@ -550,6 +589,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 description_hash=values["author_description_hash"],
                 llm=None,
             )
+        if security.get("local_status") != "pass" or not disclosure_ready:
+            result = unavailable_review(
+                content_hash=values["content_hash"],
+                description_hash=values["author_description_hash"],
+            )
+            result["availability_reason"] = "local_disclosure_preflight"
+            return result
         self._require_current(may_apply)
         result = review_package(
             package=package,
@@ -559,52 +605,57 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             llm=self.llm,
         )
         self._assert_owner(expected_owner, may_apply)
-        self.store.save_professionalism(values, result)
+        if result["status"] in {"pass", "advisory"}:
+            self.store.save_professionalism(values, result)
         return result
 
-    def _local_skill_id(self, source: Path, source_hash: str) -> str:
+    def _local_skill_id(self, source: Path) -> str:
         if self.source_store is None:
             return "local:" + sha256_address(str(source).encode())[7:39]
+        from .qualification import snapshot_tree  # pylint: disable=import-outside-toplevel
         return self.source_store.register_skill(
             source,
-            content_hash=source_hash,
+            content_hash=snapshot_tree(source)[0],
             source_kind="local",
             snapshot_text=(source / "SKILL.md").read_text(encoding="utf-8"),
         )
 
-    def prepare(  # pylint: disable=too-many-locals
-        self, skill_name: str, *, allow_model_review: bool = False,
-        may_apply: Callable[[], bool] | None = None,
-    ) -> dict[str, Any]:
-        """Prepare one manually selected skill; model disclosure requires an explicit flag."""
-
-        self._require_current(may_apply)
-        expected_owner = self._owner()
-        self._require_current(may_apply)
-        source = self.source(skill_name)
-        source_hash = source_fingerprint(source)
-        self._assert_owner(expected_owner, may_apply)
-        self._require_current(may_apply)
-        skill_id = self._local_skill_id(source, source_hash)
-        existing = self.store.prepared_draft(skill_id, source_hash, expected_owner)
-        if existing is not None:
-            self._assert_draft_owner(existing, expected_owner)
-            return self._result(
-                existing,
-                allow_model_review=allow_model_review,
-                expected_owner=expected_owner,
-                may_apply=may_apply,
-            )
-
+    def _prepare_editorial(
+        self, source, source_hash, skill_id, allow_model_review, may_apply,
+    ):
         frontmatter = self.host.parse_skill_frontmatter(source)
         if not isinstance(frontmatter, dict):
             raise WisdomValidationError("local skill frontmatter is unavailable")
-        skill_markdown = (source / "SKILL.md").read_text(encoding="utf-8")
+        source_files = read_validated_source_files(source)
+        skill_markdown = next(body for path, _mode, body in source_files
+                              if path == "SKILL.md").decode("utf-8")
         description = _existing_author_description(frontmatter)
+        disclosure_ready = model_disclosure_ready(
+            source_files,
+            str(description or ""), str(frontmatter.get("metadata") or ""),
+        )
+        if allow_model_review and disclosure_ready:
+            try:
+                guard = _scan_snapshot(
+                    self.host, self.store.root / "model-inputs", source_files
+                ).get("guard", {})
+                disclosure_ready = (
+                    guard.get("available") is True
+                    and guard.get("allowed") is True
+                    and not guard.get("findings")
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                disclosure_ready = False
+        if source_fingerprint(source) != source_hash:
+            raise WisdomConflict("source changed during local disclosure preflight")
         if description is None:
             if not allow_model_review:
                 raise PackagePolicyError(
                     "local skill requires author copy or explicit model review authorization"
+                )
+            if not disclosure_ready:
+                raise PackagePolicyError(
+                    "local disclosure preflight requires private content review"
                 )
             self._require_current(may_apply)
             description = _draft_author_description(skill_markdown, self.llm)
@@ -615,9 +666,14 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         editorial = resolve_editorial_metadata(
             frontmatter=frontmatter,
             skill_markdown=skill_markdown,
-            llm=self.llm if allow_model_review else None,
+            llm=self.llm if allow_model_review and disclosure_ready else None,
         )
-        self._assert_owner(expected_owner, may_apply)
+        return frontmatter, description, editorial
+
+    def _save_prepared(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+        self, source, source_hash, skill_id, skill_name, expected_owner, existing,
+        frontmatter, description, editorial, allow_model_review, may_apply,
+    ):
         namespace = self.store.root / "contribution-prepared" / uuid.uuid4().hex
         retained = False
 
@@ -632,6 +688,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 editorial_name=editorial_name,
                 editorial_description=editorial_description,
                 frontmatter=frontmatter,
+                coworker_benefit=(editorial["coworker_benefit"]
+                                  if editorial["provenance"] else None),
             )
 
         try:
@@ -642,15 +700,17 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 author_description=description,
                 owner=expected_owner["account_id"],
                 installation_id=expected_owner["installation_id"],
-                editorial_name=editorial["editorial_name"],
-                editorial_description=editorial["editorial_description"],
+                editorial_name=(editorial["editorial_name"]
+                                if editorial["provenance"] else None),
+                editorial_description=(editorial["editorial_description"]
+                                       if editorial["provenance"] else None),
                 editorial_applier=apply_editorial,
             )
             if source_fingerprint(source) != source_hash:
                 raise WisdomConflict("source changed during preparation")
             self._assert_owner(expected_owner, may_apply)
             draft = {
-                "id": f"local:{skill_id}:{uuid.uuid4().hex}",
+                "id": existing["id"] if existing else f"local:{skill_id}:{uuid.uuid4().hex}",
                 "skill_id": skill_id,
                 "slug": skill_name,
                 "source_path": str(source),
@@ -662,20 +722,91 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "content_hash": package.content_hash,
                 "description_hash": package.description_hash,
                 "manifest_hash": package.manifest_hash,
+                "editorial_complete_hash": (
+                    package.content_hash if editorial_copy_complete(package.overlay, skill_name)
+                    else None
+                ),
             }
             self._require_current(may_apply)
-            self.store.save_draft({**draft, "owner": expected_owner})
+            if existing is not None:
+                old_hashes = {
+                    "content": existing["content_hash"],
+                    "author_description": existing["description_hash"],
+                    "package_manifest": existing["manifest_hash"],
+                }
+                if not self.store.replace_draft(
+                    draft["id"], owner=expected_owner, hashes=old_hashes,
+                    record={**draft, "owner": expected_owner},
+                    expected_overlay=existing["overlay_path"],
+                ):
+                    raise WisdomConflict("prepared draft changed during editorial preparation")
+            else:
+                self.store.save_draft({**draft, "owner": expected_owner})
             retained = True
             saved = self.store.draft(str(draft["id"]))
             if saved is None:
                 raise WisdomValidationError("prepared local draft was not persisted")
             self._assert_draft_owner(saved, expected_owner)
-            return self._result(
+            result = self._result(
                 saved,
                 allow_model_review=allow_model_review,
                 expected_owner=expected_owner,
                 may_apply=may_apply,
             )
+            if source_fingerprint(source) != source_hash:
+                raise WisdomConflict("source changed during preparation")
+            if existing is not None:
+                old_overlay = Path(existing["overlay_path"])
+                if old_overlay.parent.parent == self.store.root / "contribution-prepared":
+                    shutil.rmtree(old_overlay.parent, ignore_errors=True)
+            return result
         finally:
             if not retained:
                 shutil.rmtree(namespace, ignore_errors=True)
+
+    def prepare(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
+        self, skill_name: str, *, allow_model_review: bool | None = None,
+        may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Prepare locally; explicit model refusal overrides the default route."""
+        if allow_model_review is None:
+            allow_model_review = self.llm is not None
+
+        self._require_current(may_apply)
+        expected_owner = self._owner()
+        self._require_current(may_apply)
+        source = self.source(skill_name)
+        source_hash = source_fingerprint(source)
+        self._assert_owner(expected_owner, may_apply)
+        self._require_current(may_apply)
+        skill_id = self._local_skill_id(source)
+        existing = self.store.prepared_draft(skill_id, source_hash, expected_owner)
+        if existing is not None:
+            self._assert_draft_owner(existing, expected_owner)
+            if (not allow_model_review or existing.get("editorial_complete_hash")
+                or existing.get("author_edited")):
+                result = self._result(
+                    existing,
+                    allow_model_review=allow_model_review and not existing.get("author_edited"),
+                    expected_owner=expected_owner, may_apply=may_apply,
+                )
+                if source_fingerprint(source) != source_hash:
+                    raise WisdomConflict("source changed during preparation")
+                return result
+
+        frontmatter, description, editorial = self._prepare_editorial(
+            source, source_hash, skill_id, allow_model_review, may_apply,
+        )
+        self._assert_owner(expected_owner, may_apply)
+        if existing is not None and not editorial["provenance"]:
+            result = self._result(
+                existing, allow_model_review=allow_model_review,
+                expected_owner=expected_owner, may_apply=may_apply,
+            )
+            if source_fingerprint(source) != source_hash:
+                raise WisdomConflict("source changed during preparation")
+            return result
+        return self._save_prepared(
+            source, source_hash, skill_id, skill_name, expected_owner, existing,
+            frontmatter, description, editorial, allow_model_review, may_apply,
+        )

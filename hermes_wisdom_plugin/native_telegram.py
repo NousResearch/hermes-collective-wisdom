@@ -272,7 +272,9 @@ async def send(bot: Any, view: NativeView, record_id: str, *, chat_id: str,
     )
 
 
-async def edit(query: Any, view: NativeView, record_id: str) -> None:
+async def edit(
+    query: Any, view: NativeView, record_id: str, *, require_change: bool = False,
+) -> None:
     """Rich-edit the original message, with only definite-rejection fallback."""
 
     message = getattr(query, "message", None)
@@ -297,7 +299,7 @@ async def edit(query: Any, view: NativeView, record_id: str) -> None:
             await raw("editMessageText", api_kwargs=payload)
             return
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            if "message is not modified" in str(exc).lower():
+            if not require_change and "message is not modified" in str(exc).lower():
                 return
             if not definite_format_rejection(exc):
                 raise
@@ -308,7 +310,7 @@ async def edit(query: Any, view: NativeView, record_id: str) -> None:
             reply_markup=keyboard(fallback, record_id),
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        if "message is not modified" not in str(exc).lower():
+        if require_change or "message is not modified" not in str(exc).lower():
             raise
 
 

@@ -378,9 +378,9 @@ def _sources_values(plugin_dir: Path) -> dict[str, str]:
         "agent": "bf51fee548ceaa28d2c299a41c0f65066c04c061",
         "gateway_feature": "1a1d0d7a71edb617d6d4aae453a2609080561874",
         "portal_feature": "dc1cdb3449e89331244cc9cc132f842da44ab353",
-        "gateway_contract": "16bd05e81b134d1ab8bb230aade6f6de9010cae3",
+        "gateway_contract": "3fb6fa2b6ab638464fd3d9a6dc6961bcc074aff9",
         "openapi_sha256": (
-            "b46f0db55befbb682a392fc0c1015ed0a9a81e02d5ad9337c29347802972937d"
+            "7fde8069b1c892fdc4d5368835a4d5fe43cc78c3b203162edc6a67b80b04c7ed"
         ),
         "manifest_schema_sha256": (
             "64d0010eada1d79fa16309e9fd715faf77b6186360ea0b095182b2bdaeec5714"

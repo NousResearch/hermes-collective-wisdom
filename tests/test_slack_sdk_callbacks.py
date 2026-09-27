@@ -37,6 +37,9 @@ class Service:
         self.applied.append(receipt)
         return {"installed": True}
 
+    def prepare_candidate_offer(self, identity):
+        return self.native_candidate_inspect(identity)
+
     def native_candidate_inspect(self, identity):
         return {"event_id": identity, "facts": {"name": "incident"}, "networked": False}
 
@@ -83,7 +86,7 @@ def test_real_sdk_response_binds_exact_message_for_registered_callbacks(tmp_path
         await ui.runtime._send_notice(ui.caller, [{
             "category": "new_skill", "skill_id": "incident", "version": 2,
         }])
-        install_id = _record_id(ui.posts[-1], "Install")
+        install_id = _record_id(ui.posts[-1], "Install Skill")
         assert ui.record(install_id)["message_id"] == "card-1"
         assert ui.record(install_id)["display_ready"] is True
 
@@ -123,7 +126,7 @@ def test_uncertain_sdk_ack_fails_closed_without_second_send(tmp_path, caplog, da
                 {"category": "new_skill", "skill_id": "first", "version": 1},
             ])
         assert len(ui.posts) == 1
-        identity = _record_id(ui.posts[0], "Install")
+        identity = _record_id(ui.posts[0], "Install Skill")
         assert ui.record(identity)["message_id"] == ""
         assert ui.record(identity)["display_ready"] is False
         await ui.click(identity, "install")
@@ -146,10 +149,13 @@ def test_callback_failure_logs_only_exception_class_after_completed_effect(
         await ui.runtime._send_notice(ui.caller, [{
             "category": "new_skill", "skill_id": "incident", "version": 2,
         }])
-        identity = _record_id(ui.posts[-1], "Install")
+        identity = _record_id(ui.posts[-1], "Install Skill")
 
-        async def failed_edit(**_payload):
-            raise ConnectionError("xoxb-super-secret callback body")
+        original_edit = ui.chat_update
+        async def failed_edit(**payload):
+            if service.applied:
+                raise ConnectionError("«redacted:xox…» callback body")
+            return await original_edit(**payload)
 
         monkeypatch.setattr(ui, "chat_update", failed_edit)
         with caplog.at_level(logging.WARNING):

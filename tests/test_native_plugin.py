@@ -15,11 +15,15 @@ from typing import Any
 
 import pytest
 import yaml
+from test_notices import Page, Service as FeedService, event
 
 from installed_test_support import JsonState
 from hermes_wisdom_plugin.commands import read_unavailable
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomUnavailable
 from hermes_wisdom_plugin.runtime import CommandRuntime
+from hermes_wisdom_plugin.direct_services import DirectState
+from hermes_wisdom_plugin.notices import EndTurnNotices
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,7 +128,8 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         assert entries["auxiliary"][0] == "hermes_collective_wisdom_refinement"
         assert entries["cli"][0] == entries["slash"][0] == "wisdom"
         assert [name for name, _callback in entries["hooks"]] == [
-            "pre_gateway_dispatch", "pre_llm_call", "on_skill_lifecycle", "on_session_end"
+            "pre_gateway_dispatch", "pre_llm_call", "post_llm_call",
+            "on_skill_lifecycle", "on_session_end"
         ]
         assert entries["slack"][0] == "slack"
         assert callable(entries["telegram"])
@@ -156,9 +161,99 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         assert disposed == [
             "slash", "cli", "present_wisdom_consent", "wisdom_inspect", "wisdom_inbox",
             "on_session_end", "on_skill_lifecycle",
-            "pre_llm_call", "pre_gateway_dispatch",
+            "post_llm_call", "pre_llm_call", "pre_gateway_dispatch",
             "hermes_collective_wisdom_refinement",
         ]
+    finally:
+        unload_native_plugin(module_name)
+
+
+@pytest.mark.parametrize("platform", ["cli", "tui"])
+# pylint: disable=too-many-locals,too-many-statements
+def test_registered_end_turn_awareness_is_private_and_owner_bound(
+    tmp_path, monkeypatch, platform,
+):
+    """Registered hook → real notice projection, including restart and owner switch."""
+    module_name, plugin = load_native_plugin()
+    try:
+        runtime_module = __import__(
+            f"{module_name}.hermes_wisdom_plugin.runtime", fromlist=["current_profile"]
+        )
+        monkeypatch.setattr(runtime_module, "current_profile", lambda: ("default", tmp_path))
+        stored = JsonState(tmp_path / "plugin-data" / "wisdom")
+        stored.data_dir = tmp_path / "plugin-data" / "wisdom"
+        owner = {"profile_name": "default", "account_id": "alice",
+                 "organization_id": "team", "installation_id": "installed"}
+        state = DirectState(stored, stored.data_dir)
+        state.set_identity({"owner": owner})
+        feed = FeedService([Page([event()], "after", False), Page([], "later", False)])
+        hooks = {}
+        context = SimpleNamespace(
+            state=stored, llm=None, spawn_task=lambda *_a, **_k: None,
+            register_hook=lambda name, callback: hooks.update({name: callback}) or None,
+            register_auxiliary_task=lambda *_a, **_k: None,
+            register_platform_handler=lambda *_a: None,
+            register_telegram_handler=lambda *_a: None,
+            register_tool=lambda **_k: None,
+            register_cli_command=lambda *_a: None,
+            register_command=lambda *_a, **_k: None,
+            on_unload=lambda _callback: None,
+        )
+        plugin.register(context)
+        command = next(cell.cell_contents for cell in hooks["on_session_end"].__closure__
+                       if type(cell.cell_contents).__name__ == "CommandRuntime")
+        calls = []
+        nested = []
+
+        class LocalService:
+            def native_owner(self):
+                return dict(owner)
+
+            def end_turn_notices(self, renderer):
+                calls.append(renderer)
+                if nested:
+                    second = nested.pop()
+                    hooks["pre_llm_call"](**second)
+                    hooks["on_session_end"](**{
+                        **second, "completed": True, "failed": False, "interrupted": False,
+                    })
+                return EndTurnNotices(state, lambda: feed).run(renderer=renderer)
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(command, "_service", LocalService)
+        facts = {"platform": platform, "session_id": "s", "task_id": "t"}
+        completed = {**facts, "completed": True, "failed": False, "interrupted": False}
+        hooks["on_session_end"](**completed)  # no admission
+        nested.append({**facts, "task_id": "simultaneous"})
+        hooks["pre_llm_call"](**facts)
+        hooks["on_session_end"](**completed)
+        assert calls == [None]
+        assert state.notice_state()["awareness_cursor"] == "after"
+        assert state.notice_state()["cursor"] is None
+        assert state.known_publications()[0]["inspect_reference"] == "skill-1@v2"
+        assert (DirectState(stored, stored.data_dir).known_publications()
+                == state.known_publications())
+        hooks["on_session_end"](**completed)  # duplicate end
+        async def loop_turn():
+            hooks["pre_llm_call"](**{**facts, "task_id": "event-loop"})
+            hooks["on_session_end"](**{**completed, "task_id": "event-loop"})
+
+        asyncio.run(loop_turn())
+        assert calls == [None]  # no synchronous feed/network on an active loop
+        hooks["pre_llm_call"](**{**facts, "parent_session_id": "parent"})
+        hooks["on_session_end"](**completed)
+        assert calls == [None]
+        hooks["pre_llm_call"](**facts)
+        owner["account_id"] = "bob"
+        hooks["on_session_end"](**completed)
+        assert calls == [None]
+        state.set_identity({"owner": owner})
+        assert not state.known_publications()
+        hooks["pre_llm_call"](**facts)
+        hooks["on_session_end"](**completed)
+        assert calls == [None, None]
     finally:
         unload_native_plugin(module_name)
 

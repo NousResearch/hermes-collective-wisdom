@@ -428,7 +428,7 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
 
 
 
-def test_cli_suggest_requires_explicit_model_disclosure_authorization(capsys):
+def test_cli_suggest_defaults_to_model_route_but_honors_explicit_refusal(capsys):
     parser = _parser()
     service = _Service()
 
@@ -437,6 +437,12 @@ def test_cli_suggest_requires_explicit_model_disclosure_authorization(capsys):
     ) == 0
     local = json.loads(capsys.readouterr().out)
     assert local["professionalism_check"]["status"] == "unavailable"
+    assert ("suggest", "local-skill", None) in service.calls
+
+    assert run_cli(
+        parser.parse_args(["suggest", "local-skill", "--no-model-review", "--json"]), service
+    ) == 0
+    capsys.readouterr()
     assert ("suggest", "local-skill", False) in service.calls
 
     assert run_cli(

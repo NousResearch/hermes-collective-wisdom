@@ -201,10 +201,12 @@ def _summary(plan: dict[str, Any]) -> str:
 
 def _skill_name(plan: dict[str, Any]) -> str:
     """Only a supplied human skill name may be presented as a name."""
-    name = plan.get("slug") or plan.get("skill_name") or plan.get("name") or plan.get("editorial_name")
-    if name == plan.get("skill_id") or name == plan.get("draft_id"):
-        return "Name unavailable"
-    return _safe(name, "Name unavailable")
+    for name in (plan.get("editorial_name"), plan.get("slug"),
+                 plan.get("skill_name"), plan.get("name")):
+        if (isinstance(name, str) and name.strip()
+                and name != plan.get("skill_id") and name != plan.get("draft_id")):
+            return _safe(name)
+    return "Name unavailable"
 
 def _installed_label(plan: dict[str, Any]) -> str:
     status = plan.get("installation_status")
@@ -237,7 +239,8 @@ def _public_review(value: Any) -> Any:
     """Hide opaque routing tokens, not the files, checks or decisions being approved."""
     if isinstance(value, dict):
         return {key: _public_review(child) for key, child in value.items()
-                if key not in {"receipt", "draft_id", "local_draft_id", "skill_id"}}
+                if key not in {"receipt", "draft_id", "local_draft_id", "skill_id",
+                               "published_by_user_id"}}
     if isinstance(value, list):
         return [_public_review(child) for child in value]
     return value
@@ -409,16 +412,16 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
         return service.choose_notification_mute(
             str(control["revision"]), duration, may_apply=may_apply,
         )
+    if operation in {"install", "update"} and action == "setup.run":
+        apply_setup = (service.install_setup_apply if operation == "install"
+                       else service.update_setup_apply)
+        return apply_setup(plan["receipt"], may_apply=may_apply)
     if operation == "install":
-        if action == "setup.run":
-            return service.install_setup_apply(plan["receipt"], may_apply=may_apply)
         return service.install_apply(
             plan["receipt"], accept_partial=action == "confirm.partial",
             may_apply=may_apply,
         )
     if operation == "update":
-        if action == "setup.run":
-            return service.update_setup_apply(plan["receipt"], may_apply=may_apply)
         return service.update_apply(plan["receipt"], may_apply=may_apply)
     if operation == "publish":
         return service.publication_submit(plan["receipt"], may_apply=may_apply)
@@ -516,19 +519,27 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
 
 def _candidate_view(plan: dict[str, Any]) -> NativeView:
     facts = plan.get("facts") or {}
+    editorial = facts.get("editorial") or {}
     safe, _checks = sharing_checks(plan)
+    name = editorial.get("editorial_name") or facts.get("name") or plan.get("editorial_name")
+    description = editorial.get("editorial_description") or "Editorial description not yet available."
+    benefit = editorial.get("coworker_benefit") or "Coworker benefit not yet available."
     return NativeView(
-        "You created a skill that could help your team",
-        _safe(facts.get("name") or plan.get("editorial_name"), "Name unavailable"),
-        items=[NativeItem(
-            "✅ Safe To Share (security and professionalism checks all passed)"
-            if safe else "Checks need review",
-            "" if safe else "Required checks may be pending or unavailable. Open Review checks.",
-        )],
-        notice="Nothing has been uploaded or published. Share starts local preparation; "
-        "you will still confirm the exact package before submission.",
+        "Hermes Collective Wisdom",
+        "You created a skill that could help your team\n\n"
+        f"Skill name: {_safe(name, 'Name unavailable')}\n"
+        f"What it does: {_safe(description)}\n"
+        f"Why others might benefit: {_safe(benefit)}\n\n"
+        "Would you like to share it?",
+        notice=("Nothing has been uploaded or published. Share My Skill starts local "
+                "preparation, then you review the exact package and checks before final "
+                "sharing authorization. Editorial copy is incomplete."
+                if facts.get("editorial_status") != "complete" else
+                "Nothing has been uploaded or published. Share My Skill starts local "
+                "preparation, then you review the exact package and checks before final "
+                "sharing authorization."),
         actions=[
-            NativeAction("✅ Safe To Share" if safe else "Review checks", "checks"),
+            NativeAction("✓ Safe To Share" if safe else "Review Checks", "checks"),
             NativeAction("View More Details", "details"),
             NativeAction("Snooze Collective Wisdom", "settings"),
             NativeAction("Maybe Later", "cancel"),
@@ -541,15 +552,24 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
     plan = record["plan"]
     updating = record["operation"] == "update"
     verb = "update" if updating else "install"
-    description = plan.get("author_description") or plan.get("description")
+    facts = plan.get("verified_facts")
+    facts = facts if isinstance(facts, dict) else {}
+    title = _skill_name(plan)
+    description = plan.get("editorial_description") or plan.get("author_description") or plan.get("description")
     files = plan.get("files")
     setup_commands = plan.get("setup_commands")
     return NativeView(
         "A shared skill in your organization is available",
-        _summary(plan),
-        [NativeItem("About this skill", _safe(description, "Open details to learn more.")),
-         NativeItem("On this profile", _installed_label(plan))]
-        + ([NativeItem(f"Files: {len(files)}", "")] if isinstance(files, list) else [])
+        title,
+        [NativeItem("What it does", _safe(description, "Description unavailable")),
+         NativeItem("Why it may help", _safe(plan.get("coworker_benefit") or facts.get("coworker_benefit") or plan.get("version_explanation"), "Explanation unavailable")),
+         *([NativeItem("What changed", "Change summary unavailable; review the exact version in Details.")]
+           if updating else []),
+         NativeItem("Version publisher", _safe(plan.get("publisher_display_name"), "Publisher name unavailable") +
+                    ("\nTeam: " + _safe(plan["team_display_name"])
+                     if plan.get("team_display_name") else "") + "\nOn this profile: " +
+                    _installed_label(plan) +
+                    (f"\nFiles: {len(files)}" if isinstance(files, list) else ""))]
         + ([NativeItem("Setup", "\n".join(setup_commands))]
            if isinstance(setup_commands, list) and setup_commands
            and all(isinstance(command, str) for command in setup_commands) else [])
@@ -564,7 +584,7 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
         actions=[
             NativeAction("View Details", "details"), NativeAction("Not Now", "defer"),
             NativeAction("Mute Skill Recommendations", "settings"),
-            NativeAction("Update" if updating else "Install", verb, primary=True),
+            NativeAction("Update Skill" if updating else "Install Skill", verb, primary=True),
         ],
     )
 
@@ -611,14 +631,15 @@ def _suggest_terminal_view(plan: dict[str, Any], state: str, result: Any = None)
         "Sharing outcome uncertain",
         "The result is uncertain. Check publication status before attempting another submission; do not retry blindly.",
     ))
-    if state == "completed" and isinstance(result, dict):
+    if isinstance(result, dict) and state in {"completed", "failed", "rejected", "uncertain"} and result.get("state") is not None:
+        from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
+        title, detail = publication_copy(result)
+    elif state == "completed" and isinstance(result, dict):
         publication_state = result.get("publication_state")
         if publication_state == "pending_moderation":
-            detail = "Submitted for team review; not published yet."
+            title, detail = "Waiting for team review", "Submitted for team review; not published yet."
         elif publication_state == "published":
-            detail = "Published to your team."
-        elif publication_state in {"changes_requested", "declined", "invalidated"}:
-            detail = "Not published; check the publication result before trying again."
+            title, detail = "Sharing request completed", "Check publication status to confirm team availability."
     return NativeView(
         "Collective Wisdom contribution", name,
         [NativeItem(title, detail)],
@@ -806,15 +827,15 @@ def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     if record.get("state") == "failed" and result.get("install_blocked") is True:
         return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
                           dismissed=True)
-    if record.get("state") == "completed" and (
-        result.get("publication_state") == "published"
-        and isinstance(result.get("detail"), str) and result["detail"]
-    ):
-        return NativeView("Publication result", f"{name}\n{_safe(result['detail'])}", dismissed=True)
+    from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
+    published = publication_copy(result)[0] == "Published"
+    if (record.get("state") == "completed" and published
+            and isinstance(result.get("detail"), str) and result["detail"]):
+        return NativeView("Published", f"{name}\nAvailable to your team.\n{_safe(result['detail'])}", dismissed=True)
     return None
 
 
-def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
+def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint: disable=too-many-return-statements
     outcome = _completed_outcome_view(record)
     if outcome is not None:
         return outcome
@@ -824,6 +845,12 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:
             "Share Packaging failed",
             "The local skill could not be packaged. Review its files and try again. "
             "Nothing has been uploaded or published.", dismissed=True,
+        )
+    if record.get("state") == "failed" and record.get("failure") == "package_preparation_failed":
+        return NativeView(
+            "Install/update preparation failed",
+            "The package could not be prepared; no files were installed or updated. "
+            "Open a new review to try again.", dismissed=True,
         )
     if (record.get("state") == "cancelled" and record.get("effect_action") == "defer"
             and isinstance(result, dict) and result.get("preference_sync") == "confirmed"):
@@ -981,10 +1008,21 @@ class NativeReviewController:
         self.state.save(record)
         return copy.deepcopy(record)
 
+    @staticmethod
+    def _publisher_display(plan: dict[str, Any], fact: Any) -> dict[str, str]:
+        """Only attach display copy when the exact freshly reviewed revision agrees."""
+        if (not isinstance(fact, dict) or fact.get("skill_id") != plan.get("skill_id")
+                or fact.get("version") != plan.get("version")
+                or not plan.get("published_by_user_id")
+                or fact.get("publisher") != plan.get("published_by_user_id")):
+            return {}
+        return {key: value for key in ("publisher_display_name", "team_display_name")
+                if isinstance((value := fact.get(key)), str) and value.strip()}
+
     def request_install(  # pylint: disable=too-many-arguments
         self, service: Any, invocation: NativeInvocation, reference: str, *,
         update_mode: str | None = None, explanation: str = "",
-        plan: dict[str, Any] | None = None,
+        plan: dict[str, Any] | None = None, publisher_fact: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         review_plan: dict[str, Any] = (service.install_plan(reference, update_mode=update_mode)
                                        if plan is None else plan)
@@ -992,16 +1030,19 @@ class NativeReviewController:
             raise WisdomValidationError("native install review is invalid")
         return self._insert(service, invocation, "install", {
             **review_plan, "installation_status": _local_installation_label(service, review_plan),
+            **self._publisher_display(review_plan, publisher_fact),
         }, explanation=explanation)
 
     def request_update(
-        self, service: Any, invocation: NativeInvocation, skill_id: str
+        self, service: Any, invocation: NativeInvocation, skill_id: str, *,
+        publisher_fact: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = service.update_plan(skill_id)
         if plan.get("operation") != "update":
             raise WisdomValidationError("native update review is invalid")
         return self._insert(service, invocation, "update", {
             **plan, "installation_status": _local_installation_label(service, plan),
+            **self._publisher_display(plan, publisher_fact),
         })
 
     def request_publication(self, service: Any, invocation: NativeInvocation, draft_id: str) -> dict[str, Any]:
@@ -1050,7 +1091,7 @@ class NativeReviewController:
         })
 
     def request_candidate(self, service: Any, invocation: NativeInvocation, event_id: str) -> dict[str, Any]:
-        plan = service.native_candidate_inspect(event_id)
+        plan = service.prepare_candidate_offer(event_id)
         return self._insert(service, invocation, "candidate", {**plan, "operation": "candidate", "allowed": False})
 
     def request_suggest(
@@ -1058,7 +1099,7 @@ class NativeReviewController:
     ) -> dict[str, Any]:
         if not str(skill_name or "").strip():
             raise WisdomValidationError("Usage: /wisdom suggest <local-skill>")
-        prepared = service.suggest(str(skill_name).strip(), allow_model_review=False)
+        prepared = service.suggest(str(skill_name).strip())
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):
@@ -1102,6 +1143,18 @@ class NativeReviewController:
 
     def view(self, record: dict[str, Any]) -> NativeView:
         return project_view(record)
+
+    def display_current(
+        self, claimed: dict[str, Any], service: Any, invocation: NativeInvocation,
+        authority: Callable[[], bool],
+    ) -> bool:
+        """Fence a card edit to the exact owner, route, and record."""
+        try:
+            return (authority() is True and self.load(claimed["id"]) == claimed
+                    and _plan_owner_matches(claimed)
+                    and _owner_matches(claimed, service, invocation))
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
 
     def _select_catalog(
         self, action: str, record: dict[str, Any],
@@ -1255,9 +1308,10 @@ class NativeReviewController:
             raise WisdomAuthError("Collective Wisdom review owner changed")
         return result
 
-    def act(  # pylint: disable=too-many-branches,too-many-return-statements
+    def act(  # pylint: disable=too-many-branches,too-many-return-statements,too-many-arguments
         self, record_id: str, action: str, service: Any,
         invocation: NativeInvocation, *, authority: Callable[[], bool] = lambda: True,
+        progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         record = self.load(record_id)
         state = str(record.get("state") or "")
@@ -1281,14 +1335,23 @@ class NativeReviewController:
         if self.clock() >= record["expires_at"]:
             raise WisdomAuthError("Collective Wisdom review expired; open it again")
         _validate_offered_action(record, action)
+        return self._act_pending(record_id, record, action, service, invocation, authority, progress)
+
+    def _act_pending(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+        self, record_id, record, action, service, invocation, authority, progress,
+    ):
+        state = record["state"]
         if state == "kept":
             return self._resume_kept(record, action, service, invocation, authority)
         if action == "defer" or action.startswith(("suggest.", "catalog.install.")):
             return self._act_special(
                 record_id, action, record, service, invocation, authority,
+                progress=progress,
             )
         if action in {"install", "update"} and action == record.get("operation"):
-            return self._one_click_package(record, action, service, invocation, authority)
+            return self._one_click_package(
+                record, action, service, invocation, authority, progress=progress,
+            )
         if (record.get("operation") in {"install", "update"}
                 and record.get("screen") == "setup"):
             if action == "setup.defer":
@@ -1356,9 +1419,10 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
 
-    def _one_click_package(
+    def _one_click_package(  # pylint: disable=too-many-branches,too-many-arguments
         self, record: dict[str, Any], action: str, service: Any,
-        invocation: NativeInvocation, authority: Callable[[], bool],
+        invocation: NativeInvocation, authority: Callable[[], bool], *,
+        progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Prepare and spend a fresh exact receipt inside the explicit click."""
         plan = record["plan"]
@@ -1368,45 +1432,71 @@ class NativeReviewController:
         }
         if not self.state.compare_replace(record, claimed):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
-        try:
+        if progress is not None:
             try:
-                fresh = _fresh_package_plan(record, action, service)
-            except PackagePolicyError:
-                if action != "install" or plan.get("receipt"):
-                    raise
-                if not authority() or not _owner_matches(record, service, invocation):
-                    raise WisdomAuthError("Collective Wisdom review owner changed") from None
-                blocked = {
-                    **record, "state": "failed", "display_ready": False,
-                    "result": {"install_blocked": True},
-                    "updated_at": self.clock(),
+                progress(NativeView(
+                    "Hermes Collective Wisdom",
+                    f"{'Installing' if action == 'install' else 'Updating'} {_skill_name(plan)}…",
+                ), claimed)
+            except Exception:
+                # A lost edit acknowledgement may still have removed the controls.
+                # No package effect has started; never call this an uncertain install.
+                self.state.compare_replace(claimed, {
+                    **claimed, "state": "failed", "failure": "progress_display_failed",
+                })
+                raise
+        try:
+            return self._prepare_one_click(record, claimed, action, service, invocation, authority)
+        except Exception:
+            if progress is None:
+                self.state.compare_replace(claimed, record)
+            else:
+                failed = {
+                    **claimed, "state": "failed", "failure": "package_preparation_failed",
                 }
-                if not self.state.compare_replace(claimed, blocked):
-                    raise WisdomConflict("Collective Wisdom review changed; open it again") from None
-                return blocked
-            inspect = getattr(service, f"native_{action}_inspect")
-            files = inspect(fresh["receipt"])
-            ready = {
-                **record, "plan": copy.deepcopy({
-                    **fresh, "installation_status": record["plan"].get("installation_status"),
-                }),
-                "package_files": copy.deepcopy(files),
-                "inspection_receipt": fresh.get("receipt"),
-                "updated_at": self.clock(), "display_ready": False,
-            }
-            if _package_needs_acknowledgement(fresh):
-                ready.update(screen="approval", page=0, inspected_through=0)
-                if not self.state.compare_replace(claimed, ready):
-                    raise WisdomConflict("Collective Wisdom review changed; open it again")
-                return copy.deepcopy(ready)
+                if self.state.compare_replace(claimed, failed):
+                    return copy.deepcopy(failed)
+            raise
+
+    def _prepare_one_click(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, record, claimed, action, service, invocation, authority,
+    ):
+        plan = record["plan"]
+        try:
+            fresh = _fresh_package_plan(record, action, service)
+        except PackagePolicyError:
+            if action != "install" or plan.get("receipt"):
+                raise
             if not authority() or not _owner_matches(record, service, invocation):
-                raise WisdomAuthError("Collective Wisdom review owner changed")
+                raise WisdomAuthError("Collective Wisdom review owner changed") from None
+            blocked = {
+                **record, "state": "failed", "display_ready": False,
+                "result": {"install_blocked": True},
+                "updated_at": self.clock(),
+            }
+            if not self.state.compare_replace(claimed, blocked):
+                raise WisdomConflict("Collective Wisdom review changed; open it again") from None
+            return blocked
+        inspect = getattr(service, f"native_{action}_inspect")
+        files = inspect(fresh["receipt"])
+        ready = {
+            **record, "plan": copy.deepcopy({
+                **fresh, "installation_status": record["plan"].get("installation_status"),
+            }),
+            "package_files": copy.deepcopy(files),
+            "inspection_receipt": fresh.get("receipt"),
+            "updated_at": self.clock(), "display_ready": False,
+        }
+        if _package_needs_acknowledgement(fresh):
+            ready.update(screen="approval", page=0, inspected_through=0)
             if not self.state.compare_replace(claimed, ready):
                 raise WisdomConflict("Collective Wisdom review changed; open it again")
-            return self._apply(ready, "confirm", service, invocation, authority)
-        except Exception:
-            self.state.compare_replace(claimed, record)
-            raise
+            return copy.deepcopy(ready)
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        if not self.state.compare_replace(claimed, ready):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return self._apply(ready, "confirm", service, invocation, authority)
 
     def _apply(
         self, record: dict[str, Any], action: str, service: Any,
@@ -1452,7 +1542,8 @@ class NativeReviewController:
 
     def _act_special(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, record_id: str, action: str, record: dict[str, Any], service: Any,
-        invocation: NativeInvocation, authority: Callable[[], bool],
+        invocation: NativeInvocation, authority: Callable[[], bool], *,
+        progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         operation = record.get("operation")
         if operation in {"install", "update"} and action == "defer":
@@ -1464,7 +1555,7 @@ class NativeReviewController:
         if operation == "catalog" and action.startswith("catalog.install."):
             selected = self._select_catalog(action, record)
             return self._one_click_package(
-                selected, "install", service, invocation, authority,
+                selected, "install", service, invocation, authority, progress=progress,
             )
         raise WisdomValidationError("Collective Wisdom action was not recognized")
 

@@ -187,6 +187,8 @@ class AgentLedPolicyResponse(WireModel):
     repeated_edits_count: bool
     max_recommendations_per_user_per_week: int = Field(ge=0, le=100)
     publication_mode: Literal["open", "moderated", "managed"]
+    # Optional on older Gateway deployments; absence never grants notice authority.
+    recommendation_mode: Literal["useful_only", "promote_all"] | None = None
     install_popularity_threshold: int = Field(ge=1, le=100_000)
     notification_defaults: AgentLedNotificationDefaults
     manager_review_email_cadence: Literal["immediate", "daily"]
@@ -564,15 +566,7 @@ class WisdomClient:
                 allow_redirects=False,
                 **request_options,
             )
-            try:
-                try:
-                    body = self._read_response_body(response, max_bytes=response_limit)
-                except WisdomError as exc:
-                    if response.status_code in (502, 503, 504):
-                        raise WisdomUnavailable(status=response.status_code) from exc
-                    raise
-            finally:
-                response.close()
+            body = self._bounded_body(response, response_limit)
         except requests.Timeout as exc:
             raise WisdomUnavailable() from exc
         except requests.RequestException as exc:
@@ -586,6 +580,17 @@ class WisdomClient:
             raise WisdomError(
                 "Collective Wisdom Gateway response failed schema validation"
             ) from exc
+
+    def _bounded_body(self, response: requests.Response, limit: int | None) -> Any:
+        try:
+            try:
+                return self._read_response_body(response, max_bytes=limit)
+            except WisdomError as exc:
+                if response.status_code in (502, 503, 504):
+                    raise WisdomUnavailable(status=response.status_code) from exc
+                raise
+        finally:
+            response.close()
 
     def capability(self) -> Capability:
         """Read advertised capabilities through the same bounded transport."""

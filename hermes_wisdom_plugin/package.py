@@ -539,6 +539,21 @@ def source_fingerprint(source: Path) -> str:
     return sha256_address("".join(records).encode("utf-8"))
 
 
+def read_validated_source_files(source: Path) -> list[tuple[str, str, bytes]]:
+    """Read every source byte for local preflight without requiring a manifest."""
+    first = [
+        (e.relative, e.mode, e.body)
+        for e in _bounded_snapshot(source, require_manifest=False)
+    ]
+    second = [
+        (e.relative, e.mode, e.body)
+        for e in _bounded_snapshot(source, require_manifest=False)
+    ]
+    if first != second:
+        raise PackagePolicyError("source changed during local preflight")
+    return first
+
+
 def read_validated_package_files(root: Path) -> list[tuple[str, str, bytes]]:
     """Read one complete safe package without hiding unsafe overlay entries."""
 

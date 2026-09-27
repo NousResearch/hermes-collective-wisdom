@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import base64
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,40 @@ from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValid
 from .package import PackagePolicyError, verify_content_files
 from .local_security import prepared_security_check
 from .setup_document import SETUP_PATH, parse_setup_document
+
+
+def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
+    """Read only bounded frontmatter in the already verified package, without a fetch."""
+    body = next((body for path, _mode, body in files if path == "SKILL.md"), b"")
+    try:
+        text = body[:24_100].decode("utf-8-sig")
+        opening = re.match(r"^---[ \t]*\r?\n", text)
+        if opening is None:
+            return {}
+        closing = re.search(r"^---[ \t]*(?:\r?\n|$)", text[opening.end():], re.MULTILINE)
+        if closing is None or closing.start() > 24_000:
+            return {}
+        from ruamel.yaml import YAML  # pylint: disable=import-outside-toplevel
+        data = YAML(typ="safe").load(text[opening.end():opening.end() + closing.start()])
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Invalid/unavailable presentation metadata does not bypass package checks.
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    metadata = data.get("metadata")
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
+    hermes = hermes if isinstance(hermes, dict) else {}
+    def present(value: object) -> str | None:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    fields = {
+        "editorial_name": present(hermes.get("editorial_name")) or data.get("name"),
+        "editorial_description": (present(hermes.get("editorial_description"))
+                                  or data.get("description")),
+        "coworker_benefit": hermes.get("coworker_benefit"),
+    }
+    return {key: value.strip() for key, value in fields.items()
+            if isinstance(value, str) and value.strip() and len(value) <= 320}
 
 
 def confirmed_file_change(value: object, *, action: str) -> bool:
@@ -58,6 +93,13 @@ _UPDATE_MODES = frozenset({"MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"})
 _REVIEW_FIELDS = (
     "skill_id",
     "slug",
+    "editorial_name",
+    "editorial_description",
+    "coworker_benefit",
+    "author_description",
+    "verified_facts",
+    "published_by_user_id",
+    "version_explanation",
     "version",
     "content_hash",
     "manifest_hash",
@@ -515,9 +557,16 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             )
             if key in version_metadata
         }
+        editorial_copy = _reviewed_skill_copy(files)
         review = {
             "skill_id": skill_id,
             "slug": slug,
+            **{key: editorial_copy.get(key) for key in
+               ("editorial_name", "editorial_description", "coworker_benefit")},
+            "author_description": version_metadata.get("author_description"),
+            "verified_facts": copy.deepcopy(version_metadata.get("verified_facts")),
+            "published_by_user_id": version_metadata.get("published_by_user_id"),
+            "version_explanation": version_metadata.get("explanation"),
             "version": version_number,
             "content_hash": content_hash,
             "manifest_hash": manifest_hash,

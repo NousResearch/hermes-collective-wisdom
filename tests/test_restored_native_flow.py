@@ -79,7 +79,8 @@ def test_slack_review_started_by_host_command_worker_posts_one_card(tmp_path):
         await asyncio.sleep(0)
         await ui.flush()
         assert len(ui.posts) == 1
-        assert [action.label for action in ui.view(result["review_id"]).actions][-1] == "Install"
+        labels = [action.label for action in ui.view(result["review_id"]).actions]
+        assert labels[-1] == "Install Skill"
         ui.runtime.close()
 
     asyncio.run(scenario())
@@ -94,6 +95,9 @@ class Service:
 
     def close(self):
         return None
+
+    def prepare_candidate_offer(self, identity):
+        return self.native_candidate_inspect(identity)
 
     def native_candidate_inspect(self, identity):
         return {"event_id": identity, "facts": {"name": "incident"}, "networked": False}
@@ -396,17 +400,19 @@ def test_not_now_does_not_claim_success_when_preference_is_unconfirmed(tmp_path)
     asyncio.run(scenario())
 
 
-def test_candidate_invitation_has_actionable_ordered_controls(tmp_path):
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface):
     async def scenario():
         service = Service()
-        ui = SlackHarness(tmp_path, service)
+        ui = surface(tmp_path, service)
         response = ui.runtime.begin_candidate(ui.caller, "candidate-1")
         await ui.flush()
         identity = response["review_id"]
         view = ui.view(identity)
-        assert view.title == "You created a skill that could help your team"
+        assert view.title == "Hermes Collective Wisdom"
+        assert "You created a skill that could help your team" in view.summary
         assert [action.label for action in view.actions] == [
-            "Review checks", "View More Details", "Snooze Collective Wisdom",
+            "Review Checks", "View More Details", "Snooze Collective Wisdom",
             "Maybe Later", "Share My Skill",
         ]
         assert "Safe To Share" not in view.to_text()
@@ -491,11 +497,7 @@ def test_safe_summary_requires_all_actual_hash_bound_checks(tmp_path, monkeypatc
         response = ui.runtime.begin_publication(ui.caller, "local:draft-1")
         await ui.flush()
         identity = response["review_id"]
-        assert (
-            "✅ Safe To Share (security and professionalism checks all passed)"
-            in ui.view(identity).to_text()
-        )
-        assert ui.view(identity).actions[0].label == "✅ Safe To Share"
+        assert ui.view(identity).actions[0].label == "✓ Safe To Share"
         await ui.click(identity, "checks")
         expanded = ui.view(identity).to_text()
         assert "✅ Safe To Share" in expanded
@@ -509,7 +511,7 @@ def test_safe_summary_requires_all_actual_hash_bound_checks(tmp_path, monkeypatc
             await ui.flush()
             view = ui.view(next_review["review_id"])
             assert "Safe To Share" not in view.to_text()
-            assert view.actions[0].label == "Review checks"
+            assert view.actions[0].label == "Review Checks"
     asyncio.run(scenario())
 
 
@@ -738,7 +740,7 @@ def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
         assert "your organization" in view.title
         assert "Would you like to install this skill?" in view.to_text()
         assert [a.label for a in view.actions] == [
-            "View Details", "Not Now", "Mute Skill Recommendations", "Install",
+            "View Details", "Not Now", "Mute Skill Recommendations", "Install Skill",
         ]
         assert "Triage incidents" in view.to_text()
         await ui.click(identity, "confirm")
@@ -868,8 +870,11 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
         response = ui.runtime.begin(ui.caller, "incident")
         await ui.flush()
         identity = response["review_id"]
-        async def failed_edit(**_kwargs):
-            raise ConnectionError("provider refused result edit")
+        original_edit = ui.chat_update
+        async def failed_edit(**kwargs):
+            if service.applied:
+                raise ConnectionError("provider refused result edit")
+            return await original_edit(**kwargs)
         monkeypatch.setattr(ui, "chat_update", failed_edit)
         await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
@@ -881,8 +886,8 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
 
 @pytest.mark.parametrize("category,label", [
     ("skill_ready_to_share", "Share My Skill"),
-    ("new_skill", "Install"),
-    ("update_available", "Update"),
+    ("new_skill", "Install Skill"),
+    ("update_available", "Update Skill"),
 ])
 def test_eligible_notice_reuses_actionable_native_candidate_flow(
     tmp_path, monkeypatch, category, label,

@@ -57,7 +57,8 @@ def test_native_inspection_and_install_use_exact_real_package(invocation_executo
             await ui.click(identity, following.action)
         inspected = json.loads("".join(chunks))
         assert inspected["review"] == {
-            key: value for key, value in original.items() if key not in {"skill_id", "receipt"}
+            key: value for key, value in original.items()
+            if key not in {"skill_id", "receipt", "published_by_user_id"}
         }
         assert "never executed" in str(inspected["package_files"])
         assert base64.b64encode(b"\x00\xff\x01").decode() in str(inspected["package_files"])

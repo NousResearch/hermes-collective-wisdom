@@ -492,11 +492,11 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         )
 
     def prepare_draft(self, service: Any, view_id: str, skill_name: str):
-        """Prepare locally without model-review or publication permission."""
+        """Prepare an owner-private draft with the configured editorial route."""
         self._require_view(service, view_id)
         return service.suggest(
             skill_name,
-            allow_model_review=False,
+            allow_model_review=None,
             may_apply=lambda: self.current(service, view_id),
         )
 
@@ -537,7 +537,7 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
             raise WisdomValidationError("Collective Wisdom candidate is incomplete")
         return service.suggest(
             skill_name,
-            allow_model_review=False,
+            allow_model_review=None,
             may_apply=lambda: self.current(service, view_id),
         )
 
@@ -700,71 +700,9 @@ def _add_candidate_routes(router, api, invoke):
         ))
 
 
-def build_router(  # pylint: disable=too-many-locals
-    service_factory: Callable[[], Any],
-    *,
-    workflow: DesktopWorkflowApi | None = None,
-    route_class: type | None = None,
-):
-    """Build the supported FastAPI router without owning host authentication.
 
-    The host mounts this router below its authenticated plugin namespace. The
-    supplied factory must already be inside the request's validated profile
-    scope; no owner/profile value is accepted in a JSON body.
-    """
-    from fastapi import (  # pylint: disable=import-outside-toplevel
-        APIRouter,
-        HTTPException,
-        Query,
-    )
-    from fastapi.routing import APIRoute  # pylint: disable=import-outside-toplevel
-
-    api = workflow or DesktopWorkflowApi()
-    router = APIRouter(route_class=route_class or APIRoute)
-
-    def invoke(operation: Callable[[Any], Any]):
-        service = None
-        try:
-            service = service_factory()
-            return operation(service)
-        except WisdomAuthError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        except WisdomUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except WisdomNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except (WisdomConflict, WisdomValidationError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except WisdomError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        finally:
-            close = getattr(service, "close", None)
-            if callable(close):
-                close()
-
-    router.add_api_route(
-        "/views", lambda: invoke(api.open_view), methods=["POST"], name="open_view"
-    )
-
-    @router.post("/notices/end-turn")
-    def end_turn_notices():
-        def check(service):
-            notices: list[dict[str, Any]] = []
-            result = service.end_turn_notices(notices.extend)
-            return {**result, "notices": notices}
-
-        return invoke(check)
-
-    router.add_api_route(
-        "/views/{view_id}",
-        lambda view_id: invoke(lambda service: api.close_view(service, view_id)),
-        methods=["DELETE"],
-        name="close_view",
-    )
+def _add_catalog_read_routes(router, api, invoke):
+    from fastapi import Query  # pylint: disable=import-outside-toplevel
 
     @router.get("/bootstrap")
     def bootstrap():
@@ -815,6 +753,8 @@ def build_router(  # pylint: disable=too-many-locals
     def update_check(skill_id: str, view_id: str = Query(min_length=8, max_length=128)):
         return invoke(lambda service: api.check_update(service, view_id, skill_id))
 
+
+def _add_package_routes(router, api, invoke):
     @router.post("/install/review")
     def install_review(body: InstallReviewBody):
         return invoke(lambda service: api.install_review(
@@ -876,6 +816,34 @@ def build_router(  # pylint: disable=too-many-locals
             service, body.view_id, body.review_id
         ))
 
+
+def _add_catalog_and_install_routes(router, api, invoke):
+    from fastapi import Query  # pylint: disable=import-outside-toplevel
+
+    router.add_api_route(
+        "/views", lambda: invoke(api.open_view), methods=["POST"], name="open_view"
+    )
+
+    @router.post("/notices/end-turn")
+    def end_turn_notices():
+        def check(service):
+            notices: list[dict[str, Any]] = []
+            result = service.end_turn_notices(notices.extend)
+            return {**result, "notices": notices}
+
+        return invoke(check)
+
+    router.add_api_route(
+        "/views/{view_id}",
+        lambda view_id: invoke(lambda service: api.close_view(service, view_id)),
+        methods=["DELETE"],
+        name="close_view",
+    )
+
+    _add_catalog_read_routes(router, api, invoke)
+
+    _add_package_routes(router, api, invoke)
+
     @router.patch("/settings/mode")
     def settings_mode(body: ModeBody):
         return invoke(lambda service: api.set_notification_mode(
@@ -897,6 +865,55 @@ def build_router(  # pylint: disable=too-many-locals
             body.control_id,
             body.duration,
         ))
+
+
+def build_router(  # pylint: disable=too-many-locals
+    service_factory: Callable[[], Any],
+    *,
+    workflow: DesktopWorkflowApi | None = None,
+    route_class: type | None = None,
+):
+    """Build the supported FastAPI router without owning host authentication.
+
+    The host mounts this router below its authenticated plugin namespace. The
+    supplied factory must already be inside the request's validated profile
+    scope; no owner/profile value is accepted in a JSON body.
+    """
+    from fastapi import (  # pylint: disable=import-outside-toplevel
+        APIRouter,
+        HTTPException,
+        Query,
+    )
+    from fastapi.routing import APIRoute  # pylint: disable=import-outside-toplevel
+
+    api = workflow or DesktopWorkflowApi()
+    router = APIRouter(route_class=route_class or APIRoute)
+
+    def invoke(operation: Callable[[Any], Any]):
+        service = None
+        try:
+            service = service_factory()
+            return operation(service)
+        except WisdomAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except WisdomUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except WisdomNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (WisdomConflict, WisdomValidationError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except WisdomError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            close = getattr(service, "close", None)
+            if callable(close):
+                close()
+
+    _add_catalog_and_install_routes(router, api, invoke)
 
     router.add_api_route(
         "/enrollment/disclosure",

@@ -31,7 +31,7 @@ def _empty() -> dict[str, Any]:
     }
 
 
-class QualificationState:
+class QualificationState:  # pylint: disable=too-many-public-methods
     """Small qualification-domain record; it owns no network or delivery state."""
 
     # These small public-state guards intentionally repeat across independent domains.
@@ -244,6 +244,24 @@ class QualificationState:
 
     def local_event(self, event_id: str) -> dict[str, Any] | None:
         return next((row for row in self.candidates() if row["event_id"] == event_id), None)
+
+    def save_candidate_preparation(  # pylint: disable=too-many-boolean-expressions
+        self, event_id: str, content_hash: str, prepared: dict[str, Any]
+    ) -> None:
+        """Bind first-offer facts to the exact owner and qualified source revision."""
+        owner = self.owner()
+        if owner is None:
+            raise ValueError("qualification owner is unavailable")
+        with self.change() as value:
+            row = next((item for item in value["candidates"].values()
+                        if item["event_id"] == event_id), None)
+            skill = value["skills"].get(row["skill_id"]) if row else None
+            if (value["owner"] != owner or row is None or row["content_hash"] != content_hash
+                or row["organization_id"] != owner["organization_id"]
+                or not skill or skill.get("current_hash") != content_hash
+                or (row.get("payload") or {}).get("preparation")):
+                raise ValueError("candidate changed during preparation")
+            row["payload"]["preparation"] = copy.deepcopy(prepared)
 
     def candidate_editorial_metadata(self, skill_id: str) -> dict[str, Any] | None:
         rows = [row for row in self.candidates() if row["skill_id"] == skill_id]

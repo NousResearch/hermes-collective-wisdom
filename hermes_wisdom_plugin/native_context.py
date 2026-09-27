@@ -16,6 +16,34 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+from .errors import WisdomValidationError
+
+
+def message_id(response: Any, *, platform: str, chat_id: str) -> str:
+    """Extract the exact posted message identity from real Slack/Telegram SDK shapes."""
+    # Slack SDK responses expose their payload through .data, not .ts attributes.
+    if platform == "slack" and isinstance(getattr(response, "data", None), dict):
+        response = response.data
+    if isinstance(response, dict):
+        result = response.get("result")
+        payload: dict[str, Any] = result if isinstance(result, dict) else response
+        returned_chat = payload.get("channel") or payload.get("chat_id")
+        if returned_chat is not None and str(returned_chat) != str(chat_id):
+            raise WisdomValidationError("Collective Wisdom review returned another route")
+        value = payload.get("ts") if platform == "slack" else payload.get("message_id")
+    else:
+        returned_chat = getattr(response, "chat_id", None)
+        chat = getattr(response, "chat", None)
+        returned_chat = returned_chat or getattr(chat, "id", None)
+        if returned_chat is not None and str(returned_chat) != str(chat_id):
+            raise WisdomValidationError("Collective Wisdom review returned another route")
+        value = getattr(response, "ts", None) if platform == "slack" else getattr(
+            response, "message_id", None
+        )
+    if not str(value or ""):
+        raise WisdomValidationError("Collective Wisdom review message identity is unavailable")
+    return str(value)
+
 
 @dataclass(frozen=True, slots=True)
 class NativeInvocation:  # pylint: disable=too-many-instance-attributes
@@ -263,16 +291,22 @@ class InvocationCapture:
         invocation = captured.invocation
         if lifecycle_ids is not None and (not all(lifecycle_ids) or parent_session_id):
             raise PermissionError("Native Wisdom lifecycle is not an owning human turn.")
-        if expected_actor is not None and invocation.actor_id != expected_actor:
-            raise PermissionError("Native Wisdom lifecycle sender changed.")
-        if expected_platform is not None and invocation.platform != expected_platform:
-            raise PermissionError("Native Wisdom lifecycle platform changed.")
+        for expected, actual, message in (
+            (expected_actor, invocation.actor_id, "sender"),
+            (expected_platform, invocation.platform, "platform"),
+        ):
+            if expected is not None and actual != expected:
+                raise PermissionError(f"Native Wisdom lifecycle {message} changed.")
         if invocation.profile and invocation.profile != profile_name:
             raise PermissionError("Native Wisdom invocation belongs to another profile.")
         if invocation.chat_type.casefold() not in {"dm", "private", "im"}:
             raise PermissionError("Open a private session to review this installation.")
         if not all((invocation.actor_id, invocation.chat_id, invocation.session_key)):
             raise PermissionError("Native Wisdom invocation is missing routed identity.")
+        self._verify_source(captured, invocation)
+        return invocation
+
+    def _verify_source(self, captured: Any, invocation: NativeInvocation) -> None:
         # Fence the copied source against the immutable identity before passing it
         # back through the host's current authorization policy.
         source = captured.source_snapshot
@@ -293,4 +327,3 @@ class InvocationCapture:
             raise PermissionError("Native Wisdom actor authorization is unavailable.") from exc
         if not authorized:
             raise PermissionError("Native Wisdom actor is not authorized by this gateway.")
-        return invocation
