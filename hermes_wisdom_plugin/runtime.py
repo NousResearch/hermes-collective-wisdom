@@ -255,15 +255,14 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         for item in page.events:
             row = item.model_dump(mode="json")
             category = categories.get(str(row.get("kind")))
-            if category is not None:
-                events.append({**row, "category": category})
+            events.append({**row, "category": category})
         return type("NoticePage", (), {
             "events": events,
             "next_cursor": page.next_cursor,
             "has_more": page.has_more,
         })()
 
-    def notice_policy(self) -> dict[str, bool]:
+    def notice_policy(self) -> dict[str, Any]:
         """Project the existing organization notification defaults."""
         owner = self._installation_owner()
         policy = self.client.agent_led_policy()
@@ -273,12 +272,40 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         settings = self.notification_config()["notifications"]
         enabled = settings["delivery_mode"] == "agent"
         return {
+            "recommendation_mode": getattr(policy, "recommendation_mode", None),
             "new_skill": enabled and bool(defaults.teammate_published)
             and settings["new_skills"] == settings["team_published"] == "immediate",
             "update_available": enabled and bool(defaults.update_available)
             and settings["updates"] == "immediate",
             "skill_ready_to_share": enabled and bool(defaults.skill_ready_to_share),
         }
+
+    def notice_version(self, skill_id: str, version: int | None) -> dict[str, Any]:
+        """Read org-scoped exact-version metadata without catalog enrichment."""
+        if version is None:
+            raise ValueError("Publication feed requires an exact version")
+        owner = self._installation_owner()
+        try:
+            revision = self._discovery().version(skill_id, version)
+        except Exception:
+            if owner != self._installation_owner():
+                raise WisdomAuthError("Collective Wisdom notice owner changed") from None
+            raise
+        if owner != self._installation_owner():
+            raise WisdomAuthError("Collective Wisdom notice owner changed")
+        return revision
+
+    def notice_publishers(
+        self, references: list[dict[str, Any]],
+    ) -> dict[tuple[str, int], dict[str, str | None]]:
+        """Resolve at most one bounded Portal batch for the current owner."""
+        from .publisher_names import publisher_names  # pylint: disable=import-outside-toplevel
+        owner = self._installation_owner()
+        assert self.client is not None
+        result = publisher_names(self.account, references, session=self.client.session)
+        if owner != self._installation_owner():
+            raise WisdomAuthError("Collective Wisdom publisher owner changed")
+        return result
 
     def notice_candidates(self) -> list[dict[str, Any]]:
         """Return qualified local candidates without model-generated presentation."""
@@ -471,7 +498,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self,
         skill_name,
         *,
-        allow_model_review=False,
+        allow_model_review=None,
         may_apply: Callable[[], bool] | None = None,
     ):
         """Prepare one exact owner-private local draft without submission authority."""
@@ -480,9 +507,18 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         owner = self._installation_owner()
         _require_current(may_apply)
         self.local_state.bind_owner(owner)
+        # An explicitly configured refusal is different from the historical
+        # missing/default-false setting. Never override the former implicitly.
+        try:
+            configured = (self._get_config("qualification.allow_model_review", None)
+                          if self._get_config is not None else None)
+        except Exception:  # pylint: disable=broad-exception-caught
+            configured = False
+        if configured is False:
+            allow_model_review = False
         result = self._contribution_reviewer().prepare(
             skill_name,
-            allow_model_review=bool(allow_model_review),
+            allow_model_review=allow_model_review,
             may_apply=may_apply,
         )
         self.check_owner()
@@ -517,10 +553,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         return {"events": self.notice_candidates(), "more": False}
 
     def inbox(self, *, invocation=None):
-        """Read owner-bound assessments and reviews without polling or mutation."""
+        """Catch up one page, then read owner-bound facts and reviews."""
         from .native_review import NativeReviewController  # pylint: disable=import-outside-toplevel
         from .review_state import ReviewState  # pylint: disable=import-outside-toplevel
         owner = self._installation_owner()
+        catch_up = self.end_turn_notices(None)
+        assert self._direct_state is not None
+        known = self._direct_state.known_publications()
         mode = self.notification_mode()
         assessments = self.notice_candidates()[-100:]
         interactions = NativeReviewController(ReviewState(self._state, self.root)).pending(
@@ -538,10 +577,54 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise WisdomAuthError("Collective Wisdom inbox owner changed")
         return {
             "mode": mode, "assessments": assessments, "interactions": interactions,
-            "installed_setup": installed_setup,
+            "installed_setup": installed_setup, "known_publications": known,
+            "catch_up": catch_up,
         }
 
-    def native_candidate_inspect(self, event_id):
+    def prepare_candidate_offer(self, event_id):
+        """Prepare once before the first actionable owner-private offer."""
+        from .setup_lock import managed_operation_guard  # pylint: disable=import-outside-toplevel
+        inspected = self.native_candidate_inspect(event_id)
+        owner = self._installation_owner()
+        lock_key = "candidate-preparation:" + json.dumps(
+            [owner, event_id, inspected["content_hash"]], sort_keys=True
+        )
+        with managed_operation_guard(self.local_state.root, lock_key):
+            # The first inspection is not an authority check: reread after taking
+            # the cross-process lock before any model or draft work.
+            return self._prepare_candidate_offer_locked(event_id, owner, inspected["content_hash"])
+
+    def _prepare_candidate_offer_locked(self, event_id, owner, expected):
+        """Bind one saved draft to the candidate while holding its operation guard."""
+        inspected = self.native_candidate_inspect(event_id)
+        if self._installation_owner() != owner or inspected["content_hash"] != expected:
+            raise WisdomConflict("candidate changed during preparation")
+        event = self.qualification_state.local_event(event_id)
+        payload = event.get("payload") or {} if event else {}
+        if payload.get("preparation"):
+            return inspected
+        from .qualification import snapshot_tree  # pylint: disable=import-outside-toplevel
+        name = inspected["facts"]["name"]
+        source = self._contribution_reviewer().source(name)
+        local = self.qualification_state.local_skill(str(event.get("skill_id"))) if event else None
+        if not local or str(source) != local.get("canonical_path"):
+            raise WisdomConflict("candidate source changed")
+        if snapshot_tree(source)[0] != expected:
+            raise WisdomConflict("candidate source changed")
+        try:
+            prepared = self.suggest(name)
+        except (PackagePolicyError, WisdomValidationError, OSError):
+            return inspected
+        if snapshot_tree(source)[0] != expected:
+            raise WisdomConflict("candidate source changed during preparation")
+        if self._installation_owner() != self.qualification_state.owner():
+            raise WisdomAuthError("candidate owner changed during preparation")
+        self.qualification_state.save_candidate_preparation(
+            event_id, expected, {"draft_id": prepared["draft_id"], "hashes": prepared["hashes"]}
+        )
+        return self.native_candidate_inspect(event_id)
+
+    def native_candidate_inspect(self, event_id):  # pylint: disable=too-many-locals
         """Inspect one exact owner-private candidate without catalog disclosure."""
         owner = self._installation_owner()
         store = self.qualification_state
@@ -559,21 +642,51 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         if local.get("current_hash") != event.get("content_hash"):
             raise WisdomError("Collective Wisdom candidate changed")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        from .qualification import snapshot_tree  # pylint: disable=import-outside-toplevel
+        if snapshot_tree(Path(local["canonical_path"]))[0] != event["content_hash"]:
+            raise WisdomConflict("candidate source changed")
+        editorial = {key: payload.get(key) for key in (
+            "editorial_name", "editorial_description", "coworker_benefit"
+        ) if payload.get(key)}
+        preparation = payload.get("preparation") or {}
+        checked = None
+        if preparation:
+            prepared_id = preparation.get("draft_id")
+            draft = (self._direct_state.draft(prepared_id)
+                     if self._direct_state and isinstance(prepared_id, str) else None)
+            if (not draft or draft.get("owner") != owner
+                or {"content": draft.get("content_hash"),
+                    "author_description": draft.get("description_hash"),
+                    "package_manifest": draft.get("manifest_hash")}
+                != preparation.get("hashes")):
+                raise WisdomConflict("candidate preparation changed; prepare again")
+            checked = self._contribution_reviewer().reopen(draft["id"])
+            editorial = {key: checked[key] for key in (
+                "editorial_name", "editorial_description", "coworker_benefit"
+            ) if checked.get(key)}
         result = {
             "kind": "candidate", "event_id": str(event["event_id"]),
             "content_hash": str(event["content_hash"]),
             "facts": {
                 "name": str(payload.get("skill_name") or event.get("skill_id") or "Local skill"),
                 "qualification": event.get("qualification"),
-                "editorial": {
-                    key: payload.get(key) for key in (
-                        "editorial_name", "editorial_description"
-                    ) if payload.get(key)
-                },
+                "editorial": editorial,
+                "editorial_status": (
+                    checked["editorial_status"] if checked is not None else "incomplete"
+                ),
             },
+            "hashes": preparation.get("hashes", {}),
+            "security_check": checked["security_check"] if checked is not None else {},
+            "professionalism_check": (
+                checked["professionalism_check"] if checked is not None else {}
+            ),
             "networked": False,
         }
         self.check_owner()
+        if owner != self._installation_owner():
+            raise WisdomAuthError("candidate owner changed during inspection")
+        if snapshot_tree(Path(local["canonical_path"]))[0] != event["content_hash"]:
+            raise WisdomConflict("candidate source changed")
         return result
 
     def native_skill_inspect(self, skill_id, *, version):
@@ -1586,22 +1699,9 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             if command == "install":
                 return self._slash_native_install(invocation, args)
             try:
-                target = " ".join(args)
-                if command == "suggest" and len(args) != 1:
-                    return "Usage: /wisdom suggest <local-skill>"
-                effect_review = {
-                    "update": self.native.begin_update,
-                    "publish": self.native.begin_publication,
-                    "suggest": self.native.begin_suggest,
-                }.get(command)
-                if effect_review is not None:
-                    return _native_review_reply(effect_review(invocation, target))
-                if command in {"browse", "show", "versions"}:
-                    return _native_review_reply(
-                        self.native.begin_catalog(invocation, command, target)
-                    )
-                if command == "settings":
-                    return _native_review_reply(self.native.begin_settings(invocation))
+                reply = self._slash_native_review(invocation, command, args)
+                if reply is not None:
+                    return reply
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning("Collective Wisdom review failed (%s)", type(exc).__name__)
                 return _REVIEW_UNAVAILABLE
@@ -1613,6 +1713,23 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             return await task
 
         return resolve()
+
+    def _slash_native_review(self, invocation, command: str, args: list[str]):
+        target = " ".join(args)
+        if command == "suggest" and len(args) != 1:
+            return "Usage: /wisdom suggest <local-skill>"
+        effect_review = {
+            "update": self.native.begin_update,
+            "publish": self.native.begin_publication,
+            "suggest": self.native.begin_suggest,
+        }.get(command)
+        if effect_review is not None:
+            return _native_review_reply(effect_review(invocation, target))
+        if command in {"browse", "show", "versions"}:
+            return _native_review_reply(self.native.begin_catalog(invocation, command, target))
+        if command == "settings":
+            return _native_review_reply(self.native.begin_settings(invocation))
+        return None
 
     async def _slash(self, parsed: tuple[str, list[str]]) -> str:
         """Run network work off-loop; cancelled TUI workers retain their own cleanup."""

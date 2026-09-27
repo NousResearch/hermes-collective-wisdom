@@ -1,6 +1,6 @@
 """Thin supported native routes for explicit reviews and best-effort notices."""
 # Lifecycle and platform-adapter methods are self-explanatory at their call sites.
-# pylint: disable=missing-function-docstring,line-too-long
+# pylint: disable=missing-function-docstring,line-too-long,too-many-lines
 
 from __future__ import annotations
 
@@ -13,9 +13,12 @@ import threading
 import time
 from typing import Any, Callable
 
+from .context_relevance import current_excerpt, eligible_candidates, relevant_skill
 from .errors import WisdomUnavailable, WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
+from .native_context import message_id as posted_message_id
 from .native_review import NativeItem, NativeReviewController, NativeView, parse_callback
+from .native_progress import PROGRESS_TIMEOUT, edit_progress
 from .package import PackagePolicyError
 from .terminal_ui import has_reviewable_warnings, render_operation_outcome
 from .review_state import ReviewState
@@ -74,30 +77,56 @@ def _already_installed_view(
     )
 
 
-def _message_id(response: Any, *, platform: str, chat_id: str) -> str:
-    """Extract the exact posted message identity from real Slack/Telegram SDK shapes."""
-    # Slack SDK responses expose their payload through .data, not .ts attributes.
-    if platform == "slack" and isinstance(getattr(response, "data", None), dict):
-        response = response.data
-    if isinstance(response, dict):
-        result = response.get("result")
-        payload: dict[str, Any] = result if isinstance(result, dict) else response
-        returned_chat = payload.get("channel") or payload.get("chat_id")
-        if returned_chat is not None and str(returned_chat) != str(chat_id):
-            raise WisdomValidationError("Collective Wisdom review returned another route")
-        value = payload.get("ts") if platform == "slack" else payload.get("message_id")
-    else:
-        returned_chat = getattr(response, "chat_id", None)
-        chat = getattr(response, "chat", None)
-        returned_chat = returned_chat or getattr(chat, "id", None)
-        if returned_chat is not None and str(returned_chat) != str(chat_id):
-            raise WisdomValidationError("Collective Wisdom review returned another route")
-        value = getattr(response, "ts", None) if platform == "slack" else getattr(
-            response, "message_id", None
+
+def _require_direct_install_owner(service, invocation):
+    if service.native_owner().get("profile_name") != invocation.profile:
+        raise PermissionError("Collective Wisdom installation owner changed")
+
+
+def _direct_install_blocked(plan, reference):
+    policy = plan.get("policy") if isinstance(plan, dict) else None
+    scan = plan.get("local_scan") if isinstance(plan, dict) else None
+    compatible = plan.get("compatibility") if isinstance(plan, dict) else None
+    clean = (
+        isinstance(plan, dict) and plan.get("operation") == "install"
+        and plan.get("allowed") is True and not has_reviewable_warnings(plan)
+        and isinstance(scan, dict) and scan.get("allowed") is True
+        and scan.get("available") is True
+        and isinstance(compatible, dict) and compatible.get("outcome") == "compatible"
+        and isinstance(policy, dict)
+        and policy.get("scan_requires_confirmation") is False
+        and policy.get("compatibility_requires_confirmation") is False
+        and isinstance(plan.get("setup_commands"), list)
+    )
+    if not clean:
+        display_name = plan.get("slug") if isinstance(plan, dict) else None
+        if not isinstance(display_name, str) or not display_name:
+            display_name = reference
+        return NativeView(
+            "Collective Wisdom", f"⚠️ {display_name} wasn't installed",
+            notice="A safety check or setup is required. No skill was installed.",
+            dismissed=True,
         )
-    if not str(value or ""):
-        raise WisdomValidationError("Collective Wisdom review message identity is unavailable")
-    return str(value)
+    return None
+
+
+def _direct_install_outcome(result, slug):
+    if not isinstance(result, dict) or result.get("pending") is True:
+        return NativeView(
+            "Collective Wisdom", f"{slug} installation needs checking",
+            notice="The outcome is uncertain. Check installed skills before trying again.",
+            dismissed=True,
+        )
+    if (result.get("installed") is not True or result.get("rejected") is True
+            or result.get("error")):
+        return NativeView(
+            "Collective Wisdom", f"{slug} installation needs attention",
+            notice="Check its installation status; do not retry blindly.", dismissed=True,
+        )
+    return NativeView(
+        "Collective Wisdom",
+        render_operation_outcome("install", result, skill_name=slug), dismissed=True,
+    )
 
 
 class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
@@ -108,7 +137,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         spawn_task: Callable[..., Any], *, installed_state: Any | None = None,
         session_context: Callable[[], dict[str, str]] | None = None,
     ) -> None:
-        del llm
+        self.llm = llm
         self.root = root
         self.profile_name = profile_name
         self.service_factory = service_factory
@@ -128,6 +157,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             tuple[str, str], tuple[float, NativeInvocation, dict[str, str], object]
         ] = {}
         self._local_tools: dict[tuple[str, str], tuple[float, NativeInvocation, dict[str, str]]] = {}
+        self._context: dict[tuple[str, str], str] = {}
 
     @property
     def reviews(self) -> NativeReviewController:
@@ -144,6 +174,25 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             self._loops.clear()
             self._turns.clear()
             self._local_tools.clear()
+            self._context.clear()
+
+    def capture_context(self, **facts: Any) -> None:
+        """Join the latest human message only to an admitted exact native turn."""
+        key = (str(facts.get("task_id") or ""), str(facts.get("session_id") or ""))
+        excerpt = current_excerpt(facts.get("conversation_history"))
+        message = facts.get("user_message")
+        if (not all(key) or not excerpt or not isinstance(message, str)
+                or excerpt != message.strip()[:1200]):
+            return
+        with self._lock:
+            grant = self._turns.get(key)
+            if grant is None or grant[0] < time.monotonic() or self._closed:
+                return
+            if grant[1].turn_id != str(facts.get("turn_id") or ""):
+                return
+            if len(self._context) >= 256:
+                self._context.pop(next(iter(self._context)))
+            self._context[key] = excerpt
 
     def hook(self, **kwargs: Any) -> None:
         if not self._closed:
@@ -252,6 +301,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         key = (str(facts.get("task_id") or ""), str(facts.get("session_id") or ""))
         with self._lock:
             grant = self._turns.pop(key, None)
+            excerpt = self._context.pop(key, "")
         if grant is None or grant[0] < time.monotonic() or self._closed:
             return {"supported": False, "offered": 0, "polled": False}
         invocation, expected_owner, token = grant[1], grant[2], grant[3]
@@ -267,7 +317,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         try:
             loop.call_soon_threadsafe(
                 self._schedule_notice_poll,
-                invocation, expected_owner, native, token, loop,
+                invocation, expected_owner, native, token, loop, excerpt,
             )
         except RuntimeError:
             return {"supported": False, "offered": 0, "polled": False, "scheduled": False}
@@ -292,15 +342,16 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         except PermissionError:
             return False
 
-    def _schedule_notice_poll(
+    def _schedule_notice_poll(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, invocation: NativeInvocation, expected_owner: dict[str, str],
-        native: Any, token: object, loop: asyncio.AbstractEventLoop,
+        native: Any, token: object, loop: asyncio.AbstractEventLoop, excerpt: str = "",
     ) -> None:
         """Create the supervised task only from the adapter's owning event loop."""
         if not self._notice_route_current(invocation, native, token, loop):
             return
         coroutine = self._run_notice_poll(
             invocation, expected_owner, native=native, token=token, loop=loop,
+            excerpt=excerpt,
         )
         try:
             self.spawn_task(coroutine, name=f"wisdom-notice:{invocation.session_key}")
@@ -316,9 +367,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         finally:
             service.close()
 
-    async def _run_notice_poll(
+    async def _run_notice_poll(  # pylint: disable=too-many-arguments
         self, invocation: NativeInvocation, expected_owner: dict[str, str], *,
-        native: Any, token: object, loop: asyncio.AbstractEventLoop,
+        native: Any, token: object, loop: asyncio.AbstractEventLoop, excerpt: str = "",
     ) -> dict[str, Any]:
         """Preflight, poll off-loop, then render on the adapter's loop."""
         if not self._notice_route_current(invocation, native, token, loop):
@@ -330,6 +381,9 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         ):
             return {"supported": False, "offered": 0, "polled": False}
         result, rows = await asyncio.to_thread(self._poll_notice_rows)
+        # One task serializes the two producers; no duplicate same-skill card or queue.
+        ordinary_skills = {(row.get("skill_id"), row.get("version")) for row in rows
+                           if row.get("category") == "new_skill"}
         if rows and self._notice_route_current(invocation, native, token, loop):
             await self._send_notice(
                 invocation, rows, expected_owner=expected_owner,
@@ -337,7 +391,47 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     invocation, native, token, loop
                 ),
             )
+        if excerpt and self._notice_route_current(invocation, native, token, loop):
+            await self._run_context_check(
+                invocation, expected_owner, native, token, loop, excerpt, ordinary_skills,
+            )
         return result
+
+    def _context_match(self, expected_owner: dict[str, str], excerpt: str) -> dict[str, Any] | None:
+        service = self.service_factory()
+        try:
+            if service.native_owner() != expected_owner:
+                return None
+            identity = {"owner": expected_owner}
+            candidates = eligible_candidates(service, identity)
+            if not candidates or service.native_owner() != expected_owner:
+                return None
+            return relevant_skill(self.llm, excerpt, candidates)
+        finally:
+            service.close()
+
+    async def _run_context_check(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, invocation: NativeInvocation, expected_owner: dict[str, str],
+        native: Any, token: object, loop: asyncio.AbstractEventLoop, excerpt: str,
+        ordinary_skills: set[tuple[Any, Any]],
+    ) -> None:
+        def authority() -> bool:
+            return self._notice_route_current(invocation, native, token, loop)
+        if not authority() or not await asyncio.to_thread(self._post_owner_current, expected_owner):
+            return
+        try:
+            match = await asyncio.to_thread(self._context_match, expected_owner, excerpt)
+            if (match is None or not authority()
+                    or (match["skill_id"], match["version"]) in ordinary_skills):
+                return
+            record = await asyncio.to_thread(
+                self._build_notice_review, invocation,
+                {"category": "new_skill", **match}, expected_owner,
+            )
+            if authority():
+                await self._post_review(invocation, record, route_authority=authority)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return  # No retry, alternate route or effect on the human turn.
 
     def _build_notice_review(
         self, invocation: NativeInvocation, row: dict[str, Any],
@@ -383,10 +477,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if category == "skill_ready_to_share":
             return self.reviews.request_candidate(service, invocation, row["event_id"])
         if category == "update_available":
-            return self.reviews.request_update(service, invocation, row["skill_id"])
+            return self.reviews.request_update(
+                service, invocation, row["skill_id"], publisher_fact=row.get("publisher_fact"))
         if category == "new_skill":
             reference = f"{row['skill_id']}@v{row['version']}"
-            return self.reviews.request_install(service, invocation, reference)
+            return self.reviews.request_install(
+                service, invocation, reference, publisher_fact=row.get("publisher_fact"))
         raise ValueError("Unsupported Wisdom notice")
 
     def consume_request(self, raw_args: str) -> NativeInvocation | None:
@@ -444,36 +540,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             raise PermissionError("Collective Wisdom installation is no longer authorized")
         service = self.service_factory()
         try:
-            owner = service.native_owner()
-            if owner.get("profile_name") != invocation.profile:
-                raise PermissionError("Collective Wisdom installation owner changed")
+            _require_direct_install_owner(service, invocation)
             try:
                 plan = service.install_plan(reference)
             except PackagePolicyError as exc:
                 return _already_installed_view(service, reference, exc, current)
-            policy = plan.get("policy") if isinstance(plan, dict) else None
-            scan = plan.get("local_scan") if isinstance(plan, dict) else None
-            compatible = plan.get("compatibility") if isinstance(plan, dict) else None
-            clean = (
-                isinstance(plan, dict) and plan.get("operation") == "install"
-                and plan.get("allowed") is True and not has_reviewable_warnings(plan)
-                and isinstance(scan, dict) and scan.get("allowed") is True
-                and scan.get("available") is True
-                and isinstance(compatible, dict) and compatible.get("outcome") == "compatible"
-                and isinstance(policy, dict)
-                and policy.get("scan_requires_confirmation") is False
-                and policy.get("compatibility_requires_confirmation") is False
-                and isinstance(plan.get("setup_commands"), list)
-            )
-            if not clean:
-                display_name = plan.get("slug") if isinstance(plan, dict) else None
-                if not isinstance(display_name, str) or not display_name:
-                    display_name = reference
-                return NativeView(
-                    "Collective Wisdom", f"⚠️ {display_name} wasn't installed",
-                    notice="A safety check or setup is required. No skill was installed.",
-                    dismissed=True,
-                )
+            blocked = _direct_install_blocked(plan, reference)
+            if blocked is not None:
+                return blocked
             receipt, slug = plan.get("receipt"), plan.get("slug")
             if not isinstance(receipt, str) or not receipt or not isinstance(slug, str) or not slug:
                 raise WisdomValidationError("Collective Wisdom install plan is incomplete")
@@ -488,22 +562,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     ),
                 )
             result = service.install_apply(receipt, may_apply=current)
-            if not isinstance(result, dict) or result.get("pending") is True:
-                return NativeView(
-                    "Collective Wisdom", f"{slug} installation needs checking",
-                    notice="The outcome is uncertain. Check installed skills before trying again.",
-                    dismissed=True,
-                )
-            if (result.get("installed") is not True or result.get("rejected") is True
-                    or result.get("error")):
-                return NativeView(
-                    "Collective Wisdom", f"{slug} installation needs attention",
-                    notice="Check its installation status; do not retry blindly.", dismissed=True,
-                )
-            return NativeView(
-                "Collective Wisdom",
-                render_operation_outcome("install", result, skill_name=slug), dismissed=True,
-            )
+            return _direct_install_outcome(result, slug)
         finally:
             service.close()
 
@@ -549,6 +608,55 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 and self._leases.get((platform, id(adapter))) is token
             )
 
+    async def _callback_action(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, record_id: str, selected: str, service: Any,
+        invocation: NativeInvocation, authority: Callable[[], bool],
+        progress: Callable[[NativeView, dict[str, Any]], None],
+        active: threading.Event, progress_done: asyncio.Event, bounded: bool,
+    ) -> tuple[dict[str, Any], bool]:
+        """Bound pre-edit ownership waits without abandoning an effect after its edit."""
+        loop = asyncio.get_running_loop()
+
+        def work():
+            try:
+                def marked_progress(view, claimed):
+                    progress(view, claimed)
+                    loop.call_soon_threadsafe(progress_done.set)
+
+                updated = self.reviews.act(
+                    record_id, selected, service, invocation,
+                    authority=authority, progress=marked_progress,
+                )
+                display = (updated.get("failure") != "package_preparation_failed"
+                           or self.reviews.display_current(updated, service, invocation, authority))
+                return updated, display
+            finally:
+                service.close()
+
+        task = asyncio.create_task(asyncio.to_thread(work))
+        pending_progress = asyncio.create_task(progress_done.wait()) if bounded else None
+        try:
+            if pending_progress is None:
+                return await task
+            done, _ = await asyncio.wait(
+                {task, pending_progress}, timeout=PROGRESS_TIMEOUT + 0.05,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                active.clear()
+                task.add_done_callback(lambda finished: finished.exception()
+                                       if not finished.cancelled() else None)
+                raise TimeoutError("Collective Wisdom progress check timed out")
+            return await task
+        except asyncio.CancelledError:
+            active.clear()
+            task.add_done_callback(lambda finished: finished.exception()
+                                   if not finished.cancelled() else None)
+            raise
+        finally:
+            if pending_progress is not None:
+                pending_progress.cancel()
+
     def wire_slack(self, native: Any, adapter: Any) -> None:
         token = self._lease("slack", native, adapter)
 
@@ -576,7 +684,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 message_type=MessageType.COMMAND, source=source, raw_message=command,
             ))
 
-        async def callback(ack: Any, body: dict[str, Any], action: dict[str, Any]) -> None:
+        async def callback(ack: Any, body: dict[str, Any], action: dict[str, Any]) -> None:  # pylint: disable=too-many-locals
             await ack()
             try:
                 self._check_lease("slack", adapter, token)
@@ -587,19 +695,33 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 )
                 invocation = callback_invocation(adapter, body, record)
                 service = self.service_factory()
-                try:
-                    updated = await asyncio.to_thread(
-                        self.reviews.act, record_id, selected, service, invocation,
-                        authority=lambda: self._lease_current("slack", adapter, token),
+                loop = asyncio.get_running_loop()
+                active = threading.Event()
+                active.set()
+                progress_done = asyncio.Event()
+                def authority():
+                    return active.is_set() and self._lease_current("slack", adapter, token)
+                def progress(view, claimed):
+                    edit_progress(
+                        loop, lambda: native.client.chat_update(
+                            channel=invocation.chat_id, ts=invocation.message_id,
+                            text=view.to_text(), blocks=blocks(view, record_id)),
+                        lambda: self.reviews.display_current(claimed, service, invocation, authority),
+                        slack=True, allowed=active.is_set,
                     )
-                finally:
-                    service.close()
-                view = self.reviews.view(updated)
-                with self.reviews.displaying(updated):
-                    await native.client.chat_update(
-                        channel=invocation.chat_id, ts=invocation.message_id,
-                        text=view.to_text(), blocks=blocks(view, record_id),
-                    )
+                updated, display = await self._callback_action(
+                    record_id, selected, service, invocation, authority, progress,
+                    active, progress_done,
+                    selected == record.get("operation") and selected in {"install", "update"}
+                    or selected.startswith("catalog.install.") and record.get("operation") == "catalog",
+                )
+                if display:
+                    view = self.reviews.view(updated)
+                    with self.reviews.displaying(updated):
+                        await native.client.chat_update(
+                            channel=invocation.chat_id, ts=invocation.message_id,
+                            text=view.to_text(), blocks=blocks(view, record_id),
+                        )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(
                     "Collective Wisdom Slack callback failed (%s)", type(exc).__name__,
@@ -614,14 +736,16 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         )
         token = self._lease("telegram", native, adapter)
 
-        async def callback(update: Any, _context: Any) -> None:
+        async def callback(update: Any, _context: Any) -> None:  # pylint: disable=too-many-locals
             query = getattr(update, "callback_query", None)
             if query is None:
                 return
             read_failed = False
+            action_completed = False
             acknowledged = False
             invocation = None
             record = None
+            selected = ""
             try:
                 self._check_lease("telegram", adapter, token)
                 record_id, selected = parse_callback(str(getattr(query, "data", "") or ""))
@@ -633,50 +757,74 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     callback_invocation, edit,
                 )
                 invocation = callback_invocation(adapter, query, record)
-                service = self.service_factory()
-                try:
-                    try:
-                        updated = await asyncio.to_thread(
-                            self.reviews.act, record_id, selected, service, invocation,
-                            authority=lambda: self._lease_current("telegram", adapter, token),
-                        )
-                    except WisdomUnavailable:
-                        read_failed = selected in {"details", "review"} and record.get(
-                            "operation"
-                        ) in {"install", "update"}
-                        raise
-                finally:
-                    service.close()
+                updated, display = await self._telegram_action(
+                    query, record, record_id, selected, adapter, token, invocation, edit,
+                )
+                action_completed = True
                 if not acknowledged:
                     await query.answer()
                     acknowledged = True
-                with self.reviews.displaying(updated):
-                    await edit(query, self.reviews.view(updated), record_id)
+                if display:
+                    with self.reviews.displaying(updated):
+                        await edit(query, self.reviews.view(updated), record_id)
             except WisdomUnavailable:
-                show_alert = False
-                if read_failed and invocation is not None and isinstance(record, dict):
-                    expected_owner = record.get("owner")
-                    show_alert = (
-                        isinstance(expected_owner, dict)
-                        and invocation.chat_type == "private"
-                        and self._lease_current("telegram", adapter, token)
-                        and await asyncio.to_thread(
-                            self._post_owner_current, expected_owner
-                        )
-                    )
-                if show_alert and not acknowledged:
-                    await query.answer(
-                        text="Collective Wisdom is temporarily unavailable. Try this read-only control again later.",
-                        show_alert=True,
-                    )
-                elif not acknowledged:
-                    await query.answer()
+                read_failed = (not action_completed and record is not None
+                               and selected in {"details", "review"}
+                               and record.get("operation") in {"install", "update"})
+                await self._telegram_unavailable(
+                    query, read_failed, invocation, record, adapter, token, acknowledged,
+                )
             except Exception:  # pylint: disable=broad-exception-caught
                 if not acknowledged:
                     await query.answer()
             raise ApplicationHandlerStop
 
         native.add_handler(CallbackQueryHandler(callback, pattern=r"^wi:agent:", block=True), group=-10)
+
+    async def _telegram_action(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, query, record, record_id, selected, adapter, token, invocation, edit,
+    ):
+        service = self.service_factory()
+        active = threading.Event()
+        active.set()
+        progress_done = asyncio.Event()
+        def authority():
+            return active.is_set() and self._lease_current("telegram", adapter, token)
+        def progress(view, claimed, loop=asyncio.get_running_loop()):
+            edit_progress(
+                loop,
+                lambda: edit(query, view, record_id, require_change=True),
+                lambda: self.reviews.display_current(claimed, service, invocation, authority),
+                allowed=active.is_set,
+            )
+        return await self._callback_action(
+            record_id, selected, service, invocation, authority, progress,
+            active, progress_done,
+            selected == record.get("operation") and selected in {"install", "update"}
+            or selected.startswith("catalog.install.") and record.get("operation") == "catalog",
+        )
+
+    async def _telegram_unavailable(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, query, read_failed, invocation, record, adapter, token, acknowledged,
+    ):
+        show_alert = False
+        if read_failed and invocation is not None and isinstance(record, dict):
+            expected_owner = record.get("owner")
+            show_alert = (
+                isinstance(expected_owner, dict)
+                and invocation.chat_type == "private"
+                and self._lease_current("telegram", adapter, token)
+                and await asyncio.to_thread(
+                    self._post_owner_current, expected_owner
+                )
+            )
+        if show_alert and not acknowledged:
+            await query.answer(
+                text="Collective Wisdom is temporarily unavailable. Try this read-only control again later.",
+                show_alert=True,
+            )
+        elif not acknowledged:
+            await query.answer()
 
     def _post_owner_current(self, expected_owner: dict[str, str]) -> bool:
         try:
@@ -697,7 +845,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         }
         self.reviews.state.compare_replace(record, cancelled)
         try:
-            message_id = _message_id(
+            message_id = posted_message_id(
                 response, platform=invocation.platform, chat_id=invocation.chat_id
             )
         except (TypeError, ValueError, WisdomValidationError):
@@ -753,7 +901,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         if not self._post_owner_current(record["owner"]):
             await self._discard_stale_post(invocation, native, response, record)
             return
-        message_id = _message_id(
+        message_id = posted_message_id(
             response, platform=invocation.platform, chat_id=invocation.chat_id
         )
         with self._lock:

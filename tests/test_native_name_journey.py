@@ -319,8 +319,8 @@ def test_kept_draft_resumes_only_from_the_bound_card(tmp_path):
         def native_owner(self):
             return direct_owner()
 
-        def suggest(self, _name, *, allow_model_review):
-            assert allow_model_review is False
+        def suggest(self, _name, *, allow_model_review=None):
+            assert allow_model_review is None
             return {"draft_id": "draft-opaque", "files": []}
 
         def prepared_review(self, draft_id, *, allow_model_review):

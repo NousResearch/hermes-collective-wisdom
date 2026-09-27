@@ -92,7 +92,9 @@ class DirectState:
             "notices": {
                 "cursor": None,
                 "has_more": False,
+                "awareness_cursor": None,
                 "offered": {},
+                "known_publications": {},
             },
         }
 
@@ -121,6 +123,10 @@ class DirectState:
         notices = value.get("notices")
         if not isinstance(notices, dict) or not isinstance(notices.get("offered"), dict):
             raise RuntimeError("Collective Wisdom direct state is invalid")
+        notices.setdefault("known_publications", {})
+        notices.setdefault("awareness_cursor", notices.get("cursor"))
+        if not isinstance(notices["known_publications"], dict):
+            raise RuntimeError("Collective Wisdom notice projection is invalid")
         return value
 
     def read(self) -> dict[str, Any]:
@@ -161,15 +167,52 @@ class DirectState:
     def notice_state(self) -> dict[str, Any]:
         return copy.deepcopy(self._load()["notices"])
 
-    def finish_notice_poll(
+    def known_publications(self) -> list[dict[str, Any]]:
+        """Read bounded owner-local publication facts, not notification attempts."""
+        return list(copy.deepcopy(self._load()["notices"]["known_publications"]).values())
+
+    @staticmethod
+    def _apply_publications(
+        known: dict[str, Any], publications: list[dict[str, Any]], limit: int,
+    ) -> None:
+        for row in publications:
+            prior = known.get(row["skill_id"])
+            if row["state"] == "unavailable":
+                if (row.get("version") is None or not isinstance(prior, dict)
+                        or prior.get("version", 0) <= row["version"]):
+                    known.pop(row["skill_id"], None)
+            else:
+                if isinstance(prior, dict) and prior.get("version", 0) > row["version"]:
+                    continue
+                known.pop(row["skill_id"], None)
+                known[row["skill_id"]] = copy.deepcopy(row)
+        while len(known) > limit:
+            known.pop(next(iter(known)))
+
+    def finish_notice_poll(  # pylint: disable=too-many-locals
         self, *, identity: dict[str, Any] | None, cursor: str | None,
         has_more: bool, keys: list[str], now: float, limit: int = 128,
+        publications: list[dict[str, Any]] | None = None,
+        expected_cursor: str | None = None,
+        awareness: bool = False, awareness_cursor: str | None = None,
     ) -> list[str]:
         with self.change() as value:
             if value["identity"] != identity:
                 raise WisdomAuthError("Collective Wisdom notice owner changed")
-            value["notices"].update({"cursor": cursor, "has_more": bool(has_more)})
-            offered = value["notices"]["offered"]
+            notices = value["notices"]
+            cursor_key = "awareness_cursor" if awareness else "cursor"
+            if notices[cursor_key] != expected_cursor:
+                raise WisdomConflict("Collective Wisdom notice checkpoint changed")
+            # A rendered page can replay history already projected by inbox.
+            # In particular an old unversioned archive must not erase a restore.
+            if awareness or notices["awareness_cursor"] == expected_cursor:
+                self._apply_publications(notices["known_publications"],
+                                         publications or [], limit)
+                notices["awareness_cursor"] = cursor if awareness else (
+                    awareness_cursor if awareness_cursor is not None else cursor)
+            if not awareness:
+                notices.update({"cursor": cursor, "has_more": bool(has_more)})
+            offered = notices["offered"]
             selected = [key for key in keys if key not in offered]
             for key in selected:
                 offered[key] = now
@@ -316,9 +359,9 @@ class DirectState:
                 "updated_at": now,
             }
 
-    def replace_draft(
+    def replace_draft(  # pylint: disable=too-many-boolean-expressions
         self, draft_id: str, *, owner: dict[str, str], hashes: dict[str, str],
-        record: dict[str, Any],
+        record: dict[str, Any], expected_overlay: str | None = None,
     ) -> bool:
         with self.change() as value:
             current = value["drafts"].get(draft_id)
@@ -328,7 +371,10 @@ class DirectState:
                 "content": current.get("content_hash"),
                 "author_description": current.get("description_hash"),
                 "package_manifest": current.get("manifest_hash"),
-            }:
+            } or (expected_overlay is not None and (
+                current.get("author_edited") or current.get("overlay_path")
+                != expected_overlay
+            )):
                 return False
             value["drafts"][draft_id] = {
                 **copy.deepcopy(record), "id": draft_id,
@@ -344,16 +390,16 @@ class DirectState:
             row.update({"state": state, "updated_at": _now()})
 
     @staticmethod
-    def _professionalism_key(values: dict[str, str]) -> str:
+    def _professionalism_key(values: dict[str, Any]) -> str:
         return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
-    def professionalism(self, values: dict[str, str]) -> dict[str, Any] | None:
+    def professionalism(self, values: dict[str, Any]) -> dict[str, Any] | None:
         return copy.deepcopy(
             self._load()["professionalism"].get(self._professionalism_key(values))
         )
 
     def save_professionalism(
-        self, values: dict[str, str], result: dict[str, Any]
+        self, values: dict[str, Any], result: dict[str, Any]
     ) -> None:
         with self.change() as value:
             value["professionalism"][self._professionalism_key(values)] = {

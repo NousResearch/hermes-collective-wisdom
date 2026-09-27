@@ -18,6 +18,7 @@ def test_service_rechecks_authority_inside_contribution_kernel(tmp_path, monkeyp
     llm = RecordingLlm()
     kernel, _source, owner = reviewer(tmp_path, llm=llm)
     prepared = kernel.prepare("reviewed-skill")
+    prior_calls = list(llm.calls)
     before = kernel.store.draft(prepared["draft_id"])
     service = InvocationService(
         kernel.store.root, ("default", Path(owner["profile_home"])),
@@ -48,7 +49,7 @@ def test_service_rechecks_authority_inside_contribution_kernel(tmp_path, monkeyp
 
     assert not active[0]
     assert kernel.store.draft(prepared["draft_id"]) == before
-    assert not llm.calls
+    assert llm.calls == prior_calls
 
 
 @pytest.mark.parametrize("action", ["review", "submit", "reopen", "decline"])

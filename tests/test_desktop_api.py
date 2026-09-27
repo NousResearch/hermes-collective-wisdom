@@ -190,7 +190,7 @@ class Service:  # pylint: disable=too-many-public-methods
         return {"delivery_mode": mode}
 
     def suggest(self, skill_name, *, allow_model_review=False, may_apply=None):
-        assert allow_model_review is False
+        assert allow_model_review is None
         assert may_apply is not None and may_apply() is True
         return {"draft_id": "local:1", "skill_id": skill_name, "files": [], "hashes": {}}
 

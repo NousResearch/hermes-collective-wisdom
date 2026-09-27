@@ -167,11 +167,15 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     suggest.add_argument("skill")
     suggest.add_argument(
         "--allow-model-review",
-        action="store_true",
+        action="store_true", default=None,
         help=(
             "Authorize sending the exact private package and owner description to "
             "the current model provider for editorial and professionalism review"
         ),
+    )
+    suggest.add_argument(
+        "--no-model-review", action="store_false", dest="allow_model_review",
+        help="Keep preparation local without sending content to the configured model",
     )
 
     prepared = commands.add_parser(
@@ -337,7 +341,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             result = _run_noninteractive_cli(args, service, command)
         elif command == "suggest":
             result = service.suggest(
-                args.skill, allow_model_review=bool(args.allow_model_review)
+                args.skill, allow_model_review=args.allow_model_review
             )
             if not as_json:
                 presentation = (
@@ -1108,10 +1112,16 @@ def _human_render(  # pylint: disable=too-many-return-statements
 
 def _render_publication_outcome(data: dict[str, Any]) -> str:
     """Render operation state without inventing a package or upload outcome."""
+    from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
 
     state = _text(data.get("state") or "unknown")
     detail = data.get("detail")
-    lines = ["Publication result"]
+    heading, next_step = publication_copy(data)
+    managed = data.get("managed_enrollment")
+    managed_success = (heading == "Published" and isinstance(managed, dict)
+                       and managed.get("state") == "managed")
+    lines = (["Publication result"] if managed_success else
+             [f"Publication result: {heading}", next_step])
     if isinstance(detail, str) and detail:
         lines.append(_text(detail, limit=1024))
     lines.append(f"State: {state}")
@@ -1121,15 +1131,8 @@ def _render_publication_outcome(data: dict[str, Any]) -> str:
         value = data.get(key)
         if isinstance(value, str) and value:
             lines.append(f"{label}: {_text(value, limit=1024)}")
-    if state.casefold() == "uncertain":
-        lines.extend((
-            "Do not submit again; reconcile the recorded operation instead.",
-            "Use `hermes wisdom publication status <skill-name>` to inspect it.",
-        ))
-    elif state.casefold() == "rejected":
-        lines.append(
-            "Edit and re-review the local draft before creating a fresh submission."
-        )
+    if heading in {"Uncertain", "Waiting for team review", "Changes requested", "Rejected"}:
+        lines.append("Use `hermes wisdom publication status <skill-name>` to inspect it.")
     return "\n".join(lines)
 
 

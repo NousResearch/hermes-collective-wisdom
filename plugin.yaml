@@ -6,6 +6,7 @@ description: "Terminal setup and read-only discovery for Collective Wisdom."
 provides_hooks:
   - pre_gateway_dispatch
   - pre_llm_call
+  - post_llm_call
   - on_skill_lifecycle
   - on_session_end
 provides_tools:

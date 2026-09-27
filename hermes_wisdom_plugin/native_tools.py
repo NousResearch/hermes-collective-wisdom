@@ -29,8 +29,11 @@ def _schema(
 _SCHEMAS = {
     "wisdom_inbox": _schema(
         "wisdom_inbox",
-        "Read this admitted private conversation's owner-bound Wisdom assessments, "
-        "pending native reviews, and installed setup references without changing them.",
+        "Catch up one bounded team-publication feed page for this admitted owner, then "
+        "read known publications, catch-up status, assessments, pending native reviews "
+        "and installed setup references. Continue while catch_up.more is true "
+        "and no error is present; errors leave prior facts readable, so retry later. "
+        "No install or human notice is sent.",
         {},
     ),
     "wisdom_inspect": _schema(

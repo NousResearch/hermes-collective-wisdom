@@ -12,7 +12,7 @@ from installed_test_support import JsonState
 
 from hermes_wisdom_plugin import local_state as local_state_module
 from hermes_wisdom_plugin import qualification as qualification_module
-from hermes_wisdom_plugin.errors import WisdomError
+from hermes_wisdom_plugin.errors import WisdomConflict, WisdomError
 from hermes_wisdom_plugin.local_state import QualificationState
 from hermes_wisdom_plugin.qualification import (
     LifecycleBridge,
@@ -132,6 +132,165 @@ def test_q11_native_inspection_returns_real_qualification_event_id(tmp_path, mon
     assert inspected["event_id"] == event_id
     assert inspected["content_hash"] == candidate_rows(state)[0]["content_hash"]
     assert inspected["networked"] is False
+
+
+def test_candidate_producer_projects_prepared_copy_only_for_current_source(tmp_path, monkeypatch):
+    from hermes_wisdom_plugin.native_review import project_view  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.contribution_review import ContributionReviewer  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.direct_services import DirectState  # pylint: disable=import-outside-toplevel
+    from test_contribution_review import Host, RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, state, args = environment(tmp_path)
+    event_id = qualify_by_usage(args)
+    llm = RecordingLlm()
+    service = InvocationService(tmp_path, ("fixture", tmp_path), state=state.state, llm=llm)
+    service._qualification = state
+    service._direct_state = DirectState(state.state, tmp_path)
+    service._installation_owner = lambda: OWNER
+    monkeypatch.setattr(InvocationService, "qualification_state", property(lambda _self: state))
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+    reviewer = ContributionReviewer(
+        service._direct_state,
+        Host(skill.parent, frontmatter={"name": "local", "description": "Workflow"}),
+        lambda: OWNER, llm=llm, source_store=state,
+    )
+    monkeypatch.setattr(service, "_contribution_reviewer", lambda: reviewer)
+
+    service.native_candidate_inspect(event_id)
+    assert not llm.calls
+    offered = service.prepare_candidate_offer(event_id)
+    view = project_view({"operation": "candidate", "state": "pending", "plan": offered})
+    assert [call["schema_name"] for call in llm.calls] == [
+        "wisdom_editorial_metadata", "wisdom_professionalism_review"
+    ]
+    assert "Skill name: Incident Review" in view.summary
+    assert "What it does: Review incident notes with a consistent checklist." in view.summary
+    assert "Why others might benefit: Coworkers can follow" in view.summary
+    assert offered["professionalism_check"]["status"] == "pass"
+    assert "final sharing authorization" in view.notice
+    assert set(state.local_event(event_id)["payload"]["preparation"]) == {"draft_id", "hashes"}
+    assert [action.label for action in view.actions] == [
+        "Review Checks", "View More Details", "Snooze Collective Wisdom",
+        "Maybe Later", "Share My Skill",
+    ]
+    assert service.native_candidate_inspect(event_id)["facts"] == offered["facts"]
+    assert service.prepare_candidate_offer(event_id)["facts"] == offered["facts"]
+    assert len(llm.calls) == 2
+    (skill / "SKILL.md").write_text((skill / "SKILL.md").read_text() + "Changed.\n")
+    with pytest.raises(WisdomConflict, match="candidate source changed"):
+        service.native_candidate_inspect(event_id)
+
+def _editorial_offer_service(tmp_path, skill, model, monkeypatch):
+    from hermes_wisdom_plugin.contribution_review import ContributionReviewer  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.direct_services import DirectState  # pylint: disable=import-outside-toplevel
+    from test_contribution_review import Host  # pylint: disable=import-outside-toplevel
+    store = JsonState(tmp_path)
+    service = InvocationService(tmp_path, ("fixture", tmp_path), state=store, llm=model)
+    service._qualification = QualificationState(store, tmp_path)
+    monkeypatch.setattr(
+        InvocationService, "qualification_state", property(lambda self: self._qualification)
+    )
+    service._direct_state = DirectState(store, tmp_path)
+    service._installation_owner = lambda: OWNER
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+    reviewer = ContributionReviewer(
+        service._direct_state,
+        Host(skill.parent, frontmatter={"name": "local", "description": "Workflow"}),
+        lambda: OWNER, llm=model, source_store=service._qualification,
+    )
+    monkeypatch.setattr(service, "_contribution_reviewer", lambda: reviewer)
+    return service
+
+def test_independent_first_offers_are_single_flight(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor  # pylint: disable=import-outside-toplevel
+    from threading import Event  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.package import PackagePolicyError  # pylint: disable=import-outside-toplevel
+    from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, _state, args = environment(tmp_path)
+    event_id = qualify_by_usage(args)
+    model = RecordingLlm()
+    first = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+    second = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+    entered, release = Event(), Event()
+    original = model.complete_structured
+
+    def blocked(**kwargs):
+        if kwargs["schema_name"] == "wisdom_editorial_metadata":
+            entered.set()
+            assert release.wait(10)
+        return original(**kwargs)
+
+    model.complete_structured = blocked
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(first.prepare_candidate_offer, event_id)
+        assert entered.wait(10)
+        try:
+            with pytest.raises(PackagePolicyError, match="another managed operation"):
+                second.prepare_candidate_offer(event_id)
+            assert not model.calls
+        finally:
+            release.set()
+        offered = future.result(timeout=10)
+    assert offered["facts"]["editorial_status"] == "complete"
+    assert second.prepare_candidate_offer(event_id)["facts"] == offered["facts"]
+    assert len(model.calls) == 2
+    assert len(first._direct_state.prepared_drafts(OWNER)) == 1
+
+def test_interrupted_offer_recovers_saved_draft_without_model_repeat(tmp_path, monkeypatch):
+    from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, state, args = environment(tmp_path)
+    event_id = qualify_by_usage(args)
+    model = RecordingLlm()
+    first = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+
+    def interrupted(*_args):
+        raise KeyboardInterrupt("interrupted before binding")
+
+    monkeypatch.setattr(first.qualification_state, "save_candidate_preparation", interrupted)
+    with pytest.raises(KeyboardInterrupt, match="interrupted"):
+        first.prepare_candidate_offer(event_id)
+    assert not (state.local_event(event_id)["payload"] or {}).get("preparation")
+    assert len(model.calls) == 2
+    later = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+    offered = later.prepare_candidate_offer(event_id)
+    assert offered["facts"]["editorial_status"] == "complete"
+    assert len(model.calls) == 2
+    assert len(later._direct_state.prepared_drafts(OWNER)) == 1
+
+def test_ordinary_manual_suggest_runs_model_then_respects_explicit_opt_out(tmp_path, monkeypatch):
+    from hermes_wisdom_plugin.contribution_review import ContributionReviewer  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.direct_services import DirectState  # pylint: disable=import-outside-toplevel
+    from test_contribution_review import Host, RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, state, _args = environment(tmp_path)
+    model = RecordingLlm()
+    service = InvocationService(tmp_path, ("fixture", tmp_path), state=state.state, llm=model)
+    service._installation_owner = lambda: OWNER
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+    direct = DirectState(state.state, tmp_path)
+    reviewer = ContributionReviewer(
+        direct, Host(skill.parent, frontmatter={"name": "local", "description": "Workflow"}),
+        lambda: OWNER, llm=model, source_store=state,
+    )
+    monkeypatch.setattr(service, "_contribution_reviewer", lambda: reviewer)
+    manual = service.suggest("local")
+    assert manual["professionalism_check"]["status"] == "pass"
+    assert manual["editorial_name"] == "Incident Review"
+    assert [call["schema_name"] for call in model.calls] == [
+        "wisdom_editorial_metadata", "wisdom_professionalism_review"
+    ]
+    service.suggest("local")
+    assert len(model.calls) == 2
+    (skill / "SKILL.md").write_text((skill / "SKILL.md").read_text() + "Another revision.\n")
+    service._get_config = lambda key, default: (
+        False if key == "qualification.allow_model_review" else default
+    )
+    opted_out = service.suggest("local")
+    assert opted_out["professionalism_check"]["status"] == "unavailable"
+    assert opted_out["editorial_status"] == "incomplete"
+    assert len(model.calls) == 2
 
 
 def test_q02_same_day_is_deduplicated_and_weekend_is_not_a_gap(tmp_path):

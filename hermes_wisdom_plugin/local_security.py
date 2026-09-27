@@ -8,6 +8,21 @@ from .credential_scan import CREDENTIAL_PATTERNS, scan_credential_bytes, scan_cr
 
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+def model_disclosure_ready(
+    files: list[tuple[str, str, bytes]], *editorial_fields: str,
+) -> bool:
+    """Credential preflight only; not a personal-information certification."""
+    bodies = [body for _path, _mode, body in files]
+    bodies.extend(field.encode("utf-8") for field in editorial_fields)
+
+    text = []
+    opaque = []
+    for index, body in enumerate(bodies):
+        try:
+            text.append({"path": str(index), "content": body.decode("utf-8")})
+        except UnicodeDecodeError:
+            opaque.append({"path": str(index), "content_bytes": body})
+    return not scan_credentials(text) and not scan_credential_bytes(opaque)
 
 
 def _safe_text(value: object, *, limit: int) -> str:

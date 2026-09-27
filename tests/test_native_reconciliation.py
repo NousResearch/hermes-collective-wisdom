@@ -17,6 +17,9 @@ from hermes_wisdom_plugin.review_state import ReviewState
 
 
 class CandidateWarningService(_NativeSuggestService):
+    def prepare_candidate_offer(self, event_id):
+        return self.native_candidate_inspect(event_id)
+
     def native_candidate_inspect(self, event_id):
         return {"event_id": event_id, "facts": {"name": "reviewed-skill"}}
 

@@ -91,6 +91,7 @@ class RecordingLlm:
             parsed = {
                 "editorial_name": "Incident Review",
                 "editorial_description": "Review incident notes with a consistent checklist.",
+                "coworker_benefit": "Coworkers can follow the same incident review steps.",
             }
         else:
             parsed = {
@@ -196,6 +197,177 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     overlay = Path(result["overlay_path"])
     assert overlay.is_relative_to(tmp_path / "state" / "contribution-prepared")
     assert overlay != source
+
+
+def test_manual_editorial_is_model_backed_and_bound_to_exact_overlay(tmp_path: Path):
+    llm = RecordingLlm()
+    value, source, _ = reviewer(tmp_path, llm=llm)
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+    assert result["editorial_status"] == "complete"
+    assert result["editorial_name"] == "Incident Review"
+    assert result["coworker_benefit"] == "Coworkers can follow the same incident review steps."
+    assert len(result["coworker_benefit"]) < 300
+    assert result["professionalism_check"]["status"] == "pass"
+    assert [call["schema_name"] for call in llm.calls] == [
+        "wisdom_editorial_metadata", "wisdom_professionalism_review"
+    ]
+    assert "coworker_benefit" not in (source / "SKILL.md").read_text()
+    assert value.reopen(result["draft_id"])["editorial_status"] == "complete"
+    (Path(result["overlay_path"]) / "SKILL.md").write_text("changed")
+    with pytest.raises(WisdomConflict):
+        value.reopen(result["draft_id"], allow_model_review=True)
+
+
+def test_partial_author_copy_is_not_overwritten_by_model(tmp_path: Path):
+    llm = RecordingLlm()
+    value, source, _ = reviewer(tmp_path, llm=llm)
+    (source / "SKILL.md").write_text(
+        (source / "SKILL.md").read_text().replace(
+            "---\n# Incident",
+            "metadata:\n  hermes:\n    editorial_name: My own title\n---\n# Incident",
+        )
+    )
+    value.host.frontmatter["metadata"] = {"hermes": {"editorial_name": "My own title"}}
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+    assert result["editorial_name"] == "My own title"
+    assert result["editorial_description"] == "Review incident notes with a consistent checklist."
+    assert result["editorial_status"] == "complete"
+
+
+def test_model_disclosure_preflight_blocks_credential_shaped_source(tmp_path: Path):
+    llm = RecordingLlm()
+    value, source, _ = reviewer(tmp_path, llm=llm)
+    (source / "SKILL.md").write_text(
+        (source / "SKILL.md").read_text() + "token=syntheticfixturevalue1234567890\n"
+    )
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+    assert not llm.calls
+    assert result["editorial_status"] == "incomplete"
+    assert result["professionalism_check"]["status"] == "unavailable"
+    assert result["professionalism_check"]["availability_reason"] == "local_disclosure_preflight"
+
+
+def test_failed_model_can_be_retried_only_with_explicit_review(tmp_path: Path):
+    llm = RecordingLlm(fail=True)
+    value, _source, _ = reviewer(tmp_path, llm=llm)
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+    assert result["editorial_status"] == "incomplete"
+    assert result["professionalism_check"]["status"] == "unavailable"
+    llm.fail = False
+    reviewed = value.reopen(result["draft_id"], allow_model_review=True)
+    assert reviewed["professionalism_check"]["status"] == "pass"
+
+def test_later_model_fills_only_missing_copy_on_same_unedited_source(tmp_path: Path):
+    llm = RecordingLlm(fail=True)
+    value, source, _ = reviewer(tmp_path, llm=llm)
+    original = (source / "SKILL.md").read_bytes()
+    first = value.prepare("reviewed-skill")
+    assert first["editorial_status"] == "incomplete"
+    assert "editorial_name:" not in (Path(first["overlay_path"]) / "SKILL.md").read_text()
+    llm.fail = False
+    second = value.prepare("reviewed-skill")
+    assert second["draft_id"] == first["draft_id"]
+    assert second["editorial_name"] == "Incident Review"
+    assert second["coworker_benefit"]
+    assert second["professionalism_check"]["status"] == "pass"
+    assert (source / "SKILL.md").read_bytes() == original
+    count = len(llm.calls)
+    value.prepare("reviewed-skill")
+    value.reopen(first["draft_id"])
+    value.inspect_prepared(first["draft_id"])
+    assert len(llm.calls) == count
+    assert len(list((tmp_path / "state" / "contribution-prepared").iterdir())) == 1
+
+def test_explicitly_edited_draft_is_never_rewritten_by_later_model(tmp_path: Path):
+    llm = RecordingLlm(fail=True)
+    value, _source, _ = reviewer(tmp_path, llm=llm)
+    first = value.prepare("reviewed-skill")
+    payload = value.inspect_prepared(first["draft_id"])
+    saved = value.save_prepared(first["draft_id"], author_description="My edited copy.",
+                                files=payload["files"], expected_hashes=payload["expected_hashes"])
+    llm.fail = False
+    before = len(llm.calls)
+    again = value.prepare("reviewed-skill")
+    assert again["hashes"] == saved["hashes"]
+    assert again["draft_id"] == first["draft_id"]
+    assert again["drafted_description"] == "My edited copy."
+    assert again["editorial_status"] == "incomplete"
+    assert len(llm.calls) == before
+
+@pytest.mark.parametrize("description", [None, "x" * 321, "   "])
+def test_author_invalid_editorial_description_clears_completeness(
+    tmp_path: Path, description: str | None
+):
+    llm = RecordingLlm()
+    value, _source, _ = reviewer(tmp_path, llm=llm)
+    first = value.prepare("reviewed-skill")
+    payload = value.inspect_prepared(first["draft_id"])
+    files = [dict(item) for item in payload["files"]]
+    skill = next(item for item in files if item["path"] == "SKILL.md")
+    import re  # pylint: disable=import-outside-toplevel
+    replacement = (f"    editorial_description: '{description}'\n"
+                   if description is not None else "")
+    edited = re.sub(
+        r"^    editorial_description:.*\n", lambda _match: replacement,
+        skill["content_utf8"], flags=re.M,
+    )
+    assert edited != skill["content_utf8"]
+    skill["content_utf8"] = edited
+    skill.pop("content_base64", None)
+    saved = value.save_prepared(first["draft_id"], author_description=first["drafted_description"],
+                                files=files, expected_hashes=payload["expected_hashes"])
+    assert saved["editorial_status"] == "incomplete"
+    assert value.reopen(first["draft_id"])["editorial_status"] == "incomplete"
+
+def test_disclosure_scan_is_bound_to_model_input_when_source_moves(tmp_path: Path):
+    llm = RecordingLlm()
+    value, source, _ = reviewer(tmp_path, llm=llm)
+    scan = value.host.scan
+
+    def moving_scan(path):
+        if path.name.startswith("model-input-"):
+            (source / "SKILL.md").write_text(
+                (source / "SKILL.md").read_text() + "changed after snapshot\n"
+            )
+        return scan(path)
+
+    value.host.scan = moving_scan
+    with pytest.raises(WisdomConflict, match="source changed"):
+        value.prepare("reviewed-skill")
+    assert not llm.calls
+
+def test_concurrent_author_edit_rejects_editorial_replacement(tmp_path: Path):
+    llm = RecordingLlm(fail=True)
+    value, _source, _ = reviewer(tmp_path, llm=llm)
+    first = value.prepare("reviewed-skill")
+    original = value.store.draft(first["draft_id"])
+    llm.fail = False
+    complete = llm.complete_structured
+
+    def interleaved(**kwargs):
+        result = complete(**kwargs)
+        if kwargs["schema_name"] == "wisdom_editorial_metadata":
+            payload = value.inspect_prepared(first["draft_id"])
+            value.save_prepared(first["draft_id"], author_description="Human revision.",
+                                files=payload["files"], expected_hashes=payload["expected_hashes"])
+        return result
+
+    llm.complete_structured = interleaved
+    with pytest.raises(WisdomConflict, match="draft changed"):
+        value.prepare("reviewed-skill")
+    assert value.store.draft(first["draft_id"])["description"] == "Human revision."
+    assert value.store.draft(first["draft_id"])["overlay_path"] != original["overlay_path"]
+
+def test_cached_professionalism_is_not_clean_when_host_guard_changes(tmp_path: Path):
+    model = RecordingLlm()
+    value, _source, _ = reviewer(tmp_path, llm=model)
+    prepared = value.prepare("reviewed-skill")
+    assert prepared["professionalism_check"]["status"] == "pass"
+    value.host.allowed = False
+    checked = value.reopen(prepared["draft_id"])
+    assert checked["security_check"]["local_status"] == "warning_required"
+    assert checked["professionalism_check"]["status"] == "unavailable"
+    assert len(model.calls) == 2
 
 
 def test_prepared_native_binary_and_exec_are_exact_without_text_coercion(tmp_path: Path):
@@ -341,7 +513,7 @@ def test_inspect_exports_a_complete_save_ready_exact_payload(tmp_path: Path):
 def test_disclosed_hashes_reject_concurrent_draft_before_model_call(tmp_path: Path):
     llm = RecordingLlm()
     value, _source, _binding = reviewer(tmp_path, llm=llm)
-    prepared = value.prepare("reviewed-skill")
+    prepared = value.prepare("reviewed-skill", allow_model_review=False)
     disclosed = value.inspect_prepared(prepared["draft_id"])
     value.save_prepared(
         prepared["draft_id"], author_description="Concurrent private edit.",
@@ -717,7 +889,7 @@ def test_reopen_denies_foreign_owner_before_bytes_or_model_disclosure(tmp_path: 
 def test_saved_edit_gets_fresh_exact_model_review_only_when_authorized(tmp_path: Path):
     llm = RecordingLlm()
     value, _source, _binding = reviewer(tmp_path, llm=llm)
-    prepared = value.prepare("reviewed-skill")
+    prepared = value.prepare("reviewed-skill", allow_model_review=False)
     assert not llm.calls
     files = [
         {
@@ -850,7 +1022,7 @@ def test_reopening_draft_requires_its_persisted_full_owner_before_model_disclosu
 ):
     llm = RecordingLlm()
     value, _source, binding = reviewer(tmp_path, llm=llm)
-    first = value.prepare("reviewed-skill")
+    first = value.prepare("reviewed-skill", allow_model_review=False)
     persisted = value.store.draft(first["draft_id"])
     assert persisted is not None
     assert persisted["owner"] == binding
@@ -890,8 +1062,11 @@ def test_explicit_model_review_is_tool_free_hash_bound_and_route_attributed(tmp_
     }
     persisted = value.store.professionalism({
         "skill_id": result["skill_id"],
+        "owner": owner(tmp_path / "profile"),
+        "source_hash": result["source_hash"],
         "content_hash": result["hashes"]["content"],
         "author_description_hash": result["hashes"]["author_description"],
+        "manifest_hash": result["hashes"]["package_manifest"],
     })
     assert persisted is not None
     assert persisted["result"] == result["professionalism_check"]
@@ -922,7 +1097,7 @@ def test_existing_editorial_description_precedes_canonical_author_copy(tmp_path:
         },
     }
 
-    result = value.prepare("reviewed-skill")
+    result = value.prepare("reviewed-skill", allow_model_review=False)
 
     assert result["drafted_description"] == "Owner-facing incident review copy."
     assert not llm.calls

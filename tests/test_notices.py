@@ -1,5 +1,6 @@
 """Best-effort end-turn notices without delivery queues or history injection."""
 # pylint: disable=missing-class-docstring,missing-function-docstring,protected-access
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -13,7 +14,9 @@ from typing import Any
 import pytest
 
 from installed_test_support import JsonState
-from hermes_wisdom_plugin.client import AgentLedPolicyResponse
+from hermes_wisdom_plugin.client import AgentLedPolicyResponse, VersionDetail
+from hermes_wisdom_plugin.discovery import Discovery
+from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomNotFound, WisdomUnavailable
 from hermes_wisdom_plugin.direct_services import DirectState
 from hermes_wisdom_plugin.notices import EndTurnNotices, suppression_key
 from hermes_wisdom_plugin.runtime import InvocationService
@@ -28,6 +31,7 @@ class Page:
 
 
 class Service:
+    # pylint: disable=too-many-instance-attributes
     def __init__(
         self, pages=None, *, fail=False, candidates=None, policy=None, preferences=None
     ):
@@ -47,7 +51,7 @@ class Service:
 
     def notice_policy(self):
         self.calls.append("policy")
-        return self.policy
+        return {"recommendation_mode": "promote_all", **self.policy}
 
     def notice_preferences(self, references):
         self.calls.append(("preferences", references))
@@ -62,6 +66,12 @@ class Service:
     def notice_candidates(self):
         self.calls.append("candidates")
         return self.candidates
+
+    def notice_version(self, skill_id, version):
+        self.calls.append(("version", skill_id, version))
+        return {"skill": {"id": skill_id, "state": "active", "takedown_generation": 0},
+                "version": {"version": version, "author_description": "Helps with reports",
+                            "published_by_user_id": "publisher-1"}}
 
 
 def notices(tmp_path: Path, service: Service, now: list[float]) -> EndTurnNotices:
@@ -78,6 +88,127 @@ def event(identity="event-1", version=2):
         "version": version,
     }
 
+
+def test_inbox_does_not_consume_human_notice_across_controllers(tmp_path):
+    service = Service([Page([event()], "after-event", False),
+                       Page([event()], "after-event", False),
+                       Page([event()], "after-event", False)])
+    assert notices(tmp_path, service, [1000]).run(renderer=None)["polled"]
+    assert notices(tmp_path, service, [1001]).run(renderer=None)["offered"] == 0
+    shown = []
+    assert notices(tmp_path, service, [1002]).run(renderer=shown.extend)["offered"] == 1
+    assert [row["event_id"] for row in shown] == ["event-1"]
+    assert [call for call in service.calls if isinstance(call, tuple) and call[0] == "feed"] == [
+        ("feed", None), ("feed", "after-event"), ("feed", None)]
+
+def test_old_rendered_tombstone_cannot_erase_newer_awareness(tmp_path):
+    service = Service([Page([event("old", 2)], "old", True),
+                       Page([{**event("archive", None), "kind": "archived"},
+                             {**event("restored", 3), "kind": "restored"}], "new", False),
+                       Page([{**event("archive", None), "kind": "archived"}], "old", True)])
+    assert notices(tmp_path, service, [1000]).run(renderer=None)["more"]
+    assert notices(tmp_path, service, [1001]).run(renderer=None)["more"] is False
+    assert notices(tmp_path, service, [1002]).run(renderer=lambda _: None)["polled"]
+    assert DirectState(JsonState(tmp_path), tmp_path).known_publications()[0]["version"] == 3
+
+def test_nullable_nonpublication_versions_do_not_stall_or_offer(tmp_path):
+    rows = [{**event("restore"), "kind": "restored", "version": None},
+            {**event("installation"), "kind": "installation_updated", "version": None},
+            event("published")]
+    service = Service([Page(rows, "done", False)])
+    shown = []
+    assert notices(tmp_path, service, [1000]).run(renderer=shown.extend)["offered"] == 1
+    assert [row["event_id"] for row in shown] == ["published"]
+    assert DirectState(JsonState(tmp_path), tmp_path).known_publications()[0]["version"] == 2
+
+def test_muted_inbox_preserves_human_cursor_and_owner_reset(tmp_path):
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    state.set_identity({"account_id": "alice", "organization_id": "org-1"})
+    service = Service([Page([event()], "after", False), Page([event()], "after", False)],
+                      preferences={"muted": True, "suppressed": {}})
+    assert EndTurnNotices(state, lambda: service).run(renderer=None)["polled"]
+    shown = []
+    assert EndTurnNotices(DirectState(JsonState(tmp_path), tmp_path), lambda: service).run(
+        renderer=shown.extend)["offered"] == 0
+    assert not shown
+    assert state.notice_state()["cursor"] == "after"
+    assert state.notice_state()["awareness_cursor"] == "after"
+    assert state.known_publications()[0]["version"] == 2
+    state.set_identity({"account_id": "bob", "organization_id": "org-2"})
+    assert state.notice_state()["cursor"] is None
+    assert state.notice_state()["awareness_cursor"] is None
+    assert not state.known_publications()
+
+def test_awareness_error_preserves_both_independent_checkpoints(tmp_path):
+    service = Service([Page([event()], "after", False)])
+    runner = notices(tmp_path, service, [1000])
+    assert runner.run(renderer= lambda _: None)["offered"] == 1
+    failing = Service([Page([event("next", 3)], "later", False)])
+    failing.notice_version = lambda *_: (_ for _ in ()).throw(WisdomUnavailable(status=503))
+    failed = EndTurnNotices(runner.state, lambda: failing).run(renderer=None)
+    assert failed["error"] == "WisdomUnavailable"
+    assert runner.state.notice_state()["cursor"] == "after"
+    assert runner.state.notice_state()["awareness_cursor"] == "after"
+
+def test_contradictory_revision_state_is_rejected(tmp_path):
+    service = Service([Page([event()], "next", False)])
+    service.notice_version = lambda skill_id, version: {
+        "skill": {"id": skill_id, "state": "active"},
+        "version": {"version": version, "state": "draft"}}
+    result = notices(tmp_path, service, [1000]).run(renderer=None)
+    assert result["error"] == "WisdomAuthError"
+    assert DirectState(JsonState(tmp_path), tmp_path).notice_state()["cursor"] is None
+
+def test_real_version_envelope_through_client_discovery_and_invocation(tmp_path):
+    payload = {"skill": {"id": "skill-1", "state": "active", "takedown_generation": 0},
+               "version": {"version": 2, "author_description": "Report helper",
+                           "published_by_user_id": "publisher-" + "x" * 210}}
+    wire = VersionDetail.model_validate(payload)
+    owner = {"account_id": "alice", "organization_id": "org-1"}
+    client = SimpleNamespace(list_skills=lambda: None, skill=lambda _: None,
+                             version=lambda skill_id, number: wire)
+    discovery = Discovery(client, lambda: owner, "https://portal.example", "org-1")
+    real = object.__new__(InvocationService)
+    real._installation_owner = lambda: dict(owner)
+    real.__dict__["_discovery"] = lambda: discovery
+    service = Service([Page([event()], "done", False)])
+    service.notice_version = real.notice_version
+    state = notices(tmp_path, service, [1000]).state
+    assert EndTurnNotices(state, lambda: service).run(renderer=None)["more"] is False
+    assert state.known_publications()[0]["publisher"] == payload["version"]["published_by_user_id"]
+    assert state.known_publications()[0]["description"] == "Report helper"
+    assert state.known_publications()[0]["slug"] == ""
+
+@pytest.mark.parametrize(("response", "error"), [
+    (WisdomNotFound("missing", status=404), None),
+    (WisdomAuthError("forbidden", status=403), "WisdomAuthError"),
+    (VersionDetail.model_validate({"skill": {"id": "other", "state": "active"},
+                                   "version": {"version": 2}}), "WisdomValidationError"),
+])
+def test_exact_read_discovery_errors_preserve_or_consume_checkpoint(tmp_path, response, error):
+    def wire_version(_skill_id, _number):
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    owner = {"account_id": "alice", "organization_id": "org-1"}
+    client = SimpleNamespace(list_skills=lambda: None, skill=lambda _: None,
+                             version=wire_version)
+    discovery = Discovery(client, lambda: dict(owner), "https://portal.example", "org-1")
+    real = object.__new__(InvocationService)
+    real._installation_owner = lambda: dict(owner)
+    real.__dict__["_discovery"] = lambda: discovery
+    service = Service([Page([event()], "done", False)])
+    service.notice_version = real.notice_version
+    runner = notices(tmp_path, service, [1000])
+    result = runner.run(renderer=None)
+    if error:
+        assert result["error"] == error
+        assert runner.state.notice_state()["awareness_cursor"] is None
+    else:
+        assert "error" not in result
+        assert runner.state.notice_state()["awareness_cursor"] == "done"
+    assert not runner.state.known_publications()
 
 def test_not_now_deferral_suppresses_the_feed_version_not_new_versions(tmp_path: Path):
     owner = {"account_id": "account-1", "organization_id": "org-1"}
@@ -119,11 +250,188 @@ def test_not_now_deferral_suppresses_the_feed_version_not_new_versions(tmp_path:
 
 
 def test_missing_renderer_is_successful_noop_before_network_or_state(tmp_path: Path):
-    service = Service()
+    service = Service([Page([], "cursor-1", False)])
     result = notices(tmp_path, service, [1000]).run(renderer=None)
-    assert result == {"supported": False, "offered": 0, "polled": False}
-    assert not service.calls
-    assert not (tmp_path / "state.json").exists()
+    assert result["supported"] is False
+    assert result["polled"] is True
+    assert service.calls[0] == ("feed", None)
+
+def test_known_publication_survives_mute_renderer_absence_and_restart(tmp_path):
+    service = Service([Page([event()], "cursor-1", False)],
+                      preferences={"muted": True, "suppressed": {}})
+    first = notices(tmp_path, service, [1000])
+    assert first.run(renderer=None)["offered"] == 0
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    assert state.notice_state()["awareness_cursor"] == "cursor-1"
+    assert state.known_publications()[0]["description"] == "Helps with reports"
+    assert state.known_publications()[0]["inspect_reference"] == "skill-1@v2"
+    restarted = notices(tmp_path, Service([Page([], "cursor-2", False)]), [1001])
+    assert restarted.state.known_publications() == state.known_publications()
+    assert state.known_publications()[0]["publisher"] == "publisher-1"
+    assert state.known_publications()[0]["title"] == ""
+    assert state.known_publications()[0]["slug"] == ""
+
+
+def test_exact_version_editorial_metadata_is_projected_without_creator_fallback(tmp_path):
+    service = Service([Page([event()], "done", False)])
+    original = service.notice_version
+
+    def editorial(skill_id, version):
+        facts = original(skill_id, version)
+        facts["version"]["title"] = "Incident report helper"
+        facts["version"]["published_by_user_id"] = "alice"
+        return facts
+
+    service.notice_version = editorial
+    runner = notices(tmp_path, service, [1000])
+    assert runner.run(renderer=None)["more"] is False
+    row = runner.state.known_publications()[0]
+    assert row["title"] == "Incident report helper"
+    assert row["publisher"] == "alice"
+
+
+def test_projection_failure_does_not_advance_cursor(tmp_path):
+    service = Service([Page([event()], "cursor-1", True)])
+    service.notice_version = lambda *_: (_ for _ in ()).throw(RuntimeError("offline"))
+    result = notices(tmp_path, service, [1000]).run(renderer=None)
+    assert result["error"] == "RuntimeError"
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    assert state.notice_state()["cursor"] is None
+    assert not state.known_publications()
+
+def test_renderer_free_catch_up_pages_and_fails_closed_on_foreign_org(tmp_path):
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    state.set_identity({"owner": {"organization_id": "org-1", "account_id": "alice"}})
+    service = Service([Page([event("first")], "after-first", True),
+                       Page([event("second", 3)], "after-second", False)])
+    runner = EndTurnNotices(state, lambda: service, clock=lambda: 1000)
+    assert runner.run(renderer=None)["more"] is True
+    assert state.notice_state()["awareness_cursor"] == "after-first"
+    assert runner.run(renderer=None)["more"] is False
+    assert state.known_publications()[0]["version"] == 3
+    assert state.known_publications()[0]["team"] == ""
+    assert [call for call in service.calls if isinstance(call, tuple) and call[0] == "feed"] == [
+        ("feed", None), ("feed", "after-first")]
+
+    foreign = Service([Page([event("foreign", 4)], "foreign-cursor", False)])
+    foreign.notice_version = lambda skill_id, version: {
+        "skill": {"id": skill_id, "state": "active",
+                  "organization_id": "org-2"},
+        "version": {"version": version}}
+    assert EndTurnNotices(state, lambda: foreign).run(renderer=None)["error"] == "WisdomAuthError"
+    assert state.notice_state()["awareness_cursor"] == "after-second"
+    assert state.known_publications()[0]["version"] == 3
+    state.set_identity({"owner": {"organization_id": "org-2", "account_id": "bob"}})
+    assert not state.known_publications()
+    assert state.notice_state()["cursor"] is None
+
+
+def test_mixed_tombstones_and_authenticated_missing_versions_across_pages(tmp_path):
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    state.set_identity({"owner": {"organization_id": "org-1"}})
+    missing = {("old", 2), ("new-missing", 2)}
+    service = Service([
+        Page([{**event("old"), "skill_id": "old"},
+              {**event("fresh"), "skill_id": "fresh"}], "page-one", True),
+        Page([{**event("removed"), "kind": "taken_down", "skill_id": "fresh"},
+              {**event("missing"), "skill_id": "new-missing"},
+              {**event("newer", 3), "skill_id": "old"}], "page-two", False),
+    ])
+    original = service.notice_version
+
+    def revision(skill_id, version):
+        if (skill_id, version) in missing:
+            raise WisdomNotFound("Gateway skill version not found", status=404)
+        return original(skill_id, version)
+
+    service.notice_version = revision
+    runner = EndTurnNotices(state, lambda: service)
+    assert runner.run(renderer=None)["more"] is True
+    assert [row["skill_id"] for row in state.known_publications()] == ["fresh"]
+    assert runner.run(renderer=None)["more"] is False
+    assert state.notice_state()["awareness_cursor"] == "page-two"
+    assert [row["inspect_reference"] for row in state.known_publications()] == ["old@v3"]
+
+
+
+@pytest.mark.parametrize("failure", [
+    WisdomAuthError("denied", status=403), WisdomUnavailable(status=503),
+    WisdomNotFound("opaque miss"), ValueError("malformed metadata"),
+])
+def test_unknown_metadata_failure_retains_existing_facts_and_checkpoint(tmp_path, failure):
+    first = Service([Page([{**event(), "skill_id": "old"}], "page-one", True)])
+    state = notices(tmp_path, first, [1000]).state
+    assert EndTurnNotices(state, lambda: first).run(renderer=None)["more"] is True
+    old = state.known_publications()
+    second = Service([Page([{**event("next"), "skill_id": "new"}], "page-two", False)])
+
+    def unavailable(skill_id, version):
+        del skill_id, version
+        raise failure
+
+    second.notice_version = unavailable
+    result = EndTurnNotices(state, lambda: second).run(renderer=None)
+    assert result["error"] == type(failure).__name__
+    assert result["more"] is True
+    assert state.notice_state()["awareness_cursor"] == "page-one"
+    assert state.known_publications() == old
+    retry = Service([Page([{**event("next"), "skill_id": "new"}], "page-two", False)])
+    assert EndTurnNotices(state, lambda: retry).run(renderer=None)["more"] is False
+    assert {row["skill_id"] for row in state.known_publications()} == {"old", "new"}
+
+
+def test_stale_checkpoint_cannot_replace_newer_projection(tmp_path):
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    state.finish_notice_poll(identity=None, cursor="new", has_more=False, keys=[],
+                             now=1, expected_cursor=None,
+                             publications=[{"skill_id": "new", "version": 3,
+                                            "state": "published"}])
+    with pytest.raises(Exception, match="checkpoint changed"):
+        state.finish_notice_poll(identity=None, cursor="stale", has_more=False,
+                                 keys=[], now=2, expected_cursor=None,
+                                 publications=[{"skill_id": "new", "version": 2,
+                                                "state": "published"}])
+    assert state.notice_state()["cursor"] == "new"
+    assert state.known_publications()[0]["version"] == 3
+
+
+def test_interrupted_page_commits_no_partial_publication_facts(tmp_path):
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    rows = [{**event("first"), "skill_id": "first"},
+            {**event("second"), "skill_id": "second"}]
+    service = Service([Page(rows, "after", False)])
+    original = service.notice_version
+
+    def broken(skill_id, version):
+        if skill_id == "second":
+            raise WisdomUnavailable(status=503)
+        return original(skill_id, version)
+
+    service.notice_version = broken
+    result = EndTurnNotices(state, lambda: service).run(renderer=None)
+    assert result["error"] == "WisdomUnavailable"
+    assert state.notice_state()["cursor"] is None
+    assert not state.known_publications()
+    service = Service([Page(rows, "after", False)])
+    assert EndTurnNotices(state, lambda: service).run(renderer=None)["more"] is False
+    assert {row["skill_id"] for row in state.known_publications()} == {"first", "second"}
+
+
+def test_exact_version_read_checks_owner_even_on_gateway_404():
+    real = object.__new__(InvocationService)
+    owner = [{"account_id": "alice", "organization_id": "org-1"}]
+    real._installation_owner = lambda: dict(owner[0])
+    calls = []
+
+    def version(skill_id, number):
+        calls.append((skill_id, number))
+        owner[0] = {"account_id": "bob", "organization_id": "org-2"}
+        raise WisdomNotFound("Gateway version missing", status=404)
+
+    real.__dict__["_discovery"] = lambda: SimpleNamespace(version=version)
+    with pytest.raises(WisdomAuthError, match="owner changed"):
+        real.notice_version("skill-1", 2)
+    assert calls == [("skill-1", 2)]
 
 
 def test_poll_consumes_one_page_and_attempt_is_marked_before_render(tmp_path: Path):
@@ -582,7 +890,7 @@ def test_notice_preserves_exact_review_targets_without_performing_actions(tmp_pa
     assert shown[2]["content_hash"] == "sha256:exact-revision"
     assert [
         call if isinstance(call, str) else call[0] for call in service.calls
-    ] == ["feed", "candidates", "policy", "preferences"]
+    ] == ["feed", "version", "version", "candidates", "policy", "preferences"]
 
 
 def test_separate_profile_state_allows_owner_local_best_effort_offers(tmp_path: Path):
@@ -671,7 +979,7 @@ def test_notice_policy_respects_current_profile_settings(mode, frequency):
         'updates': frequency, 'team_published': 'immediate',
     }}
     service.client = SimpleNamespace(agent_led_policy=lambda: SimpleNamespace(
-        org_id='org', notification_defaults=SimpleNamespace(
+        org_id='org', recommendation_mode='promote_all', notification_defaults=SimpleNamespace(
             teammate_published=True, update_available=True, skill_ready_to_share=True,
         ),
     ))
@@ -706,12 +1014,12 @@ def test_notice_category_settings_are_independent(setting, expected):
     service._installation_owner = lambda: owner
     service.notification_config = lambda: {'notifications': settings}
     service.client = SimpleNamespace(agent_led_policy=lambda: SimpleNamespace(
-        org_id='org', notification_defaults=SimpleNamespace(
+        org_id='org', recommendation_mode='promote_all', notification_defaults=SimpleNamespace(
             teammate_published=True, update_available=True, skill_ready_to_share=True,
         ),
     ))
 
-    assert service.notice_policy() == expected
+    assert service.notice_policy() == {"recommendation_mode": "promote_all", **expected}
 
 
 def test_new_candidate_is_checked_on_the_next_turn(tmp_path):
