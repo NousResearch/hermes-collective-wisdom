@@ -89,6 +89,11 @@ def test_structured_scanner_findings_are_readable_on_native_surfaces(operation, 
     }
     record = {"operation": operation, "screen": screen, "state": "pending", "plan": plan}
     original = deepcopy(plan)
+    if operation == "publish" and screen == "approval":
+        proposal = project_view(record)
+        assert not any(action.primary for action in proposal.actions)
+        assert any(action.action == "details" for action in proposal.actions)
+        record["screen"] = "details"
     texts = []
     while True:
         record["page"] = len(texts)

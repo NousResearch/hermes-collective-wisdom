@@ -174,7 +174,8 @@ def _check_group_rows(check, labels, group):
             for detail in (row.get("findings") or row.get("details") or []):
                 lines.extend(_finding_lines(detail))
     for row in (row for key, row in rows.items() if key not in labels):
-        lines.append(f"⚠️ Additional check: {_readable(row.get('status') or 'unavailable')}")
+        lines.append(f"⚠️ Additional check {_readable(row.get('key') or 'unnamed')}: "
+                     f"{_readable(row.get('status') or 'unavailable')}")
         for detail in (row.get("findings") or row.get("details") or []):
             lines.extend(_finding_lines(detail))
     if check.get("status") not in {"pass", "pending"}:
@@ -227,6 +228,15 @@ def _sharing_lines(plan):
         "ℹ️ Nothing has been uploaded or shared by viewing these details.",
     ]
     lines.extend(_human_check_rows(plan))
+    scan = plan.get("local_scan")
+    if isinstance(scan, dict):
+        findings = scan.get("findings")
+        lines.append("Local scanner: " + (
+            "allowed" if scan.get("allowed") is True else "needs review"
+        ) + f"; findings: {len(findings) if isinstance(findings, list) else 'unavailable'}")
+        if isinstance(findings, list):
+            for finding in findings:
+                lines.extend(_finding_lines(finding))
     for item in plan.get("files") or []:
         if not isinstance(item, dict):
             continue
@@ -257,73 +267,5 @@ def inspection_pages(record):
 
 
 def review_pages(plan):
-    """Paginate human-readable facts while retaining complete exact-file inspection."""
+    """Render review details while retaining complete exact-file inspection."""
     return _pages("\n".join(_detail_lines(plan)))
-
-
-def _proposal_checks(plan):
-    """Project actual check verdicts without claiming a pending Gateway scan passed."""
-    checks = []
-    for key, label in (("security_check", "Local security"),
-                       ("professionalism_check", "Professionalism")):
-        check = plan.get(key) or {}
-        status = check.get("status", "unavailable")
-        checks.append(f"{_status_icon(status)} {label}: {status}")
-        for row in check.get("checks") or []:
-            row_label = _LABELS.get(row.get("key"), str(row.get("key", "Unnamed check"))
-                                    .replace("_", " "))
-            checks.append(
-                f"  {_status_icon(row.get('status'))} {row_label}: "
-                f"{row.get('status', 'unavailable')}"
-                f" (findings: {row.get('finding_count', 'unavailable')})"
-            )
-            for finding in row.get("findings") or []:
-                checks.extend(_finding_lines(finding))
-    guard = plan.get("local_scan")
-    if isinstance(guard, dict):
-        findings = guard.get("findings")
-        checks.append(
-            f"Local scanner: {'allowed' if guard.get('allowed') is True else 'needs review'}; "
-            f"findings: {len(findings) if isinstance(findings, list) else 'unavailable'}"
-        )
-        for finding in findings if isinstance(findings, list) else []:
-            checks.extend(_finding_lines(finding))
-    gateway = (plan.get("server_checks") or {}).get("security_check")
-    gateway_status = (str(gateway.get("status", "unavailable"))
-                      if isinstance(gateway, dict) else "pending until submission")
-    checks.append(f"{_status_icon(gateway_status)} Gateway security: {gateway_status}")
-    return checks
-
-
-def publication_proposal_pages(record):
-    """Bound readable authorization facts; the receipt still binds exact bytes."""
-    plan = record["plan"]
-    route = record.get("route") or {}
-    files = plan.get("files") or []
-    lines = [
-        f"Name: {_readable(plan.get('editorial_name') or 'Editorial name incomplete')}",
-        "What it does: " + _readable(plan.get('editorial_description')
-                                      or 'Editorial description incomplete'),
-        f"Why coworkers benefit: {_readable(plan.get('coworker_benefit') or 'Benefit incomplete')}",
-        f"Publication name: {_readable(plan.get('slug') or 'Unavailable')}",
-        f"Destination team: {_readable(record.get('team_name') or 'Team name unavailable')}",
-        f"Private review: {route.get('platform', 'Unavailable')} on this profile",
-        f"Publication policy: {plan.get('publication_mode', 'Unavailable')} "
-        f"(version {plan.get('policy_version', 'Unavailable')}). "
-        "Gateway decides direct or moderated handling; submission is not a promise of publication.",
-        f"Exact prepared package: {len(files)} files. File contents have not been shown here; "
-        "View More Details for the lossless inventory and bytes.",
-        *_proposal_checks(plan),
-        "Material local warnings acknowledged: " + (
-            "yes" if plan.get("warning_acceptance") else "none"),
-        f"Authorization expires: {_date(plan.get('authorization_expires_at'))}",
-        f"This review expires: {_date(record.get('expires_at'))}",
-        "Nothing has been uploaded yet. Share My Skill sends this exact prepared package "
-        "(files, metadata and checks) to the authenticated organization Gateway once. "
-        "The Gateway scans it and applies the displayed publication policy.",
-    ]
-    return _pages("\n".join(
-        line if line.startswith(("  ✅", "  ⚠️", "  ❌", "  ⏳", "  ?"))
-        else "⏳ " + line if "expires:" in line.lower() else "• " + line
-        for line in lines
-    ))

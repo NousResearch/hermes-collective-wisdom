@@ -48,17 +48,20 @@ def test_cancel_and_duplicate_share_during_preparation(tmp_path, monkeypatch, su
         service = Service()
         started, release = threading.Event(), threading.Event()
         calls = []
-        def prepare(_identity):
+        def prepare(identity):
+            del identity
             calls.append(True)
             started.set()
             assert release.wait(10)
             if fails:
                 raise ConnectionError("preparation failed after dismissal")
             return "local:draft-1"
-        monkeypatch.setattr(service, "native_candidate_prepare", prepare)
+        monkeypatch.setattr(service, "native_candidate_prepare", lambda identity: (
+            _ for _ in ()).throw(ConnectionError("first preparation unavailable")))
         ui = surface(tmp_path, service)
         identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
         await ui.flush()
+        monkeypatch.setattr(service, "native_candidate_prepare", prepare)
         pending = asyncio.create_task(ui.click(identity, "share"))
         assert await asyncio.to_thread(started.wait, 5)
         await ui.click(identity, "share")
