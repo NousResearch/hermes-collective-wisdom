@@ -561,6 +561,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     authority=authority, progress=marked_progress,
                 )
                 display = (updated.get("failure") != "package_preparation_failed"
+                           and updated.get("operation") != "publish"
                            or self.reviews.display_current(updated, service, invocation, authority))
                 return updated, display
             finally:
@@ -645,7 +646,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 updated, display = await self._callback_action(
                     record_id, selected, service, invocation, authority, progress,
                     active, progress_done,
-                    selected == record.get("operation") and selected in {"install", "update"}
+                    selected in {"confirm", "confirm.partial"} and record.get("operation") == "publish"
+                    or selected == record.get("operation") and selected in {"install", "update"}
                     or selected.startswith("catalog.install.") and record.get("operation") == "catalog",
                 )
                 if display:
@@ -733,7 +735,8 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         return await self._callback_action(
             record_id, selected, service, invocation, authority, progress,
             active, progress_done,
-            selected == record.get("operation") and selected in {"install", "update"}
+            selected in {"confirm", "confirm.partial"} and record.get("operation") == "publish"
+            or selected == record.get("operation") and selected in {"install", "update"}
             or selected.startswith("catalog.install.") and record.get("operation") == "catalog",
         )
 

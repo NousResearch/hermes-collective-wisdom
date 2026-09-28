@@ -1,10 +1,12 @@
 """In-card progress on the real registered native callback paths."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,protected-access
 import asyncio
+import threading
 
 import pytest
 
 from restoration_support import SlackHarness, TelegramHarness
+from test_restored_native_flow import Service as SharingService
 from test_slack_sdk_callbacks import Service, _record_id
 from native_test_support import owner
 from hermes_wisdom_plugin import native_progress
@@ -22,6 +24,135 @@ class NamedService(Service):
 
     def update_apply(self, receipt, *, may_apply, **_kwargs):
         return self.install_apply(receipt, may_apply=may_apply)
+
+
+async def sharing_card(ui):
+    identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+    await ui.flush()
+    await ui.click(identity, "share")
+    while await ui.next_page(identity):
+        pass
+    assert any(action.label == "Share My Skill" for action in ui.view(identity).actions)
+    return identity
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_share_progress_precedes_publication_and_removes_action(tmp_path, harness):
+    async def scenario():
+        class Moderated(SharingService):
+            def publication_submit(self, receipt, *, may_apply):
+                super().publication_submit(receipt, may_apply=may_apply)
+                return {"state": "done", "publication_state": "pending_moderation"}
+        service = Moderated()
+        ui = harness(tmp_path, service)
+        identity = await sharing_card(ui)
+        before = len(ui.edits)
+        observed = []
+        original = ui.chat_update
+        async def observe(**payload):
+            if "Sharing…" in payload["text"]:
+                observed.append(True)
+                assert not service.applied
+                assert ui.record(identity)["state"] == "applying"
+                assert "Share My Skill" not in str(payload)
+                assert not any(block.get("elements") for block in payload.get("blocks", []))
+                assert "wi:agent:" not in str(payload.get("reply_markup", ""))
+                await ui.click(identity, "confirm")
+                assert not service.applied
+            return await original(**payload)
+        ui.chat_update = observe
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+        assert ui.record(identity)["state"] == "completed"
+        assert observed and len(ui.edits) == before + 2
+        assert "Sharing…" not in ui.edits[-1]["text"]
+        assert "Waiting for team review" in ui.edits[-1]["text"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+@pytest.mark.parametrize("failure", ["edit", "rejected", "uncertain"])
+def test_share_progress_failure_and_publication_outcome(tmp_path, harness, failure):
+    class Submission(SharingService):
+        def publication_submit(self, receipt, *, may_apply):
+            if failure == "uncertain":
+                assert may_apply()
+                self.applied.append(receipt)
+                raise ConnectionError("response lost after submission")
+            super().publication_submit(receipt, may_apply=may_apply)
+            return {"state": "rejected", "phase": "rejected",
+                    "detail": "rejected before creation"}
+
+    async def scenario():
+        service = Submission()
+        ui = harness(tmp_path, service)
+        identity = await sharing_card(ui)
+        before = len(ui.edits)
+        if failure == "edit":
+            async def broken(**_payload):
+                raise ConnectionError("display failed")
+            ui.chat_update = broken
+        await ui.click(identity, "confirm")
+        assert service.applied == ([] if failure == "edit" else ["publication-receipt"])
+        expected = {"edit": "failed", "uncertain": "uncertain", "rejected": "completed"}
+        assert ui.record(identity)["state"] == expected[failure]
+        if failure != "edit":
+            assert len(ui.edits) == before + 2
+            assert ("Uncertain" if failure == "uncertain" else "Failed") in ui.edits[-1]["text"]
+            assert "Share My Skill" not in str(ui.edits[-1])
+        await ui.click(identity, "confirm")
+        assert service.applied == ([] if failure == "edit" else ["publication-receipt"])
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_share_hung_progress_is_bounded_without_publication(tmp_path, harness, monkeypatch):
+    async def scenario():
+        service = SharingService()
+        ui = harness(tmp_path, service)
+        identity = await sharing_card(ui)
+        async def hanging(**_payload):
+            await asyncio.Event().wait()
+        ui.chat_update = hanging
+        monkeypatch.setattr(native_progress, "PROGRESS_TIMEOUT", 0.02)
+        await asyncio.wait_for(ui.click(identity, "confirm"), timeout=1)
+        assert not service.applied
+        assert ui.record(identity)["state"] == "failed"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_share_slow_authorized_publication_is_not_abandoned(tmp_path, harness, monkeypatch):
+    class Slow(SharingService):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def publication_submit(self, receipt, *, may_apply):
+            self.started.set()
+            assert self.release.wait(1)
+            return super().publication_submit(receipt, may_apply=may_apply)
+
+    async def scenario():
+        service = Slow()
+        ui = harness(tmp_path, service)
+        identity = await sharing_card(ui)
+        monkeypatch.setattr(native_progress, "PROGRESS_TIMEOUT", 0.02)
+        from hermes_wisdom_plugin import native_runtime  # pylint: disable=import-outside-toplevel
+        monkeypatch.setattr(native_runtime, "PROGRESS_TIMEOUT", 0.02)
+        click = asyncio.create_task(ui.click(identity, "confirm"))
+        try:
+            assert await asyncio.to_thread(service.started.wait, 0.5)
+            await asyncio.sleep(0.08)
+            assert not click.done() and not service.applied
+            assert ui.record(identity)["state"] == "applying"
+        finally:
+            service.release.set()
+        await asyncio.wait_for(click, 1)
+        assert service.applied == ["publication-receipt"]
+        assert ui.record(identity)["state"] == "completed"
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
