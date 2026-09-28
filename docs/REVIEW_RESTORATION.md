@@ -8,13 +8,13 @@ infrastructure. Desktop retains its management pages and exact-content controls.
 
 | Control or state | Behavior | Boundary |
 | --- | --- | --- |
-| Sharing invitation | Qualified candidates offer “You created a skill that could help your team”, the skill name, and Share My Skill. | Qualification is deterministic, not a model assessment of the team's needs. |
+| Sharing invitation | A qualified candidate's first clean card says “You created a skill that could help your team” and offers Share My Skill directly beside optional details and private Portal editing. | Qualification is deterministic, not a model assessment of the team's needs. Preparation does not upload. |
 | Review checks | Expands the actual checks. Safe To Share requires complete passing security and hash-bound professionalism evidence. | Missing, pending, advisory, or unavailable checks never count as passed. Local preparation normally has pending Gateway checks. |
-| View More Details | Opens private, bounded inspection. Looks good. returns without authorization. | This is not a Portal deeplink; larger packages need Previous/Next navigation. |
+| View More Details | Opens private, bounded inspection; Back returns to the proposal without authorization. | This is not a Portal deeplink; larger packages need Previous/Next navigation. |
 | Notification settings | Opens the existing profile delivery mode settings. | Opening settings changes nothing. Recommendation muting is no longer supported. |
 | Install / Update invitation | Offers View Details, Not Now, and Install or Update, in that order. Uses reviewed editorial copy and a plain description under What does it do?. | No invented organization name or workload relevance. Main-agent explanations are labelled advice, never authorization. |
 | Maybe Later / Not Now | Removes controls while retaining the invitation text, including cancellation during preparation. | Old callbacks cannot authorize effects. Dismissal does not create a durable cooldown. |
-| Native packaging failure | A blocked local package displays Share Packaging failed without a settings shortcut. | Other preparation errors instead offer an accurately named retry/dismiss card, without exposing exception details. |
+| Native packaging failure | A blocked local package displays a retry/dismiss card before posting; a failed bound retry identifies Share Packaging failed. | Other preparation errors offer an accurately named retry/dismiss card, without exposing exception details. |
 | Desktop preparation failure | Reports Share preparation failed, retaining the underlying error detail. | A transport or service failure is not falsely diagnosed as a packaging problem. Nothing is uploaded by preparation. |
 
 ## Exact consent and the existing contribution flow
@@ -23,15 +23,19 @@ Sharing starts with local, owner-private preparation, not an upload. Final submi
 still requires separate exact-content approval under the organization's publication
 policy. There is no once-for-all sharing authorization.
 
-The existing `/wisdom suggest <local-skill>` workflow remains available: inspect files
-and checks, edit through the terminal, re-review, acknowledge reviewable scanner
-warnings, continue to sharing review, or keep the draft. The invitation flow must
-preserve the same draft identity, owner, and warning-acknowledgement boundaries.
+Both `/wisdom suggest <local-skill>` and a qualified candidate open the same
+compact ready proposal for a clean, complete draft. Details and exact files are
+optional to inspect. An explicit
+Review/edit in Portal uploads a private draft for editing, not publication or
+moderation. Material warnings still require acknowledgement before the proposal;
+incomplete editorial copy cannot authorize sharing. The invitation flow preserves
+the same draft identity, owner, and warning-acknowledgement boundaries.
 Acknowledging warnings is not publication consent; a changed package or scanner
 verdict requires a fresh review.
 
-Install, update, and publication separate read-only details from approval. Their
-bounded exact-review pages must be read in sequence before Confirm is offered.
+Install and update retain their bounded exact-review pages when needed. Sharing
+separates optional read-only details from one final Share My Skill action; its
+compact proposal must fit the provider without truncating required consent facts.
 Install/update inspection verifies the receipt and discloses complete UTF-8 content,
 executable intent, and base64 for opaque files. Installing never authorizes setup.
 The consent plan and receipt are not replaced by a presentation summary or agent
@@ -84,5 +88,5 @@ failed display, and replay rejection. Desktop tests exercise mounted components.
 See [Testing](TESTING.md) for reproducible commands and optional stock-host probes.
 
 Passing tests does not establish live Slack/Telegram delivery or production Gateway
-publication/installation. Full Desktop invitation parity, private Portal deeplinks,
-once-for-all sharing consent remain outside this change.
+publication/installation. Full Desktop invitation parity and once-for-all sharing
+consent remain outside this change.

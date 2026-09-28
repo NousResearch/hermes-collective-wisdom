@@ -2,6 +2,7 @@
 # pylint: disable=protected-access
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from installed_test_support import JsonState
@@ -10,6 +11,31 @@ from test_publication import publication
 
 from hermes_wisdom_plugin.errors import WisdomAuthError
 from hermes_wisdom_plugin.runtime import InvocationService
+
+@pytest.mark.parametrize("mode", ["open", "moderated"])
+def test_invocation_private_draft_exposes_only_acknowledged_owner_portal_url(
+    tmp_path, monkeypatch, mode,
+):
+    """Private uploads return the owner URL without approving or publishing."""
+    kernel, prepared, client, owner = publication(tmp_path, mode=mode)
+    service = InvocationService(
+        kernel.store.root, ("default", Path(owner["profile_home"])),
+        state=JsonState(kernel.store.root),
+    )
+    monkeypatch.setattr(
+        service, "account", SimpleNamespace(portal_base_url="https://portal.example"),
+    )
+    monkeypatch.setattr(service, "_publication_service", lambda: kernel)
+    monkeypatch.setattr(service, "_installation_owner", lambda: dict(owner))
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+    review = kernel.review(prepared["draft_id"])
+    outcome = service.publication_submit_private(review["receipt"], may_apply=lambda: True)
+    assert outcome["state"] == "pending" and outcome["phase"] == "policy_review_required"
+    assert outcome["portal_url"] == (
+        "https://portal.example/wisdom/review/" + outcome["remote_draft_id"]
+    )
+    assert client.state.calls["approve"] == 0
+    assert client.state.calls["publish"] == 0
 
 
 @pytest.mark.parametrize("operation", ["save", "model_review"])

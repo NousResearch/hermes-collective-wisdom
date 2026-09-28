@@ -8,7 +8,7 @@ from importlib import import_module
 from typing import Any
 
 from .native_context import NativeInvocation, adapter_profile
-from .native_review import NativeView, callback_value, telegram_view_text
+from .native_review import NativeItem, NativeView, callback_value, telegram_view_text
 
 
 def text(view: NativeView) -> str:
@@ -99,6 +99,15 @@ def _rich_row(actions: list[Any], record_id: str) -> str:
     )
 
 
+def _rich_detail(item: NativeItem) -> str:
+    """Style owned prefixes only, after escaping every source fragment."""
+    rendered = "".join(
+        (f"<b>{html.escape(label)}</b>" if label else "")
+        + html.escape(rest).replace("\n", "<br/>")
+        for label, rest in item.detail_parts()
+    )
+    return rendered
+
 def rich_html(view: NativeView, record_id: str) -> str:
     """Render a bounded Bot API rich-message card with embedded controls."""
 
@@ -114,7 +123,9 @@ def rich_html(view: NativeView, record_id: str) -> str:
     if view.summary:
         parts.append(f"<p>{_escaped(view.summary, 2_000)}</p>")
     for item in view.items[:5]:
-        body = _escaped(item.detail, 5_000)
+        body = _rich_detail(item)
+        if len(body) > 5_000:
+            body = _escaped(item.detail, 5_000)
         preamble = (
             f"<p><i>{_escaped(item.preamble, 1_000)}</i></p>" if item.preamble else ""
         )
@@ -151,11 +162,7 @@ def rich_html_is_lossless(view: NativeView, record_id: str) -> bool:
     except (ValueError, TypeError):
         return False
     values = [view.title, view.summary, view.notice]
-    values.extend(
-        value
-        for item in view.items
-        for value in (item.preamble, item.title, item.detail)
-    )
+    values.extend(value for item in view.items for value in (item.preamble, item.title))
     controls = [*view.navigation_actions, *view.actions]
     controls.extend(action for item in view.items for action in item.actions)
     return (
@@ -163,6 +170,11 @@ def rich_html_is_lossless(view: NativeView, record_id: str) -> bool:
         and all(
             html.escape(str(value)).replace("\n", "<br/>") in rendered
             for value in values if value
+        )
+        and all(
+            len(_rich_detail(item)) <= 5_000
+            and _rich_detail(item) in rendered
+            for item in view.items if item.detail
         )
         and all(_rich_button(action, record_id) in rendered for action in controls)
     )

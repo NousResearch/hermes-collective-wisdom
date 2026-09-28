@@ -473,7 +473,9 @@ def test_generated_author_copy_explains_teammate_usefulness_without_unsupported_
     assert "simple terms what this skill does" in prompt
     assert "why it would be useful to teammates" in prompt
     assert "unsupported claims" in prompt
-    assert result["drafted_description"] == "Draft incident reviews with a repeatable checklist."
+    assert result["drafted_description"] == result["editorial_description"] == (
+        "Review incident notes with a consistent checklist."
+    )
     assert (source / "SKILL.md").is_file()
 
 
@@ -1140,8 +1142,8 @@ def test_missing_author_copy_uses_authorized_model_fallback(tmp_path: Path):
 
     result = value.prepare("reviewed-skill", allow_model_review=True)
 
-    assert result["drafted_description"] == (
-        "Draft incident reviews with a repeatable checklist."
+    assert result["drafted_description"] == result["editorial_description"] == (
+        "Review incident notes with a consistent checklist."
     )
     assert [call["schema_name"] for call in llm.calls] == [
         "author_description",

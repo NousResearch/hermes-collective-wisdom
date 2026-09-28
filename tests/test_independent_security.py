@@ -52,16 +52,20 @@ def test_forged_actions_cannot_install_and_real_install_still_inspects(
 def test_cancel_during_candidate_preparation_revokes_review(tmp_path):
     started, release = threading.Event(), threading.Event()
     service = Service()
-    def slow_prepare(_identity):
+    def slow_prepare(identity):
+        del identity
         started.set()
         assert release.wait(10)
         return 'local:draft-1'
-    service.native_candidate_prepare = slow_prepare
+    service.native_candidate_prepare = lambda identity: (_ for _ in ()).throw(
+        ConnectionError('first local preparation unavailable')
+    )
 
     async def scenario():
         ui = SlackHarness(tmp_path, service)
         identity = ui.runtime.begin_candidate(ui.caller, 'candidate-1')['review_id']
         await ui.flush()
+        service.native_candidate_prepare = slow_prepare
         preparing = asyncio.create_task(ui.click(identity, 'share'))
         assert await asyncio.to_thread(started.wait, 5)
         await ui.click(identity, 'cancel')
