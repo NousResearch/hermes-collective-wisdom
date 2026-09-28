@@ -72,7 +72,10 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
         body = item.preamble + "\n\n" if item.preamble else ""
         body += f"*{item.title}*"
         if item.detail:
-            body += "\n" + item.detail
+            body += "\n" + "".join(
+                (f"*{label}*" if label else "") + rest
+                for label, rest in item.detail_parts()
+            )
         item_bodies.append(body)
     approval_is_lossless = (
         len(view.items) <= _MAX_ITEMS

@@ -48,6 +48,18 @@ class NativeItem:
     actions: list[NativeAction] = field(default_factory=list)
     preamble: str = ""
     literal: bool = False
+    emphasis_labels: tuple[str, ...] = ()
+
+    def detail_parts(self) -> list[tuple[str, str]]:
+        """Split only explicitly owned line prefixes; leave all original text intact."""
+        if self.literal or not self.emphasis_labels:
+            return [("", self.detail)]
+        parts = []
+        for line in self.detail.splitlines(keepends=True):
+            label = next((label + ":" for label in self.emphasis_labels
+                          if line.startswith(label + ": ")), "")
+            parts.append((label, line[len(label):]))
+        return parts
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,8 +561,13 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=t
             actions[:0] = [NativeAction("Share My Skill", "confirm", primary=True),
                            NativeAction("Review/edit in Portal", "portal.draft")]
         view = NativeView(
-            "Ready to share", _skill_name(plan), [NativeItem(
+            "Ready to share", "", [NativeItem(
                 _skill_name(plan), "You created a skill that could help your team.\n" + facts,
+                emphasis_labels=(
+                    "What it does", "Why teammates benefit", "Destination team",
+                    "Publication policy", "Local security", "Gateway scan", "Package",
+                    "Authorization expires",
+                ),
             )],
             actions=actions,
             notice="Share My Skill uploads the exact package for the displayed policy. "
