@@ -46,8 +46,8 @@ def test_install_and_update_cards_name_and_status_without_opaque_fields():
         assert any(action.action == operation for action in view.actions)
         for text in surfaces:
             assert "incident-triage" in text
-            assert "Installed v2" in text
-            assert "Files: 1" in text
+            assert ("Installed v2" in text) is (operation == "update")
+            assert "Files: 1" not in text
             assert "private-hash" not in text
             assert "opaque-id" not in text
             assert "private-receipt" not in text

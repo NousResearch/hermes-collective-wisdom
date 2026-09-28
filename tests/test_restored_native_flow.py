@@ -1,8 +1,8 @@
 """Restored journeys through real registered native callbacks; no live services."""
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods,too-many-lines
 import asyncio
+import re
 import sys
-from datetime import datetime
 from html import unescape
 from types import ModuleType, SimpleNamespace
 
@@ -14,9 +14,9 @@ from restoration_support import (
     SlackHarness, TelegramHarness, assert_cancelled_review_is_inert,
     assert_owner_switch_after_post_is_cleaned,
 )
-from test_client import Response, Session, client as recording_client
 from hermes_wisdom_plugin.errors import SharePackagingError
 from hermes_wisdom_plugin.native_inspection import publication_proposal_pages
+from hermes_wisdom_plugin.native_review import callback_value
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import rich_html, plain_html
 from hermes_wisdom_plugin.runtime import InvocationService
@@ -83,7 +83,7 @@ def test_slack_review_started_by_host_command_worker_posts_one_card(tmp_path):
         await ui.flush()
         assert len(ui.posts) == 1
         labels = [action.label for action in ui.view(result["review_id"]).actions]
-        assert labels[-1] == "Install Skill"
+        assert labels[-1] == "Install"
         ui.runtime.close()
 
     asyncio.run(scenario())
@@ -428,7 +428,7 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface)
         assert view.title == "Hermes Collective Wisdom"
         assert "You created a skill that could help your team" in view.summary
         assert [action.label for action in view.actions] == [
-            "Review Checks", "View More Details", "Snooze Collective Wisdom",
+            "Review Checks", "View More Details", "Notification settings",
             "Maybe Later", "Review proposal",
         ]
         assert "Safe To Share" not in view.to_text()
@@ -720,7 +720,7 @@ def test_safe_summary_requires_all_actual_hash_bound_checks(tmp_path, monkeypatc
     asyncio.run(scenario())
 
 
-def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
+def test_notification_settings_preserve_profile_controls_without_muting(tmp_path, monkeypatch):
     async def scenario():
         service = Service()
         changed = []
@@ -743,166 +743,17 @@ def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
         assert "Current: On" in text
         assert not any(word in text for word in ("Gateway", "Revision", "None", "agent", "Org id"))
         assert [action.label for action in view.actions] == [
-            "Mute one week", "Turn off automatic suggestions", "Cancel",
+            "Turn off automatic suggestions", "Cancel",
         ]
         assert not changed
         assert not service.applied
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
-@pytest.mark.parametrize("stale", [False, True])
-def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, stale):
-    class MuteSession(Session):
-        def __init__(self):
-            super().__init__()
-            self.muted = False
-
-        def request(self, method, url, **kwargs):
-            self.calls.append((method, url, kwargs))
-            if method == "PUT":
-                self.muted = True
-            return Response(200, {
-                "org_id": "org-1", "muted": self.muted,
-                "duration": "1_week" if self.muted else None,
-                "muted_until": "2030-01-08T00:00:00Z" if self.muted else None,
-                "forever": False, "revision": 8 if self.muted else 7,
-            })
-
-    class MuteService(Service):
-        choose_notification_mute = InvocationService.choose_notification_mute
-
-        def __init__(self, session):
-            super().__init__()
-            self.client = recording_client(session=session)
-
-        def native_owner(self):
-            return owner(organization_id="org-1")
-
-        def notification_settings(self, **_kwargs):
-            return {"delivery_mode": "agent", "mode_writable": True,
-                    "mute_control": self.client.recommendation_mute().model_dump(mode="json")}
-
-    async def scenario():
-        transport = MuteSession()
-        service = MuteService(transport)
-        ui = surface(tmp_path, service)
-        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
-        await ui.flush()
-        await ui.click(identity, "settings")
-        assert not [call for call in transport.calls if call[0] == "PUT"]
-        forged = ({"user": {"id": "U2"}} if ui.caller.platform == "slack"
-                  else {"actor_id": 22})
-        await ui.click(identity, "settings.mute.1w", **forged)
-        assert not [call for call in transport.calls if call[0] == "PUT"]
-        if stale:
-            transport.muted = True  # Another client changed the Gateway revision.
-            await ui.click(identity, "settings.mute.1w")
-            assert not [call for call in transport.calls if call[0] == "PUT"]
-            return
-        await ui.click(identity, "settings.mute.1w")
-        writes = [call for call in transport.calls if call[0] == "PUT"]
-        assert len(writes) == 1
-        assert writes[0][2]["json"]["duration"] == "1_week"
-        assert writes[0][2]["json"]["expected_revision"] == 7
-        assert writes[0][2]["json"]["mutation_id"]
-        requested_at = writes[0][2]["json"]["requested_at"]
-        assert datetime.fromisoformat(requested_at).isoformat(
-            timespec="milliseconds"
-        ).replace("+00:00", "Z") == requested_at
-        assert ui.record(identity)["state"] == "completed"
-        assert transport.calls[-1][0] == "GET", "Confirmation needs Gateway readback"
-        assert service.client.recommendation_mute().duration == "1_week"
-        confirmation = ui.view(identity)
-        assert confirmation.title == "Notifications muted"
-        assert "one week" in confirmation.summary
-        assert "only affects you" in confirmation.summary
-        assert confirmation.dismissed and not confirmation.actions
-        assert "Gateway" not in confirmation.to_text()
-        await ui.click(identity, "settings.mute.1w")
-        restarted = surface(tmp_path / "restart", MuteService(transport))
-        another = restarted.runtime.begin_candidate(restarted.caller, "candidate-2")["review_id"]
-        await restarted.flush()
-        await restarted.click(another, "settings")
-        assert restarted.record(another)["plan"]["mute_control"]["duration"] == "1_week"
-        assert len([call for call in transport.calls if call[0] == "PUT"]) == 1
-
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
-def test_failed_mute_click_replaces_card_with_uncertain_confirmation(tmp_path, surface):
-    class FailingMuteService(Service):
-        def notification_settings(self, **_kwargs):
-            return {"delivery_mode": "agent", "mode_writable": True,
-                    "mute_control": {"revision": 7, "muted": False}}
-
-        def choose_notification_mute(self, _revision, _duration, *, may_apply):
-            assert may_apply()
-            raise ConnectionError("unknown write outcome")
-
-    async def scenario():
-        ui = surface(tmp_path, FailingMuteService())
-        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
-        await ui.flush()
-        await ui.click(identity, "settings")
-        edit_count = len(ui.edits)
-        await ui.click(identity, "settings.mute.1w")
-        assert ui.record(identity)["state"] == "uncertain"
-        assert len(ui.edits) == edit_count + 1
-        assert "Couldn't confirm the change" in unescape(str(ui.edits[-1]))
-        assert not ui.view(identity).actions
-
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
-@pytest.mark.parametrize("readback", ["unchanged", "stale_revision", "later_revision"])
-def test_mute_response_without_persisted_readback_never_confirms(tmp_path, surface, readback):
-    class UnconfirmedSession(Session):
-        written = False
-
-        def request(self, method, url, **kwargs):
-            self.calls.append((method, url, kwargs))
-            if method == "PUT":
-                self.written = True
-            muted = method == "PUT" or (self.written and readback != "unchanged")
-            revision = (8 if method == "PUT" else
-                        9 if self.written and readback == "later_revision" else 7)
-            return Response(200, {
-                "org_id": "org-1", "muted": muted,
-                "duration": "1_week" if muted else None,
-                "muted_until": "2030-01-08T00:00:00Z" if muted else None,
-                "forever": False, "revision": revision,
-            })
-
-    class MuteService(Service):
-        choose_notification_mute = InvocationService.choose_notification_mute
-
-        def __init__(self, session):
-            super().__init__()
-            self.client = recording_client(session=session)
-
-        def native_owner(self):
-            return owner(organization_id="org-1")
-
-        def notification_settings(self, **_kwargs):
-            return {"delivery_mode": "agent", "mode_writable": True,
-                    "mute_control": self.client.recommendation_mute().model_dump(mode="json")}
-
-    async def scenario():
-        transport = UnconfirmedSession()
-        ui = surface(tmp_path, MuteService(transport))
-        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
-        await ui.flush()
-        await ui.click(identity, "settings")
-        await ui.click(identity, "settings.mute.1w")
-        assert [method for method, _url, _body in transport.calls][-2:] == ["PUT", "GET"]
-        assert ui.record(identity)["state"] == "uncertain"
-        assert ui.view(identity).title == "Couldn't confirm the change"
-        assert not ui.view(identity).actions
-
-    asyncio.run(scenario())
 
 
 def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch):
@@ -937,19 +788,22 @@ def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch)
     asyncio.run(scenario())
 
 
-def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path, harness):
     async def scenario():
         service = Service()
-        ui = SlackHarness(tmp_path, service)
+        ui = harness(tmp_path, service)
         response = ui.runtime.begin(ui.caller, "incident")
         await ui.flush()
         identity = response["review_id"]
         view = ui.view(identity)
-        assert "your organization" in view.title
-        assert "Would you like to install this skill?" in view.to_text()
-        assert [a.label for a in view.actions] == [
-            "View Details", "Not Now", "Mute Skill Recommendations", "Install Skill",
-        ]
+        assert view.title == (
+            "A new skill has been added to your organization's collective wisdom."
+        )
+        assert "What does it do?" in view.to_text()
+        for removed in ("Would you like", "On this profile", "Files:", "Mute"):
+            assert removed not in view.to_text()
+        assert [a.label for a in view.actions] == ["View Details", "Not Now", "Install"]
         assert "Triage incidents" in view.to_text()
         await ui.click(identity, "confirm")
         assert not service.applied
@@ -987,7 +841,7 @@ def test_native_install_discloses_setup_then_asks_separate_permission(tmp_path, 
         identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
         await ui.flush()
         assert "connect example account" in ui.view(identity).to_text()
-        assert "choose whether to run setup afterward" in ui.view(identity).to_text()
+        assert "Setup requires separate permission" in ui.view(identity).to_text()
         await ui.click(identity, "details")
         assert not service.applied
         await ui.click(identity, "back")
@@ -1001,7 +855,38 @@ def test_native_install_discloses_setup_then_asks_separate_permission(tmp_path, 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+class RichTelegramHarness(TelegramHarness):
+    """Capture actual rich sends and edits through the registered Telegram path."""
+
+    async def do_api_request(self, endpoint, *, api_kwargs):
+        destination = self.posts if endpoint == "sendRichMessage" else self.edits
+        destination.append(api_kwargs)
+        return {"message_id": 123, "chat": {"id": 11}}
+
+
+def _emitted_controls(ui):
+    """Read actual provider controls, never the unprojected source view."""
+    payload = (ui.edits or ui.posts)[-1]
+    if "blocks" in payload:
+        return [(button["text"]["text"], button["value"])
+                for block in payload["blocks"] if block["type"] == "actions"
+                for button in block["elements"]]
+    if "rich_message" in payload:
+        return [(unescape(label), unescape(value)) for value, label in re.findall(
+            r'<tg-button\b[^>]* data="([^"]+)"[^>]*>(.*?)</tg-button>',
+            payload["rich_message"]["html"],
+        )]
+    markup = payload.get("reply_markup")
+    return [(button.text, button.callback_data)
+            for row in markup.inline_keyboard for button in row] if markup else []
+
+
+async def _click_emitted(ui, identity, action):
+    assert callback_value(identity, action) in [value for _label, value in _emitted_controls(ui)]
+    return await ui.click(identity, action)
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness, RichTelegramHarness])
 @pytest.mark.parametrize("decision", ["setup.run", "setup.defer"])
 def test_update_with_new_setup_requires_separate_command_permission(
     tmp_path, harness, decision,
@@ -1029,17 +914,23 @@ def test_update_with_new_setup_requires_separate_command_permission(
         identity = ui.runtime.begin_update(ui.caller, "incident")["review_id"]
         await ui.flush()
         assert "printf 'new version" in ui.view(identity).to_text()
-        await ui.click(identity, "details")
+        if harness is RichTelegramHarness:
+            assert "rich_message" in ui.posts[-1]
+        assert [label for label, _value in _emitted_controls(ui)] == [
+            "View Details", "Not Now", "Update",
+        ]
+        await _click_emitted(ui, identity, "details")
         assert not service.applied
-        await ui.click(identity, "back")
-        await ui.click(identity, "update")
+        await _click_emitted(ui, identity, "back")
+        await _click_emitted(ui, identity, "update")
         assert service.applied == ["exact-receipt"]
         view = ui.view(identity)
         assert "files updated; setup incomplete" in view.to_text()
         assert [a.label for a in view.actions] == ["Run setup", "Not now"]
+        # Negative replay probe, not a positive path through a hidden action.
         await ui.click(identity, "update")
         assert service.applied == ["exact-receipt"]
-        await ui.click(identity, decision)
+        await _click_emitted(ui, identity, decision)
         if decision == "setup.run":
             assert service.applied == ["exact-receipt", "setup:exact-receipt"]
             receipt = ui.view(identity).to_text()
@@ -1094,8 +985,8 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
 
 @pytest.mark.parametrize("category,label", [
     ("skill_ready_to_share", "Review proposal"),
-    ("new_skill", "Install Skill"),
-    ("update_available", "Update Skill"),
+    ("new_skill", "Install"),
+    ("update_available", "Update"),
 ])
 def test_eligible_notice_reuses_actionable_native_candidate_flow(
     tmp_path, monkeypatch, category, label,

@@ -42,7 +42,7 @@ The notice path:
 
 1. returns early when no renderer is available;
 2. uses an owner-local cursor, bounded deduplication, and last-offered markers;
-3. reads Gateway policy, mute, and suppression before rendering;
+3. reads Gateway policy and suppression before rendering;
 4. preserves the cursor on feed failure and never advances past unconsumed pagination;
 5. calls the surface directly, without model assessment or history injection; and
 6. treats renderer failure as a missed notice, never as a failed agent turn.

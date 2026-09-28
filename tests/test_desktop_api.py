@@ -97,12 +97,8 @@ class Service:  # pylint: disable=too-many-public-methods
     def notification_config(self):
         return {"notifications": {"delivery_mode": "agent"}}
 
-    def notification_settings(self, *, may_apply=None, include_mute_control=False):
+    def notification_settings(self, *, may_apply=None):
         assert may_apply is not None and may_apply() is True
-        control = {
-            "org_id": "org-1", "muted": False, "duration": None,
-            "muted_until": None, "forever": False, "revision": 7,
-        }
         return {
             "delivery_mode": "agent",
             "mode_writable": True,
@@ -110,20 +106,8 @@ class Service:  # pylint: disable=too-many-public-methods
                 "agent": "Eligible recommendations may be assessed and delivered.",
                 "fixed": "Assessment and proactive delivery are off; manual review remains.",
             },
-            "gateway_status": "available",
-            "gateway_mute": control,
-            "mute_control": control if include_mute_control else None,
         }
 
-    def choose_notification_mute(self, control_id, duration, *, may_apply=None):
-        assert control_id == "7"
-        assert duration == "1_week"
-        assert may_apply is not None and may_apply() is True
-        return {
-            "org_id": "org-1", "muted": True, "duration": duration,
-            "muted_until": "2030-01-08T00:00:00Z", "forever": False,
-            "revision": 8,
-        }
 
     def inbox(self):
         return {"mode": "agent", "assessments": [], "interactions": [], "installed_setup": []}
@@ -488,16 +472,16 @@ def test_closing_view_revokes_outstanding_reviews(tmp_path):
         api.install_confirm(service, view["view_id"], plan["receipt"])
 
 
-def test_organization_mute_control_is_bound_to_the_originating_live_view(tmp_path):
+def test_notification_settings_are_bound_to_the_originating_live_view(tmp_path):
     api = DesktopWorkflowApi()
     service = Service(tmp_path / "a")
     view_id = api.open_view(service)["view_id"]
     settings = api.notification_settings(service, view_id)
-    assert settings["mute_control"]["revision"] == 7
+    assert settings["delivery_mode"] == "agent"
 
     api.close_view(service, view_id)
     with pytest.raises(WisdomAuthError, match="no longer current"):
-        api.choose_notification_mute(service, view_id, "7", "1_week")
+        api.notification_settings(service, view_id)
 
 
 def test_update_check_is_read_only_and_bound_to_the_current_view(tmp_path):
@@ -873,13 +857,13 @@ def test_malformed_confirm_is_validation_error_not_internal_error(payload):
     assert result.status_code == 422
 
 
-def test_mute_route_rejects_unknown_duration_before_workflow_dispatch():
+def test_retired_mute_route_rejects_unknown_duration_without_dispatch():
     app = FastAPI()
     app.include_router(build_router(lambda: None))
     result = _request(app, "PATCH", "/settings/mute", json={
         "view_id": "valid-view-id", "control_id": "7", "duration": "until_tuesday",
     })
-    assert result.status_code == 422
+    assert result.status_code == 404
 
 
 @pytest.mark.parametrize(("failure", "status_code"), [
@@ -1043,11 +1027,11 @@ def test_router_covers_management_settings_enrolment_and_publication(  # pylint:
     assert checked["latest_version"] == 2
     assert asyncio.run(request(
         "GET", "/wisdom/settings", params={"view_id": view_id}
-    )).json()["mute_control"]["revision"] == 7
+    )).json()["delivery_mode"] == "agent"
     assert asyncio.run(request(
         "PATCH", "/wisdom/settings/mute",
         json={"view_id": view_id, "control_id": "7", "duration": "1_week"},
-    )).json()["muted"] is True
+    )).status_code == 404
     assert asyncio.run(request("GET", "/wisdom/catalog/skill-1")).json()["slug"] == "one"
     versions = asyncio.run(request("GET", "/wisdom/catalog/skill-1/versions")).json()
     assert versions["versions"][0]["version"] == 1

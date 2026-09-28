@@ -88,8 +88,8 @@ def _prepare_local_offer(runtime, grant):
     try:
         if service.native_owner() != grant["owner"]:
             return None
-        # Do not prepare (possibly with editorial model I/O) while muted
-        # or suppressed. The existing notice pipeline rechecks at offer time.
+        # Do not prepare (possibly with editorial model I/O) while suppressed.
+        # The existing notice pipeline rechecks at offer time.
         candidate = next((row for row in service.notice_candidates()
                           if row.get("event_id") == grant["event_id"]), None)
         if (candidate is None
@@ -98,8 +98,7 @@ def _prepare_local_offer(runtime, grant):
         reference = {"kind": "candidate", "content_hash": candidate["content_hash"],
                      "notice_key": _key(candidate)}
         preferences = service.notice_preferences([reference])
-        if (preferences.get("muted")
-                or (preferences.get("suppressed") or {}).get(_key(candidate))):
+        if (preferences.get("suppressed") or {}).get(_key(candidate)):
             return None
         plan = service.prepare_candidate_offer(grant["event_id"])
         event = service.qualification_state.local_event(grant["event_id"])

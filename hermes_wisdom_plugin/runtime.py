@@ -13,11 +13,9 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable
-from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
@@ -327,11 +325,10 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         ]
 
     def notice_preferences(self, references: list[dict[str, Any]]) -> dict[str, Any]:
-        """Read remote mute and exact suppressions; never stage local delivery work."""
+        """Read exact suppressions; retired mute state is neither read nor changed."""
         from .notices import suppression_key  # pylint: disable=import-outside-toplevel
 
         owner = self._installation_owner()
-        mute = self.client.recommendation_mute()
         keyed = [
             (
                 str(reference["notice_key"]),
@@ -341,11 +338,11 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         ]
         remote_keys = list(dict.fromkeys(remote for _local, remote in keyed))
         rows = self.client.recommendation_suppressions(remote_keys) if remote_keys else []
-        if mute.org_id != owner["organization_id"] or owner != self._installation_owner():
+        if owner != self._installation_owner():
             raise WisdomAuthError("Collective Wisdom notice preference owner changed")
         by_remote = {row.key: row.suppress_until for row in rows}
         suppressed = {local: by_remote[remote] for local, remote in keyed if remote in by_remote}
-        return {"muted": bool(mute.muted), "suppressed": suppressed}
+        return {"suppressed": suppressed}
 
     def end_turn_notices(self, renderer: Callable[[list[dict[str, Any]]], Any] | None,
                          *, candidate_event_id: str | None = None):
@@ -796,26 +793,14 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         }
 
     def notification_settings(
-        self, *, may_apply: Callable[[], bool], include_mute_control: bool = False
+        self, *, may_apply: Callable[[], bool]
     ) -> dict[str, Any]:
-        """Prepare one current mode/mute snapshot for an invocation-scoped review."""
+        """Prepare current profile notification settings without remote mute state."""
 
         _require_current(may_apply)
         owner = self.native_owner()
         _require_current(may_apply)
         mode = self.notification_mode()
-        try:
-            mute = self.client.recommendation_mute()
-            gateway_status = "available"
-            gateway_mute = mute.model_dump(mode="json")
-            mute_control = gateway_mute if include_mute_control else None
-        except WisdomAuthError:
-            raise
-        except Exception:  # pylint: disable=broad-exception-caught
-            # Read-only/missing Gateway authority removes only those controls.
-            mute_control = None
-            gateway_status = "unavailable"
-            gateway_mute = None
         if self.native_owner() != owner:
             raise WisdomAuthError("Collective Wisdom notification owner changed")
         _require_current(may_apply)
@@ -827,69 +812,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                 "agent": "Eligible recommendations may be assessed and delivered.",
                 "fixed": "Assessment and proactive delivery are off; manual review remains.",
             },
-            "gateway_status": gateway_status,
-            "gateway_mute": gateway_mute,
-            "mute_sync": None,
-            "mute_control": mute_control,
         }
-
-    def notification_mute_status(self) -> dict[str, Any]:
-        """Inspect persisted mute state without preparing a choice or flushing work."""
-
-        return self.mute("status")
-
-    def choose_notification_mute(
-        self,
-        control_id: str,
-        duration: str | None,
-        *,
-        may_apply: Callable[[], bool],
-    ) -> dict[str, Any]:
-        """Apply one exact revision-bound mute choice and attempt its idempotent sync."""
-
-        owner = self.native_owner()
-        client = self.client
-        if client is None:
-            raise WisdomValidationError("Collective Wisdom service is unavailable")
-        current = client.recommendation_mute()
-        if current.revision is None or control_id != str(current.revision):
-            raise WisdomConflict("Collective Wisdom mute setting changed; review it again")
-        _require_current(may_apply)
-        if self.native_owner() != owner:
-            raise WisdomAuthError("Collective Wisdom notification owner changed")
-        result = client.set_recommendation_mute(
-            duration,
-            expected_revision=current.revision,
-            mutation_id=str(uuid4()),
-            requested_at=datetime.now(timezone.utc).isoformat(
-                timespec="milliseconds"
-            ).replace("+00:00", "Z"),
-        )
-        if self.native_owner() != owner:
-            raise WisdomAuthError("Collective Wisdom notification owner changed")
-        confirmed = client.recommendation_mute()
-        if self.native_owner() != owner:
-            raise WisdomAuthError("Collective Wisdom notification owner changed")
-        if (confirmed.revision != result.revision or confirmed.duration != duration
-                or confirmed.muted != (duration is not None)
-                or confirmed.org_id != owner["organization_id"]):
-            raise WisdomConflict(
-                "Notification preference could not be confirmed; open settings again"
-            )
-        return confirmed.model_dump(mode="json")
-
-    def mute(self, choice="status"):
-        """Inspect or mutate the shared organization notification preference."""
-
-        self._installation_owner()
-        if choice == "status":
-            result = self.client.recommendation_mute()
-        else:
-            duration = {"off": None, "1d": "1_day", "1w": "1_week",
-                        "30d": "30_days"}.get(choice, choice)
-            result = self.client.set_recommendation_mute(duration)
-        self.check_owner()
-        return result.model_dump(mode="json")
 
     def maintenance(self, *, refresh_policy=False, apply_automatic=False):
         """Explicit bounded producer; automatic mutation requires its own flag."""

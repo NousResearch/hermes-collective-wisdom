@@ -1568,12 +1568,6 @@ test('Settings keeps simple notification controls without an Activity diagnostic
       gateway_mute: { org_id: 'org-1', muted: false, revision: 7 },
       mute_control: { org_id: 'org-1', muted: false, revision: 7 }
     }
-    if (path === '/settings/mute') {
-      assert.deepEqual(structuredClone(options.body), {
-        view_id: 'view-remote-a-A', control_id: '7', duration: '1_week'
-      })
-      return { org_id: 'org-1', muted: true, duration: '1_week', muted_until: '2030-01-08T00:00:00Z', revision: 8 }
-    }
     throw new Error(`unexpected ${path}`)
   })
   const mounted = await renderPage(loaded)
@@ -1584,10 +1578,9 @@ test('Settings keeps simple notification controls without an Activity diagnostic
   assert.match(mounted.container.textContent, /Recommendations/)
   assert.ok(button(mounted, 'On'))
   assert.ok(button(mounted, 'Off'))
-  assert.match(mounted.container.textContent, /for you, not your teammates/i)
-  assert.doesNotMatch(mounted.container.textContent, /everyone|organization-wide/i)
-  await click(button(mounted, 'Mute for 1 week'))
-  assert.ok(loaded.calls.rest.some(([path]) => path === '/settings/mute'))
+  assert.doesNotMatch(mounted.container.textContent, /mute|snooze/i)
+  assert.equal(button(mounted, 'Mute for 1 week'), undefined)
+  assert.equal(loaded.calls.rest.some(([path]) => path === '/settings/mute'), false)
 })
 
 test('Contribute lists share candidates and persists Not now through the backend', async t => {

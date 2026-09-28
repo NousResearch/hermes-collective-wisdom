@@ -170,7 +170,7 @@ def test_candidate_producer_projects_prepared_copy_only_for_current_source(tmp_p
     assert "final Share My Skill action" in view.notice
     assert set(state.local_event(event_id)["payload"]["preparation"]) == {"draft_id", "hashes"}
     assert [action.label for action in view.actions] == [
-        "Review Checks", "View More Details", "Snooze Collective Wisdom",
+        "Review Checks", "View More Details", "Notification settings",
         "Maybe Later", "Review proposal",
     ]
     assert service.native_candidate_inspect(event_id)["facts"] == offered["facts"]

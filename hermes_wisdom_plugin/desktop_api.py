@@ -87,15 +87,6 @@ class ModeBody(ViewBody):
     expected_mode: str = Field(pattern=r"^(agent|fixed)$")
 
 
-class MuteBody(ViewBody):
-    """Apply one revision-bound organization mute choice."""
-
-    control_id: str = Field(min_length=1, max_length=64)
-    duration: str | None = Field(
-        default=None, pattern=r"^(1_day|1_week|30_days|forever)$"
-    )
-
-
 class EnrollmentBody(ViewBody):
     """Accept the displayed disclosure version."""
 
@@ -457,25 +448,9 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         )
 
     def notification_settings(self, service: Any, view_id: str):
-        """Read current mode and a revision-bound organization mute control."""
+        """Read current profile notification mode."""
         self._require_view(service, view_id)
         return service.notification_settings(
-            include_mute_control=True,
-            may_apply=lambda: self.current(service, view_id),
-        )
-
-    def choose_notification_mute(
-        self,
-        service: Any,
-        view_id: str,
-        control_id: str,
-        duration: str | None,
-    ):
-        """Apply only the organization mute snapshot displayed in this view."""
-        self._require_view(service, view_id)
-        return service.choose_notification_mute(
-            control_id,
-            duration,
             may_apply=lambda: self.current(service, view_id),
         )
 
@@ -857,14 +832,6 @@ def _add_catalog_and_install_routes(router, api, invoke):
     def settings(view_id: str = Query(min_length=8, max_length=128)):
         return invoke(lambda service: api.notification_settings(service, view_id))
 
-    @router.patch("/settings/mute")
-    def settings_mute(body: MuteBody):
-        return invoke(lambda service: api.choose_notification_mute(
-            service,
-            body.view_id,
-            body.control_id,
-            body.duration,
-        ))
 
 
 def build_router(  # pylint: disable=too-many-locals

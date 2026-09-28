@@ -75,7 +75,7 @@ def test_cli_notification_settings_are_explicit_and_status_does_not_write(choice
     )
 
 
-@pytest.mark.parametrize("command", ["settings fixed", "mute forever"])
+@pytest.mark.parametrize("command", ["settings fixed"])
 def test_shared_slash_controls_only_offer_terminal_handoff(command):
     service = _Service()
     output = run_slash(command, service)
@@ -1206,8 +1206,6 @@ def test_cli_unavailable_retry_guidance(  # pylint: disable=too-many-arguments,t
     (["notifications", "--mark-seen"], False),
     (["settings", "status"], True),
     (["settings", "fixed"], False),
-    (["mute", "status"], True),
-    (["mute", "forever"], False),
     (["prepared", "inspect", "local:draft"], True),
     (["prepared", "review", "local:draft"], False),
     (["installed-setup", "inspect", "skill-1"], True),

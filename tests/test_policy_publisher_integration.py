@@ -79,7 +79,7 @@ def producer(tmp_path, mode, *, muted=False, suppressed=False):
 
 @pytest.mark.parametrize('mode,muted,suppressed,offered', [
     (None, False, False, 0), ('useful_only', False, False, 0),
-    ('promote_all', False, False, 1), ('promote_all', True, False, 0),
+    ('promote_all', False, False, 1), ('promote_all', True, False, 1),
     ('promote_all', False, True, 0),
 ])
 def test_actual_gateway_policy_projection_and_personal_precedence(tmp_path, mode, muted,

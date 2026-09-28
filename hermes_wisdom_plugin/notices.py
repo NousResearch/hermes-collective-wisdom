@@ -193,8 +193,7 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                 preferences = service.notice_preferences(references)
                 allowed = [
                     row for row in policy_allowed
-                    if not preferences.get("muted")
-                    and not (preferences.get("suppressed") or {}).get(_key(row))
+                    if not (preferences.get("suppressed") or {}).get(_key(row))
                 ]
                 allowed_events = [row for row in allowed if row in available_events]
                 publisher_facts = {(fact["skill_id"], fact.get("version")): fact

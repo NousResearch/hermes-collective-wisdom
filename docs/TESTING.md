@@ -74,7 +74,7 @@ not a passing integration test. Never give fixtures production credentials.
 - **Qualification:** real stored snapshots, meaningful refinement, and opt-in
   before model-data disclosure. Advice never authorizes publication.
 - **Notices:** candidate checks each eligible turn, feed polling only when due;
-  independent policy/settings/mute/suppression gates; offered candidates do not
+  independent policy/settings/suppression gates; offered candidates do not
   starve later ones; stale account results are discarded.
 - **Lifecycle:** actual emitted Desktop events, connection/profile fencing,
   disable/unload cleanup and native cancellation revocation. Unsupported
@@ -135,7 +135,7 @@ disposable profiles and an inert skill; never reset existing user state as a tes
    moderation and publication; verify member/admin separation.
 2. As another member, browse, inspect, install and separately approve setup;
    publish another version and exercise manual and allowed automatic updates.
-3. Exercise mute/suppression and explicit browsing after dismissed/missed advice,
+3. Exercise per-skill suppression and explicit browsing after dismissed/missed advice,
    without requiring delivery guarantees or delivery-linked reporting.
 4. Deny stale/altered reviews, wrong actors/messages and wrong profiles. Switch
    account/profile/connection mid-request; stale results must not cross over.

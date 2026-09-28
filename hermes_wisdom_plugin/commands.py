@@ -61,7 +61,7 @@ MAX_PREPARED_PAYLOAD_BYTES = (
 )
 CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
 _SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
-    {"setup", "status", "settings", "mute", "list", "browse", "show", "versions", "help",
+    {"setup", "status", "settings", "list", "browse", "show", "versions", "help",
      "install", "installed", "check", "update", "uninstall", "installed-setup"}
 )
 _CHECK_LABELS = (
@@ -85,7 +85,7 @@ _PUBLIC_STATUS_STATES = {
     "degraded": "attention required",
     "unavailable": "unavailable",
 }
-_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "inbox",
+_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "inbox",
                  "maintenance", "list", "browse", "show", "versions", "suggest",
                  "prepared", "publication", "install", "installed", "check", "update",
                  "installed-setup", "uninstall", "help")
@@ -144,12 +144,6 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     )
     notifications = add("notifications", "Show durable local Wisdom notices")
     notifications.add_argument("--mark-seen", action="store_true")
-    mute = add("mute", "Manage organization-wide proactive Wisdom notifications")
-    mute.add_argument(
-        "mute_duration", nargs="?", default="status",
-        choices=["status", "1d", "1w", "30d", "forever", "off"],
-    )
-
     add("inbox", "Read local Wisdom activity without polling or delivery")
     maintenance = add("maintenance", "Refresh policy or run bounded automatic updates")
     maintenance.add_argument("--refresh-policy", action="store_true")
@@ -334,7 +328,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 accepted = True
             result = service.setup(accept_disclosure=accepted)
         elif command in {
-            "status", "settings", "notifications", "mute", "inbox",
+            "status", "settings", "notifications", "inbox",
             "maintenance", "list", "browse", "show", "versions",
             "publication", "installed", "check", "installed-setup",
         }:
@@ -387,7 +381,6 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 command in {"status", "inbox", "list", "browse", "show", "versions",
                             "installed", "check"}
                 or command == "settings" and args.notification_mode == "status"
-                or command == "mute" and args.mute_duration == "status"
                 or command == "notifications" and not args.mark_seen
                 or command == "prepared" and args.prepared_action == "inspect"
                 or command == "publication" and args.publication_action == "status"
@@ -441,8 +434,6 @@ def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-m
         }
     if command == "notifications":
         return service.notifications(mark_seen=bool(args.mark_seen))
-    if command == "mute":
-        return service.mute(args.mute_duration)
 
     if command == "inbox":
         return service.inbox()
@@ -502,7 +493,7 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
                 "Run `hermes wisdom setup` in your terminal to review the disclosure "
                 "and configure this profile."
             )
-        if command in {"settings", "mute"}:
+        if command == "settings":
             return (
                 "Use an admitted private control or the terminal for notification settings.\n\n"
                 f"Run `hermes wisdom {command} status` to inspect first. Nothing has been changed."
@@ -1170,7 +1161,7 @@ def _slash_help() -> str:
             "",
             "Read: /wisdom browse [query] | /wisdom show <skill>",
             "      /wisdom versions <skill> | /wisdom status | /wisdom setup",
-            "Private: /wisdom settings | /wisdom mute | /wisdom candidate <id>",
+            "Private: /wisdom settings | /wisdom candidate <id>",
             "         /wisdom suggest <skill> | /wisdom prepared <action>",
             "         /wisdom publish <draft> | /wisdom publication <action> <target>",
             "Terminal: /wisdom install | /wisdom installed | /wisdom check",

@@ -942,15 +942,6 @@ function Settings({ bootstrap, client, lifecycle, viewId }) {
     ])
     if (isCurrent(token)) host.notify({ kind: 'success', message: 'Recommendation setting updated' })
   }, 'Recommendation setting was not changed')
-  const mute = useCurrentMutation(client, lifecycle, duration => client.rest('/settings/mute', {
-    method: 'PATCH',
-    body: requestBody(viewId, { control_id: String(current.mute_control.revision), duration })
-  }), async (_result, token, isCurrent) => {
-    await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Your notification mute was updated' })
-  }, 'Your notification mute was not changed')
-  const muteState = current.gateway_mute
-  const muteControl = current.mute_control
   if (settings.error && isUnavailable(settings.error)) return jsx(ReadFailure, { error: settings.error, title: 'Settings unavailable', onRetry: () => settings.refetch() })
   return jsxs('div', { className: 'space-y-6', children: [
     jsx(Section, { title: 'Recommendations', description: mode === 'fixed'
@@ -961,23 +952,6 @@ function Settings({ bootstrap, client, lifecycle, viewId }) {
         jsx(Button, { disabled: current.mode_writable === false || mode === 'fixed' || setMode.isPending, onClick: () => setMode.mutate('fixed'), size: 'sm', type: 'button', variant: mode === 'fixed' ? 'secondary' : 'ghost', children: 'Off' })
       ] })
     }),
-    jsx(Section, { title: 'Mute recommendations for you', description: 'Pause sharing suggestions and skill recommendations for you, not your teammates. You can still browse and install skills.', children: settings.error
-      ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Mute unavailable: ${text(settings.error?.message || settings.error)}` })
-      : !settings.data
-        ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading current mute setting…' })
-        : jsxs('div', { className: 'space-y-3', children: [
-            jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: muteState?.muted
-              ? `Recommendations are muted${muteState?.muted_until ? ` until ${muteState.muted_until}` : ''}.`
-              : 'Recommendations are on for you.' }),
-            muteControl ? jsxs('div', { className: 'flex flex-wrap gap-2', children: [
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_day'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 day' }),
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_week'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 week' }),
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('30_days'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 30 days' }),
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('forever'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute indefinitely' }),
-              jsx(Button, { disabled: mute.isPending || muteState?.muted !== true, onClick: () => mute.mutate(null), size: 'sm', type: 'button', variant: 'secondary', children: 'Unmute' })
-            ] }) : jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'Mute controls are unavailable here.' })
-          ] })
-    })
   ] })
 }
 

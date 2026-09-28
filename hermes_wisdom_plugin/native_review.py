@@ -379,7 +379,7 @@ def _package_needs_acknowledgement(plan: dict[str, Any]) -> bool:
 
 
 def _validate_review_action(record: dict[str, Any], action: str) -> None:
-    if action.startswith("settings.") and record.get("operation") == "settings":
+    if action in {"settings.mode.agent", "settings.mode.fixed"} and record.get("operation") == "settings":
         return
     plan = record.get("plan")
     if action not in {"confirm", "confirm.partial"} or not isinstance(plan, dict):
@@ -417,14 +417,6 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
             action.rsplit(".", 1)[-1],
             expected_mode=str(plan.get("delivery_mode") or ""), may_apply=may_apply,
         )
-    if action in {"settings.mute.1w", "settings.mute.off"}:
-        control = plan.get("mute_control")
-        if not isinstance(control, dict) or control.get("revision") is None:
-            raise WisdomValidationError("Notification mute control is unavailable")
-        duration = "1_week" if action.endswith(".1w") else None
-        return service.choose_notification_mute(
-            str(control["revision"]), duration, may_apply=may_apply,
-        )
     if operation in {"install", "update"} and action == "setup.run":
         apply_setup = (service.install_setup_apply if operation == "install"
                        else service.update_setup_apply)
@@ -446,14 +438,6 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
 
 
 def _settings_result_view(result: dict[str, Any]) -> NativeView:
-    if result.get("muted") is True and result.get("duration") == "1_week":
-        return NativeView(
-            "Notifications muted",
-            "Skill recommendations and sharing suggestions are paused for one week. "
-            "This only affects you; you can still browse and install skills.", dismissed=True,
-        )
-    if result.get("muted") is False:
-        return NativeView("Notifications unmuted", "Recommendations are on for you.", dismissed=True)
     if result.get("delivery_mode") == "fixed":
         return NativeView("Automatic suggestions off", "You can still browse and install skills.", dismissed=True)
     if result.get("delivery_mode") == "agent":
@@ -473,15 +457,7 @@ def _settings_view(record: dict[str, Any]) -> NativeView:
     if state != "pending":
         result = record.get("result")
         return _settings_result_view(result if isinstance(result, dict) else {})
-    control = plan.get("mute_control")
-    muted = isinstance(control, dict) and control.get("muted") is True
-    duration = control.get("duration") if muted else None
-    current = (
-        "Muted for one week" if duration == "1_week" else "Muted" if muted else
-        "On" if isinstance(control, dict) else "Mute status unavailable"
-    )
-    if plan.get("delivery_mode") == "fixed":
-        current += "; automatic suggestions off"
+    current = "Off" if plan.get("delivery_mode") == "fixed" else "On"
     item = NativeItem(f"Current: {current}", "")
     actions = [NativeAction("Cancel", "cancel", destructive=True)]
     if plan.get("mode_writable") is True:
@@ -490,11 +466,6 @@ def _settings_view(record: dict[str, Any]) -> NativeView:
             actions.insert(0, NativeAction("Turn off automatic suggestions", "settings.mode.fixed"))
         else:
             actions.insert(0, NativeAction("Turn on automatic suggestions", "settings.mode.agent"))
-    if isinstance(control, dict) and control.get("revision") is not None:
-        actions.insert(0, NativeAction(
-            "Unmute recommendations" if muted else "Mute one week",
-            "settings.mute.off" if muted else "settings.mute.1w",
-        ))
     return NativeView(
         "Collective Wisdom settings",
         "Pause sharing suggestions and skill recommendations for you, not your teammates. "
@@ -581,7 +552,7 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
         actions=[
             NativeAction("✅ Safe To Share" if safe else "Review Checks", "checks"),
             NativeAction("View More Details", "details"),
-            NativeAction("Snooze Collective Wisdom", "settings"),
+            NativeAction("Notification settings", "settings"),
             NativeAction("Maybe Later", "cancel"),
             NativeAction("Review proposal" if complete else "Retry preparation", "share"),
         ],
@@ -591,40 +562,31 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
 def _installation_view(record: dict[str, Any]) -> NativeView:
     plan = record["plan"]
     updating = record["operation"] == "update"
-    verb = "update" if updating else "install"
     facts = plan.get("verified_facts")
     facts = facts if isinstance(facts, dict) else {}
-    title = _skill_name(plan)
     description = plan.get("editorial_description") or plan.get("author_description") or plan.get("description")
-    files = plan.get("files")
     setup_commands = plan.get("setup_commands")
     return NativeView(
-        "A shared skill in your organization is available",
-        title,
-        [NativeItem("What it does", _safe(description, "Description unavailable")),
+        "An updated skill is available in your organization's collective wisdom." if updating else
+        "A new skill has been added to your organization's collective wisdom.",
+        _skill_name(plan),
+        [NativeItem("What does it do?", _safe(description, "Description unavailable. View Details to inspect the skill.")),
          NativeItem("Why it may help", _safe(plan.get("coworker_benefit") or facts.get("coworker_benefit") or plan.get("version_explanation"), "Explanation unavailable")),
-         *([NativeItem("What changed", "Change summary unavailable; review the exact version in Details.")]
+         *([NativeItem("What changed", _installed_label(plan) +
+                       "\nChange summary unavailable; review the exact version in Details.")]
            if updating else []),
          NativeItem("Version publisher", _safe(plan.get("publisher_display_name"), "Publisher name unavailable") +
                     ("\nTeam: " + _safe(plan["team_display_name"])
-                     if plan.get("team_display_name") else "") + "\nOn this profile: " +
-                    _installed_label(plan) +
-                    (f"\nFiles: {len(files)}" if isinstance(files, list) else ""))]
-        + ([NativeItem("Setup", "\n".join(setup_commands))]
+                     if plan.get("team_display_name") else ""))]
+        + ([NativeItem("Setup requires separate permission", "\n".join(setup_commands))]
            if isinstance(setup_commands, list) and setup_commands
            and all(isinstance(command, str) for command in setup_commands) else [])
         + ([NativeItem("Agent explanation (not authorization)", record["explanation"])]
            if record.get("explanation") else []),
-        notice=f"Would you like to {verb} this skill? View Details shows the files and checks. "
-        "If there's something to review first, we'll show it before you continue. "
-        + (("New setup is shown above. You can choose whether to run it after updating. "
-            if updating else "Install adds the files. You can choose whether to run setup afterward. ")
-           if setup_commands else "")
-        + "Mute changes recommendations for all skills.",
         actions=[
             NativeAction("View Details", "details"), NativeAction("Not Now", "defer"),
-            NativeAction("Mute Skill Recommendations", "settings"),
-            NativeAction("Update Skill" if updating else "Install Skill", verb, primary=True),
+            NativeAction("Update" if updating else "Install",
+                         "update" if updating else "install", primary=True),
         ],
     )
 
@@ -1115,7 +1077,7 @@ class NativeReviewController:
         })
 
     def request_settings(self, service: Any, invocation: NativeInvocation) -> dict[str, Any]:
-        plan = service.notification_settings(may_apply=lambda: True, include_mute_control=True)
+        plan = service.notification_settings(may_apply=lambda: True)
         plan = {**plan, "operation": "settings", "allowed": False}
         return self._insert(service, invocation, "settings", plan)
 
@@ -1265,7 +1227,7 @@ class NativeReviewController:
         self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
         authority: Callable[[], bool],
     ) -> dict[str, Any]:
-        plan = service.notification_settings(may_apply=authority, include_mute_control=True)
+        plan = service.notification_settings(may_apply=authority)
         if not authority() or not _owner_matches(record, service, invocation):
             raise WisdomAuthError("Collective Wisdom review owner changed")
         result = {

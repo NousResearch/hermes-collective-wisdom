@@ -67,7 +67,7 @@ Supported private Desktop and messaging routes may check for a notice at turn en
 There is no proactive notice for plain CLI/TUI chat or unsupported clients.
 
 Each eligible completed turn checks one bounded cursor-based feed page, combines
-eligible local qualified candidates, and reads current policy, mute, and suppression.
+eligible local qualified candidates, and reads current policy and suppression.
 It offers at most one deterministic
 human-facing notice. Cursor advancement never skips unconsumed pagination; a failed
 feed preserves the cursor. Renderer failure is swallowed so it cannot fail the agent
