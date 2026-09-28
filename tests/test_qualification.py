@@ -237,6 +237,8 @@ def test_candidate_model_validation_failure_keeps_owner_copy_and_no_safe_claim(
     ]
     assert plan["professionalism_check"]["status"] == "pass"
     assert plan["facts"]["editorial_status"] == "incomplete"
+    assert plan["facts"]["editorial_failure"] == "invalid_response"
+    assert "invalid response" in view.notice.lower()
     assert "What it does: Review fictional notes for a shift handover." in view.summary
     assert "Why others might benefit: Coworker benefit not yet available." in view.summary
     assert "Editorial copy is incomplete" in view.notice
@@ -249,6 +251,54 @@ def test_candidate_model_validation_failure_keeps_owner_copy_and_no_safe_claim(
     )
     assert refreshed["facts"]["editorial"]["coworker_benefit"]
     assert len(service._direct_state.prepared_drafts(OWNER)) == 1
+
+
+@pytest.mark.parametrize("response_text,expected_failure", [
+    ("PRIVATE_BAD_JSON", "invalid_response"),
+    ('{"editorial_name":"Title","editorial_description":"Description"}',
+     "adapter_validation"),
+])
+def test_editorial_host_adapter_rejects_invalid_response_without_leaking(
+    caplog, response_text, expected_failure,
+):
+    """Use the stock host structured adapter with a non-network injected caller."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+    import os  # pylint: disable=import-outside-toplevel
+    from pathlib import Path  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.editorial import resolve_editorial_metadata  # pylint: disable=import-outside-toplevel
+
+    root = os.environ.get("WISDOM_AGENT_DIR")
+    if not root or not (Path(root) / "agent" / "plugin_llm.py").is_file():
+        pytest.skip("stock host source requires WISDOM_AGENT_DIR")
+    spec = importlib.util.spec_from_file_location(
+        "stock_plugin_llm", Path(root) / "agent" / "plugin_llm.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    import sys  # pylint: disable=import-outside-toplevel
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    def response(**kwargs):
+        assert kwargs["max_tokens"] == 300 and kwargs["timeout"] == 45
+        assert kwargs["extra_body"]["response_format"]["type"] == "json_schema"
+        return ("stock", "model", SimpleNamespace(
+            model="model", choices=[SimpleNamespace(
+                message=SimpleNamespace(content=response_text))]
+        ))
+    adapter = module.make_plugin_llm_for_test(
+        plugin_id="wisdom", policy=module._TrustPolicy(plugin_id="wisdom"), sync_caller=response,
+    )
+    result = resolve_editorial_metadata(
+        frontmatter={"name": "my-skill", "description": "Use when routing"},
+        skill_markdown="# PRIVATE_INPUT", llm=adapter,
+    )
+    # Host skips schema enforcement when optional jsonschema is absent; plugin
+    # Pydantic validation must still reject the incomplete object.
+    if expected_failure == "adapter_validation" and importlib.util.find_spec("jsonschema") is None:
+        expected_failure = "invalid_response"
+    assert result["failure"] == expected_failure
+    assert result["coworker_benefit"] == ""
+    assert response_text not in caplog.text and "PRIVATE_INPUT" not in caplog.text
 
 def test_interrupted_editorial_upgrade_rebinds_verified_overlay(tmp_path, monkeypatch):
     from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import re
 import uuid
@@ -17,6 +18,7 @@ MAX_EDITORIAL_NAME_LENGTH = 100
 MAX_EDITORIAL_DESCRIPTION_LENGTH = 320
 MAX_COWORKER_BENEFIT_LENGTH = 299
 MAX_SKILL_CONTEXT_CHARS = 24_000
+_LOG = logging.getLogger(__name__)
 
 
 class _EditorialCopy(BaseModel):
@@ -144,7 +146,9 @@ def resolve_editorial_metadata(
             "coworker_benefit": existing_benefit or "",
             "changed": False,
             "provenance": None,
+            "failure": "model_unavailable",
         }
+    stage = "model_call"
     try:
         result = llm.complete_structured(
             instructions=(
@@ -179,7 +183,9 @@ def resolve_editorial_metadata(
             schema_name="wisdom_editorial_metadata",
             purpose="Prepare Collective Wisdom presentation metadata",
         )
+        stage = "response_validation"
         parsed = _EditorialCopy.model_validate(getattr(result, "parsed", None))
+        stage = "provenance_validation"
         provider = str(getattr(result, "provider", "") or "")[:128]
         model = str(getattr(result, "model", "") or "")[:128]
         if not provider or not model:
@@ -195,13 +201,23 @@ def resolve_editorial_metadata(
                 "model": model,
             },
         }
-    except Exception:  # pylint: disable=broad-exception-caught
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Provider exceptions may contain prompt/response bytes; emit only fixed labels.
+        category = ("timeout" if isinstance(exc, TimeoutError) else
+                    "invalid_response" if stage == "response_validation"
+                    else "adapter_validation" if stage == "model_call" and isinstance(
+                        exc, ValueError)
+                    else "provenance_missing" if stage == "provenance_validation"
+                    else "model_error")
+        _LOG.warning("Wisdom editorial preparation incomplete stage=%s category=%s",
+                     stage, category)
         return {
             "editorial_name": existing_name or canonical_name,
             "editorial_description": existing_description or canonical_description,
             "coworker_benefit": existing_benefit or "",
             "changed": False,
             "provenance": None,
+            "failure": category,
         }
 
 

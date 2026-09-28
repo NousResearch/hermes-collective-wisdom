@@ -325,6 +325,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "complete" if draft.get("editorial_complete_hash") == content_hash
                 else "incomplete"
             ),
+            "editorial_failure": (draft.get("editorial_failure")
+                                  if draft.get("editorial_complete_hash") != content_hash
+                                  else None),
             "files": files,
             "hashes": {
                 "content": str(draft["content_hash"]),
@@ -620,6 +623,26 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             snapshot_text=(source / "SKILL.md").read_text(encoding="utf-8"),
         )
 
+    def _editorial_disclosure_ready(self, source_files, description, frontmatter,
+                                    allow_model_review):
+        ready = model_disclosure_ready(
+            source_files,
+            str(description or ""), str(frontmatter.get("metadata") or ""),
+        )
+        if allow_model_review and ready:
+            try:
+                guard = _scan_snapshot(
+                    self.host, self.store.root / "model-inputs", source_files
+                )
+                ready = (
+                    guard.get("available") is True
+                    and guard.get("allowed") is True
+                    and not guard.get("findings")
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                ready = False
+        return ready
+
     def _prepare_editorial(
         self, source, source_hash, skill_id, allow_model_review, may_apply,
     ):
@@ -630,22 +653,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         skill_markdown = next(body for path, _mode, body in source_files
                               if path == "SKILL.md").decode("utf-8")
         description = _existing_author_description(frontmatter)
-        disclosure_ready = model_disclosure_ready(
-            source_files,
-            str(description or ""), str(frontmatter.get("metadata") or ""),
+        disclosure_ready = self._editorial_disclosure_ready(
+            source_files, description, frontmatter, allow_model_review,
         )
-        if allow_model_review and disclosure_ready:
-            try:
-                guard = _scan_snapshot(
-                    self.host, self.store.root / "model-inputs", source_files
-                ).get("guard", {})
-                disclosure_ready = (
-                    guard.get("available") is True
-                    and guard.get("allowed") is True
-                    and not guard.get("findings")
-                )
-            except Exception:  # pylint: disable=broad-exception-caught
-                disclosure_ready = False
         if source_fingerprint(source) != source_hash:
             raise WisdomConflict("source changed during local disclosure preflight")
         if description is None:
@@ -668,6 +678,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             skill_markdown=skill_markdown,
             llm=self.llm if allow_model_review and disclosure_ready else None,
         )
+        if allow_model_review and not disclosure_ready and self.llm is not None:
+            editorial["failure"] = "disclosure_blocked"
         return frontmatter, description, editorial
 
     def _save_prepared(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -726,6 +738,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                     package.content_hash if editorial_copy_complete(package.overlay, skill_name)
                     else None
                 ),
+                "editorial_failure": editorial.get("failure"),
             }
             self._require_current(may_apply)
             if existing is not None:

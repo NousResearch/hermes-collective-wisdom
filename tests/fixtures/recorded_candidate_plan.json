@@ -1,0 +1,113 @@
+{
+  "kind": "candidate",
+  "facts": {
+    "name": "local-handover-skill",
+    "qualification": "high_usage",
+    "editorial": {
+      "editorial_name": "Shift Handover Summary",
+      "editorial_description": "Summarizes fictional shift handover notes into completed work, next actions, and blockers while preserving stated facts.",
+      "coworker_benefit": "Coworkers can quickly see what was completed, what needs attention next, and what may be blocking progress."
+    },
+    "editorial_status": "complete",
+    "editorial_failure": null
+  },
+  "security_check": {
+    "schema_version": 1,
+    "source": "local_preflight",
+    "status": "pending",
+    "local_status": "pass",
+    "upload_allowed": true,
+    "warning_acceptance_required": false,
+    "opaque_file_count": 0,
+    "opaque_scan_coverage": "ascii_credential_and_private_key_patterns",
+    "summary": "No issues detected by local security checks. Required Gateway checks run after you authorize upload and before publication.",
+    "checks": [
+      {
+        "key": "private_keys",
+        "label": "Private keys",
+        "status": "pass",
+        "finding_count": 0,
+        "details": [
+          "No issues detected by this local check."
+        ]
+      },
+      {
+        "key": "live_credentials",
+        "label": "Live credentials",
+        "status": "pass",
+        "finding_count": 0,
+        "details": [
+          "No issues detected by this local check."
+        ]
+      },
+      {
+        "key": "secret_assignments",
+        "label": "Secret-like assignments",
+        "status": "pass",
+        "finding_count": 0,
+        "details": [
+          "No issues detected by this local check."
+        ]
+      },
+      {
+        "key": "skills_guard",
+        "label": "Harmful instruction patterns",
+        "status": "pass",
+        "finding_count": 0,
+        "details": [
+          "The local skills guard checks known harmful instruction patterns."
+        ],
+        "findings": []
+      },
+      {
+        "key": "organization_policy",
+        "label": "Organization policy",
+        "status": "pending",
+        "finding_count": 0,
+        "details": [
+          "Required Gateway check after you authorize upload; before publication."
+        ]
+      },
+      {
+        "key": "personal_information",
+        "label": "Personal information",
+        "status": "pending",
+        "finding_count": 0,
+        "details": [
+          "Required Gateway check after you authorize upload; before publication."
+        ]
+      }
+    ]
+  },
+  "professionalism_check": {
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "No profanity, abuse, hate, harassment, sexual or graphic language, or manipulative or spam-like wording detected.",
+    "checks": [
+      {
+        "key": "profanity_or_abuse",
+        "status": "pass",
+        "finding_count": 0,
+        "details": []
+      },
+      {
+        "key": "hate_or_harassment",
+        "status": "pass",
+        "finding_count": 0,
+        "details": []
+      },
+      {
+        "key": "sexual_or_graphic_language",
+        "status": "pass",
+        "finding_count": 0,
+        "details": []
+      },
+      {
+        "key": "manipulative_or_spam",
+        "status": "pass",
+        "finding_count": 0,
+        "details": []
+      }
+    ]
+  }
+}

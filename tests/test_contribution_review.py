@@ -54,16 +54,17 @@ class Host:
 
     def scan(self, overlay: Path) -> dict[str, object]:
         self.scans.append(overlay)
-        return {"guard": {
+        return {
             "available": self.allowed is not None,
             "allowed": self.allowed,
-            "verdict": "allow" if self.allowed is True else "review",
+            "verdict": "safe" if self.allowed is True else "caution",
             "summary": "clean" if self.allowed is True else "manual review required",
             "findings": [],
-        }}
+        }
 
     def check_package_security(self, overlay: Path) -> PackageSecurityDecision:
-        return PackageSecurityDecision(allowed=self.scan(overlay)["guard"]["allowed"])
+        self.scan(overlay)
+        return PackageSecurityDecision(allowed=self.allowed)
 
 
 class RecordingLlm:
@@ -169,13 +170,11 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     assert result["local_draft_id"] == result["draft_id"]
     assert result["drafted_description"] == "Review incident notes."
     assert result["local_scan"] == {
-        "guard": {
-            "available": True,
-            "allowed": True,
-            "verdict": "allow",
-            "summary": "clean",
-            "findings": [],
-        }
+        "available": True,
+        "allowed": True,
+        "verdict": "safe",
+        "summary": "clean",
+        "findings": [],
     }
     assert result["security_check"]["content_hash"] == result["hashes"]["content"]
     assert result["security_check"]["author_description_hash"] == (
@@ -245,6 +244,37 @@ def test_model_disclosure_preflight_blocks_credential_shaped_source(tmp_path: Pa
     assert result["editorial_status"] == "incomplete"
     assert result["professionalism_check"]["status"] == "unavailable"
     assert result["professionalism_check"]["availability_reason"] == "local_disclosure_preflight"
+
+@pytest.mark.parametrize("decision", [
+    {"available": False, "allowed": True, "findings": []},
+    {"available": True, "allowed": None, "findings": []},
+    {"available": True, "allowed": False, "findings": []},
+    {"available": True, "allowed": True, "findings": [{"severity": "low"}]},
+    RuntimeError("scan unavailable"),
+])
+def test_editorial_withholds_model_without_clean_host_preflight(
+    tmp_path: Path, decision: dict | Exception,
+):
+    llm = RecordingLlm()
+    value, _source, _ = reviewer(tmp_path, llm=llm)
+    original_scan = value.host.scan
+    preflight_pending = True
+
+    def scan(path):
+        nonlocal preflight_pending
+        if path.name.startswith("model-input-"):
+            if isinstance(decision, Exception) and preflight_pending:
+                preflight_pending = False
+                raise decision
+            if not isinstance(decision, Exception):
+                return decision
+        return original_scan(path)
+
+    value.host.scan = scan
+    result = value.prepare("reviewed-skill", allow_model_review=True)
+    assert result["editorial_status"] == "incomplete"
+    assert result["editorial_failure"] == "disclosure_blocked"
+    assert all(call["schema_name"] != "wisdom_editorial_metadata" for call in llm.calls)
 
 
 def test_failed_model_can_be_retried_only_with_explicit_review(tmp_path: Path):
@@ -413,7 +443,7 @@ def test_blocked_host_scan_prepares_warning_but_does_not_authorize_upload(tmp_pa
     value, _source, _binding = reviewer(tmp_path, allowed=False)
     result = value.prepare("reviewed-skill")
     assert result["state"] == "prepared"
-    assert result["local_scan"]["guard"]["allowed"] is False
+    assert result["local_scan"]["allowed"] is False
     assert result["security_check"]["local_status"] == "warning_required"
     assert result["security_check"]["upload_allowed"] is False
     assert result["security_check"]["warning_acceptance_required"] is True

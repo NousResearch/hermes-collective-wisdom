@@ -130,6 +130,27 @@ class HermesAccountAdapter:
         except Exception:  # pylint: disable=broad-exception-caught
             raise WisdomAuthError(_UNAVAILABLE) from None
 
+    def team_name(self) -> str | None:
+        """Read the authenticated Portal name for this bound destination, never an ID fallback."""
+        try:
+            snapshot = self._current_bound_snapshot()
+            account_module = import_module("hermes_cli.nous_account")
+            fetch = account_module._fetch_nous_account_info  # pylint: disable=protected-access
+            payload = fetch(snapshot.access_token, snapshot.portal_base_url)
+            organisation = payload.get("organisation") if isinstance(payload, dict) else None
+            self._current_bound_snapshot()
+            if (not isinstance(organisation, dict)
+                    or organisation.get("id") != snapshot.organization_id):
+                return None
+            name = organisation.get("name")
+            if (not isinstance(name, str) or not name.strip()
+                    or name.strip() == snapshot.organization_id
+                    or any(ord(char) < 32 for char in name)):
+                return None
+            return name.strip()[:200]
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+
     def _current_bound_snapshot(self) -> _HostAccountSnapshot:
         snapshot = self._read_snapshot()
         _require_current_snapshot(snapshot, self._clock())

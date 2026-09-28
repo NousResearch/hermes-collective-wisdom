@@ -124,6 +124,7 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
         *,
         renderer: Callable[[list[dict[str, Any]]], Any] | None,
         conversation_history: list[dict[str, Any]] | None = None,
+        candidate_event_id: str | None = None,
     ) -> dict[str, Any]:
         """Check one page and current candidates without turning misses into retries."""
         del conversation_history
@@ -137,8 +138,12 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                 polled = True
                 feed_cursor = (checkpoint["awareness_cursor"] if renderer is None
                                else checkpoint["cursor"])
-                page = service.notice_feed(feed_cursor)
-                events, cursor, more = list(page.events), page.next_cursor, page.has_more
+                if candidate_event_id is None:
+                    page = service.notice_feed(feed_cursor)
+                    events, cursor, more = list(page.events), page.next_cursor, page.has_more
+                else:
+                    # Local text offers must neither consume nor present the team feed.
+                    events, cursor, more = [], feed_cursor, bool(checkpoint["has_more"])
                 publications = [fact for row in events
                                 if (fact := _publication(row, service, identity)) is not None]
                 _resolve_publishers(publications, service)
@@ -150,7 +155,9 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                                                   publications=publications,
                                                   expected_cursor=feed_cursor, awareness=True)
                     return {"supported": False, "offered": 0, "polled": True, "more": bool(more)}
-                candidates = list(service.notice_candidates())
+                candidates = [row for row in service.notice_candidates()
+                              if candidate_event_id is None
+                              or row.get("event_id") == candidate_event_id]
                 available_events = [
                     row for row in events
                     if row.get("category") in {"new_skill", "update_available"}
@@ -209,7 +216,7 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                     identity=identity, cursor=cursor, has_more=more,
                     keys=[_key(row) for row in rows], now=now, publications=publications,
                     expected_cursor=checkpoint["cursor"],
-                    awareness_cursor=page.next_cursor,
+                    awareness_cursor=(page.next_cursor if candidate_event_id is None else None),
                 ))
                 if self.state.identity() != identity:
                     raise WisdomAuthError("Collective Wisdom notice owner changed")

@@ -50,7 +50,9 @@ Notification delivery alone never approves an effect. Install approval covers
 reviewed files only; actual external setup commands require a separate Run setup
 choice. Manual setup remains separate.
 
-Plain CLI/TUI chat and unsupported clients receive no proactive notice. Explicit
+CLI/TUI chat may append a best-effort candidate-only suggestion after a verified
+skill load, before final outcome is known; a later failed recovered answer may
+retain it. Other unsupported clients receive no proactive notice. Explicit
 catalog, contribution, install, publish, settings, and recovery commands remain.
 
 ## Operational boundary

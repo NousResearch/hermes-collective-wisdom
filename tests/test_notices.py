@@ -89,6 +89,33 @@ def event(identity="event-1", version=2):
     }
 
 
+@pytest.mark.parametrize("muted,suppressed,expected", [
+    (False, False, 1), (True, False, 0), (False, True, 0),
+])
+def test_exact_local_candidate_reuses_policy_mute_suppression_and_dedupe(
+    tmp_path, muted, suppressed, expected,
+):
+    candidate = {"event_id": "qualified", "category": "skill_ready_to_share",
+                 "local_skill_id": "local", "content_hash": "hash"}
+    other = {**candidate, "event_id": "older", "local_skill_id": "other"}
+    service = Service([Page([event()], "after", True)], candidates=[candidate, other],
+                      preferences={"muted": muted, "suppressed": {
+                          "candidate:local:hash": True} if suppressed else {}})
+    handler = notices(tmp_path, service, [1000])
+    shown = []
+    before = handler.state.notice_state()
+    assert handler.run(  # pylint: disable=unexpected-keyword-arg
+        renderer=shown.extend, candidate_event_id="qualified")["offered"] == expected
+    assert [row["event_id"] for row in shown] == (["qualified"] if expected else [])
+    after = handler.state.notice_state()
+    assert after["cursor"] == before["cursor"]
+    assert after["awareness_cursor"] == before["awareness_cursor"]
+    assert "feed" not in str(service.calls)
+    assert handler.run(  # pylint: disable=unexpected-keyword-arg
+        renderer=shown.extend, candidate_event_id="qualified")["offered"] == 0
+    assert len(shown) == expected
+
+
 def test_inbox_does_not_consume_human_notice_across_controllers(tmp_path):
     service = Service([Page([event()], "after-event", False),
                        Page([event()], "after-event", False),
