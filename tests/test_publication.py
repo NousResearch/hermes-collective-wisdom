@@ -1,5 +1,5 @@
 """Behavioral tests for direct PluginState-backed publication."""
-# pylint: disable=missing-function-docstring,too-few-public-methods
+# pylint: disable=missing-function-docstring,too-few-public-methods,too-many-lines
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 from installed_test_support import JsonState
-from test_contribution_review import Host, make_skill, owner as contribution_owner, reviewer
+from test_contribution_review import (
+    Host, RecordingLlm, make_skill, owner as contribution_owner, reviewer,
+)
 
 from hermes_wisdom_plugin.contribution_review import ContributionReviewer
 from hermes_wisdom_plugin.commands import build_parser, run_cli
@@ -546,6 +548,106 @@ def test_one_confirmation_uses_server_policy_and_exact_review(tmp_path: Path, mo
     assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
     assert "publication_mode" not in result["submitted_request"]
     assert service.status(result["operation_id"])["state"] == "done"
+
+
+@pytest.mark.parametrize(("mode", "expected"), [
+    ("open", "published"), ("moderated", "pending_moderation"),
+])
+@pytest.mark.parametrize("private_first", [False, True])
+def test_editorial_preparation_is_the_exact_uploaded_and_shared_package(
+    tmp_path: Path, mode: str, expected: str, private_first: bool,
+):
+    prepared_reviewer, source, binding = reviewer(tmp_path, llm=RecordingLlm())
+    original = (source / "SKILL.md").read_bytes()
+    prepared = prepared_reviewer.prepare("reviewed-skill", allow_model_review=True)
+    client = RecordingPublicationClient(binding, mode=mode)
+    service = PublicationService(prepared_reviewer.store, prepared_reviewer, client,
+                                 lambda: dict(binding))
+    review = service.review(prepared["draft_id"])
+    assert review["slug"] == "reviewed-skill"
+    assert review["editorial_name"] == "Incident Review"
+    assert review["editorial_description"] == (
+        "Review incident notes with a consistent checklist."
+    )
+    assert (prepared["drafted_description"] == review["description"]
+            == review["editorial_description"])
+    assert review["hashes"] == prepared["hashes"]
+    assert (source / "SKILL.md").read_bytes() == original
+
+    if private_first:
+        staged = service.submit_private_draft(review["receipt"])
+        assert staged["phase"] == "policy_review_required"
+        assert client.state.drafts[staged["remote_draft_id"]].state == "ready"
+        review = service.review(staged["operation_id"])
+        assert review["hashes"] == prepared["hashes"]
+    result = service.submit(review["receipt"])
+    remote = client.state.drafts[result["remote_draft_id"]]
+    assert result["publication_state"] == expected
+    assert result["submitted_request"]["slug"] == remote.slug == "reviewed-skill"
+    assert result["submitted_request"]["description"] == remote.authorDescription == (
+        "Review incident notes with a consistent checklist."
+    )
+    assert result["submitted_request"]["description_hash"] == remote.authorDescriptionHash
+    assert result["submitted_request"]["manifest_hash"] == remote.packageManifestHash == (
+        prepared["hashes"]["package_manifest"]
+    )
+    assert result["submitted_request"]["content_hash"] == remote.contentHash == (
+        prepared["hashes"]["content"]
+    )
+    assert client.state.calls["submit"] == 1
+    assert (source / "SKILL.md").read_bytes() == original
+
+
+def test_author_editorial_edits_require_new_review_and_preserve_approved_copy(tmp_path: Path):
+    prepared_reviewer, source, binding = reviewer(tmp_path, llm=RecordingLlm())
+    original = (source / "SKILL.md").read_bytes()
+    prepared = prepared_reviewer.prepare("reviewed-skill", allow_model_review=True)
+    client = RecordingPublicationClient(binding)
+    service = PublicationService(prepared_reviewer.store, prepared_reviewer, client,
+                                 lambda: dict(binding))
+    stale = service.review(prepared["draft_id"])
+    editable = prepared_reviewer.inspect_prepared(prepared["draft_id"])
+    skill = next(item for item in editable["files"] if item["path"] == "SKILL.md")
+    skill["content_utf8"] = skill["content_utf8"].replace(
+        "editorial_name: Incident Review", "editorial_name: Owner Incident Summary"
+    ).replace(
+        "editorial_description: Review incident notes with a consistent checklist.",
+        "editorial_description: Owner approved description.",
+    )
+    edited = prepared_reviewer.save_prepared(
+        prepared["draft_id"], author_description="Owner approved description.",
+        files=editable["files"], expected_hashes=editable["expected_hashes"],
+    )
+    assert edited["editorial_status"] == "complete"
+    assert edited["hashes"]["content"] != stale["hashes"]["content"]
+    assert edited["hashes"]["author_description"] != stale["hashes"]["author_description"]
+    with pytest.raises(WisdomConflict, match="changed after review"):
+        service.submit(stale["receipt"])
+    assert not client.state.calls
+    fresh = service.review(prepared["draft_id"])
+    assert fresh["editorial_name"] == "Owner Incident Summary"
+    assert fresh["editorial_description"] == fresh["description"] == "Owner approved description."
+    result = service.submit(fresh["receipt"])
+    assert result["submitted_request"]["description"] == "Owner approved description."
+    assert client.state.drafts[result["remote_draft_id"]].authorDescription == fresh["description"]
+    assert (source / "SKILL.md").read_bytes() == original
+
+
+def test_review_uses_explicit_manifest_identity_not_editorial_or_directory(tmp_path: Path):
+    prepared_reviewer, source, binding = reviewer(tmp_path, llm=RecordingLlm())
+    first = prepared_reviewer.prepare("reviewed-skill", allow_model_review=True)
+    manifest = json.loads(next(item["content_utf8"] for item in first["files"]
+                               if item["path"] == "skill.manifest.json"))
+    manifest["name"] = "incident-notes"
+    (source / "skill.manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    prepared = prepared_reviewer.prepare("reviewed-skill", allow_model_review=True)
+    client = RecordingPublicationClient(binding)
+    service = PublicationService(prepared_reviewer.store, prepared_reviewer, client,
+                                 lambda: dict(binding))
+    review = service.review(prepared["draft_id"])
+    assert review["slug"] == "incident-notes"
+    result = service.submit(review["receipt"])
+    assert result["submitted_request"]["slug"] == "incident-notes"
 
 
 def test_published_result_links_exact_remote_identity_after_publication(tmp_path: Path):

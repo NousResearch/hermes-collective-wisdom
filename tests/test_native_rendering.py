@@ -21,7 +21,8 @@ from hermes_wisdom_plugin.native_telegram import (
     edit, keyboard, plain_html, rich_html, rich_html_is_lossless, send,
 )
 
-def test_candidate_share_approval_has_one_heading_and_emphasized_owned_labels():
+@pytest.mark.parametrize("mode", ["open", "moderated"])
+def test_candidate_share_approval_has_one_heading_and_emphasized_owned_labels(mode):
     name = "Shift <Handover> & Summary"
     record = {
         "operation": "publish", "screen": "approval", "state": "pending",
@@ -29,7 +30,7 @@ def test_candidate_share_approval_has_one_heading_and_emphasized_owned_labels():
         "plan": {
             "candidate_flow": True, "editorial_name": name,
             "editorial_description": "Use <notes> & handoffs.",
-            "coworker_benefit": "Fewer lost details.", "publication_mode": "open",
+            "coworker_benefit": "Fewer lost details.", "publication_mode": mode,
             "policy_version": 2, "files": [{"path": "SKILL.md"}], "allowed": True,
             "receipt": "reviewed", "editorial_status": "complete",
             "authorization_expires_at": 12345.5, "hashes": {"SKILL.md": "sha256:abc"},
@@ -39,6 +40,11 @@ def test_candidate_share_approval_has_one_heading_and_emphasized_owned_labels():
     assert view.summary == ""
     assert view.to_text().count(name) == 1
     assert view.items[0].title == name
+    if mode == "moderated":
+        assert ("On sharing, sent for team moderation; not published until approved."
+                in view.to_text())
+        assert ("Publication policy: moderated (version 2). Sent for team moderation"
+                not in view.to_text())
     labels = ("What it does", "Why teammates benefit", "Destination team",
               "Publication policy", "Local security", "Gateway scan", "Package",
               "Authorization expires")

@@ -670,8 +670,6 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             self._require_current(may_apply)
             description = _draft_author_description(skill_markdown, self.llm)
             self._require_current(may_apply)
-        if self.source_store is not None:
-            description = publication_description(self.source_store, skill_id, description)
         self._require_current(may_apply)
         editorial = resolve_editorial_metadata(
             frontmatter=frontmatter,
@@ -680,6 +678,10 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         )
         if allow_model_review and not disclosure_ready and self.llm is not None:
             editorial["failure"] = "disclosure_blocked"
+        if editorial["provenance"]:
+            description = editorial["editorial_description"]
+        if self.source_store is not None:
+            description = publication_description(self.source_store, skill_id, description)
         return frontmatter, description, editorial
 
     def _save_prepared(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals

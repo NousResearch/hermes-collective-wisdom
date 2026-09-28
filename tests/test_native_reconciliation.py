@@ -1,8 +1,12 @@
 """Combined main/PR21 native reconciliation regressions."""
 # pylint: disable=missing-class-docstring,missing-function-docstring,protected-access
 
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +14,11 @@ from installed_test_support import JsonState
 from native_test_support import direct_owner
 from test_commands import _NativeSuggestService, _native_invocation
 from test_restored_native_flow import Service as SharingService
+from test_publication import RecordingPublicationClient
+from test_contribution_review import RecordingLlm, reviewer
+
+from hermes_wisdom_plugin.runtime import InvocationService
+from hermes_wisdom_plugin.native_telegram import keyboard, rich_html
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict, WisdomValidationError
 from hermes_wisdom_plugin.native_review import (
     NativeAction, NativeItem, NativeReviewController, NativeView, project_view,
@@ -32,6 +41,261 @@ class ReadyService(SharingService):
         self.applied.append("private")
         return {"state": "pending", "phase": "policy_review_required",
                 "remote_draft_id": "remote-1", "portal_url": "https://portal.example/draft"}
+
+
+def _direct_private_card(tmp_path, monkeypatch):
+    prepared_reviewer, _source, owner = reviewer(tmp_path, llm=RecordingLlm())
+    prepared = prepared_reviewer.prepare("reviewed-skill", allow_model_review=True)
+    client = RecordingPublicationClient(owner)
+    from hermes_wisdom_plugin.direct_services import PublicationService  # pylint: disable=import-outside-toplevel
+    kernel = PublicationService(prepared_reviewer.store, prepared_reviewer, client,
+                                lambda: dict(owner))
+    service = InvocationService(kernel.store.root, ("default", Path(owner["profile_home"])),
+                                state=JsonState(kernel.store.root))
+    monkeypatch.setattr(service, "account", SimpleNamespace(
+        portal_base_url="https://portal.example"))
+    monkeypatch.setattr(service, "_publication_service", lambda: kernel)
+    monkeypatch.setattr(service, "_installation_owner", lambda: dict(owner))
+    monkeypatch.setattr(service, "check_owner", lambda: None)
+    monkeypatch.setattr(service, "native_owner", lambda: dict(owner))
+    monkeypatch.setattr(service, "native_team_name", lambda: "Incident Response")
+    controller = _controller(tmp_path)
+    caller = _native_invocation()
+    record = controller.request_publication(service, caller, prepared["draft_id"])
+    # Enter the candidate card with the actual prepared editorial package.
+    record.update(screen="approval", page=0, inspected_through=0,
+                  team_name="Incident Response", plan={
+                      **record["plan"], "candidate_flow": True,
+                  })
+    controller.state.save(record)
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    return controller, service, kernel, client, controller.load(record["id"]), clicked
+
+
+def test_private_upload_continues_on_same_card_with_exact_fresh_share(  # pylint: disable=too-many-locals
+    tmp_path, monkeypatch,
+):
+    controller, service, _kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    staged = controller.act(record["id"], "portal.draft", service, clicked)
+    view = controller.view(staged)
+    assert staged["state"] == "pending"
+    assert staged["plan"]["receipt"] != record["plan"]["receipt"]
+    assert staged["plan"]["operation_id"] == staged["result"]["operation_id"]
+    assert view.title == "Ready for review"
+    assert "Your private draft is ready to review and edit in Portal." in view.to_text()
+    assert "refresh.review" not in {a.action for a in view.actions}
+    assert view.to_text().count("Incident Review") == 1
+    assert "not published" in view.to_text().lower()
+    url = "https://portal.example/wisdom/review/draft-1"
+    assert any(a.url == url and a.action is None for a in view.actions)
+    assert any(a.label == "Share My Skill" for a in view.actions)
+    assert {"details", "settings", "cancel"} <= {
+        a.action for a in view.actions if a.action
+    }
+    assert not any(a.action == "portal.draft" for a in view.actions)
+    assert any(b.get("url") == url for row in blocks(view, staged["id"])
+               for b in row.get("elements", []) if isinstance(b, dict))
+    assert f'type="url" url="{url}"' in rich_html(view, staged["id"])
+    markup = keyboard(view, staged["id"])
+    assert any(b.url == url for row in markup["inline_keyboard"]  # pylint: disable=unsubscriptable-object
+               for b in row)
+    assert client.state.calls == Counter(upload=1, submit=1)
+    with controller.displaying(staged):
+        pass
+    detail = controller.act(record["id"], "details", service, clicked)
+    assert "Nothing has been uploaded" not in controller.view(detail).to_text()
+    with controller.displaying(detail):
+        pass
+    ready = controller.act(record["id"], "back", service, clicked)
+    with controller.displaying(ready):
+        pass
+    finished = controller.act(record["id"], "confirm", service, clicked)
+    assert finished["result"]["publication_state"] == "published"
+    assert client.state.calls["upload"] == client.state.calls["submit"] == 1
+    remote = client.state.drafts[finished["result"]["remote_draft_id"]]
+    assert record["plan"]["editorial_description"] == remote.authorDescription
+    assert staged["plan"]["hashes"] == record["plan"]["hashes"]
+    assert remote.slug == record["plan"]["slug"] == "reviewed-skill"
+    with pytest.raises(WisdomAuthError):
+        controller.act(record["id"], "confirm", service, clicked)
+
+
+def test_expired_private_authorization_refreshes_without_effect(tmp_path, monkeypatch):
+    controller, service, kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    # Expire the actual service receipt, not just the longer-lived native card.
+    core = kernel.store.state.get("wisdom-core")
+    kernel.store.state.set("wisdom-core", {**core,
+        "publication_reviews": {
+            **core["publication_reviews"],
+            record["plan"]["receipt"]: {
+                **core["publication_reviews"][record["plan"]["receipt"]],
+                "expires_at": expired,
+            },
+        },
+    })
+    record = controller.load(record["id"])
+    controller.state.save({**record, "plan": {
+        **record["plan"], "authorization_expires_at": expired,
+    }})
+    stopped = controller.act(record["id"], "portal.draft", service, clicked)
+    assert stopped["state"] == "pending"
+    assert "Refresh review" in [a.label for a in controller.view(stopped).actions]
+    assert client.state.calls == Counter()
+    with controller.displaying(stopped):
+        pass
+    refreshed = controller.act(record["id"], "refresh.review", service, clicked)
+    assert refreshed["plan"]["receipt"] != record["plan"]["receipt"]
+    assert client.state.calls == Counter()
+
+
+@pytest.mark.parametrize("action", ["portal.draft", "confirm"])
+def test_native_clock_expires_receipt_before_progress_or_upload(tmp_path, monkeypatch, action):
+    controller, service, _kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    controller.clock = lambda: datetime.fromisoformat(
+        record["plan"]["authorization_expires_at"]).timestamp() + 1
+    displayed = []
+    stopped = controller.act(record["id"], action, service, clicked,
+                             progress=lambda *_args: displayed.append(True))
+    assert stopped["screen"] == "authorization_expired"
+    assert not displayed and client.state.calls == Counter()
+
+
+def test_acknowledged_private_upload_with_unavailable_fresh_review_keeps_link_only(
+    tmp_path, monkeypatch,
+):
+    controller, service, _kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    original = service.publication_review
+    def interrupted(target, **kwargs):
+        if target != record["plan"]["draft_id"]:
+            raise ConnectionError("review read unavailable after acknowledged upload")
+        return original(target, **kwargs)
+    monkeypatch.setattr(service, "publication_review", interrupted)
+    staged = controller.act(record["id"], "portal.draft", service, clicked)
+    assert staged["state"] == "pending" and "receipt" not in staged["plan"]
+    view = controller.view(staged)
+    assert any(a.url == staged["result"]["portal_url"] for a in view.actions)
+    assert "Share My Skill" not in [a.label for a in view.actions]
+    assert "Refresh review" in [a.label for a in view.actions]
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+
+@pytest.mark.parametrize("fallback", ["expired", "unavailable"])
+def test_private_fallback_navigation_remains_usable(tmp_path, monkeypatch, fallback):
+    controller, service, _kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    if fallback == "unavailable":
+        original = service.publication_review
+        def interrupted(target, **kwargs):
+            if target != record["plan"]["draft_id"]:
+                raise ConnectionError("temporarily unavailable")
+            return original(target, **kwargs)
+        monkeypatch.setattr(service, "publication_review", interrupted)
+    staged = controller.act(record["id"], "portal.draft", service, clicked)
+    if fallback == "expired":
+        controller.state.save({**staged, "screen": "authorization_expired",
+                               "plan": {key: value for key, value in staged["plan"].items()
+                                        if key != "receipt"}})
+        staged = controller.load(record["id"])
+    view = controller.view(staged)
+    assert any(a.url == staged["result"]["portal_url"] for a in view.actions)
+    assert {"details", "settings", "cancel"} <= {a.action for a in view.actions}
+    assert "confirm" not in {a.action for a in view.actions}
+    with controller.displaying(staged):
+        pass
+    details = controller.act(record["id"], "details", service, clicked)
+    assert details["screen"] == "details"
+    assert "Review details and files" in controller.view(details).to_text()
+    with controller.displaying(details):
+        pass
+    back = controller.act(record["id"], "back", service, clicked)
+    assert any(a.url == staged["result"]["portal_url"] for a in controller.view(back).actions)
+    with controller.displaying(back):
+        pass
+    assert "settings" in controller.view(
+        controller.act(record["id"], "settings", service, clicked)
+    ).title.lower()
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+
+def test_portal_edit_refresh_hands_off_without_native_share_loop(tmp_path, monkeypatch):
+    controller, service, _kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    staged = controller.act(record["id"], "portal.draft", service, clicked)
+    client.state.drafts["draft-1"].contentHash = "sha256:edited-in-portal"
+    with controller.displaying(staged):
+        pass
+    details = controller.act(record["id"], "details", service, clicked)
+    with controller.displaying(details):
+        pass
+    refreshed = controller.act(record["id"], "refresh.review", service, clicked)
+    view = controller.view(refreshed)
+    assert refreshed["state"] == "pending"
+    assert any(a.url == staged["result"]["portal_url"] for a in view.actions)
+    assert "Portal" in view.to_text() and "review" in view.to_text().lower()
+    assert "confirm" not in {a.action for a in view.actions}
+    assert "refresh.review" not in {a.action for a in view.actions}
+    with controller.displaying(refreshed):
+        pass
+    assert controller.act(record["id"], "details", service, clicked)["screen"] == "details"
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+
+def test_missing_private_preflight_fails_before_claim(tmp_path, monkeypatch):
+    controller, service, _kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    staged = controller.act(record["id"], "portal.draft", service, clicked)
+    with controller.displaying(staged):
+        pass
+    monkeypatch.setattr(service, "publication_preflight", None)
+    with pytest.raises(TypeError):
+        controller.act(record["id"], "confirm", service, clicked)
+    assert controller.load(record["id"])["state"] == "pending"
+    assert client.state.calls == Counter(upload=1, submit=1)
+
+
+@pytest.mark.parametrize("changed", ["portal_bytes", "policy", "owner", "expired"])
+def test_private_share_rejects_stale_authority_without_second_upload(
+    tmp_path, monkeypatch, changed,
+):
+    controller, service, kernel, client, record, clicked = _direct_private_card(
+        tmp_path, monkeypatch)
+    staged = controller.act(record["id"], "portal.draft", service, clicked)
+    with controller.displaying(staged):
+        pass
+    if changed == "portal_bytes":
+        client.state.drafts["draft-1"].contentHash = "sha256:edited-in-portal"
+    elif changed == "policy":
+        client.state.policy_version += 1
+    elif changed == "owner":
+        monkeypatch.setattr(service, "native_owner", lambda: {
+            **record["owner"], "account_id": "other",
+        })
+    else:
+        expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        current = kernel.store.state.get("wisdom-core")
+        receipt = staged["plan"]["receipt"]
+        kernel.store.state.set("wisdom-core", {**current, "publication_reviews": {
+            **current["publication_reviews"], receipt: {
+                **current["publication_reviews"][receipt], "expires_at": expired,
+            },
+        }})
+        controller.state.save({**controller.load(record["id"]), "plan": {
+            **staged["plan"], "authorization_expires_at": expired,
+        }})
+    if changed == "expired":
+        stopped = controller.act(record["id"], "confirm", service, clicked)
+        assert stopped["screen"] == "authorization_expired"
+    else:
+        with pytest.raises((WisdomAuthError, WisdomConflict, WisdomValidationError)):
+            controller.act(record["id"], "confirm", service, clicked)
+    assert client.state.calls == Counter(upload=1, submit=1)
+    assert client.state.calls["approve"] == client.state.calls["publish"] == 0
 
 @pytest.mark.parametrize("action", ["confirm", "portal.draft"])
 @pytest.mark.parametrize("changed", ["actor", "message", "owner", "expiry", "stale"])

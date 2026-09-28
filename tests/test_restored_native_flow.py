@@ -548,16 +548,21 @@ def test_candidate_final_share_spends_only_inspected_receipt_once(tmp_path, surf
 def test_ready_proposal_offers_one_share_and_private_portal_choice(tmp_path, surface, policy):
     class PrivateService(Service):
         def publication_review(self, draft_id, *, accept_warnings=False):
-            return {**super().publication_review(draft_id, accept_warnings=accept_warnings),
-                    "publication_mode": policy}
+            plan = super().publication_review("local:draft-1", accept_warnings=accept_warnings)
+            return {**plan, "publication_mode": policy, **({
+                "operation_id": "operation-1", "receipt": "fresh-receipt",
+            } if draft_id == "operation-1" else {})}
 
         def publication_submit_private(self, receipt, *, may_apply, candidate_assessment_id=None):
             del candidate_assessment_id
             assert may_apply() and receipt == "publication-receipt"
             self.applied.append("private")
             return {"state": "pending", "phase": "policy_review_required",
-                    "remote_draft_id": "remote-1",
+                    "operation_id": "operation-1", "remote_draft_id": "remote-1",
                     "portal_url": "https://portal.example/wisdom/review/remote-1"}
+
+        def publication_preflight(self, receipt, *, may_apply):
+            assert receipt == "fresh-receipt" and may_apply()
 
     async def scenario():
         service = PrivateService()
@@ -582,7 +587,7 @@ def test_ready_proposal_offers_one_share_and_private_portal_choice(tmp_path, sur
         assert "portal.example/wisdom/review/remote-1" in str(ui.edits[-1])
         assert "not published" in ui.view(identity).to_text().lower()
         await ui.click(identity, "confirm")
-        assert service.applied == ["private"]
+        assert service.applied == ["private", "fresh-receipt"]
         ui.runtime.close()
     asyncio.run(scenario())
 
