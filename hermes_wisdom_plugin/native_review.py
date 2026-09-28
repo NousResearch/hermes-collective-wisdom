@@ -883,6 +883,10 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
     if outcome is not None:
         return outcome
     result = record.get("result")
+    if record.get("operation") == "publish" and record.get("state") in {"completed", "uncertain"}:
+        from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
+        title, detail = publication_copy(result if isinstance(result, dict) else {})
+        return NativeView(title, detail, dismissed=True)
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",
@@ -1452,7 +1456,7 @@ class NativeReviewController:
             return navigated
         _validate_review_action(record, action)
 
-        return self._apply(record, action, service, invocation, authority)
+        return self._apply(record, action, service, invocation, authority, progress=progress)
 
     def _defer(
         self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
@@ -1583,11 +1587,21 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return self._apply(ready, "confirm", service, invocation, authority)
 
-    def _apply(
+    def _publish_progress(self, claimed, progress):
+        """A lost progress acknowledgement cannot authorize publication."""
+        try:
+            progress(NativeView("Hermes Collective Wisdom", "⏳ Sharing…"), claimed)
+        except Exception:
+            self.state.compare_replace(claimed, {
+                **claimed, "state": "failed", "failure": "progress_display_failed",
+            })
+            raise
+
+    def _apply(  # pylint: disable=too-many-arguments
         self, record: dict[str, Any], action: str, service: Any,
         invocation: NativeInvocation, authority: Callable[[], bool],
+        *, progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        record_id = record["id"]
         claimed = {
             **record, "state": "applying", "display_ready": False,
             "updated_at": self.clock(),
@@ -1596,9 +1610,11 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         plan = claimed["plan"]
         operation = claimed["operation"]
+        if operation == "publish" and progress is not None:
+            self._publish_progress(claimed, progress)
         def current() -> bool:
             return _current_effect(
-                self.load(record_id), claimed, service, invocation, authority
+                self.load(record["id"]), claimed, service, invocation, authority
             )
         try:
             outcome = _apply_review_action(action, operation, plan, service, current)
@@ -1608,7 +1624,8 @@ class NativeReviewController:
                 "updated_at": self.clock(),
             }
             if (self.state.compare_replace(claimed, uncertain)
-                    and operation == "settings" and not isinstance(exc, WisdomAuthError)):
+                    and operation in {"settings", "publish"}
+                    and not isinstance(exc, WisdomAuthError)):
                 return copy.deepcopy(uncertain)
             raise
         result = {

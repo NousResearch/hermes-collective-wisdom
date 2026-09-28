@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from restoration_support import SlackHarness, TelegramHarness
-from test_native_progress import NamedService
+from test_native_progress import NamedService, SharingService, sharing_card
 from hermes_wisdom_plugin import native_progress, native_runtime
 
 
@@ -68,6 +68,49 @@ def test_blocked_progress_owner_keeps_loop_live_and_times_out(tmp_path, harness,
         assert ui.record(identity)["state"] == "failed"
         assert not service.applied and not ui.edits
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("harness", [SlackHarness, TelegramHarness])
+def test_share_blocked_pre_progress_owner_is_bounded_without_effect(tmp_path, harness, monkeypatch):
+    async def scenario():
+        service = SharingService()
+        ui = harness(tmp_path, service)
+        identity = await sharing_card(ui)
+        before = len(ui.edits)
+        entered, release = threading.Event(), threading.Event()
+        original_owner = service.native_owner
+        original_act = ui.runtime.reviews.act
+
+        def block(*args, **kwargs):
+            progress = kwargs["progress"]
+            def wrapped(*progress_args):
+                def blocking_owner():
+                    entered.set()
+                    release.wait()
+                    return original_owner()
+                service.native_owner = blocking_owner
+                return progress(*progress_args)
+            return original_act(*args, **{**kwargs, "progress": wrapped})
+
+        ui.runtime.reviews.act = block
+        monkeypatch.setattr(native_progress, "PROGRESS_TIMEOUT", 0.03)
+        monkeypatch.setattr(native_runtime, "PROGRESS_TIMEOUT", 0.03)
+        timer = threading.Timer(0.25, release.set)
+        timer.start()
+        try:
+            click = asyncio.create_task(ui.click(identity, "confirm"))
+            assert await asyncio.to_thread(entered.wait, 0.15)
+            await asyncio.sleep(0.005)
+            assert not release.is_set() and not click.done()
+            await asyncio.wait_for(click, 1)
+            assert not release.is_set()
+            assert not service.applied and len(ui.edits) == before
+        finally:
+            release.set()
+            timer.join()
+        assert ui.record(identity)["state"] == "failed"
+        assert not service.applied
     asyncio.run(scenario())
 
 
