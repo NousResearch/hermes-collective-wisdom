@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 from concurrent.futures import Future
-from types import SimpleNamespace
 import threading
 import time
 
@@ -163,6 +161,38 @@ def _grant(runtime, platform, adapter, *, task_id="task-1", session_id="session-
     runtime._turns[(task_id, session_id)] = (
         time.monotonic() + 60, invocation, owner(), runtime._leases[route],
     )
+
+
+def test_stock_host_turn_does_not_classify_conversation_or_read_extra_feed(tmp_path):
+    host = AdapterLoop().start()
+    feed_reads = []
+    class FeedGuard(NoticeService):
+        def notice_feed(self, cursor):
+            feed_reads.append(cursor)
+            raise AssertionError('context feed must not be read')
+
+    service = FeedGuard()
+    service.eligible = False
+    runtime = NativeSurfaceRuntime(
+        tmp_path, "default", lambda: service, None, host.spawn,
+        installed_state=JsonState(tmp_path),
+    )
+    adapter = Adapter()
+    try:
+        native = _wire(runtime, "slack", host, adapter)
+        _grant(runtime, "slack", adapter)
+        assert runtime.end_turn(
+            task_id="task-1", session_id="session-1",
+            user_message="Find me an incident skill",
+            conversation_history=[{"role": "user", "content": "private text"}],
+        )["scheduled"]
+        host.drain()
+        assert service.polls == 1
+        assert not feed_reads
+        assert not native.posts
+    finally:
+        runtime.close()
+        host.stop()
 
 
 @pytest.mark.parametrize("platform", ["slack", "telegram"])
@@ -365,209 +395,5 @@ def test_stale_native_route_is_rejected_before_consuming_notice(
         assert service.eligible is True
     finally:
         gate.set()
-        runtime.close()
-        host.stop()
-
-
-class ContextService(NoticeService):
-    def __init__(self):
-        super().__init__()
-        self.eligible = False
-        self.feed_reads = []
-        self.plans = []
-        self.preferences = {"muted": False, "suppressed": {}}
-
-    def notice_policy(self):
-        return {"new_skill": True, "recommendation_mode": "useful_only"}
-
-    def notice_feed(self, cursor):
-        self.feed_reads.append(cursor)
-        return SimpleNamespace(events=[
-            {"category": "new_skill", "kind": "new", "event_id": "event-incident",
-             "skill_id": "incident", "version": 2}
-        ])
-
-    def notice_version(self, skill_id, version):
-        return {"skill": {"id": skill_id, "state": "active", "slug": "incident-response",
-                          "organization_id": self.owner["organization_id"]},
-                "version": {"version": version, "state": "published",
-                            "author_description": "Triage incidents"}}
-
-    def notice_preferences(self, _references):
-        return self.preferences
-
-    def install_plan(self, reference, *, update_mode=None):
-        self.plans.append(reference)
-        plan = super().install_plan(reference, update_mode=update_mode)
-        plan["skill_id"] = "incident"
-        plan["version"] = 2
-        return plan
-
-    def end_turn_notices(self, renderer):
-        if self.eligible:
-            self.eligible = False
-            self.polls += 1
-            renderer([{"category": "new_skill", "event_id": "event-incident",
-                       "skill_id": "incident", "version": 2}])
-            return {"supported": True, "offered": 1, "polled": True, "more": False}
-        return super().end_turn_notices(renderer)
-
-
-class Decision:
-    def __init__(self, index=0, unavailable=False):
-        self.index, self.unavailable, self.calls, self.cancelled = index, unavailable, [], []
-
-    def launch(self, request):
-        self.calls.append(request)
-        assert request.private_default_route is True and request.role == "leaf"
-        assert request.parent_session_id == "session-1"
-        assert request.model is None and request.allowed_toolsets is None
-        if self.unavailable:
-            raise RuntimeError("default route unavailable")
-        return object()
-
-    def wait(self, _handle, *, timeout_seconds):
-        assert timeout_seconds <= 10
-        return SimpleNamespace(state="SUCCEEDED", completed=True, timed_out=False)
-
-    def result(self, _handle):
-        return SimpleNamespace(ready=True, terminal_state="SUCCEEDED",
-                               summary=str(self.index))
-
-    def cancel(self, handle, *, reason):
-        self.cancelled.append((handle, reason))
-
-
-@pytest.mark.parametrize("case", [
-    "relevant", "unrelated", "no_context", "unavailable", "stale_owner", "wrong_turn",
-    "old_host", "muted", "suppressed", "duplicate", "credential_label",
-    "credential_bare", "credential_bearer",
-])
-@pytest.mark.usefixtures("private_lifecycle_contract")
-def test_context_relevance_end_turn_and_exact_version(tmp_path, case):
-    host = AdapterLoop().start()
-    service = ContextService()
-    decision = Decision(index=-1 if case == "unrelated" else 0,
-                        unavailable=case == "unavailable")
-    if case == "old_host":
-        decision = SimpleNamespace(
-            complete_structured=lambda **_kwargs: pytest.fail("raw LLM called")
-        )
-    runtime = NativeSurfaceRuntime(tmp_path, "default", lambda: service, None, host.spawn,
-                                   installed_state=JsonState(tmp_path),
-                                   subagent_lifecycle=decision)
-    adapter = Adapter()
-    try:
-        native = _wire(runtime, "slack", host, adapter)
-        _grant(runtime, "slack", adapter)
-        if case == "duplicate":
-            service.eligible = True
-        if case == "muted":
-            service.preferences["muted"] = True
-        if case == "suppressed":
-            service.preferences["suppressed"]["feed:event-incident"] = True
-        if case != "no_context":
-            message = {
-                "credential_label": "Help triage an incident; token: secret-value",
-                "credential_bare": "Help triage an incident " + "sk-" + "a" * 32,
-                "credential_bearer": "Help triage an incident; Authorization: Bearer " + "a" * 32,
-            }.get(case, "Help triage an incident")
-            runtime.capture_context(task_id="task-1", session_id="session-1",
-                                    turn_id="other" if case == "wrong_turn" else "turn-1",
-                                    user_message=message,
-                                    conversation_history=[{"role": "user", "content": "old secret"},
-                                                          {"role": "tool", "content": "irrelevant"},
-                                                          {"role": "user", "content": message}])
-        if case == "stale_owner":
-            service.owner["account_id"] = "other-account"
-        runtime.end_turn(task_id="task-1", session_id="session-1")
-        host.drain()
-        assert (len(native.posts) == 1) == (case in {"relevant", "duplicate"})
-        assert (len(getattr(decision, "calls", [])) == 1) == (
-            case in {"relevant", "unrelated", "unavailable", "duplicate"}
-        )
-        if case == "relevant":
-            assert service.plans == ["incident@v2"]
-            assert service.feed_reads == [None]
-            assert "old secret" not in str(decision.calls)
-            assert runtime.reviews.pending(owner())[0]["message_id"] == "notice-1"
-    finally:
-        runtime.close()
-        host.stop()
-
-
-@pytest.mark.usefixtures("private_lifecycle_contract")
-def test_context_handoff_preserves_original_turn_scope_and_consumes_once(tmp_path):
-    scope: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-        "active_parent", default=None,
-    )
-    host = AdapterLoop().start()
-    service = ContextService()
-    decision = Decision()
-    original_launch = decision.launch
-
-    def launch(request):
-        assert scope.get() == "original-parent"
-        return original_launch(request)
-
-    decision.launch = launch
-    runtime = NativeSurfaceRuntime(
-        tmp_path, "default", lambda: service, None, host.spawn,
-        installed_state=JsonState(tmp_path), subagent_lifecycle=decision,
-    )
-    adapter = Adapter()
-    try:
-        native = _wire(runtime, "slack", host, adapter)
-        _grant(runtime, "slack", adapter)
-        runtime.capture_context(
-            task_id="task-1", session_id="session-1", turn_id="turn-1",
-            user_message="Incident triage",
-            conversation_history=[{"role": "user", "content": "Incident triage"}],
-        )
-        token = scope.set("original-parent")
-        try:
-            assert runtime.end_turn(task_id="task-1", session_id="session-1")["scheduled"]
-            assert not runtime.end_turn(task_id="task-1", session_id="session-1")["supported"]
-        finally:
-            scope.reset(token)
-        host.drain()
-        assert len(decision.calls) == 1
-        assert len(native.posts) == 1
-    finally:
-        runtime.close()
-        host.stop()
-
-
-@pytest.mark.usefixtures("private_lifecycle_contract")
-def test_context_capture_requires_admitted_private_human_turn(tmp_path):
-    from test_native_model_routing import _event, _gateway  # pylint: disable=import-outside-toplevel
-
-    host = AdapterLoop().start()
-    service = ContextService()
-    decision = Decision()
-    runtime = NativeSurfaceRuntime(tmp_path, "default", lambda: service, None, host.spawn,
-                                   installed_state=JsonState(tmp_path),
-                                   subagent_lifecycle=decision)
-    adapter = Adapter()
-    try:
-        native = _wire(runtime, "slack", host, adapter)
-
-        async def admitted():
-            runtime.hook(event=_event(adapter), gateway=_gateway(adapter))
-            runtime.lifecycle_hook(session_id="session-1", task_id="task-1", turn_id="turn-1",
-                                   sender_id="U_NATIVE", platform="slack", parent_session_id="")
-
-        asyncio.run_coroutine_threadsafe(admitted(), host.loop).result(timeout=2)
-        runtime.capture_context(task_id="task-1", session_id="session-1", turn_id="turn-1",
-                                user_message="Help triage an incident",
-                                conversation_history=[{"role": "user",
-                                                       "content": "Help triage an incident"}])
-        runtime.end_turn(task_id="task-1", session_id="session-1")
-        host.drain()
-        assert len(native.posts) == 1
-        assert service.plans == ["incident@v2"]
-        assert len(decision.calls) == 1
-        assert not runtime._context
-    finally:
         runtime.close()
         host.stop()
