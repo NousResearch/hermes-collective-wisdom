@@ -413,9 +413,11 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface)
         assert "You created a skill that could help your team" in view.summary
         assert [action.label for action in view.actions] == [
             "Review Checks", "View More Details", "Snooze Collective Wisdom",
-            "Maybe Later", "Share My Skill",
+            "Maybe Later", "Review proposal",
         ]
         assert "Safe To Share" not in view.to_text()
+        assert "Destination team (verified organization ID): org" in view.to_text()
+        assert not any(a.label == "Share My Skill" for a in view.actions)
         await ui.click(identity, "share")
         assert ui.record(identity)["operation"] == "publish"
         assert ui.record(identity)["plan"]["receipt"] == "publication-receipt"
@@ -423,6 +425,52 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface)
         await ui.click(identity, "back")
         await ui.click(identity, "cancel")
         assert not ui.view(identity).actions
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_final_share_spends_only_inspected_receipt_once(tmp_path, surface):
+    async def scenario():
+        service = Service()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        await ui.click(identity, "share")
+        assert ui.record(identity)["plan"]["candidate_flow"] is True
+        assert not service.applied
+        while True:
+            following = next((a for a in ui.view(identity).actions if a.label == "Next"), None)
+            if following is None:
+                break
+            await ui.click(identity, following.action)
+        assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
+        assert not service.applied
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+    asyncio.run(scenario())
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_missing_receipt_cannot_offer_final_share(tmp_path, surface):
+    class MissingReceipt(Service):
+        def publication_review(self, draft_id, *, accept_warnings=False):
+            result = super().publication_review(draft_id, accept_warnings=accept_warnings)
+            result.pop("receipt")
+            return result
+
+    async def scenario():
+        service = MissingReceipt()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "share")
+        assert not service.applied
+        assert not any(a.label == "Share My Skill" for a in ui.view(identity).actions)
+        await ui.click(identity, "confirm")
+        assert not service.applied
     asyncio.run(scenario())
 
 
@@ -454,7 +502,7 @@ def test_complete_private_inspection_returns_without_authorizing(tmp_path, monke
         }
         assert ui.view(identity).actions[-1].label == "Looks good."
         await ui.click(identity, "back")
-        assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
+        assert "Review proposal" in [a.label for a in ui.view(identity).actions]
         assert ui.record(identity)["plan"] == before
         assert not service.applied
         # A forged final callback cannot skip the explicit Share/review screen.
@@ -885,7 +933,7 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("category,label", [
-    ("skill_ready_to_share", "Share My Skill"),
+    ("skill_ready_to_share", "Review proposal"),
     ("new_skill", "Install Skill"),
     ("update_available", "Update Skill"),
 ])

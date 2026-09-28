@@ -29,7 +29,8 @@ def sharing_checks(plan):
     hashes = plan.get("hashes") or {}
     server = plan.get("server_checks") or {}
     gateway = server.get("security_check") or server.get("scan")
-    gateway_safe = not gateway or gateway.get("status") in {"pass", "passed"}
+    gateway_safe = (gateway.get("status") in {"pass", "passed"} if gateway else
+                    plan.get("kind") != "candidate" and plan.get("candidate_flow") is not True)
     safe = bool(
         hashes.get("content") and hashes.get("author_description")
         and professional.get("content_hash") == hashes["content"]
@@ -49,6 +50,8 @@ def sharing_checks(plan):
             lines.append(f"  {label}: {status}")
     if gateway:
         lines.append(f"  Gateway security: {gateway.get('status') or 'unavailable'}")
+    elif plan.get("kind") == "candidate" or plan.get("candidate_flow") is True:
+        lines.append("  Gateway security: pending until submission")
     return safe, "\n".join(lines)
 
 

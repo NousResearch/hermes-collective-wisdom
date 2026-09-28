@@ -584,33 +584,64 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     def prepare_candidate_offer(self, event_id):
         """Prepare once before the first actionable owner-private offer."""
         from .setup_lock import managed_operation_guard  # pylint: disable=import-outside-toplevel
-        inspected = self.native_candidate_inspect(event_id)
         owner = self._installation_owner()
+        event = self.qualification_state.local_event(event_id)
+        if (self.qualification_state.owner() != owner or not event
+                or event.get("organization_id") != owner["organization_id"]
+                or event.get("kind") != "wisdom.candidate"):
+            raise WisdomError("Collective Wisdom candidate was not found")
+        expected = event["content_hash"]
         lock_key = "candidate-preparation:" + json.dumps(
-            [owner, event_id, inspected["content_hash"]], sort_keys=True
+            [owner, event_id, expected], sort_keys=True
         )
         with managed_operation_guard(self.local_state.root, lock_key):
-            # The first inspection is not an authority check: reread after taking
-            # the cross-process lock before any model or draft work.
-            return self._prepare_candidate_offer_locked(event_id, owner, inspected["content_hash"])
+            return self._prepare_candidate_offer_locked(event_id, owner, expected)
 
-    def _prepare_candidate_offer_locked(self, event_id, owner, expected):
+    def _prepare_candidate_offer_locked(self, event_id, owner, expected):  # pylint: disable=too-many-locals,too-many-branches
         """Bind one saved draft to the candidate while holding its operation guard."""
-        inspected = self.native_candidate_inspect(event_id)
-        if self._installation_owner() != owner or inspected["content_hash"] != expected:
-            raise WisdomConflict("candidate changed during preparation")
         event = self.qualification_state.local_event(event_id)
-        payload = event.get("payload") or {} if event else {}
-        if payload.get("preparation"):
-            return inspected
+        if (self._installation_owner() != owner or self.qualification_state.owner() != owner
+                or not event or event.get("content_hash") != expected):
+            raise WisdomConflict("candidate changed during preparation")
+        payload = event.get("payload") or {}
         from .qualification import snapshot_tree  # pylint: disable=import-outside-toplevel
-        name = inspected["facts"]["name"]
+        name = str(payload.get("skill_name") or event.get("skill_id") or "")
         source = self._contribution_reviewer().source(name)
         local = self.qualification_state.local_skill(str(event.get("skill_id"))) if event else None
-        if not local or str(source) != local.get("canonical_path"):
+        if (not local or local.get("deleted_at") is not None
+                or local.get("current_hash") != expected
+                or str(source) != local.get("canonical_path")):
             raise WisdomConflict("candidate source changed")
         if snapshot_tree(source)[0] != expected:
             raise WisdomConflict("candidate source changed")
+        previous = payload.get("preparation")
+        if previous:
+            from .package import source_fingerprint  # pylint: disable=import-outside-toplevel
+            draft = (self._direct_state.draft(previous.get("draft_id"))
+                     if self._direct_state else None)
+            if (not draft or draft.get("owner") != owner
+                    or draft.get("source_hash") != source_fingerprint(source)):
+                raise WisdomConflict("candidate preparation changed; prepare again")
+            hashes = {"content": draft.get("content_hash"),
+                      "author_description": draft.get("description_hash"),
+                      "package_manifest": draft.get("manifest_hash")}
+            if hashes != previous.get("hashes"):
+                # A saved, complete editorial overlay can outlive an interrupted
+                # binding update. Reopen verifies its exact files before rebinding.
+                if draft.get("editorial_complete_hash") != hashes["content"]:
+                    raise WisdomConflict("candidate preparation changed; prepare again")
+                self.prepared_review(draft["id"], allow_model_review=False)
+                self.qualification_state.save_candidate_preparation(
+                    event_id, expected, {"draft_id": draft["id"], "hashes": hashes},
+                    previous=previous,
+                )
+                previous = {"draft_id": draft["id"], "hashes": hashes}
+            inspected = self.native_candidate_inspect(event_id)
+            if (inspected["facts"]["editorial_status"] == "complete" or self.llm is None
+                    or draft.get("author_edited")):
+                return inspected
+        else:
+            inspected = self.native_candidate_inspect(event_id)
         try:
             prepared = self.suggest(name)
         except (PackagePolicyError, WisdomValidationError, OSError):
@@ -619,9 +650,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             raise WisdomConflict("candidate source changed during preparation")
         if self._installation_owner() != self.qualification_state.owner():
             raise WisdomAuthError("candidate owner changed during preparation")
-        self.qualification_state.save_candidate_preparation(
-            event_id, expected, {"draft_id": prepared["draft_id"], "hashes": prepared["hashes"]}
-        )
+        binding = {"draft_id": prepared["draft_id"], "hashes": prepared["hashes"]}
+        if previous is None:
+            self.qualification_state.save_candidate_preparation(event_id, expected, binding)
+        else:
+            self.qualification_state.save_candidate_preparation(
+                event_id, expected, binding, previous=previous,
+            )
         return self.native_candidate_inspect(event_id)
 
     def native_candidate_inspect(self, event_id):  # pylint: disable=too-many-locals

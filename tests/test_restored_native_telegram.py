@@ -119,7 +119,7 @@ def test_telegram_complete_inspection_then_quiet_dismissal(tmp_path, monkeypatch
         response = ui.runtime.begin_publication(ui.caller, "draft")
         await ui.flush()
         identity = response["review_id"]
-        assert "Share My Skill" in str(ui.posts[-1]["reply_markup"])
+        assert "Review proposal" in str(ui.posts[-1]["reply_markup"])
         await ui.click(identity, "details", actor_id=22)
         assert not ui.edits
         await ui.click(identity, "details")

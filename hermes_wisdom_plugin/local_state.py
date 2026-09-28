@@ -246,7 +246,8 @@ class QualificationState:  # pylint: disable=too-many-public-methods
         return next((row for row in self.candidates() if row["event_id"] == event_id), None)
 
     def save_candidate_preparation(  # pylint: disable=too-many-boolean-expressions
-        self, event_id: str, content_hash: str, prepared: dict[str, Any]
+        self, event_id: str, content_hash: str, prepared: dict[str, Any], *,
+        previous: dict[str, Any] | None = None,
     ) -> None:
         """Bind first-offer facts to the exact owner and qualified source revision."""
         owner = self.owner()
@@ -259,7 +260,8 @@ class QualificationState:  # pylint: disable=too-many-public-methods
             if (value["owner"] != owner or row is None or row["content_hash"] != content_hash
                 or row["organization_id"] != owner["organization_id"]
                 or not skill or skill.get("current_hash") != content_hash
-                or (row.get("payload") or {}).get("preparation")):
+                or (row.get("payload") or {}).get("preparation") != previous
+                or (previous is not None and prepared.get("draft_id") != previous.get("draft_id"))):
                 raise ValueError("candidate changed during preparation")
             row["payload"]["preparation"] = copy.deepcopy(prepared)
 

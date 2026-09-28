@@ -500,50 +500,56 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
         actions.append(NativeAction("Previous", f"page.{page - 1}"))
     if page + 1 < len(pages):
         actions.append(NativeAction("Next", f"page.{page + 1}"))
-    elif approving and plan.get("allowed", True):
+    elif approving and plan.get("allowed", True) and (
+        plan.get("candidate_flow") is not True or bool(plan.get("receipt"))
+    ):
         partial = _requires_partial_acknowledgement(plan)
         actions.append(NativeAction(
-            "Acknowledge partial compatibility and confirm" if partial else "Confirm",
+            "Acknowledge partial compatibility and confirm" if partial else
+            "Share My Skill" if plan.get("candidate_flow") is True else "Confirm",
             "confirm.partial" if partial else "confirm", primary=True,
         ))
     actions.append(NativeAction("Back" if approving else "Looks good.", "back"))
+    candidate = record.get("operation") == "candidate"
     return NativeView(
-        "Exact package review" if approving else "Private package details",
+        "Exact package review" if approving else
+        "Candidate details" if candidate else "Private package details",
         f"Page {page + 1} of {len(pages)}. " + (
             "Confirm only after inspecting the complete exact plan."
-            if approving else "Inspection does not authorize sharing, installation or setup."
+            if approving else "Candidate details are not the prepared package. Review proposal first."
+            if candidate else "Inspection does not authorize sharing, installation or setup."
         ) + (("\n" + "\n".join(authority)) if authority else ""),
         [NativeItem("Exact review data (JSON)", pages[page], literal=True)], actions=actions,
     )
 
 
-def _candidate_view(plan: dict[str, Any]) -> NativeView:
+def _candidate_view(plan: dict[str, Any], owner: dict[str, Any] | None = None) -> NativeView:
     facts = plan.get("facts") or {}
     editorial = facts.get("editorial") or {}
     safe, _checks = sharing_checks(plan)
-    name = editorial.get("editorial_name") or facts.get("name") or plan.get("editorial_name")
-    description = editorial.get("editorial_description") or "Editorial description not yet available."
-    benefit = editorial.get("coworker_benefit") or "Coworker benefit not yet available."
+    name = editorial.get("editorial_name") or plan.get("editorial_name") or facts.get("name")
+    description = editorial.get("editorial_description") or plan.get("editorial_description") or "Editorial description not yet available."
+    benefit = editorial.get("coworker_benefit") or plan.get("coworker_benefit") or "Coworker benefit not yet available."
+    complete = facts.get("editorial_status", plan.get("editorial_status")) == "complete"
+    team = owner.get("organization_id") if isinstance(owner, dict) else None
     return NativeView(
         "Hermes Collective Wisdom",
         "You created a skill that could help your team\n\n"
         f"Skill name: {_safe(name, 'Name unavailable')}\n"
         f"What it does: {_safe(description)}\n"
-        f"Why others might benefit: {_safe(benefit)}\n\n"
-        "Would you like to share it?",
-        notice=("Nothing has been uploaded or published. Share My Skill starts local "
-                "preparation, then you review the exact package and checks before final "
-                "sharing authorization. Editorial copy is incomplete."
-                if facts.get("editorial_status") != "complete" else
-                "Nothing has been uploaded or published. Share My Skill starts local "
-                "preparation, then you review the exact package and checks before final "
-                "sharing authorization."),
+        f"Why others might benefit: {_safe(benefit)}\n"
+        f"Destination team (verified organization ID): {_safe(team, 'Unavailable')}\n\n"
+        "Would you like to review a sharing proposal?",
+        notice=("Nothing has been uploaded or published. Review proposal opens the "
+                "local package and current policy without sharing. Inspect every exact "
+                "review page before the final Share My Skill action."
+                + (" Editorial copy is incomplete." if not complete else "")),
         actions=[
             NativeAction("✓ Safe To Share" if safe else "Review Checks", "checks"),
             NativeAction("View More Details", "details"),
             NativeAction("Snooze Collective Wisdom", "settings"),
             NativeAction("Maybe Later", "cancel"),
-            NativeAction("Share My Skill", "share"),
+            NativeAction("Review proposal", "share"),
         ],
     )
 
@@ -895,7 +901,7 @@ def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-m
             and record.get("screen") == "setup"):
         return _setup_permission_view(record)
     if record.get("operation") in {"candidate", "publish"} and state == "pending":
-        return _candidate_view(plan)
+        return _candidate_view(plan, record.get("owner"))
     if record.get("operation") in {"install", "update"} and state == "pending":
         return _installation_view(record)
     if record.get("operation") == "catalog":
@@ -1578,8 +1584,12 @@ class NativeReviewController:
         if review_identity(review) != review_identity(displayed):
             raise WisdomConflict("The package or scanner findings changed; open it again")
         if plan.get("candidate_flow") is True:
+            if not isinstance(review.get("receipt"), str) or not review["receipt"]:
+                raise WisdomValidationError("publication review receipt is unavailable")
             return {
-                **record, "operation": "publish", "plan": copy.deepcopy(review),
+                **record, "operation": "publish", "plan": copy.deepcopy({
+                    **review, "candidate_flow": True,
+                }),
                 "screen": "approval", "page": 0, "inspected_through": 0,
                 "updated_at": self.clock(),
             }
