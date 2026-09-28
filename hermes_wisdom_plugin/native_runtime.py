@@ -13,7 +13,6 @@ import threading
 import time
 from typing import Any, Callable
 
-from .context_relevance import current_excerpt, eligible_candidates, relevant_skill
 from .errors import WisdomUnavailable, WisdomValidationError
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_context import message_id as posted_message_id
@@ -136,9 +135,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         self, root, profile_name: str, service_factory: Callable[[], Any], _llm: Any,
         spawn_task: Callable[..., Any], *, installed_state: Any | None = None,
         session_context: Callable[[], dict[str, str]] | None = None,
-        subagent_lifecycle: Any | None = None,
     ) -> None:
-        self.subagent_lifecycle = subagent_lifecycle
         self.root = root
         self.profile_name = profile_name
         self.service_factory = service_factory
@@ -158,7 +155,6 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             tuple[str, str], tuple[float, NativeInvocation, dict[str, str], object]
         ] = {}
         self._local_tools: dict[tuple[str, str], tuple[float, NativeInvocation, dict[str, str]]] = {}
-        self._context: dict[tuple[str, str], str] = {}
 
     @property
     def reviews(self) -> NativeReviewController:
@@ -175,25 +171,6 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             self._loops.clear()
             self._turns.clear()
             self._local_tools.clear()
-            self._context.clear()
-
-    def capture_context(self, **facts: Any) -> None:
-        """Join the latest human message only to an admitted exact native turn."""
-        key = (str(facts.get("task_id") or ""), str(facts.get("session_id") or ""))
-        excerpt = current_excerpt(facts.get("conversation_history"))
-        message = facts.get("user_message")
-        if (not all(key) or not excerpt or not isinstance(message, str)
-                or excerpt != message.strip()[:1200]):
-            return
-        with self._lock:
-            grant = self._turns.get(key)
-            if grant is None or grant[0] < time.monotonic() or self._closed:
-                return
-            if grant[1].turn_id != str(facts.get("turn_id") or ""):
-                return
-            if len(self._context) >= 256:
-                self._context.pop(next(iter(self._context)))
-            self._context[key] = excerpt
 
     def hook(self, **kwargs: Any) -> None:
         if not self._closed:
@@ -302,7 +279,6 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         key = (str(facts.get("task_id") or ""), str(facts.get("session_id") or ""))
         with self._lock:
             grant = self._turns.pop(key, None)
-            excerpt = self._context.pop(key, "")
         if grant is None or grant[0] < time.monotonic() or self._closed:
             return {"supported": False, "offered": 0, "polled": False}
         invocation, expected_owner, token = grant[1], grant[2], grant[3]
@@ -318,7 +294,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         try:
             loop.call_soon_threadsafe(
                 self._schedule_notice_poll,
-                invocation, expected_owner, native, token, loop, excerpt,
+                invocation, expected_owner, native, token, loop,
             )
         except RuntimeError:
             return {"supported": False, "offered": 0, "polled": False, "scheduled": False}
@@ -345,14 +321,13 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
     def _schedule_notice_poll(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, invocation: NativeInvocation, expected_owner: dict[str, str],
-        native: Any, token: object, loop: asyncio.AbstractEventLoop, excerpt: str = "",
+        native: Any, token: object, loop: asyncio.AbstractEventLoop,
     ) -> None:
         """Create the supervised task only from the adapter's owning event loop."""
         if not self._notice_route_current(invocation, native, token, loop):
             return
         coroutine = self._run_notice_poll(
             invocation, expected_owner, native=native, token=token, loop=loop,
-            excerpt=excerpt,
         )
         try:
             self.spawn_task(coroutine, name=f"wisdom-notice:{invocation.session_key}")
@@ -370,7 +345,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
     async def _run_notice_poll(  # pylint: disable=too-many-arguments
         self, invocation: NativeInvocation, expected_owner: dict[str, str], *,
-        native: Any, token: object, loop: asyncio.AbstractEventLoop, excerpt: str = "",
+        native: Any, token: object, loop: asyncio.AbstractEventLoop,
     ) -> dict[str, Any]:
         """Preflight, poll off-loop, then render on the adapter's loop."""
         if not self._notice_route_current(invocation, native, token, loop):
@@ -382,9 +357,6 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         ):
             return {"supported": False, "offered": 0, "polled": False}
         result, rows = await asyncio.to_thread(self._poll_notice_rows)
-        # One task serializes the two producers; no duplicate same-skill card or queue.
-        ordinary_skills = {(row.get("skill_id"), row.get("version")) for row in rows
-                           if row.get("category") == "new_skill"}
         if rows and self._notice_route_current(invocation, native, token, loop):
             await self._send_notice(
                 invocation, rows, expected_owner=expected_owner,
@@ -392,53 +364,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     invocation, native, token, loop
                 ),
             )
-        if excerpt and self._notice_route_current(invocation, native, token, loop):
-            await self._run_context_check(
-                invocation, expected_owner, native, token, loop, excerpt, ordinary_skills,
-            )
         return result
-
-    def _context_match(
-        self, expected_owner: dict[str, str], excerpt: str, parent_session_id: str,
-    ) -> dict[str, Any] | None:
-        if self.subagent_lifecycle is None:
-            return None
-        service = self.service_factory()
-        try:
-            if service.native_owner() != expected_owner:
-                return None
-            identity = {"owner": expected_owner}
-            candidates = eligible_candidates(service, identity)
-            if not candidates or service.native_owner() != expected_owner:
-                return None
-            return relevant_skill(self.subagent_lifecycle, excerpt, candidates, parent_session_id)
-        finally:
-            service.close()
-
-    async def _run_context_check(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self, invocation: NativeInvocation, expected_owner: dict[str, str],
-        native: Any, token: object, loop: asyncio.AbstractEventLoop, excerpt: str,
-        ordinary_skills: set[tuple[Any, Any]],
-    ) -> None:
-        def authority() -> bool:
-            return self._notice_route_current(invocation, native, token, loop)
-        if not authority() or not await asyncio.to_thread(self._post_owner_current, expected_owner):
-            return
-        try:
-            match = await asyncio.to_thread(
-                self._context_match, expected_owner, excerpt, invocation.host_session_id,
-            )
-            if (match is None or not authority()
-                    or (match["skill_id"], match["version"]) in ordinary_skills):
-                return
-            record = await asyncio.to_thread(
-                self._build_notice_review, invocation,
-                {"category": "new_skill", **match}, expected_owner,
-            )
-            if authority():
-                await self._post_review(invocation, record, route_authority=authority)
-        except Exception:  # pylint: disable=broad-exception-caught
-            return  # No retry, alternate route or effect on the human turn.
 
     def _build_notice_review(
         self, invocation: NativeInvocation, row: dict[str, Any],

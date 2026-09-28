@@ -117,7 +117,6 @@ async function loadPlugin(restHandler, initial = {}) {
     ScrollArea: props => React.createElement(Primitive, props),
     Separator: props => React.createElement(Primitive, { ...props, as: 'hr' }),
     SIDEBAR_NAV_AREA: 'sidebar.nav',
-    TRANSCRIPT_MESSAGE_AREA: initial.inline ? 'chat.transcript-message' : undefined,
     Textarea,
     host,
     useMutation,
@@ -169,65 +168,12 @@ test('unbound session_end cannot consume or toast a human notice', async () => {
   assert.equal(loaded.calls.notify.length, 0)
 })
 
-async function renderInline(loaded, props, { strict = false } = {}) {
-  const entry = loaded.calls.registrations.find(item => item.area === 'chat.transcript-message')
-  assert.ok(entry?.data?.match(props), 'a real slash-result must match the inline contribution')
-  const container = document.createElement('div')
-  document.body.append(container)
-  const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0, retry: false }, mutations: { gcTime: 0, retry: false } } })
-  const root = createRoot(container)
-  const draw = () => React.createElement(QueryClientProvider, { client }, entry.data.render(props))
-  await act(async () => root.render(strict ? React.createElement(React.StrictMode, null, draw()) : draw()))
-  await settle()
-  return {
-    container,
-    async cleanup() { await act(async () => root.unmount()); client.clear(); container.remove() }
-  }
-}
-
-const inlineProps = { kind: 'slash-result', sessionId: 'runtime-1', messageId: 'slash-1', isLast: true, command: '/wisdom browse', output: 'ordinary output' }
-
-test('inline row uses SDK match and fences wrong row, A→B→A, disposal and footer notice', async () => {
-  const loaded = await loadPlugin(baseHandler, { inline: true })
-  const entry = loaded.calls.registrations.find(item => item.area === 'chat.transcript-message')
-  assert.ok(entry)
-  assert.equal(loaded.calls.registrations.some(item => item.area === 'composer.middleware'), false)
-  assert.equal(entry.data.match({ ...inlineProps, command: '/other' }), false)
-  assert.equal(entry.data.match({ ...inlineProps, kind: 'assistant-footer' }), false)
-  const mounted = await renderInline(loaded, inlineProps, { strict: true })
-  assert.match(mounted.container.textContent, /one.*Not installed/)
-  assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
-  const staleButton = button(mounted, 'Install')
-  assert.ok(staleButton)
-  await act(async () => { loaded.profile.set('B'); loaded.profile.set('A') })
-  await click(staleButton)
-  assert.equal(loaded.calls.rest.some(([path]) => path === '/install/review'), false)
-  await mounted.cleanup()
+test('stock SDK registers composer discovery without transcript extensions', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  assert.ok(loaded.calls.registrations.find(item => item.area === 'composer.middleware'))
+  assert.ok(loaded.calls.registrations.find(item => item.area === 'composer.top'))
+  assert.equal(loaded.calls.registrations.some(item => item.area === 'chat.transcript-message'), false)
   loaded.dispose()
-  assert.equal(loaded.calls.rest.some(([path]) => path === '/notices/end-turn'), false)
-})
-
-test('inline catalog reviews exact version before install and cannot act for another focused session', async () => {
-  const loaded = await loadPlugin((path, options, owner) => {
-    if (path === '/install/review') return installReview()
-    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', version: 2, ready_to_use: true }
-    return baseHandler(path, options, owner)
-  }, { inline: true })
-  const mounted = await renderInline(loaded, inlineProps)
-  try {
-    const entry = loaded.calls.registrations.find(item => item.area === 'chat.transcript-message')
-    assert.equal(entry.data.match({ ...inlineProps, kind: 'assistant-footer' }), false)
-    await click(button(mounted, 'Install'))
-    assert.deepEqual(loaded.calls.rest.filter(([path]) => path.startsWith('/install/')).map(([path]) => path),
-      ['/install/review', '/install/confirm'])
-    assert.equal(loaded.calls.navigate.length, 0)
-  } finally { await mounted.cleanup(); loaded.dispose() }
-  const wrong = await loadPlugin(baseHandler, { inline: true, focusedSessionId: 'runtime-other' })
-  const denied = await renderInline(wrong, inlineProps)
-  try {
-    assert.equal(wrong.calls.rest.length, 0)
-    assert.equal(denied.container.textContent, '')
-  } finally { await denied.cleanup(); wrong.dispose() }
 })
 
 async function renderPage(loaded, { strict = false } = {}) {

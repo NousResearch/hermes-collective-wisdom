@@ -128,7 +128,7 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         assert entries["auxiliary"][0] == "hermes_collective_wisdom_refinement"
         assert entries["cli"][0] == entries["slash"][0] == "wisdom"
         assert [name for name, _callback in entries["hooks"]] == [
-            "pre_gateway_dispatch", "pre_llm_call", "post_llm_call",
+            "pre_gateway_dispatch", "pre_llm_call",
             "on_skill_lifecycle", "on_session_end"
         ]
         assert entries["slack"][0] == "slack"
@@ -161,7 +161,7 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         assert disposed == [
             "slash", "cli", "present_wisdom_consent", "wisdom_inspect", "wisdom_inbox",
             "on_session_end", "on_skill_lifecycle",
-            "post_llm_call", "pre_llm_call", "pre_gateway_dispatch",
+            "pre_llm_call", "pre_gateway_dispatch",
             "hermes_collective_wisdom_refinement",
         ]
     finally:

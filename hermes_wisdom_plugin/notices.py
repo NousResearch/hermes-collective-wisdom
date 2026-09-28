@@ -164,8 +164,8 @@ class EndTurnNotices:  # pylint: disable=too-few-public-methods
                     row for row in candidates if _key(row) not in checkpoint["offered"]
                 ]
                 policy = service.notice_policy()
-                # #49 will supply the grounded recipient match for useful_only.
-                # Until then neither missing nor unknown policy may promote a feed row.
+                # Contextual classification is deferred on stock hosts; only an
+                # explicit promote_all policy can promote a feed row.
                 promotion = policy.get("recommendation_mode")
                 policy_allowed = [
                     row for row in [*available_events, *available_candidates]

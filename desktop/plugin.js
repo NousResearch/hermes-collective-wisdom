@@ -1,4 +1,3 @@
-import * as sdk from '@hermes/plugin-sdk'
 import {
   Badge,
   Button,
@@ -1306,68 +1305,6 @@ function WisdomDialogHost({ client }) {
   })
 }
 
-let inlineMountSequence = 0
-// Inline actions belong to the actual row, not whichever chat is focused later.
-function WisdomInlineCatalog({ client, props }) {
-  const connectionId = useValue(host.state.connectionId)
-  const profile = useValue(host.state.profile)
-  const gateway = useValue(host.state.gateway)
-  const owner = useValue(host.state.focusedSessionOwner)
-  const focused = useValue(host.state.focusedSessionId)
-  const stored = useValue(host.state.focusedStoredSessionId)
-  const [, refresh] = useState(0)
-  const guard = useRef(null)
-  if (!guard.current) guard.current = {
-    alive: true, epoch: 0, mountId: ++inlineMountSequence,
-    origin: { connectionId, profile, gateway, owner, focused, stored }
-  }
-  const state = guard.current
-  const origin = state.origin
-  useEffect(() => {
-    state.alive = true // StrictMode effect replay restores this mount.
-    refresh(value => value + 1)
-    const sources = [host.state.connectionId, host.state.profile, host.state.gateway,
-      host.state.focusedSessionOwner, host.state.focusedSessionId, host.state.focusedStoredSessionId]
-    const stop = sources.map(source => source.listen(() => { state.epoch += 1; refresh(value => value + 1) }))
-    return () => { state.alive = false; state.epoch += 1; stop.forEach(dispose => dispose()) }
-  }, [state])
-  const epoch = state.epoch
-  const valid = () => state.alive && state.epoch === epoch && client.active() &&
-    host.state.gateway.get() === 'open' && origin.gateway === 'open' &&
-    host.state.connectionId.get() === origin.connectionId &&
-    host.state.profile.get() === origin.profile &&
-    host.state.focusedSessionId.get() === props.sessionId && origin.focused === props.sessionId &&
-    host.state.focusedStoredSessionId.get() === origin.stored &&
-    origin.owner?.connectionId === origin.connectionId && origin.owner?.profile === origin.profile &&
-    host.state.focusedSessionOwner.get()?.connectionId === origin.connectionId &&
-    host.state.focusedSessionOwner.get()?.profile === origin.profile
-  const boundClient = {
-    active: valid,
-    rest: (...args) => valid()
-      ? client.rest(...args)
-      : Promise.reject(Object.assign(new Error('This chat review is no longer current.'), { stale: true }))
-  }
-  const lifecycle = {
-    connectionId: origin.connectionId, profile: origin.profile,
-    key: `inline:${origin.connectionId}:${origin.profile}:${props.sessionId}:${props.messageId}:${props.kind}:${state.mountId}:${epoch}`,
-    mounted: valid
-  }
-  const parsed = parseWisdomDiscovery(props.command)
-  const view = useQuery(queryOptions(['inline-view', lifecycle.key], () => boundClient.rest('/views', { method: 'POST' }), valid()))
-  if (!valid()) return null
-  return jsx('section', {
-    'aria-label': 'Collective Wisdom in chat',
-    className: 'rounded-3xl bg-(--ui-widget-surface-background) px-3.5 py-3 text-(--ui-text-primary)',
-    style: { fontSize: 'var(--conversation-tool-font-size)' },
-    children: view.error
-      ? jsx(ReadFailure, { error: view.error, title: 'Shared skills unavailable', onRetry: () => { if (valid()) view.refetch() } })
-      : view.data
-        ? jsx(Catalog, { client: boundClient, dialog: true, initialSearch: parsed.query,
-          initialSelected: parsed.skillId, lifecycle, viewId: view.data.view_id })
-        : 'Loading shared skills…'
-  })
-}
-
 function WisdomPage({ client }) {
   const connectionId = useValue(host.state.connectionId) || ''
   const profile = useValue(host.state.profile) || 'default'
@@ -1484,15 +1421,8 @@ export default {
       { id: 'page', area: ROUTES_AREA, data: { path: WISDOM_ROUTE }, render: () => jsx(WisdomPage, { client }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'library', label: 'Wisdom', path: WISDOM_ROUTE } },
       { id: 'open', area: PALETTE_AREA, data: { id: 'collective-wisdom.open', label: 'Collective Wisdom: Open', keywords: ['wisdom', 'skills', 'catalog', 'install', 'contribute'], run: () => host.navigate(WISDOM_ROUTE) } },
-      ...(sdk.TRANSCRIPT_MESSAGE_AREA === 'chat.transcript-message'
-        ? [{ id: 'inline-catalog', area: sdk.TRANSCRIPT_MESSAGE_AREA, data: {
-          match: props => props.kind === 'slash-result' && Boolean(parseWisdomDiscovery(props.command)),
-          render: props => jsx(WisdomInlineCatalog, { client, props })
-        } }]
-        : [
-          { id: 'slash-dialog', area: COMPOSER_AREAS.top, render: () => jsx(WisdomDialogHost, { client }) },
-          { id: 'slash-middleware', area: COMPOSER_AREAS.middleware, order: 40, data: { handler: openDiscovery } }
-        ])
+      { id: 'slash-dialog', area: COMPOSER_AREAS.top, render: () => jsx(WisdomDialogHost, { client }) },
+      { id: 'slash-middleware', area: COMPOSER_AREAS.middleware, order: 40, data: { handler: openDiscovery } }
     ])
   }
 }

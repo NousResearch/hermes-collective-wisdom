@@ -104,7 +104,9 @@ than silently switching owners.
 
 The Desktop page also offers explicit enrollment after disclosure. At completed
 turns it checks a bounded feed without a polling delay and may show a direct
-best-effort notification. A missed or failed notification is not queued or retried, and opening one starts a
+best-effort notification. Contextual skill classification is deferred on stock
+hosts: `useful_only` does not promote catalog feed rows without a grounded match.
+A missed or failed notification is not queued or retried, and opening one starts a
 review rather than approving any effect. Contributions supports complete private
 draft editing and save-and-re-review, including text-file add/remove/rename and
 inert opaque-byte export. Catalog exposes Install; Installed exposes Check for

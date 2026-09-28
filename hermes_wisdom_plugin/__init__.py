@@ -85,9 +85,6 @@ def _register_local_awareness(  # pylint: disable=too-many-arguments,too-many-po
     runtime.registrations.append(
         ctx.register_hook("pre_llm_call", pre_llm_call)
     )
-    runtime.registrations.append(ctx.register_hook(
-        "post_llm_call", runtime.native.capture_context,
-    ))
     runtime.registrations.append(
         ctx.register_hook("on_skill_lifecycle", lifecycle.on_skill_lifecycle)
     )
@@ -124,7 +121,7 @@ def register(ctx: Any) -> None:
     runtime = CommandRuntime(
         ctx.state.data_dir, profile, llm=ctx.llm, spawn_task=ctx.spawn_task,
         config=config, get_config=get_config, set_config=set_config,
-        state=ctx.state, subagent_lifecycle=getattr(ctx, "subagent_lifecycle", None),
+        state=ctx.state,
     )
     lifecycle = LifecycleBridge(
         ctx.state.data_dir, profile, state=ctx.state, llm=ctx.llm, get_config=config_value,
