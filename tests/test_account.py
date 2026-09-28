@@ -51,6 +51,32 @@ class Reader:  # pylint: disable=too-few-public-methods
         self.calls += 1
         return self.value
 
+@pytest.mark.parametrize("organisation,expected", [
+    ({"id": "org-1", "name": "Incident Response"}, "Incident Response"),
+    ({"id": "org-2", "name": "Wrong team"}, None),
+    ({"id": "org-1"}, None),
+    ({"id": "org-1", "name": "org-1"}, None),
+])
+def test_team_name_reads_authenticated_portal_organisation_and_fences_identity(
+    monkeypatch, organisation, expected,
+):
+    """Display-only names require the same authenticated bound organization."""
+    reader = Reader(snapshot())
+    adapter = HermesAccountAdapter.current(_read_snapshot=reader, _clock=lambda: NOW)
+    calls = []
+    def fetch(token, base):
+        calls.append((token, base))
+        return {"organisation": organisation}
+    monkeypatch.setitem(sys.modules, "hermes_cli.nous_account", SimpleNamespace(
+        _fetch_nous_account_info=fetch,
+    ))
+    assert adapter.team_name() == expected
+    assert calls == [("secret-token", "https://portal.example")]
+    assert reader.calls == 3
+    reader.value = replace(reader.value, account_id="other")
+    assert adapter.team_name() is None
+    assert len(calls) == 1
+
 
 def test_current_binds_profile_account_and_supplies_client_contract() -> None:
     """One valid snapshot binds identity and later reads supply current data."""

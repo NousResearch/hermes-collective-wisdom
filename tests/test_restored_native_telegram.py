@@ -119,7 +119,7 @@ def test_telegram_complete_inspection_then_quiet_dismissal(tmp_path, monkeypatch
         response = ui.runtime.begin_publication(ui.caller, "draft")
         await ui.flush()
         identity = response["review_id"]
-        assert "Share My Skill" in str(ui.posts[-1]["reply_markup"])
+        assert "Review proposal" in str(ui.posts[-1]["reply_markup"])
         await ui.click(identity, "details", actor_id=22)
         assert not ui.edits
         await ui.click(identity, "details")
@@ -128,13 +128,13 @@ def test_telegram_complete_inspection_then_quiet_dismissal(tmp_path, monkeypatch
             payload = ui.edits[-1]
             assert len(payload["text"]) < 4000
             decoded = html.unescape(payload["text"])
-            chunks.append(decoded.split("Exact review data (JSON)\n", 1)[1])
+            assert "Review details and files" in decoded
+            chunks.append(ui.view(identity).items[0].detail)
             assert "confirm:" not in str(payload["reply_markup"])
             if not await ui.next_page(identity):
                 break
-        assert json.loads("".join(chunks)) == {
-            key: value for key, value in plan.items() if key not in {"draft_id", "receipt"}
-        }
+        assert json.dumps(plan["files"][0]["content_utf8"])[1:-1] in "".join(chunks)
+        assert "receipt" not in "".join(chunks)
         await ui.click(identity, "back")
         before = ui.edits[-1]["text"]
         assert not service.applied

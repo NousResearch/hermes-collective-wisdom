@@ -16,6 +16,9 @@ from restoration_support import (
 )
 from test_client import Response, Session, client as recording_client
 from hermes_wisdom_plugin.errors import SharePackagingError
+from hermes_wisdom_plugin.native_inspection import publication_proposal_pages
+from hermes_wisdom_plugin.native_slack import blocks
+from hermes_wisdom_plugin.native_telegram import rich_html, plain_html
 from hermes_wisdom_plugin.runtime import InvocationService
 
 
@@ -93,6 +96,9 @@ class Service:
     def native_owner(self):
         return owner()
 
+    def native_team_name(self) -> str | None:
+        return "Incident Response"
+
     def close(self):
         return None
 
@@ -100,7 +106,11 @@ class Service:
         return self.native_candidate_inspect(identity)
 
     def native_candidate_inspect(self, identity):
-        return {"event_id": identity, "facts": {"name": "incident"}, "networked": False}
+        return {"event_id": identity, "facts": {"name": "incident", "editorial_status": "complete",
+                "editorial": {"editorial_name": "Incident Review",
+                              "editorial_description": "Review incident notes.",
+                              "coworker_benefit": "Teammates can use the same checklist."}},
+                "networked": False}
 
     def native_candidate_prepare(self, identity):
         assert identity == "candidate-1"
@@ -114,6 +124,12 @@ class Service:
         del accept_warnings
         return {
             "draft_id": draft_id, "receipt": "publication-receipt", "allowed": True,
+            "editorial_name": "Incident Review", "editorial_description": "Review incident notes.",
+            "coworker_benefit": "Teammates can use the same checklist.",
+            "editorial_status": "complete", "slug": "incident-review",
+            "hashes": {"content": "sha256:content", "author_description": "sha256:description",
+                       "package_manifest": "sha256:manifest"},
+            "policy_version": 3, "authorization_expires_at": "2026-09-30T00:00:00Z",
             "files": [{"path": "SKILL.md", "content_utf8": "first\nlast"}],
             "security_check": {"status": "pass"},
             "professionalism_check": {"status": "pass"},
@@ -413,9 +429,12 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface)
         assert "You created a skill that could help your team" in view.summary
         assert [action.label for action in view.actions] == [
             "Review Checks", "View More Details", "Snooze Collective Wisdom",
-            "Maybe Later", "Share My Skill",
+            "Maybe Later", "Review proposal",
         ]
         assert "Safe To Share" not in view.to_text()
+        assert "Destination team: Incident Response" in view.to_text()
+        assert "organization ID" not in view.to_text()
+        assert not any(a.label == "Share My Skill" for a in view.actions)
         await ui.click(identity, "share")
         assert ui.record(identity)["operation"] == "publish"
         assert ui.record(identity)["plan"]["receipt"] == "publication-receipt"
@@ -423,6 +442,191 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface)
         await ui.click(identity, "back")
         await ui.click(identity, "cancel")
         assert not ui.view(identity).actions
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_transport_details_are_readable_and_do_not_expose_ids(tmp_path, surface):
+    async def scenario():
+        class HostileService(Service):
+            def native_team_name(self):
+                return "R&D <Team>"
+        ui = surface(tmp_path, HostileService())
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "details")
+        view = ui.view(identity)
+        assert "Approval permission: blocked" not in view.to_text()
+        assert "organization ID" not in view.to_text()
+        assert "org" not in view.to_text()
+        assert "{" not in view.items[0].detail
+        slack = blocks(view, identity)
+        assert "R&amp;D &lt;Team&gt;" in str(slack)
+        assert "R&D <Team>" in unescape(rich_html(view, identity))
+        assert "R&D <Team>" in unescape(plain_html(view))
+        assert "Review details and files" in str(slack)
+    asyncio.run(scenario())
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_missing_team_name_never_falls_back_to_owner_id(tmp_path, surface):
+    async def scenario():
+        class Unnamed(Service):
+            def native_team_name(self) -> str | None:
+                return None
+        ui = surface(tmp_path, Unnamed())
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        assert "Destination team: Team name unavailable" in ui.view(identity).to_text()
+        assert "Destination team: org" not in ui.view(identity).to_text()
+        await ui.click(identity, "share")
+        assert "Destination team: Team name unavailable" in ui.view(identity).to_text()
+        assert "Destination team: org" not in ui.view(identity).to_text()
+    asyncio.run(scenario())
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_final_share_spends_only_inspected_receipt_once(tmp_path, surface):
+    async def scenario():
+        service = Service()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        await ui.click(identity, "share")
+        assert ui.record(identity)["plan"]["candidate_flow"] is True
+        assert "Exact review data (JSON)" not in [item.title for item in ui.view(identity).items]
+        assert "publication-receipt" not in ui.view(identity).to_text()
+        assert "Destination" in ui.view(identity).to_text()
+        assert "Incident Review" in ui.view(identity).to_text()
+        assert not service.applied
+        while True:
+            following = next((a for a in ui.view(identity).actions if a.label == "Next"), None)
+            if following is None:
+                break
+            await ui.click(identity, following.action)
+        assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
+        assert not service.applied
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+    asyncio.run(scenario())
+
+@pytest.mark.parametrize("allowed,findings,expected", [
+    (True, [], "allowed; findings: 0"),
+    (False, [{"severity": "high"}], "needs review; findings: 1"),
+    (None, [{"severity": "low"}], "needs review; findings: 1"),
+])
+def test_publication_proposal_displays_flat_host_scan(allowed, findings, expected):
+    plan = Service().publication_review("local:draft-1")
+    plan["local_scan"] = {"available": True, "allowed": allowed,
+                          "findings": findings}
+    text = "".join(publication_proposal_pages({"plan": plan}))
+    assert "Local scanner: " + expected in text
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_optional_details_roundtrip_has_no_effect(tmp_path, surface):
+    async def scenario():
+        service = Service()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "share")
+        await ui.click(identity, "details")
+        assert ui.view(identity).items[0].title != "Exact review data (JSON)"
+        assert "{\n" not in ui.view(identity).items[0].detail
+        assert not service.applied
+        await ui.click(identity, "back")
+        assert ui.view(identity).items[0].title == "Sharing proposal"
+        assert not service.applied
+        while next((a for a in ui.view(identity).actions if a.label == "Next"), None):
+            following = next(a.action for a in ui.view(identity).actions if a.label == "Next")
+            await ui.click(identity, following)
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_proposal_overflow_preserves_approval_facts(tmp_path, surface, monkeypatch):
+    async def scenario():
+        service = Service()
+        exact = service.publication_review("local:draft-1")
+        exact["security_check"]["checks"] = [
+            {"key": f"finding-{number}-" + "<&" * 300, "status": "pass"}
+            for number in range(6)
+        ]
+        monkeypatch.setattr(service, "publication_review", lambda _draft, **_kw: exact)
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "share")
+        pages = []
+        while True:
+            view = ui.view(identity)
+            assert len(view.to_text()) <= 3500
+            pages.append(view.items[0].detail)
+            following = next((a for a in view.actions if a.label == "Next"), None)
+            if following is None:
+                break
+            await ui.click(identity, following.action)
+        text = "".join(pages)
+        assert all(f"finding-{number}-" in text for number in range(6))
+        assert "<&" * 300 in text
+        assert "Share My Skill" in [action.label for action in ui.view(identity).actions]
+        assert not service.applied
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_incomplete_candidate_only_retries_local_preparation(tmp_path, surface):
+    class IncompleteService(Service):
+        def __init__(self):
+            super().__init__()
+            self.retries = 0
+
+        def prepare_candidate_offer(self, identity):
+            self.retries += 1
+            plan = super().prepare_candidate_offer(identity)
+            plan["facts"]["editorial_status"] = "incomplete"
+            plan["facts"]["editorial_failure"] = "invalid_response"
+            return plan
+
+        def native_candidate_prepare(self, identity):
+            raise AssertionError("not ready for publication review")
+
+    async def scenario():
+        service = IncompleteService()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        assert "Retry preparation" in [action.label for action in ui.view(identity).actions]
+        await ui.click(identity, "share")
+        assert service.retries == 2
+        assert ui.record(identity)["operation"] == "candidate"
+        assert not service.applied
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_candidate_missing_receipt_cannot_offer_final_share(tmp_path, surface):
+    class MissingReceipt(Service):
+        def publication_review(self, draft_id, *, accept_warnings=False):
+            result = super().publication_review(draft_id, accept_warnings=accept_warnings)
+            result.pop("receipt")
+            return result
+
+    async def scenario():
+        service = MissingReceipt()
+        ui = surface(tmp_path, service)
+        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "share")
+        assert not service.applied
+        assert not any(a.label == "Share My Skill" for a in ui.view(identity).actions)
+        await ui.click(identity, "confirm")
+        assert not service.applied
     asyncio.run(scenario())
 
 
@@ -449,12 +653,13 @@ def test_complete_private_inspection_returns_without_authorizing(tmp_path, monke
                 break
             await ui.click(identity, next_action.action)
         import json  # pylint: disable=import-outside-toplevel
-        assert json.loads("".join(chunks)) == {
-            key: value for key, value in exact.items() if key not in {"draft_id", "receipt"}
-        }
+        visible = "".join(chunks)
+        assert "📄 File:" in visible and "ℹ️ What it does" in visible
+        assert json.dumps(exact["files"][0]["content_utf8"])[1:-1] in visible
+        assert "publication-receipt" not in visible
         assert ui.view(identity).actions[-1].label == "Looks good."
         await ui.click(identity, "back")
-        assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
+        assert "Review proposal" in [a.label for a in ui.view(identity).actions]
         assert ui.record(identity)["plan"] == before
         assert not service.applied
         # A forged final callback cannot skip the explicit Share/review screen.
@@ -497,12 +702,12 @@ def test_safe_summary_requires_all_actual_hash_bound_checks(tmp_path, monkeypatc
         response = ui.runtime.begin_publication(ui.caller, "local:draft-1")
         await ui.flush()
         identity = response["review_id"]
-        assert ui.view(identity).actions[0].label == "✓ Safe To Share"
+        assert ui.view(identity).actions[0].label == "✅ Safe To Share"
         await ui.click(identity, "checks")
         expanded = ui.view(identity).to_text()
         assert "✅ Safe To Share" in expanded
-        assert "  Private keys: pass" in expanded
-        assert "  Profanity or abusive language: pass" in expanded
+        assert "  ✅ Private keys: pass" in expanded
+        assert "  ✅ Profanity or abusive language: pass" in expanded
         await ui.click(identity, "back")
         assert not service.applied
         for status in ("pending", "unavailable", "blocked"):
@@ -707,7 +912,10 @@ def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch)
         (source / "unsafe-link").symlink_to(source / "SKILL.md")
         service = Service()
         monkeypatch.setattr(service, "native_candidate_inspect", lambda identity: {
-            "event_id": identity, "facts": {"name": "reviewed-skill"},
+            "event_id": identity, "facts": {
+                **Service.native_candidate_inspect(service, identity)["facts"],
+                "name": source.name,
+            },
         })
         monkeypatch.setattr(service, "suggest", prepared.prepare, raising=False)
         monkeypatch.setattr(service, "native_candidate_prepare",
@@ -885,7 +1093,7 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("category,label", [
-    ("skill_ready_to_share", "Share My Skill"),
+    ("skill_ready_to_share", "Review proposal"),
     ("new_skill", "Install Skill"),
     ("update_available", "Update Skill"),
 ])
@@ -946,9 +1154,10 @@ def test_slack_inspection_payload_preserves_literal_whitespace_and_markup(tmp_pa
             if following is None:
                 break
             await ui.click(identity, following.action)
-        assert json.loads("".join(chunks)) == {
-            key: value for key, value in plan.items() if key not in {"draft_id", "receipt"}
-        }
+        visible = "".join(chunks)
+        assert json.dumps(plan["files"][0]["content_utf8"])[1:-1] in visible
+        assert "*not bold* <https://invalid|label>" in visible
+        assert "receipt" not in visible
     asyncio.run(scenario())
 
 

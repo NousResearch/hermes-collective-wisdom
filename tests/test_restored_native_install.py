@@ -3,7 +3,7 @@
 # pylint: disable=protected-access,redefined-outer-name,unused-import
 import asyncio
 import base64
-import json
+
 
 from test_install_execution import invocation_executor
 from restoration_support import SlackHarness
@@ -55,13 +55,11 @@ def test_native_inspection_and_install_use_exact_real_package(invocation_executo
             if following is None:
                 break
             await ui.click(identity, following.action)
-        inspected = json.loads("".join(chunks))
-        assert inspected["review"] == {
-            key: value for key, value in original.items()
-            if key not in {"skill_id", "receipt", "published_by_user_id"}
-        }
-        assert "never executed" in str(inspected["package_files"])
-        assert base64.b64encode(b"\x00\xff\x01").decode() in str(inspected["package_files"])
+        inspected = "".join(chunks)
+        assert "• Review" in inspected and "• Verified package files" in inspected
+        assert "never executed" in inspected
+        assert base64.b64encode(b"\x00\xff\x01").decode() in inspected
+        assert "receipt" not in inspected
         assert ui.record(identity)["plan"] == original
         assert not target.exists()
         assert not client.record_calls

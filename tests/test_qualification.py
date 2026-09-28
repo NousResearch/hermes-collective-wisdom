@@ -167,11 +167,11 @@ def test_candidate_producer_projects_prepared_copy_only_for_current_source(tmp_p
     assert "What it does: Review incident notes with a consistent checklist." in view.summary
     assert "Why others might benefit: Coworkers can follow" in view.summary
     assert offered["professionalism_check"]["status"] == "pass"
-    assert "final sharing authorization" in view.notice
+    assert "final Share My Skill action" in view.notice
     assert set(state.local_event(event_id)["payload"]["preparation"]) == {"draft_id", "hashes"}
     assert [action.label for action in view.actions] == [
         "Review Checks", "View More Details", "Snooze Collective Wisdom",
-        "Maybe Later", "Share My Skill",
+        "Maybe Later", "Review proposal",
     ]
     assert service.native_candidate_inspect(event_id)["facts"] == offered["facts"]
     assert service.prepare_candidate_offer(event_id)["facts"] == offered["facts"]
@@ -200,6 +200,147 @@ def _editorial_offer_service(tmp_path, skill, model, monkeypatch):
     )
     monkeypatch.setattr(service, "_contribution_reviewer", lambda: reviewer)
     return service
+
+def test_candidate_model_validation_failure_keeps_owner_copy_and_no_safe_claim(
+    tmp_path, monkeypatch,
+):
+    from hermes_wisdom_plugin.native_review import project_view  # pylint: disable=import-outside-toplevel
+    from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, _state, args = environment(tmp_path)
+    (skill / "SKILL.md").write_text(
+        "---\nname: local\ndescription: Workflow\nmetadata:\n  hermes:\n"
+        "    editorial_description: Review fictional notes for a shift handover.\n"
+        "---\n# Workflow\nInspect the notes.\n", encoding="utf-8",
+    )
+    event_id = qualify_by_usage(args)
+    model = RecordingLlm()
+    original = model.complete_structured
+    def invalid_editorial(**kwargs):
+        if kwargs["schema_name"] == "wisdom_editorial_metadata":
+            model.calls.append(kwargs)
+            return SimpleNamespace(parsed={"editorial_name": "Shift Handover"},
+                                   provider="recording", model="recording-model")
+        return original(**kwargs)
+    model.complete_structured = invalid_editorial
+    service = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+    service._contribution_reviewer().host.frontmatter = {
+        "name": "local", "description": "Workflow",
+        "metadata": {"hermes": {
+            "editorial_description": "Review fictional notes for a shift handover.",
+        }},
+    }
+    plan = service.prepare_candidate_offer(event_id)
+    view = project_view({"operation": "candidate", "state": "pending", "plan": plan})
+    assert [call["schema_name"] for call in model.calls] == [
+        "wisdom_editorial_metadata", "wisdom_professionalism_review"
+    ]
+    assert plan["professionalism_check"]["status"] == "pass"
+    assert plan["facts"]["editorial_status"] == "incomplete"
+    assert plan["facts"]["editorial_failure"] == "invalid_response"
+    assert "invalid response" in view.notice.lower()
+    assert "What it does: Review fictional notes for a shift handover." in view.summary
+    assert "Why others might benefit: Coworker benefit not yet available." in view.summary
+    assert "Editorial copy is incomplete" in view.notice
+    assert "Safe To Share" not in view.to_text()
+    model.complete_structured = original
+    refreshed = service.prepare_candidate_offer(event_id)
+    assert refreshed["facts"]["editorial_status"] == "complete"
+    assert refreshed["facts"]["editorial"]["editorial_description"] == (
+        "Review fictional notes for a shift handover."
+    )
+    assert refreshed["facts"]["editorial"]["coworker_benefit"]
+    assert len(service._direct_state.prepared_drafts(OWNER)) == 1
+
+
+@pytest.mark.parametrize("response_text,expected_failure", [
+    ("PRIVATE_BAD_JSON", "invalid_response"),
+    ('{"editorial_name":"Title","editorial_description":"Description"}',
+     "adapter_validation"),
+])
+def test_editorial_host_adapter_rejects_invalid_response_without_leaking(
+    caplog, response_text, expected_failure,
+):
+    """Use the stock host structured adapter with a non-network injected caller."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+    import os  # pylint: disable=import-outside-toplevel
+    from pathlib import Path  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.editorial import resolve_editorial_metadata  # pylint: disable=import-outside-toplevel
+
+    root = os.environ.get("WISDOM_AGENT_DIR")
+    if not root or not (Path(root) / "agent" / "plugin_llm.py").is_file():
+        pytest.skip("stock host source requires WISDOM_AGENT_DIR")
+    spec = importlib.util.spec_from_file_location(
+        "stock_plugin_llm", Path(root) / "agent" / "plugin_llm.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    import sys  # pylint: disable=import-outside-toplevel
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    def response(**kwargs):
+        assert kwargs["max_tokens"] == 300 and kwargs["timeout"] == 45
+        assert kwargs["extra_body"]["response_format"]["type"] == "json_schema"
+        return ("stock", "model", SimpleNamespace(
+            model="model", choices=[SimpleNamespace(
+                message=SimpleNamespace(content=response_text))]
+        ))
+    adapter = module.make_plugin_llm_for_test(
+        plugin_id="wisdom", policy=module._TrustPolicy(plugin_id="wisdom"), sync_caller=response,
+    )
+    result = resolve_editorial_metadata(
+        frontmatter={"name": "my-skill", "description": "Use when routing"},
+        skill_markdown="# PRIVATE_INPUT", llm=adapter,
+    )
+    # Host skips schema enforcement when optional jsonschema is absent; plugin
+    # Pydantic validation must still reject the incomplete object.
+    if expected_failure == "adapter_validation" and importlib.util.find_spec("jsonschema") is None:
+        expected_failure = "invalid_response"
+    assert result["failure"] == expected_failure
+    assert result["coworker_benefit"] == ""
+    assert response_text not in caplog.text and "PRIVATE_INPUT" not in caplog.text
+
+def test_interrupted_editorial_upgrade_rebinds_verified_overlay(tmp_path, monkeypatch):
+    from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, state, args = environment(tmp_path)
+    event_id = qualify_by_usage(args)
+    model = RecordingLlm(fail=True)
+    first = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+    assert first.prepare_candidate_offer(event_id)["facts"]["editorial_status"] == "incomplete"
+    model.fail = False
+    def interrupted(*_args, **kwargs):
+        assert kwargs["previous"] == state.local_event(event_id)["payload"]["preparation"]
+        raise KeyboardInterrupt("interrupted before refreshed binding")
+    monkeypatch.setattr(first.qualification_state, "save_candidate_preparation", interrupted)
+    with pytest.raises(KeyboardInterrupt, match="interrupted before refreshed binding"):
+        first.prepare_candidate_offer(event_id)
+    calls = len(model.calls)
+    second = _editorial_offer_service(tmp_path, skill, model, monkeypatch)
+    assert second.prepare_candidate_offer(event_id)["facts"]["editorial_status"] == "complete"
+    assert len(model.calls) == calls
+    assert len(second._direct_state.prepared_drafts(OWNER)) == 1
+
+def test_candidate_local_checks_do_not_claim_gateway_safe(tmp_path, monkeypatch):
+    from hermes_wisdom_plugin.native_review import project_view  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.native_inspection import SECURITY_LABELS  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.professionalism import CHECK_KEYS  # pylint: disable=import-outside-toplevel
+    from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
+
+    skill, _state, args = environment(tmp_path)
+    event_id = qualify_by_usage(args)
+    service = _editorial_offer_service(tmp_path, skill, RecordingLlm(), monkeypatch)
+    plan = service.prepare_candidate_offer(event_id)
+    for key, labels in (("security_check", SECURITY_LABELS),
+                        ("professionalism_check", CHECK_KEYS)):
+        plan[key]["status"] = "pass"
+        plan[key]["checks"] = [
+            {"key": label, "status": "pass", "finding_count": 0} for label in labels
+        ]
+        plan[key]["content_hash"] = plan["hashes"]["content"]
+        plan[key]["author_description_hash"] = plan["hashes"]["author_description"]
+    view = project_view({"operation": "candidate", "state": "pending", "plan": plan})
+    assert view.actions[0].label == "Review Checks"
 
 def test_independent_first_offers_are_single_flight(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor  # pylint: disable=import-outside-toplevel

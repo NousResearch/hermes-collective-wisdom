@@ -32,8 +32,11 @@ setup approval cannot authorize a later effect.
 
 On supported private Desktop and messaging surfaces, an end-of-turn hook may perform
 a bounded feed poll on each eligible turn and emit one deterministic human-facing notice.
-Unsupported clients receive no proactive notice; their explicit commands remain
-available.
+CLI/TUI instead append one candidate-only suggestion to the current answer after
+a verified skill load qualifies. This transform precedes final turn outcome: a
+subsequently failed recovered answer may still contain the suggestion. It does not
+claim whole-turn success or grant publication consent. Other unsupported clients
+receive no proactive notice; their explicit commands remain available.
 
 The notice path:
 
@@ -72,8 +75,9 @@ SQLite schema, migration, importer, compatibility store, or dual-write path.
 - Desktop uses its supported turn event, plugin REST namespace, notification API,
   and Collective Wisdom page. Discovery slash commands open an SDK dialog through
   composer middleware, reusing the same catalog and exact package review components.
-- Plain CLI/TUI chat and unsupported/non-gateway clients do not receive proactive
-  notices.
+- CLI/TUI chat offers newly qualified local candidates in answer text, with a
+  terminal-only private draft review handoff. Unsupported/non-gateway clients do
+  not receive proactive notices.
 - Dashboard/full embedded parity, Agent/Gateway core changes, and a separate daemon
   are out of scope.
 

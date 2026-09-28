@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from .errors import SharePackagingError, WisdomAuthError, WisdomConflict, WisdomValidationError
 from .native_context import NativeInvocation
-from .native_inspection import inspection_pages, sharing_checks
+from .native_inspection import inspection_pages, sharing_checks, publication_proposal_pages
 from .package import PackagePolicyError
 from .review_state import ReviewState
 from .install_review import confirmed_file_change
@@ -246,7 +246,20 @@ def _public_review(value: Any) -> Any:
     return value
 
 def _inspection_pages(record: dict[str, Any]) -> list[str]:
+    if (record.get("screen") == "approval" and record.get("operation") == "publish"
+            and record.get("plan", {}).get("candidate_flow") is True):
+        return publication_proposal_pages(record)
     return inspection_pages({**record, "plan": _public_review(record["plan"])})
+
+
+def _candidate_review_ready(plan: dict[str, Any]) -> bool:
+    return bool(
+        plan.get("receipt") and plan.get("editorial_status") == "complete"
+        and all(plan.get(key) for key in (
+            "editorial_name", "editorial_description", "coworker_benefit",
+            "publication_mode", "policy_version", "authorization_expires_at", "hashes",
+        ))
+    )
 
 
 def _catalog_rows(data: Any) -> list[dict[str, Any]]:
@@ -500,50 +513,77 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
         actions.append(NativeAction("Previous", f"page.{page - 1}"))
     if page + 1 < len(pages):
         actions.append(NativeAction("Next", f"page.{page + 1}"))
-    elif approving and plan.get("allowed", True):
+    elif approving and plan.get("allowed", True) and (
+        plan.get("candidate_flow") is not True or _candidate_review_ready(plan)
+    ):
         partial = _requires_partial_acknowledgement(plan)
         actions.append(NativeAction(
-            "Acknowledge partial compatibility and confirm" if partial else "Confirm",
+            "Acknowledge partial compatibility and confirm" if partial else
+            "Share My Skill" if plan.get("candidate_flow") is True else "Confirm",
             "confirm.partial" if partial else "confirm", primary=True,
         ))
-    actions.append(NativeAction("Back" if approving else "Looks good.", "back"))
-    return NativeView(
-        "Exact package review" if approving else "Private package details",
+    if approving and plan.get("candidate_flow") is True:
+        actions.append(NativeAction("View More Details", "details"))
+    actions.append(NativeAction("Back" if approving else
+                                "Return to proposal" if plan.get("candidate_flow") is True
+                                else "Looks good.", "back"))
+    candidate = record.get("operation") == "candidate"
+    view = NativeView(
+        "Sharing proposal" if approving and plan.get("candidate_flow") is True else
+        "Exact package review" if approving else
+        "Candidate details" if candidate else "Private package details",
         f"Page {page + 1} of {len(pages)}. " + (
+            "Review the complete proposal before sharing. Detailed file inventory is optional."
+            if approving and plan.get("candidate_flow") is True else
             "Confirm only after inspecting the complete exact plan."
-            if approving else "Inspection does not authorize sharing, installation or setup."
-        ) + (("\n" + "\n".join(authority)) if authority else ""),
-        [NativeItem("Exact review data (JSON)", pages[page], literal=True)], actions=actions,
+            if approving else "Candidate details are not the prepared package. Review proposal first."
+            if candidate else "Inspection does not authorize sharing, installation or setup."
+        ) + (("\n" + "\n".join(authority)) if authority and not (
+            approving and plan.get("candidate_flow") is True) else ""),
+        [NativeItem("Sharing proposal" if approving and plan.get("candidate_flow") is True
+                    else "Review details and files", pages[page],
+                    literal=record.get("operation") != "candidate")], actions=actions,
     )
+    if approving and plan.get("candidate_flow") is True and not _approval_is_lossless(view):
+        return replace(view, actions=[action for action in actions if not action.primary],
+                       notice="Approval facts cannot be displayed completely here; use terminal review.")
+    return view
 
 
-def _candidate_view(plan: dict[str, Any]) -> NativeView:
+def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> NativeView:
     facts = plan.get("facts") or {}
     editorial = facts.get("editorial") or {}
     safe, _checks = sharing_checks(plan)
-    name = editorial.get("editorial_name") or facts.get("name") or plan.get("editorial_name")
-    description = editorial.get("editorial_description") or "Editorial description not yet available."
-    benefit = editorial.get("coworker_benefit") or "Coworker benefit not yet available."
+    name = editorial.get("editorial_name") or plan.get("editorial_name") or facts.get("name")
+    description = editorial.get("editorial_description") or plan.get("editorial_description") or "Editorial description not yet available."
+    benefit = editorial.get("coworker_benefit") or plan.get("coworker_benefit") or "Coworker benefit not yet available."
+    complete = facts.get("editorial_status", plan.get("editorial_status")) == "complete"
+    team = team_name
+    reason = facts.get("editorial_failure")
+    if reason not in {"invalid_response", "adapter_validation", "timeout", "model_error",
+                      "provenance_missing",
+                      "model_unavailable", "disclosure_blocked", "package_preparation_failed"}:
+        reason = "not prepared"
     return NativeView(
         "Hermes Collective Wisdom",
         "You created a skill that could help your team\n\n"
         f"Skill name: {_safe(name, 'Name unavailable')}\n"
         f"What it does: {_safe(description)}\n"
-        f"Why others might benefit: {_safe(benefit)}\n\n"
-        "Would you like to share it?",
-        notice=("Nothing has been uploaded or published. Share My Skill starts local "
-                "preparation, then you review the exact package and checks before final "
-                "sharing authorization. Editorial copy is incomplete."
-                if facts.get("editorial_status") != "complete" else
-                "Nothing has been uploaded or published. Share My Skill starts local "
-                "preparation, then you review the exact package and checks before final "
-                "sharing authorization."),
+        f"Why others might benefit: {_safe(benefit)}\n"
+        f"Destination team: {_safe(team, 'Team name unavailable')}\n\n"
+        "Would you like to review a sharing proposal?",
+        notice=("Nothing has been uploaded or published. Review proposal opens the "
+                "local package and current policy without sharing. The final Share My Skill "
+                "action authorizes that exact proposal." if complete else
+                "Nothing has been uploaded or published. Editorial copy is incomplete (" +
+                reason.replace("_", " ") +
+                "); retry local preparation or edit the private draft before reviewing sharing."),
         actions=[
-            NativeAction("✓ Safe To Share" if safe else "Review Checks", "checks"),
+            NativeAction("✅ Safe To Share" if safe else "Review Checks", "checks"),
             NativeAction("View More Details", "details"),
             NativeAction("Snooze Collective Wisdom", "settings"),
             NativeAction("Maybe Later", "cancel"),
-            NativeAction("Share My Skill", "share"),
+            NativeAction("Review proposal" if complete else "Retry preparation", "share"),
         ],
     )
 
@@ -806,15 +846,18 @@ def _authority_projection(
     enriched = {**plan, **({"owner": owner} if isinstance(owner, dict) else {})}
     if record.get("expires_at") is not None:
         enriched["review_expires_at"] = record["expires_at"]
-    owner_labels = (("organization_id", "Organization"),
-                    ("account_id", "Owner account"), ("profile_name", "Profile"))
-    lines = ([f"{label}: {_safe(owner.get(key))}" for key, label in owner_labels
-              if owner.get(key)] if isinstance(owner, dict) else [])
+    sharing = record.get("operation") in {"candidate", "publish"}
+    lines = ([f"Destination team: {_safe(record.get('team_name'), 'Team name unavailable')}"]
+             if sharing else [])
+    if isinstance(owner, dict) and owner.get("profile_name"):
+        lines.append(f"Profile: {_safe(owner['profile_name'])}")
     if record.get("expires_at") is not None:
-        lines.append(f"Review expires: {_safe(record['expires_at'])}")
-    permission = plan.get("allowed")
-    if isinstance(permission, bool):
-        lines.append("Approval permission: " + ("allowed" if permission else "blocked"))
+        from .native_inspection import _date  # pylint: disable=import-outside-toplevel
+        lines.append(f"Review expires: {_date(record['expires_at'])}")
+    if record.get("operation") != "candidate" and record.get("screen") == "approval":
+        action = "Sharing" if sharing else "Approval"
+        lines.append(f"{action} is available only after reviewing the complete proposal."
+                     if plan.get("allowed") is True else f"{action} is not available for this review.")
     return enriched, lines
 
 
@@ -895,7 +938,7 @@ def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-m
             and record.get("screen") == "setup"):
         return _setup_permission_view(record)
     if record.get("operation") in {"candidate", "publish"} and state == "pending":
-        return _candidate_view(plan)
+        return _candidate_view(plan, record.get("team_name"))
     if record.get("operation") in {"install", "update"} and state == "pending":
         return _installation_view(record)
     if record.get("operation") == "catalog":
@@ -1005,6 +1048,9 @@ class NativeReviewController:
             "result": None, "created_at": self.clock(), "updated_at": self.clock(),
             "expires_at": self.clock() + self.ttl_seconds,
         }
+        if operation in {"candidate", "publish"}:
+            resolve = getattr(service, "native_team_name", None)
+            record["team_name"] = resolve() if callable(resolve) else None
         self.state.save(record)
         return copy.deepcopy(record)
 
@@ -1194,6 +1240,15 @@ class NativeReviewController:
                 raise WisdomAuthError("Collective Wisdom review owner changed")
             return self._navigate(record, action, package_files=files)
         if action == "share" and record.get("operation") == "candidate":
+            if record["plan"].get("facts", {}).get("editorial_status") != "complete":
+                refreshed = service.prepare_candidate_offer(record["plan"]["event_id"])
+                if not authority() or not _owner_matches(record, service, invocation):
+                    raise WisdomAuthError("Collective Wisdom review owner changed")
+                updated = {**record, "plan": {**refreshed, "operation": "candidate", "allowed": False},
+                           "display_ready": False, "updated_at": self.clock()}
+                if not self.state.compare_replace(record, updated):
+                    raise WisdomConflict("Collective Wisdom review changed; open it again")
+                return updated
             return self._prepare_candidate(record, service, invocation, authority)
         if (
             action in {"details", "back", "checks"} or action.startswith("page.")
@@ -1247,7 +1302,10 @@ class NativeReviewController:
         elif action == "checks":
             result.update(screen="checks")
         elif action == "back":
-            result.update(screen="offer", page=0, inspected_through=-1)
+            if (record.get("screen") == "details" and record["plan"].get("candidate_flow") is True):
+                result.update(screen="approval", page=0, inspected_through=0)
+            else:
+                result.update(screen="offer", page=0, inspected_through=-1)
         else:
             try:
                 page = int(action.split(".", 1)[1])
@@ -1284,7 +1342,13 @@ class NativeReviewController:
                 ),
                 "candidate_flow": True,
             }
-            if has_reviewable_warnings(prepared):
+            if prepared.get("editorial_status") != "complete":
+                candidate = copy.deepcopy(record["plan"])
+                candidate.setdefault("facts", {})["editorial_status"] = "incomplete"
+                candidate["facts"]["editorial_failure"] = prepared.get("editorial_failure")
+                result = {**record, "plan": candidate, "display_ready": False,
+                          "updated_at": self.clock(), "failure": None}
+            elif has_reviewable_warnings(prepared):
                 if not safe_scan_details(prepared.get("local_scan")):
                     raise WisdomValidationError(
                         "scanner warning details are unavailable; acknowledgement is blocked"
@@ -1335,7 +1399,28 @@ class NativeReviewController:
         if self.clock() >= record["expires_at"]:
             raise WisdomAuthError("Collective Wisdom review expired; open it again")
         _validate_offered_action(record, action)
+        record = self._enrich_team_label(record, service, invocation, authority)
         return self._act_pending(record_id, record, action, service, invocation, authority, progress)
+
+    def _enrich_team_label(self, record, service, invocation, authority):
+        """Resolve old cards via the bound host identity without changing consent."""
+        if record.get("operation") not in {"candidate", "publish"} or record.get("team_name"):
+            return record
+        resolve = getattr(service, "native_team_name", None)
+        if not callable(resolve) or authority() is not True:
+            return record
+        try:
+            label = resolve()
+        except (WisdomAuthError, WisdomValidationError, ConnectionError, TimeoutError):
+            label = None
+        if not _owner_matches(record, service, invocation) or authority() is not True:
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        if not isinstance(label, str) or not label.strip() or label == record["owner"].get("organization_id"):
+            return record
+        updated = {**record, "team_name": label}
+        if not self.state.compare_replace(record, updated):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return updated
 
     def _act_pending(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
         self, record_id, record, action, service, invocation, authority, progress,
@@ -1578,8 +1663,12 @@ class NativeReviewController:
         if review_identity(review) != review_identity(displayed):
             raise WisdomConflict("The package or scanner findings changed; open it again")
         if plan.get("candidate_flow") is True:
+            if not isinstance(review.get("receipt"), str) or not review["receipt"]:
+                raise WisdomValidationError("publication review receipt is unavailable")
             return {
-                **record, "operation": "publish", "plan": copy.deepcopy(review),
+                **record, "operation": "publish", "plan": copy.deepcopy({
+                    **review, "candidate_flow": True,
+                }),
                 "screen": "approval", "page": 0, "inspected_through": 0,
                 "updated_at": self.clock(),
             }
@@ -1613,6 +1702,7 @@ class NativeReviewController:
         refreshed = _prepared_review(service, plan)
         return {**record, "plan": {
             **refreshed, "skill_name": plan.get("skill_name"), "native_stage": "prepared",
+            **({"candidate_flow": True} if plan.get("candidate_flow") is True else {}),
         }, "updated_at": self.clock()}
 
     def _move_suggest_file(
@@ -1663,6 +1753,7 @@ class NativeReviewController:
         return {**record, "plan": {
             **displayed, "skill_name": plan.get("skill_name"),
             "native_stage": "warnings",
+            **({"candidate_flow": True} if plan.get("candidate_flow") is True else {}),
         }, "updated_at": self.clock()}
 
     def _confirm_suggest(  # pylint: disable=too-many-arguments

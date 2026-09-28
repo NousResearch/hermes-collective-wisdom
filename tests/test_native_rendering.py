@@ -3,16 +3,133 @@
 
 import asyncio
 import html
+import json
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from hermes_wisdom_plugin.commands import _human_render
+from hermes_wisdom_plugin.local_security import safe_scan_findings
+from hermes_wisdom_plugin.native_inspection import inspection_pages
 from hermes_wisdom_plugin.native_review import (
     NativeAction, NativeItem, NativeView, project_view,
 )
 from hermes_wisdom_plugin.native_slack import blocks
-from hermes_wisdom_plugin.native_telegram import edit, keyboard, plain_html, send
+from hermes_wisdom_plugin.native_telegram import edit, keyboard, plain_html, rich_html, send
+
+def test_recorded_candidate_plan_is_a_human_list_on_real_transports():
+    # Shape captured from a real candidate plan; authority tokens removed from fixture.
+    path = Path(__file__).parent / "fixtures" / "recorded_candidate_plan.json"
+    record = {"operation": "candidate", "plan": json.loads(path.read_text(encoding="utf-8")),
+              "state": "pending", "screen": "details", "page": 0,
+              "team_name": "Wisdom Staging Test"}
+    original = deepcopy(record)
+    pages = []
+    while True:
+        record["page"] = len(pages)
+        view = project_view(record)
+        pages.append(view.items[0].detail)
+        assert view.items[0].literal is False
+        assert html.escape(view.items[0].detail) in next(
+            block["text"]["text"] for block in blocks(view, "record-1")
+            if block.get("type") == "section" and "Review details" in block["text"]["text"]
+        )
+        assert view.items[0].detail.replace("&", "&amp;") in plain_html(view)
+        expected = html.escape(view.items[0].detail).replace("\n", "<br/>")
+        assert expected in rich_html(view, "record-1")
+        if not any(action.label == "Next" for action in view.actions):
+            break
+    text = "\n".join(pages)
+    for fact in ("Skill name: Shift Handover Summary", "What it does:",
+                 "Why teammates benefit:", "Why suggested: Frequent use",
+                 "Draft preparation: Complete", "Nothing has been uploaded or shared",
+                 "✅ Private keys: No issues detected",
+                 "⏳ Organization policy: Checked by Gateway after authorized submission"):
+        assert fact in text
+    for internal in ("high_usage", "Schema version", "local_preflight", "ascii_credential",
+                     "author_description_hash", "Editorial failure: Unavailable"):
+        assert internal not in text
+    assert original["plan"] == record["plan"]
+
+def test_candidate_details_keep_warning_and_unavailable_without_fake_pass():
+    path = Path(__file__).parent / "fixtures" / "recorded_candidate_plan.json"
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    plan["security_check"]["checks"][0].update(
+        status="warning_required", finding_count=1, details=["A key may be exposed"])
+    plan["professionalism_check"]["checks"][0]["status"] = "unavailable"
+    plan["facts"]["editorial_status"] = "incomplete"
+    plan["facts"]["editorial_failure"] = "model_unavailable"
+    record = {"operation": "candidate", "plan": plan, "state": "pending", "screen": "details"}
+    text = "\n".join(inspection_pages(record))
+    assert "⚠️ Private keys: warning required" in text
+    assert "1 finding(s) reported" in text and "A key may be exposed" in text
+    assert "⚠️ Profanity or abusive language: unavailable" in text
+    assert "⚠️ Draft preparation: Incomplete" in text
+    assert "Preparation needs attention: model unavailable" in text
+    assert "✅ Private keys" not in text
+
+
+@pytest.mark.parametrize("operation,screen", [
+    ("candidate", "details"), ("publish", "details"), ("publish", "approval"),
+])
+def test_structured_scanner_findings_are_readable_on_native_surfaces(operation, screen):
+    scan = {"available": True, "allowed": None, "findings": [{
+        "severity": "high", "kind": "instruction_override", "path": "SKILL.md",
+        "line": 7, "description": "Review the instruction override.",
+        "matched_text": "private matched content must not be displayed",
+    }]}
+    plan = {
+        "candidate_flow": operation == "publish", "allowed": False,
+        "local_scan": scan, "security_check": {"status": "warning_required", "checks": [{
+            "key": "skills_guard", "status": "warning_required", "finding_count": 1,
+            "findings": safe_scan_findings(scan),
+        }]},
+    }
+    record = {"operation": operation, "screen": screen, "state": "pending", "plan": plan}
+    original = deepcopy(plan)
+    texts = []
+    while True:
+        record["page"] = len(texts)
+        view = project_view(record)
+        text = view.items[0].detail
+        texts.append(text)
+        slack_text = "\n".join(block.get("text", {}).get("text", "")
+                               for block in blocks(view, "record-1"))
+        assert html.escape(text) in slack_text or text in slack_text
+        assert html.escape(text).replace("\n", "<br/>") in rich_html(view, "record-1")
+        assert html.escape(text) in plain_html(view)
+        assert not any(action.primary for action in view.actions)
+        if not any(action.label == "Next" for action in view.actions):
+            break
+    rendered = "\n".join(texts)
+    for expected in ("Severity: high", "File: SKILL.md", "Line: 7",
+                     "Review the instruction override."):
+        assert expected in rendered
+    assert "{'severity'" not in rendered
+    assert "private matched content" not in rendered
+    assert plan == original
+
+
+@pytest.mark.parametrize("status,icon", [
+    ("pass", "✅"), ("blocked", "❌"), ("warning_required", "⚠️"),
+    ("unavailable", "⚠️"), ("pending", "⏳"),
+])
+def test_candidate_status_emoji_survive_native_renderers(status, icon):
+    record = {
+        "operation": "candidate", "screen": "details", "state": "pending",
+        "plan": {"security_check": {"checks": [
+            {"key": "private_keys", "status": status, "finding_count": 0},
+        ]}},
+    }
+    view = project_view(record)
+    expected = f"{icon} Private keys:"
+    assert expected in view.to_text()
+    assert expected in str(blocks(view, "record-1"))
+    assert expected in rich_html(view, "record-1")
+    assert expected in plain_html(view)
+    assert "ℹ️ Skill name:" in view.to_text()
 
 
 def test_explicit_review_controls_point_to_exact_record():
@@ -102,12 +219,16 @@ def test_effect_review_retains_exact_security_compatibility_and_file_facts():
     }).to_text()
 
     for exact_fact in (
-        "sha256:content", "sha256:manifest",
-        'compatible_after_setup', '"accept_partial": true', "ask",
+        'compatible_after_setup', "Accept partial: Yes", "ask",
         "Review shell capability", "shell", "scripts/check.sh", "exec", "sha256:file",
     ):
         assert exact_fact in text
     assert "receipt-exact" not in text
+    approval = project_view({
+        "state": "pending", "operation": "install", "plan": plan, "screen": "approval",
+    }).to_text()
+    assert "Sharing is" not in approval
+    assert "Destination team: Team name unavailable" not in approval
 
 
 def test_telegram_plain_fallback_removes_approval_when_escape_expansion_truncates():
@@ -216,12 +337,11 @@ def test_native_approval_fallback_preserves_version_owner_expiry_and_permission(
     fallback = html.unescape(plain_html(view))
     slack = blocks(view, "record-1")
 
-    for fact in (
-        '"version": 7', "Organization: org-1", "Owner account: owner-1",
-        "Profile: work", "Review expires: 12345.5", "Approval permission: allowed",
-    ):
+    for fact in ("Version: 7", "Profile: work",
+                 "Review expires: 01 Jan 1970", "Approval is available only after"):
         assert fact in fallback
         assert fact in str(slack)
+    assert "org-1" not in fallback and "owner-1" not in fallback
     assert "wi:agent:confirm:record-1" in str(keyboard(view, "record-1"))
 
 
@@ -327,8 +447,8 @@ def test_native_review_renders_persisted_owner_when_plan_owner_diverges():
     })
 
     rendered = view.to_text()
-    assert "Organization: record-org" in rendered
-    assert "Owner account: record-owner" in rendered
-    assert "Profile: work" in rendered
+    assert f"Profile: {record_owner['profile_name']}" in rendered
+    assert "Profile: other" not in rendered
+    assert "record-org" not in rendered and "record-owner" not in rendered
     assert "plan-org" not in rendered
     assert "plan-owner" not in rendered

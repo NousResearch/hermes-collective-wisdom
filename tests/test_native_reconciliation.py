@@ -17,15 +17,23 @@ from hermes_wisdom_plugin.review_state import ReviewState
 
 
 class CandidateWarningService(_NativeSuggestService):
+    def native_team_name(self) -> str | None:
+        return None
+
     def prepare_candidate_offer(self, event_id):
         return self.native_candidate_inspect(event_id)
 
     def native_candidate_inspect(self, event_id):
-        return {"event_id": event_id, "facts": {"name": "reviewed-skill"}}
+        return {"event_id": event_id, "facts": {"name": "reviewed-skill",
+                                              "editorial_status": "complete"}}
 
     def native_candidate_prepare(self, event_id):
         assert event_id == "candidate-1"
         return "local:draft-1"
+
+    def prepared_review(self, draft_id, *, allow_model_review=False):
+        return {**super().prepared_review(draft_id, allow_model_review=allow_model_review),
+                "editorial_status": "complete"}
 
 
 def _controller(tmp_path):
@@ -114,6 +122,53 @@ def test_candidate_warnings_use_bound_suggest_ack_before_exact_approval(tmp_path
     assert not any(call[0] == "publication_submit" for call in service.calls)
 
 
+def test_candidate_warning_ack_leads_to_readable_proposal(tmp_path):
+    service = CandidateWarningService()
+    controller = _controller(tmp_path)
+    caller = _native_invocation()
+    record = controller.request_candidate(service, caller, "candidate-1")
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    warnings = _act_and_display(controller, record["id"], "share", service, clicked)
+    assert warnings["plan"]["candidate_flow"] is True
+    proposal = _act_and_display(controller, record["id"], "suggest.ack", service, clicked)
+    assert proposal["operation"] == "publish"
+    assert proposal["plan"]["candidate_flow"] is True
+    assert project_view(proposal).items[0].title == "Sharing proposal"
+
+def test_existing_candidate_enriches_display_on_authenticated_navigation(tmp_path):
+    service = CandidateWarningService()
+    service.native_team_name = lambda: "Wisdom Staging Test"
+    controller = _controller(tmp_path)
+    caller = _native_invocation()
+    record = controller.request_candidate(service, caller, "candidate-1")
+    record = controller.bind_message(record["id"], caller, "card-1")
+    old = {key: value for key, value in record.items() if key != "team_name"}
+    controller.state.save(old)
+    clicked = replace(caller, message_id="card-1")
+    navigated = controller.act(record["id"], "details", service, clicked)
+    assert navigated["team_name"] == "Wisdom Staging Test"
+    assert navigated["plan"] == old["plan"]
+    assert "Destination team: Wisdom Staging Test" in controller.view(navigated).to_text()
+    assert controller.state.get(record["id"])["team_name"] == "Wisdom Staging Test"
+
+def test_team_enrichment_rejects_stale_record_after_network_lookup(tmp_path):
+    service = CandidateWarningService()
+    controller = _controller(tmp_path)
+    caller = _native_invocation()
+    record = controller.request_candidate(service, caller, "candidate-1")
+    record = controller.bind_message(record["id"], caller, "card-1")
+    old = {key: value for key, value in record.items() if key != "team_name"}
+    controller.state.save(old)
+    def changed():
+        controller.state.save({**old, "state": "cancelled"})
+        return "Wrong team"
+    service.native_team_name = changed
+    with pytest.raises(WisdomConflict):
+        controller.act(record["id"], "details", service, replace(caller, message_id="card-1"))
+    assert controller.state.get(record["id"])["state"] == "cancelled"
+
+
 @pytest.mark.parametrize("changed", ["draft", "owner"])
 def test_publication_review_cannot_change_prepared_draft_or_owner(tmp_path, changed):
     service = _NativeSuggestService()
@@ -167,10 +222,11 @@ def test_exact_inspection_projects_persisted_owner_not_plan_owner(tmp_path):
     }
 
     text = project_view(record).to_text()
-    assert "Owner account: account-1" in text
+    assert "Destination team: Team name unavailable" in text
+    assert "account-1" not in text
     assert '"draft_id"' not in text
     assert '"receipt"' not in text
-    assert "Review expires: 123.0" in text
+    assert "Review expires: 01 Jan 1970" in text
     assert '"account_id": "other"' not in text
 
 

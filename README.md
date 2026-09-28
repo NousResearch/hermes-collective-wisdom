@@ -84,8 +84,11 @@ install, update, and removal still use their separately reviewed authority check
 - **Slack / Telegram:** use `/wisdom` for browsing and private review flows.
   Sensitive actions require a private conversation and explicit approval.
   Live platform acceptance is still in progress.
-- **CLI / TUI chat:** read tools and terminal handoffs are available. These clients
-  do not receive proactive notices.
+- **CLI / TUI chat:** after an owning turn loads a skill and it newly qualifies,
+  a best-effort local sharing suggestion may be appended to the answer. It names
+  the checked private draft and gives a terminal review command; it never shares
+  automatically. The current Agent transform hook cannot distinguish a later
+  failed final outcome, so a suggestion may remain in a recovered failed answer.
 - **Desktop:** enable the package's Desktop half in **Capabilities → Plugins**
   (also available through **⌘K → Plugins**), then open **Collective Wisdom**.
   Catalog, Installed, Activity & Settings, and Contributions call the existing

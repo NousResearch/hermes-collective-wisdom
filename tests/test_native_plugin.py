@@ -129,7 +129,7 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         assert entries["cli"][0] == entries["slash"][0] == "wisdom"
         assert [name for name, _callback in entries["hooks"]] == [
             "pre_gateway_dispatch", "pre_llm_call",
-            "on_skill_lifecycle", "on_session_end"
+            "on_skill_lifecycle", "transform_llm_output", "on_session_end"
         ]
         assert entries["slack"][0] == "slack"
         assert callable(entries["telegram"])
@@ -160,7 +160,7 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         entries["unload"]()
         assert disposed == [
             "slash", "cli", "present_wisdom_consent", "wisdom_inspect", "wisdom_inbox",
-            "on_session_end", "on_skill_lifecycle",
+            "on_session_end", "transform_llm_output", "on_skill_lifecycle",
             "pre_llm_call", "pre_gateway_dispatch",
             "hermes_collective_wisdom_refinement",
         ]
@@ -223,7 +223,7 @@ def test_registered_end_turn_awareness_is_private_and_owner_bound(
                 return None
 
         monkeypatch.setattr(command, "_service", LocalService)
-        facts = {"platform": platform, "session_id": "s", "task_id": "t"}
+        facts = {"platform": platform, "session_id": "s", "task_id": "t", "turn_id": "turn"}
         completed = {**facts, "completed": True, "failed": False, "interrupted": False}
         hooks["on_session_end"](**completed)  # no admission
         nested.append({**facts, "task_id": "simultaneous"})
