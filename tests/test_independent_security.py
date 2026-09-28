@@ -85,11 +85,11 @@ def test_settings_effect_waits_for_display_ack(tmp_path):
     service.notification_settings = lambda **kw: {
         'delivery_mode': 'agent', 'mode_writable': True, 'mute_control': {'revision': 7},
     }
-    def mute(revision, duration, *, may_apply):
+    def set_mode(mode, *, expected_mode, may_apply):
         assert may_apply()
-        changes.append((revision, duration))
-        return {'muted': True}
-    service.choose_notification_mute = mute
+        changes.append((expected_mode, mode))
+        return {'delivery_mode': mode}
+    service.set_notification_mode = set_mode
 
     async def scenario():
         ui = SlackHarness(tmp_path, service)
@@ -107,7 +107,7 @@ def test_settings_effect_waits_for_display_ack(tmp_path):
         ui.chat_update = blocked_display
         pending = asyncio.create_task(ui.click(identity, 'settings'))
         await asyncio.wait_for(started.wait(), 5)
-        await ui.click(identity, 'settings.mute.1w')
+        await ui.click(identity, 'settings.mode.fixed')
         release.set()
         await pending
 

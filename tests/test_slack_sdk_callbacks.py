@@ -43,9 +43,8 @@ class Service:
     def native_candidate_inspect(self, identity):
         return {"event_id": identity, "facts": {"name": "incident"}, "networked": False}
 
-    def notification_settings(self, *, may_apply, include_mute_control):
+    def notification_settings(self, *, may_apply):
         assert may_apply()
-        assert include_mute_control is True
         return {
             "delivery_mode": "agent", "mode_writable": True,
             "mute_control": {"revision": 7},
@@ -86,7 +85,7 @@ def test_real_sdk_response_binds_exact_message_for_registered_callbacks(tmp_path
         await ui.runtime._send_notice(ui.caller, [{
             "category": "new_skill", "skill_id": "incident", "version": 2,
         }])
-        install_id = _record_id(ui.posts[-1], "Install Skill")
+        install_id = _record_id(ui.posts[-1], "Install")
         assert ui.record(install_id)["message_id"] == "card-1"
         assert ui.record(install_id)["display_ready"] is True
 
@@ -99,7 +98,7 @@ def test_real_sdk_response_binds_exact_message_for_registered_callbacks(tmp_path
         await ui.runtime._send_notice(ui.caller, [{
             "category": "skill_ready_to_share", "event_id": "candidate-1",
         }])
-        candidate_id = _record_id(ui.posts[-1], "Snooze Collective Wisdom")
+        candidate_id = _record_id(ui.posts[-1], "Notification settings")
         assert ui.record(candidate_id)["message_id"] == "card-2"
         assert ui.record(candidate_id)["display_ready"] is True
 
@@ -126,7 +125,7 @@ def test_uncertain_sdk_ack_fails_closed_without_second_send(tmp_path, caplog, da
                 {"category": "new_skill", "skill_id": "first", "version": 1},
             ])
         assert len(ui.posts) == 1
-        identity = _record_id(ui.posts[0], "Install Skill")
+        identity = _record_id(ui.posts[0], "Install")
         assert ui.record(identity)["message_id"] == ""
         assert ui.record(identity)["display_ready"] is False
         await ui.click(identity, "install")
@@ -149,7 +148,7 @@ def test_callback_failure_logs_only_exception_class_after_completed_effect(
         await ui.runtime._send_notice(ui.caller, [{
             "category": "new_skill", "skill_id": "incident", "version": 2,
         }])
-        identity = _record_id(ui.posts[-1], "Install Skill")
+        identity = _record_id(ui.posts[-1], "Install")
 
         original_edit = ui.chat_update
         async def failed_edit(**payload):

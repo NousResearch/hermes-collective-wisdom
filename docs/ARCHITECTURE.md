@@ -45,7 +45,7 @@ Those business-operation records are not advisory delivery queues.
 ## Best-effort notices and native reviews
 
 Each eligible end turn checks qualified local candidates; feed polling runs only
-when due. Policy, profile notification settings, mute and suppression are separate
+when due. Policy, profile notification settings and suppression are separate
 gates. Persist only owner-bound cursor/poll state and offered markers. Discard
 stale account results; unsupported surfaces do nothing. No claims, settlement,
 retry/rescue queues, model-history injection or cross-device guarantee exists.

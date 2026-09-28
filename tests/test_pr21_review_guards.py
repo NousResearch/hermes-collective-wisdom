@@ -117,11 +117,12 @@ def test_settings_ack_fences_effects_and_preserves_completed_result(
         monkeypatch.setattr(service, "notification_settings", lambda **_kw: {
             "delivery_mode": "agent", "mode_writable": True, "mute_control": {"revision": 7},
         }, raising=False)
-        def mute(_revision, _duration, *, may_apply):
+        def set_mode(mode, *, expected_mode, may_apply):
             assert may_apply()
             changes.append(True)
-            return {"muted": True}
-        monkeypatch.setattr(service, "choose_notification_mute", mute, raising=False)
+            assert mode == "fixed" and expected_mode == "agent"
+            return {"delivery_mode": "fixed"}
+        monkeypatch.setattr(service, "set_notification_mode", set_mode, raising=False)
         ui = surface(tmp_path, service)
         identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
         await ui.flush()
@@ -138,14 +139,14 @@ def test_settings_ack_fences_effects_and_preserves_completed_result(
         monkeypatch.setattr(ui, "chat_update", edit)
         pending = asyncio.create_task(ui.click(identity, "settings"))
         await asyncio.wait_for(started.wait(), 5)
-        await ui.click(identity, "settings.mute.1w")
+        await ui.click(identity, "settings.mode.fixed")
         assert not changes
         release.set()
         await pending
-        await ui.click(identity, "settings.mute.1w")
+        await ui.click(identity, "settings.mode.fixed")
         assert changes == ([] if fails else [True])
         assert ui.record(identity)["state"] == ("failed" if fails else "completed")
-        await ui.click(identity, "settings.mute.1w")
+        await ui.click(identity, "settings.mode.fixed")
         assert changes == ([] if fails else [True])
     asyncio.run(scenario())
 

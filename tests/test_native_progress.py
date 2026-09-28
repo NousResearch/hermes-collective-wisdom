@@ -164,7 +164,7 @@ def test_install_progress_precedes_effect_and_disables_duplicate(tmp_path, harne
             await ui.runtime._send_notice(ui.caller, [{
                 "category": "new_skill", "skill_id": "incident", "version": 2,
             }])
-            identity = _record_id(ui.posts[-1], "Install Skill")
+            identity = _record_id(ui.posts[-1], "Install")
         else:
             record = ui.runtime.reviews.request_install(service, ui.caller, "incident@v2")
             identity = record["id"]

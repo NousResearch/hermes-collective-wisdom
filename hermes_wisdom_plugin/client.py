@@ -211,17 +211,6 @@ class WisdomSuppressionList(WireModel):
     suppressions: list[WisdomSuppression] = Field(max_length=100)
 
 
-class WisdomMuteResponse(WireModel):
-    org_id: str = Field(min_length=1, max_length=512)
-    muted: bool
-    duration: Literal["1_day", "1_week", "30_days", "forever"] | None
-    muted_until: str | None
-    forever: bool
-    revision: int = Field(default=0, ge=0)
-    mutation_id: str | None = None
-    updated_at: str | None = None
-
-
 class FeedEvent(WireModel):
     model_config = ConfigDict(extra="allow", strict=False)
     event_id: str = Field(min_length=1, max_length=512)
@@ -630,27 +619,6 @@ class WisdomClient:
         if any(row.key not in keys for row in result.suppressions):
             raise WisdomError("Gateway returned unexpected suppression keys")
         return result.suppressions
-
-    def recommendation_mute(self) -> WisdomMuteResponse:
-        return self._preference_org(self._request(
-            "agent-led/mute", model=WisdomMuteResponse, params={"include_revision": "1"}))
-
-    def set_recommendation_mute(self, duration: str | None, *, expected_revision: int | None = None,
-                                mutation_id: str | None = None,
-                                requested_at: str | None = None) -> WisdomMuteResponse:
-        if duration not in {None, "1_day", "1_week", "30_days", "forever"}:
-            raise WisdomValidationError("Unsupported mute duration")
-        guarded = any(value is not None for value in (expected_revision, mutation_id, requested_at))
-        if guarded and (type(expected_revision) is not int or not mutation_id or not requested_at):
-            raise WisdomValidationError("Queued mute requires revision, mutation ID and request time")
-        body = {"duration": duration}
-        if guarded:
-            body.update(expected_revision=expected_revision, mutation_id=mutation_id,
-                        requested_at=requested_at)
-        return self._preference_org(self._request(
-            "agent-led/mute", model=WisdomMuteResponse,
-            method="DELETE" if duration is None and not guarded else "PUT",
-            json_body=body if duration is not None or guarded else None))
 
     def feed(self, cursor: str | None = None, *, installation_id: str | None = None) -> Feed:
         params: dict[str, str] = {}

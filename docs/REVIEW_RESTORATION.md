@@ -11,8 +11,8 @@ infrastructure. Desktop retains its management pages and exact-content controls.
 | Sharing invitation | A qualified candidate's first clean card says “You created a skill that could help your team” and offers Share My Skill directly beside optional details and private Portal editing. | Qualification is deterministic, not a model assessment of the team's needs. Preparation does not upload. |
 | Review checks | Expands the actual checks. Safe To Share requires complete passing security and hash-bound professionalism evidence. | Missing, pending, advisory, or unavailable checks never count as passed. Local preparation normally has pending Gateway checks. |
 | View More Details | Opens private, bounded inspection; Back returns to the proposal without authorization. | This is not a Portal deeplink; larger packages need Previous/Next navigation. |
-| Snooze / Mute | Opens settings disclosing their all-recommendation scope. | Opening settings changes nothing; recipient-only mute is not provided. |
-| Install / Update invitation | Offers View Details, Not Now, Mute Skill Recommendations, and Install/Update Skill. | No invented organization name or workload relevance. Main-agent explanations are labelled advice, never authorization. |
+| Notification settings | Opens the existing profile delivery mode settings. | Opening settings changes nothing. Recommendation muting is no longer supported. |
+| Install / Update invitation | Offers View Details, Not Now, and Install or Update, in that order. Uses reviewed editorial copy and a plain description under What does it do?. | No invented organization name or workload relevance. Main-agent explanations are labelled advice, never authorization. |
 | Maybe Later / Not Now | Removes controls while retaining the invitation text, including cancellation during preparation. | Old callbacks cannot authorize effects. Dismissal does not create a durable cooldown. |
 | Native packaging failure | A blocked local package displays a retry/dismiss card before posting; a failed bound retry identifies Share Packaging failed. | Other preparation errors offer an accurately named retry/dismiss card, without exposing exception details. |
 | Desktop preparation failure | Reports Share preparation failed, retaining the underlying error detail. | A transport or service failure is not falsely diagnosed as a packaging problem. Nothing is uploaded by preparation. |
@@ -88,5 +88,5 @@ failed display, and replay rejection. Desktop tests exercise mounted components.
 See [Testing](TESTING.md) for reproducible commands and optional stock-host probes.
 
 Passing tests does not establish live Slack/Telegram delivery or production Gateway
-publication/installation. Full Desktop invitation parity,
-recipient-only mute, and once-for-all sharing consent remain outside this change.
+publication/installation. Full Desktop invitation parity and once-for-all sharing
+consent remain outside this change.

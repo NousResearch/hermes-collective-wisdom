@@ -97,7 +97,7 @@ def test_registered_local_transform(tmp_path, monkeypatch, platform, guard):
         if guard == "profile":
             active_profile[0] = "other"
         result = hooks["transform_llm_output"](**transform)
-        if guard != "none":
+        if guard not in {"none", "mute"}:
             assert result is None
             assert not calls
             return

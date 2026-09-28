@@ -91,6 +91,7 @@ def test_private_upload_continues_on_same_card_with_exact_fresh_share(  # pylint
     url = "https://portal.example/wisdom/review/draft-1"
     assert any(a.url == url and a.action is None for a in view.actions)
     assert any(a.label == "Share My Skill" for a in view.actions)
+    assert next(a.label for a in view.actions if a.action == "settings") == "Notification settings"
     assert {"details", "settings", "cancel"} <= {
         a.action for a in view.actions if a.action
     }
@@ -205,6 +206,7 @@ def test_private_fallback_navigation_remains_usable(tmp_path, monkeypatch, fallb
     view = controller.view(staged)
     assert any(a.url == staged["result"]["portal_url"] for a in view.actions)
     assert {"details", "settings", "cancel"} <= {a.action for a in view.actions}
+    assert next(a.label for a in view.actions if a.action == "settings") == "Notification settings"
     assert "confirm" not in {a.action for a in view.actions}
     with controller.displaying(staged):
         pass
@@ -240,6 +242,7 @@ def test_portal_edit_refresh_hands_off_without_native_share_loop(tmp_path, monke
     assert "Portal" in view.to_text() and "review" in view.to_text().lower()
     assert "confirm" not in {a.action for a in view.actions}
     assert "refresh.review" not in {a.action for a in view.actions}
+    assert next(a.label for a in view.actions if a.action == "settings") == "Notification settings"
     with controller.displaying(refreshed):
         pass
     assert controller.act(record["id"], "details", service, clicked)["screen"] == "details"

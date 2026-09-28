@@ -11,7 +11,7 @@
     "hermes_wisdom_plugin/client.py::WisdomClient._request": 11,
     "hermes_wisdom_plugin/commands.py::_install_cli": 13,
     "hermes_wisdom_plugin/commands.py::_read_prepared_payload": 20,
-    "hermes_wisdom_plugin/commands.py::_run_noninteractive_cli": 16,
+    "hermes_wisdom_plugin/commands.py::_run_noninteractive_cli": 15,
     "hermes_wisdom_plugin/commands.py::_suggest_human": 19,
     "hermes_wisdom_plugin/commands.py::_update_cli": 13,
     "hermes_wisdom_plugin/commands.py::run_cli": 23,

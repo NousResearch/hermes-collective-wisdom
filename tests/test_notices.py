@@ -90,9 +90,9 @@ def event(identity="event-1", version=2):
 
 
 @pytest.mark.parametrize("muted,suppressed,expected", [
-    (False, False, 1), (True, False, 0), (False, True, 0),
+    (False, False, 1), (True, False, 1), (False, True, 0),
 ])
-def test_exact_local_candidate_reuses_policy_mute_suppression_and_dedupe(
+def test_exact_local_candidate_ignores_legacy_mute_but_keeps_suppression_and_dedupe(
     tmp_path, muted, suppressed, expected,
 ):
     candidate = {"event_id": "qualified", "category": "skill_ready_to_share",
@@ -148,7 +148,7 @@ def test_nullable_nonpublication_versions_do_not_stall_or_offer(tmp_path):
     assert [row["event_id"] for row in shown] == ["published"]
     assert DirectState(JsonState(tmp_path), tmp_path).known_publications()[0]["version"] == 2
 
-def test_muted_inbox_preserves_human_cursor_and_owner_reset(tmp_path):
+def test_legacy_muted_inbox_preserves_human_cursor_and_owner_reset(tmp_path):
     state = DirectState(JsonState(tmp_path), tmp_path)
     state.set_identity({"account_id": "alice", "organization_id": "org-1"})
     service = Service([Page([event()], "after", False), Page([event()], "after", False)],
@@ -156,8 +156,8 @@ def test_muted_inbox_preserves_human_cursor_and_owner_reset(tmp_path):
     assert EndTurnNotices(state, lambda: service).run(renderer=None)["polled"]
     shown = []
     assert EndTurnNotices(DirectState(JsonState(tmp_path), tmp_path), lambda: service).run(
-        renderer=shown.extend)["offered"] == 0
-    assert not shown
+        renderer=shown.extend)["offered"] == 1
+    assert len(shown) == 1
     assert state.notice_state()["cursor"] == "after"
     assert state.notice_state()["awareness_cursor"] == "after"
     assert state.known_publications()[0]["version"] == 2
@@ -859,16 +859,12 @@ def test_suppressing_candidate_notice_keeps_manual_candidate_review_available(tm
         ),
         (
             {"new_skill": True, "update_available": True, "skill_ready_to_share": True},
-            {"muted": True, "suppressed": {}},
-        ),
-        (
-            {"new_skill": True, "update_available": True, "skill_ready_to_share": True},
             {"muted": False, "suppressed": {"feed:event-1": "later"}},
         ),
     ],
-    ids=["category-policy", "organization-mute", "item-suppression"],
+    ids=["category-policy", "item-suppression"],
 )
-def test_policy_mute_and_suppression_each_independently_block_rendering(
+def test_policy_and_suppression_each_independently_block_rendering(
     tmp_path: Path, policy, preferences
 ):
     service = Service(

@@ -60,3 +60,13 @@ catalog, contribution, install, publish, settings, and recovery commands remain.
 Do not delete or rewrite user state to adopt this architecture. Validate new builds in
 disposable profiles. Live credentialed, publication, installation, update, and
 messaging acceptance requires separate authorization; local mocks do not prove it.
+
+
+### Retired recommendation muting
+
+Collective Wisdom no longer exposes recommendation mute durations or resume
+controls in native chat, Desktop, or the CLI. The client no longer reads or writes
+Gateway mute preferences. Existing saved mute data is left untouched and ignored;
+obsolete native mute callbacks are rejected, and the removed Desktop route returns
+404. Per-skill, per-version Not Now suppression and profile delivery mode settings
+remain. No global Hermes notification settings are changed.

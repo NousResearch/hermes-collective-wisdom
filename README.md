@@ -21,7 +21,7 @@ files; declared external setup commands require a separate Run setup choice.
 - **Share:** prepare a private local draft, review its files and checks, then
   submit it under your organization's publication policy.
 - **Install and update:** review compatibility and approve an exact version.
-- **Manage:** inspect your inbox, choose a notification mode, and mute recommendations.
+- **Manage:** inspect your inbox, choose a notification mode, and defer individual skill versions.
 
 ## Get started
 
@@ -199,7 +199,6 @@ as unavailable, not passed.
 | Review an update | `hermes wisdom update <skill-id> --plan --json` |
 | Recover management of an already-published original | `hermes wisdom publication enroll <local-skill-name> --json` |
 | Inspect notification settings | `hermes wisdom settings --json` |
-| Mute proactive notifications for a week | `hermes wisdom mute 1w --json` |
 
 After approving an update plan, apply it with
 `hermes wisdom update --apply-receipt <receipt> --json`. Local edits block

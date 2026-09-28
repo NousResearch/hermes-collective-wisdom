@@ -2,7 +2,11 @@
 # pylint: disable=missing-function-docstring,line-too-long
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+from test_contribution_review import RecordingLlm, reviewer as contribution_reviewer
 
 from test_install_review import Client, _reviewer
 from review_test_support import _content
@@ -49,8 +53,8 @@ metadata:
     assert 'original-creator' not in rendered and 'version-publisher-42' not in rendered
     assert 'Publisher name unavailable' in rendered
     assert [action.label for action in view.actions] == [
-        'View Details', 'Not Now', 'Mute Skill Recommendations',
-        'Update Skill' if updating else 'Install Skill',
+        'View Details', 'Not Now',
+        'Update' if updating else 'Install',
     ]
     assert 'version-publisher-42' in str(plan)
     assert plan['version'] == version
@@ -146,3 +150,36 @@ def test_native_completed_record_does_not_promote_stale_publication_state(result
     })
     assert 'Published\n' not in view.to_text()
     assert 'Available to your team.' not in view.to_text()
+
+
+@pytest.mark.parametrize("model_state", ["available", "missing", "failed"])
+def test_prepared_editorial_bytes_reach_recipient_without_injected_metadata(tmp_path, model_state):
+    llm = None if model_state == "missing" else RecordingLlm(fail=model_state == "failed")
+    contribution, source, _owner = contribution_reviewer(tmp_path / "publisher", llm=llm)
+    original = (source / "SKILL.md").read_bytes()
+    prepared = contribution.prepare("reviewed-skill", allow_model_review=llm is not None)
+    client = Client()
+    client.files[0] = ("SKILL.md", "file", (Path(prepared["overlay_path"]) / "SKILL.md").read_bytes())
+    envelope = _content(client.files)
+    client.version_value.update(content_hash=envelope.content_hash, commit=envelope.commit)
+    install = _reviewer(tmp_path / "recipient", client=client)
+    plan = install.plan("skill-1@v1")
+    view = project_view({"operation": "install", "state": "pending", "plan": plan})
+    if model_state == "available":
+        assert llm is not None
+        assert view.summary == "Incident Review"
+        assert "Review incident notes with a consistent checklist." in view.to_text()
+        call = next(call for call in llm.calls if call["schema_name"] == "wisdom_editorial_metadata")
+        instructions = call["instructions"]
+        assert "American spelling" in instructions and "dash punctuation" in instructions
+        assert "Review incident notes." in call["input"][0]["text"]
+    else:
+        assert view.summary == "reviewed-skill"
+        assert plan["editorial_description"] == "Review incident notes."
+        assert not plan["coworker_benefit"]
+        assert "consistent checklist" not in view.to_text()
+    assert view.title == "A new skill has been added to your organization's collective wisdom."
+    assert "What does it do?" in view.to_text()
+    assert [a.label for a in view.actions] == ["View Details", "Not Now", "Install"]
+    assert install.verify(plan).plan["content_hash"] == envelope.content_hash
+    assert (source / "SKILL.md").read_bytes() == original
