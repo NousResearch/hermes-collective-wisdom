@@ -1082,6 +1082,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         return result
 
+    def publication_preflight(self, receipt, *, may_apply: Callable[[], bool] | None = None):
+        """Read-only current-content check; never consumes a review receipt."""
+        _require_current(may_apply)
+        self._publication_service().preflight(receipt, may_apply=may_apply)
+        self.check_owner()
+        _require_current(may_apply)
+
     def publication_for_candidate(self, assessment_id: str):
         """Read the direct publication identity for one private candidate action."""
 

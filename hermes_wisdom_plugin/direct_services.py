@@ -1196,21 +1196,28 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         warning = self._security(prepared, accept_warnings=accept_warnings)
         policy = self._policy(owner, may_apply)
         scan = self._scan_fingerprint(prepared)
+        manifest_bytes = next(
+            (item["content_utf8"].encode("utf-8") for item in prepared["files"]
+             if item["path"] == "skill.manifest.json"), None
+        )
+        if (manifest_bytes is None or sha256_address(manifest_bytes)
+                != prepared["hashes"]["package_manifest"]):
+            raise WisdomConflict("Prepared package manifest changed during review")
+        slug = self._slug(parse_manifest_bytes(manifest_bytes).name)
+        expires_at = (datetime.now(timezone.utc) + self.REVIEW_TTL).isoformat()
         receipt = self.state.save_publication_review({
             "draft_id": draft_id, "owner": owner, "policy": policy,
             "hashes": copy.deepcopy(prepared["hashes"]), "scan_fingerprint": scan,
             "warning_acceptance": warning, "reviewed_at": _now(),
-            "expires_at": (datetime.now(timezone.utc) + self.REVIEW_TTL).isoformat(),
+            "expires_at": expires_at,
         })
         return {
             **prepared, "receipt": receipt,
-            "slug": self._slug(str(prepared.get("editorial_name") or draft["slug"])),
+            "slug": slug,
             "publication_mode": policy["publication_mode"],
             "policy_version": policy["version"], "scan_fingerprint": scan,
             "warning_acceptance": warning,
-            "authorization_expires_at": (
-                datetime.now(timezone.utc) + self.REVIEW_TTL
-            ).isoformat(),
+            "authorization_expires_at": expires_at,
             "notice": (
                 "Nothing has been uploaded. Submitting this exact receipt is the one final "
                 "owner confirmation; the Gateway alone chooses direct or moderated handling."
@@ -1244,6 +1251,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 "content_hash": operation["hashes"]["content"],
                 "gateway_evidence_hash": gateway_evidence,
             }
+        expires_at = (datetime.now(timezone.utc) + self.REVIEW_TTL).isoformat()
         receipt = self.state.save_publication_review({
             "draft_id": operation["local_draft_id"], "owner": owner, "policy": policy,
             "hashes": copy.deepcopy(operation["hashes"]),
@@ -1253,7 +1261,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "operation_id": operation["id"], "remote_revision": _value(remote, "updatedAt"),
             "gateway_evidence_hash": gateway_evidence,
             "reviewed_at": _now(),
-            "expires_at": (datetime.now(timezone.utc) + self.REVIEW_TTL).isoformat(),
+            "expires_at": expires_at,
         })
         return {
             **prepared, "state": "policy_review_required",
@@ -1265,6 +1273,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             ),
             "server_checks": {"security_check": self._gateway_check(remote)},
             "network_submission": False,
+            "authorization_expires_at": expires_at,
         }
 
     @staticmethod
@@ -1434,6 +1443,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         self, receipt: str, *, may_apply: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         return self._submit(receipt, private=False, may_apply=may_apply)
+
+    def preflight(self, receipt: str, *, may_apply: Callable[[], bool] | None = None) -> None:
+        """Check current receipt and remote bytes before the native effect claim."""
+        self._authorized(receipt, may_apply)
 
     def submit_private_draft(
         self, receipt: str, *, may_apply: Callable[[], bool] | None = None,
