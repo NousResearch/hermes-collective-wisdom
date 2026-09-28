@@ -743,6 +743,30 @@ def test_private_draft_requires_fresh_confirmation(tmp_path: Path):
     assert client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
 
 
+@pytest.mark.parametrize("mode", ["open", "moderated"])
+@pytest.mark.parametrize("changed", ["owner", "policy", "content", "expiry"])
+def test_private_draft_upload_rechecks_exact_review_before_transport(
+    tmp_path: Path, mode, changed,
+):
+    service, prepared, client, binding = publication(tmp_path, mode=mode)
+    review = service.review(prepared["draft_id"])
+    if changed == "owner":
+        binding["account_id"] = "other-member"
+    elif changed == "policy":
+        client.state.policy_version += 1
+    elif changed == "content":
+        draft = service.state.draft(prepared["draft_id"])
+        assert draft is not None
+        (Path(draft["source_path"]) / "SKILL.md").write_text("changed", encoding="utf-8")
+    else:
+        with service.state.change() as state:
+            state["publication_reviews"][review["receipt"]]["expires_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+    with pytest.raises((WisdomAuthError, WisdomConflict)):
+        service.submit_private_draft(review["receipt"])
+    assert not client.state.calls
+
 def test_private_draft_preserves_exact_warning_acceptance_for_final_review(tmp_path: Path):
     service, prepared, _client, _ = publication(
         tmp_path, mode="moderated", scan_allowed=False
@@ -756,6 +780,20 @@ def test_private_draft_preserves_exact_warning_acceptance_for_final_review(tmp_p
 
     final = service.review(staged["operation_id"])
     assert final["warning_acceptance"] == initial["warning_acceptance"]
+
+@pytest.mark.parametrize("mode", ["open", "moderated"])
+def test_private_draft_uncertain_submission_reopens_without_publication(tmp_path: Path, mode):
+    service, prepared, client, _ = publication(tmp_path, mode=mode)
+    client.state.fail_after_effect.add("submit")
+    uncertain = service.submit_private_draft(service.review(prepared["draft_id"])["receipt"])
+    assert uncertain["state"] == "uncertain" and uncertain["retry_safe"] is False
+    operation = service.state.publication(uncertain["operation_id"])
+    assert operation is not None and operation["requested_action"] == "private_draft"
+    client.state.fail_after_effect.clear()
+    recovered = service.reopen(uncertain["operation_id"])
+    assert recovered["phase"] == "policy_review_required"
+    assert recovered["state"] == "pending"
+    assert client.state.calls == Counter(upload=1, submit=1)
 
 
 def test_submit_ack_loss_reconciles_exact_remote_without_duplicate(tmp_path: Path):
