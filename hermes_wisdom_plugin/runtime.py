@@ -1057,6 +1057,10 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         return result
 
+    def share_status(self, skill_name):
+        """Read retained incomplete sharing intent without replaying any effect."""
+        return self._publication_service().share_status(skill_name)
+
     def publication_review(
         self, draft_id, *, accept_warnings=False,
         may_apply: Callable[[], bool] | None = None,

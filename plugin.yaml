@@ -2,7 +2,8 @@ manifest_version: 1
 kind: standalone
 name: collective-wisdom
 version: 0.1.0.dev0
-description: "Terminal setup and read-only discovery for Collective Wisdom."
+description: "Share, discover, install and manage team skills with Collective Wisdom."
+requires_hermes: ">=2026.9.24"
 provides_hooks:
   - pre_gateway_dispatch
   - pre_llm_call

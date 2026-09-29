@@ -1980,9 +1980,14 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 content_hash=operation["hashes"]["content"], base_commit=head,
             )
         except WisdomConflict as exc:
-            if exc.code != "base_mismatch":
+            if exc.code == "slug_owned" and exc.status == 409:
+                self.state.update_publication(
+                    operation_id, phase="publication_rejected", rejection_code="slug_owned",
+                )
+            elif exc.code != "base_mismatch":
                 raise
-            self.state.update_publication(operation_id, phase="base_conflict")
+            else:
+                self.state.update_publication(operation_id, phase="base_conflict")
             return self.status(operation_id)
         except Exception:
             return self._uncertain(
@@ -2026,6 +2031,9 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         if operation["status"] == "done":
             return self._done(operation)
         phase = operation["phase"]
+        if phase == "publication_rejected":
+            return {"operation_id": operation_id, "state": "rejected", "phase": phase,
+                    "code": operation["rejection_code"], "retry_safe": False}
         if phase == "approval_rejected":
             return self._approval_rejection(operation_id)
         return {
@@ -2036,6 +2044,19 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "retryable_with_fresh_base": phase == "base_conflict",
             "retry_safe": phase in {"intent", "objects_uploaded"},
         }
+
+    def share_status(self, skill_name: str) -> dict[str, Any] | None:
+        """Fence repeated one-shot calls behind any unfinished source operation."""
+        owner = self._owner()
+        source = self.reviewer.source(skill_name)
+        for item in self.state.pending_direct_operations(owner):
+            if item["kind"] != "publication":
+                continue
+            operation = self._operation(item["operation_id"])
+            draft = self.state.draft(operation["local_draft_id"])
+            if draft and draft.get("source_path") == str(source):
+                return self.status(operation["id"])
+        return None
 
     def enroll(
         self, skill_name: str, *, may_apply: Callable[[], bool] | None = None,

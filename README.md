@@ -25,7 +25,7 @@ files; declared external setup commands require a separate Run setup choice.
 
 ## Get started
 
-You'll need Hermes Agent, a Nous account with Wisdom access, and an organization
+You'll need Hermes Agent 2026.9.24 or newer, a Nous account with Wisdom access, and an organization
 whose Gateway has Wisdom enabled. Managed skill installation currently supports
 Linux and macOS; Windows installation is not yet supported.
 
@@ -145,6 +145,24 @@ If the Hermes scanner reports reviewable warnings, the interactive terminal
 shows the findings and offers explicit acknowledgement before final approval.
 Scripted reviews use `--accept-warnings` after authorized review; this is distinct
 from compatibility `--accept-partial`. An unavailable scan cannot be accepted.
+
+### Share a skill
+
+```bash
+hermes wisdom share <local-skill-name>
+```
+
+Review the destination team, exact files and checks, then choose Share once.
+Enter cancels. Scanner warnings require separate acknowledgement, and editing
+resets that acknowledgement. Preparation stays local and does not use a model.
+The server's current policy still determines immediate publication or team review.
+
+For authorized scripted use, pass `--yes --json`; warnings additionally require
+`--accept-warnings`. JSON output is one object with `outcome`, `skill`, `version`,
+`portal_url`, and `detail`. `shared` and `already_shared` exit 0; scan/ownership/
+entitlement refusals exit 1; `uncertain` exits 2 and names a status command.
+Do not resubmit an uncertain operation. Portal links are null when unavailable;
+destination teams use their authoritative organization ID when no display name is supplied.
 
 ### Prepare a skill to share
 

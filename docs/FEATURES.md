@@ -18,6 +18,9 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 - Prepare owner-private contribution drafts, edit and re-review their exact files and
   hashes, submit them according to server policy, inspect status, reopen conflicts,
   and decline private drafts.
+- Terminal `share <skill>` composes preparation, exact-hash review and submission
+  behind one Share choice, with separate scanner-warning acknowledgement and
+  prompt-free `--yes --json` automation. Retained unfinished operations are not resent.
 - After exact successful publication proof, register the unchanged author source in
   place for managed teammate updates. Failed local registration remains separately
   recoverable and never changes the remote publication result.

@@ -32,6 +32,7 @@ from .package import (
     MAX_TREE_BYTES,
     PackagePolicyError,
 )
+from .share_command import run_share
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
 from .direct_services import WISDOM_DISCLOSURE
@@ -86,7 +87,7 @@ _PUBLIC_STATUS_STATES = {
     "unavailable": "unavailable",
 }
 _CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "inbox",
-                 "maintenance", "list", "browse", "show", "versions", "suggest",
+                 "maintenance", "list", "browse", "show", "versions", "suggest", "share",
                  "prepared", "publication", "install", "installed", "check", "update",
                  "installed-setup", "uninstall", "help")
 
@@ -164,6 +165,11 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     add("show", "Show one published skill").add_argument("skill_id")
     add("versions", "List published versions").add_argument("skill_id")
     suggest = add("suggest", "Prepare one manually selected owner-private local draft")
+    share = add("share", "Share one exact local skill with your team")
+    share.add_argument("skill")
+    share.add_argument("--yes", action="store_true", help="Confirm sharing the checked package")
+    share.add_argument("--accept-warnings", action="store_true",
+                       help="Acknowledge exact local scanner warnings, separately from sharing")
     suggest.add_argument("skill")
     suggest.add_argument(
         "--allow-model-review",
@@ -320,6 +326,8 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
     command = getattr(args, "wisdom_command", None)
     as_json = bool(getattr(args, "json", False))
     try:
+        if command in {"share", "suggest"}:
+            return _contribution_cli(args, service)
         if command == "setup":
             accepted = bool(args.accept_disclosure)
             if not accepted:
@@ -339,16 +347,6 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             "publication", "installed", "check", "installed-setup",
         }:
             result = _run_noninteractive_cli(args, service, command)
-        elif command == "suggest":
-            result = service.suggest(
-                args.skill, allow_model_review=args.allow_model_review
-            )
-            if not as_json:
-                presentation = (
-                    {**result, "skill_name": args.skill} if isinstance(result, dict) else result
-                )
-                publication_result = _suggest_human(presentation, service)
-                return _publication_result_exit(publication_result)
         elif command == "prepared":
             result = _prepared_cli(args, service)
             if args.prepared_action == "edit":
@@ -423,6 +421,18 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             as_json=as_json, error=True,
         )
         return 8
+
+
+def _contribution_cli(args, service):
+    """Dispatch terminal-owned contribution flows, keeping their consent distinct."""
+    if args.wisdom_command == "share":
+        return run_share(args, service)
+    result = service.suggest(args.skill, allow_model_review=args.allow_model_review)
+    if args.json:
+        _emit(result, as_json=True, command="suggest")
+        return 0
+    presentation = {**result, "skill_name": args.skill} if isinstance(result, dict) else result
+    return _publication_result_exit(_suggest_human(presentation, service))
 
 
 def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-many-branches
