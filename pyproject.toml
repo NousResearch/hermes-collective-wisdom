@@ -15,7 +15,7 @@ dependencies = [
   "pydantic==2.13.4",
   "requests==2.33.0",
   "rich>=14.3.3,<16",
-  "ruamel.yaml==0.18.17",
+  "ruamel.yaml>=0.18.16,<0.19",
 ]
 
 [project.optional-dependencies]
