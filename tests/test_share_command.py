@@ -222,6 +222,22 @@ def test_manifest_declares_minimum_and_current_description():
     assert "read-only" not in manifest["description"]
 
 
+def _host_version_tuple(version):
+    # Mirrors the host gate: Hermes compares requires_hermes to its semver base
+    # version (hermes_cli.plugins_manifest.version_satisfies), never the release date.
+    return tuple(int(part) for part in version.split(".")[:3])
+
+
+def test_manifest_minimum_loads_on_the_2026_9_24_release_host():
+    from ruamel.yaml import YAML  # pylint: disable=import-outside-toplevel
+    manifest = YAML(typ="safe").load(Path("plugin.yaml").read_text(encoding="utf-8"))
+    spec = manifest["requires_hermes"]
+    assert spec.startswith(">=")
+    minimum = _host_version_tuple(spec[2:].strip())
+    assert _host_version_tuple("0.21.5") >= minimum  # v2026.9.24 release base version
+    assert _host_version_tuple("0.21.3") < minimum  # older host lacks the required API
+
+
 def test_changed_source_after_confirmation_is_not_uploaded(tmp_path, capsys, monkeypatch):
     service = ShareCli(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)

@@ -3,7 +3,7 @@ kind: standalone
 name: collective-wisdom
 version: 0.1.0.dev0
 description: "Share, discover, install and manage team skills with Collective Wisdom."
-requires_hermes: ">=2026.9.24"
+requires_hermes: ">=0.21.5"
 provides_hooks:
   - pre_gateway_dispatch
   - pre_llm_call

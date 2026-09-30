@@ -25,7 +25,7 @@ files; declared external setup commands require a separate Run setup choice.
 
 ## Get started
 
-You'll need Hermes Agent 2026.9.24 or newer, a Nous account with Wisdom access, and an organization
+You'll need Hermes Agent v0.21.5 (the 2026.9.24 release) or newer, a Nous account with Wisdom access, and an organization
 whose Gateway has Wisdom enabled. Managed skill installation currently supports
 Linux and macOS; Windows installation is not yet supported.
 
