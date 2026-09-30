@@ -1555,9 +1555,8 @@ def test_slash_rejects_mutation_commands_without_service_calls(command):
 
     output = run_slash(command, service)
 
-    assert output.startswith("Unsupported")
+    assert "admitted private review" in output
     assert not service.calls
-    assert "Terminal: /wisdom install" in output
 
 
 @pytest.mark.parametrize(
@@ -1644,7 +1643,10 @@ def _act_displayed(controller, record_id, action, service, caller):
     return controller.load(record_id)
 
 
-def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path, monkeypatch):
+@pytest.mark.parametrize("command", ["suggest", "share"])
+def test_admitted_native_contribution_dispatches_prepare_review_not_handoff(
+    tmp_path, monkeypatch, command,
+):
     runtime = CommandRuntime(
         tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
         spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
@@ -1659,7 +1661,7 @@ def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path,
     )
 
     try:
-        assert runtime.slash("suggest local-skill") == ""
+        assert runtime.slash(f"{command} local-skill") == ""
         assert seen == [(invocation, "local-skill")]
     finally:
         runtime.close()

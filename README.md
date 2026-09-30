@@ -102,8 +102,15 @@ View is read-only. Install authorizes the checked installation without another
 confirmation; material warnings still require acknowledgement. Other Wisdom
 commands keep their normal route. The current Desktop
 middleware API leaves the submitted command in the composer; closing the dialog
-does not send it. A focused-chat/active-profile mismatch refuses requests rather
-than silently switching owners.
+does not send it. A focused-chat/active-profile mismatch refuses requests
+rather than silently switching owners.
+
+In a private Slack or Telegram chat, `/wisdom share <local-skill>` opens the owner-
+private preparation and exact-content review. The final **Share My Skill** action
+is still required; group chats never open private contribution state. `/wisdom
+suggest <local-skill>` remains the prepare-only equivalent. Prepared-draft and
+publication recovery subcommands stay terminal-only because they can expose or
+change private draft state.
 
 The Desktop page also offers explicit enrollment after disclosure. At completed
 turns it checks a bounded feed without a polling delay and may show a direct

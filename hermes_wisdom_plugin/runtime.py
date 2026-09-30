@@ -1787,12 +1787,16 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
     def _slash_native_review(self, invocation, command: str, args: list[str]):
         target = " ".join(args)
-        if command == "suggest" and len(args) != 1:
-            return "Usage: /wisdom suggest <local-skill>"
+        if command in {"suggest", "share"} and len(args) != 1:
+            return f"Usage: /wisdom {command} <local-skill>"
         effect_review = {
             "update": self.native.begin_update,
             "publish": self.native.begin_publication,
             "suggest": self.native.begin_suggest,
+            # Share is the operator-facing name for the same owner-private
+            # preparation/review flow. The final Share My Skill button remains
+            # the only publication authority.
+            "share": self.native.begin_suggest,
         }.get(command)
         if effect_review is not None:
             return _native_review_reply(effect_review(invocation, target))

@@ -60,7 +60,7 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     + MAX_METADATA_BYTES
     + 1024 * 1024
 )
-CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
+CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "share", "prepared", "publish", "publication"})
 _SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
     {"setup", "status", "settings", "mute", "list", "browse", "show", "versions", "help",
      "install", "installed", "check", "update", "uninstall", "installed-setup"}
@@ -500,6 +500,13 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
                 raise _SlashUsageError("Usage: /wisdom help")
             return _slash_help()
         if command in CONTRIBUTION_COMMANDS:
+            if command == "share":
+                if len(args) != 1:
+                    return "Usage: /wisdom share <local-skill>"
+                return (
+                    "Sharing is only available in an admitted private review. "
+                    "Open /wisdom share <local-skill> in a private chat; no private state was opened here."
+                )
             return (
                 "Contribution content is private. Use an admitted private review or the terminal "
                 "`hermes wisdom suggest`, `prepared`, and `publication` workflows. "

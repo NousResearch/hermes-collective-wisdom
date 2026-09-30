@@ -21,6 +21,9 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 - Terminal `share <skill>` composes preparation, exact-hash review and submission
   behind one Share choice, with separate scanner-warning acknowledgement and
   prompt-free `--yes --json` automation. Retained unfinished operations are not resent.
+- Private Slack/Telegram `/wisdom share <local-skill>` opens the same owner-bound
+  preparation and review flow for non-CLI operators. It never publishes from the
+  command itself; the explicit native **Share My Skill** action remains required.
 - After exact successful publication proof, register the unchanged author source in
   place for managed teammate updates. Failed local registration remains separately
   recoverable and never changes the remote publication result.
