@@ -279,7 +279,7 @@ rather than blindly repeating the action.
 
 ## Development and further reading
 
-Use Python 3.11–3.13 in an isolated environment:
+Use Python 3.11–3.14 in an isolated environment:
 
 ```bash
 python3.11 -m venv .venv
