@@ -185,7 +185,7 @@ def test_interactive_share_has_one_confirmation(tmp_path, capsys, monkeypatch):
     assert "bytes" in output
     assert "Shared with org-1 as v1" in output
     assert "hermes wisdom install reviewed-skill" in output
-    assert "hermes wisdom unshare reviewed-skill" in output
+    assert "unshare" not in output
 
 
 def test_default_enter_cancels(tmp_path, capsys, monkeypatch):

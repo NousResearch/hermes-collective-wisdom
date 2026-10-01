@@ -194,7 +194,8 @@ def _share(args, service):
         try:
             published = _catalog(service, args.skill)
             outcome["portal_url"] = safe_portal_url(published.get("portal_url"))
-        except WisdomError:
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Publication is already authoritative; link discovery is best effort.
             pass
     return outcome, code
 
@@ -208,7 +209,7 @@ def _emit_result(args, result):
         print("Portal   " + result["portal_url"])
     if result["outcome"] == "shared":
         name = shlex.quote(text(args.skill))
-        print(f"Install  hermes wisdom install {name}\nUndo     hermes wisdom unshare {name}")
+        print(f"Install  hermes wisdom install {name}")
 
 
 def run_share(args, service):
