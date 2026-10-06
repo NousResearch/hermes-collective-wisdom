@@ -10,6 +10,7 @@ error. Reads are bound to the plugin's own profile home and never write.
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import os
 import unicodedata
@@ -26,22 +27,27 @@ UNAVAILABLE_TEXT = (
     "Skill usage data is unavailable on this Hermes version. "
     "Update Hermes to see your top skills."
 )
+ERROR_TEXT = (
+    "Couldn't read your local skill usage. Check the Hermes logs and try again."
+)
 EMPTY_TEXT = (
     "No recorded usage for your own local skills yet. "
     "Use your skills in Hermes and try again."
 )
-_REQUIRED_API = ("load_usage", "is_bundled", "is_hub_installed")
-_EXCLUDED_ROOTS = frozenset({"_org", "_wisdom", ".archive", ".hub"})
+# ``_iter_skill_mds`` and ``_find_skill_dir`` are private but already the
+# resolver ``/wisdom share`` uses (qualification.py); both exist from 0.21.5.
+_REQUIRED_API = ("load_usage", "is_bundled", "is_hub_installed", "_iter_skill_mds",
+                 "_find_skill_dir")
 _PUBLISHER_KIND = "publisher_source"
 _FRONTMATTER_CHARS = 4000
 _DESCRIPTION_LIMIT = 200
-# Mirrors gateway.session_context.NON_MESSAGING_SESSION_SURFACES; unknown
-# identities count as messaging (default deny).
-_LOCAL_SURFACES = frozenset({
-    "", "api_server", "cli", "codex", "desktop", "gateway", "kanban", "local",
-    "msgraph_webhook", "tool", "tui", "webhook",
-})
-_PRIVATE_CHAT_TYPES = frozenset({"dm", "private", "im", "direct"})
+# The owner's own interactive sessions. Webhook, API-server, Kanban and other
+# non-messaging routes can deliver replies to shared destinations, so they are
+# refused like any non-private chat.
+_OWNER_LOCAL_SURFACES = frozenset({"", "cli", "local", "tui", "desktop"})
+# Same private chat types native admission accepts (native_context._consume).
+_PRIVATE_CHAT_TYPES = frozenset({"dm", "private", "im"})
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,16 +116,19 @@ def load_usage_api() -> Any | None:
     return module
 
 
-@contextlib.contextmanager
-def _profile_home(home: Path) -> Iterator[None]:
-    """Bind core helpers to this profile without mutating process environment."""
+def _home_override() -> tuple[Callable[[str], Any], Callable[[Any], None]] | None:
     try:
         constants = import_module("hermes_constants")
-        set_override = getattr(constants, "set_hermes_home_override")
-        reset_override = getattr(constants, "reset_hermes_home_override")
+        return (getattr(constants, "set_hermes_home_override"),
+                getattr(constants, "reset_hermes_home_override"))
     except (ImportError, AttributeError):
-        yield
-        return
+        return None
+
+
+@contextlib.contextmanager
+def _profile_home(home: Path, override) -> Iterator[None]:
+    """Bind core helpers to this profile without mutating process environment."""
+    set_override, reset_override = override
     token = set_override(str(home))
     try:
         yield
@@ -134,37 +143,55 @@ def collect_top_skills(  # pylint: disable=too-many-locals
     published_paths: Iterable[str] = (),
     usage_api: Callable[[], Any | None] | None = None,
 ) -> TopSkills:
-    """Rank the owner's own local skills that have recorded uses or edits."""
+    """Rank the owner's own local skills that have recorded uses or edits.
+
+    Candidates come from the host's own local skill walk and must resolve through
+    the same profile-fenced resolver ``/wisdom share`` uses, so every listed skill
+    can be shared by that name.
+    """
     api = (usage_api or load_usage_api)()
-    if api is None:
+    override = _home_override()
+    if api is None or override is None:
         return TopSkills("unavailable")
+    from .qualification import _eligible_path  # pylint: disable=import-outside-toplevel
+
     home = Path(profile_home).expanduser().absolute()
+    skills_root = home / "skills"
     team, shared = _managed_paths(installations)
     shared |= {_resolved(path) for path in published_paths if path}
     try:
-        with _profile_home(home):
+        with _profile_home(home, override):
             usage = api.load_usage()
             if not isinstance(usage, dict):
                 return TopSkills("unavailable")
-            archived = set(_call(api, "list_archived_skill_names", ()))
+            hidden = (set(_call(api, "list_archived_skill_names", ()))
+                      | set(_call(api, "read_suppressed_names", ())))
+            not_owned = _ownership_filter(api)
             items = []
-            seen: set[str] = set()
-            for name, description, path in _local_skills(home / "skills"):
+            candidates = (
+                sorted({name for name, _md in api._iter_skill_mds(  # pylint: disable=protected-access
+                    skills_root, local_only=True)}) if skills_root.is_dir() else []
+            )
+            resolver = _skill_resolver(api, skills_root)
+            for name in candidates:
                 record = usage.get(name)
-                if (name in seen or name in archived or not isinstance(record, dict)
-                        or _team_installed(team, name, path) or _not_owned(api, name, record)):
+                if name in hidden or not isinstance(record, dict) or not_owned(name, record):
                     continue
                 uses, edits = _count(record.get("use_count")), _count(record.get("patch_count"))
                 if not uses and not edits:
                     continue
-                seen.add(name)
+                path = _eligible_path(name, skills_root=skills_root, skill_resolver=resolver)
+                if path is None or _team_installed(team, name, path):
+                    continue
                 items.append(TopSkill(
-                    name=name, description=description, uses=uses, edits=edits,
-                    last_used=_iso(record.get("last_used_at")),
+                    name=name, description=_description(path / "SKILL.md"),
+                    uses=uses, edits=edits, last_used=_iso(record.get("last_used_at")),
                     shared=str(path) in shared,
                 ))
-    except Exception:  # pylint: disable=broad-exception-caught
-        return TopSkills("unavailable")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Collective Wisdom could not read skill usage (%s)", type(exc).__name__)
+        logger.debug("Collective Wisdom skill usage failure", exc_info=True)
+        return TopSkills("error")
     items.sort(key=rank_key)
     return TopSkills("ok" if items else "empty", tuple(items))
 
@@ -202,7 +229,7 @@ def session_surface() -> dict[str, str]:
             return ""
 
     return {
-        "platform": os.environ.get("HERMES_PLATFORM", "") or value("HERMES_SESSION_PLATFORM"),
+        "platform": value("HERMES_SESSION_PLATFORM") or os.environ.get("HERMES_PLATFORM", ""),
         "source": value("HERMES_SESSION_SOURCE"),
         "chat_type": value("HERMES_SESSION_CHAT_TYPE"),
         "chat_id": value("HERMES_SESSION_CHAT_ID"),
@@ -213,9 +240,9 @@ def session_surface() -> dict[str, str]:
 
 
 def is_messaging(surface: dict[str, str]) -> bool:
-    """Whether the bound session is a human messaging chat (default deny)."""
+    """Whether the session is anything but the owner's own local session (default deny)."""
     return any(
-        ident and ident not in _LOCAL_SURFACES
+        ident not in _OWNER_LOCAL_SURFACES
         for ident in (surface.get("platform", "").strip().casefold(),
                       surface.get("source", "").strip().casefold())
     )
@@ -254,61 +281,75 @@ def _managed_paths(installations: Iterable[dict[str, Any]]):
     return team, shared
 
 
-def _local_skills(root: Path) -> Iterator[tuple[str, str, Path]]:
-    """Yield (name, description, path) for real skill dirs inside this profile."""
-    if not root.is_dir() or root.is_symlink():
-        return
-    resolved_root = root.resolve()
-    for skill_md in sorted(root.rglob("SKILL.md")):
-        relative = skill_md.relative_to(root)
-        parts = relative.parts[:-1]
-        if not parts or parts[0] in _EXCLUDED_ROOTS or any(
-            part.startswith(".") for part in parts
-        ):
-            continue
-        if any(root.joinpath(*relative.parts[:index]).is_symlink()
-               for index in range(1, len(relative.parts) + 1)):
-            continue
-        directory = skill_md.parent.resolve()
-        try:
-            directory.relative_to(resolved_root)
-        except ValueError:
-            continue
-        name, description = _frontmatter(skill_md, fallback=directory.name)
-        yield name, description, directory
-
-
-def _frontmatter(skill_md: Path, *, fallback: str) -> tuple[str, str]:
+def _description(skill_md: Path) -> str:
+    """The SKILL.md frontmatter description, single-line and bounded; empty if absent."""
     try:
         with skill_md.open(encoding="utf-8-sig", errors="replace") as handle:
             text = handle.read(_FRONTMATTER_CHARS)
     except OSError:
-        return fallback, ""
+        return ""
     lines = [line.rstrip() for line in text.split("\n")]
-    if not lines or lines[0].strip() != "---":
-        return fallback, ""
-    values: dict[str, str] = {}
-    for line in lines[1:]:
+    if "---" not in (line.strip() for line in lines):
+        return ""
+    start = next(index for index, line in enumerate(lines) if line.strip() == "---")
+    for line in lines[start + 1:]:
         if line.strip() == "---":
             break
         key, separator, raw = line.partition(":")
-        if separator and key.strip() in {"name", "description"} and not line[:1].isspace():
-            values[key.strip()] = raw.strip().strip("\"'")
-    return clean_text(values.get("name") or fallback, 128) or fallback, clean_text(
-        values.get("description", "")
-    )
+        if separator and key == "description":
+            return clean_text(raw.strip().strip("\"'"))
+    return ""
 
 
 def _team_installed(team: dict[str, set[str]], name: str, path: Path) -> bool:
     return str(path) in team["paths"] or name in team["names"]
 
 
-def _not_owned(api: Any, name: str, record: dict[str, Any]) -> bool:
-    """Archived, bundled, Hub-installed or protected built-in skills are not the owner's."""
-    if record.get("state") == "archived" or record.get("archived_at"):
-        return True
-    return bool(_call(api, "is_protected_builtin", False, name)
-                or api.is_bundled(name) or api.is_hub_installed(name))
+def _ownership_filter(api: Any) -> Callable[[str, dict[str, Any]], bool]:
+    """Archived, bundled, Hub-installed or protected built-in skills are not the owner's.
+
+    The bundled and Hub name sets are read once per ranking when the host exposes
+    them; ``is_bundled``/``is_hub_installed`` re-read both manifests per name.
+    """
+    try:
+        names = (set(api._read_bundled_names())  # pylint: disable=protected-access
+                 | set(api._read_hub_installed_names()))  # pylint: disable=protected-access
+    except (AttributeError, TypeError):
+        names = None
+
+    def listed(name: str) -> bool:
+        if names is not None:
+            return name in names
+        return bool(api.is_bundled(name) or api.is_hub_installed(name))
+
+    def not_owned(name: str, record: dict[str, Any]) -> bool:
+        if record.get("state") == "archived" or record.get("archived_at"):
+            return True
+        return bool(_call(api, "is_protected_builtin", False, name) or listed(name))
+
+    return not_owned
+
+
+def _skill_resolver(api: Any, skills_root: Path) -> Callable[[str], Path | None]:
+    """First-match name → dir, built in one walk with the host's own ``_find_skill_dir`` parts.
+
+    ``_find_skill_dir`` walks the tree once per name. When the host exposes the
+    pieces it composes (``iter_skill_index_files``, ``_read_skill_name``,
+    ``is_external_skill_path``), build the same first-match map once instead.
+    """
+    try:
+        iterate = import_module("agent.skill_utils").iter_skill_index_files
+        read_name = api._read_skill_name  # pylint: disable=protected-access
+        external = api.is_external_skill_path
+    except (ImportError, AttributeError):
+        return api._find_skill_dir  # pylint: disable=protected-access
+    found: dict[str, Path] = {}
+    if skills_root.exists():
+        for skill_md in iterate(skills_root, "SKILL.md"):
+            if not external(skill_md):
+                found.setdefault(read_name(skill_md, fallback=skill_md.parent.name),
+                                 skill_md.parent)
+    return found.get
 
 
 def _resolved(path: str) -> str:

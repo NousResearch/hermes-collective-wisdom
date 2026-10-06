@@ -45,12 +45,17 @@ tests run under the `full_release_scope` fixture.
   command itself; the explicit native **Share My Skill** action remains required.
 - `hermes wisdom top` and private `/wisdom top [page]` rank the owner's own local
   skills by Hermes-recorded usage (uses, edits, last used, name) and label skills
-  already shared. Group chats are refused without naming skills. Usage is read
-  lazily from Hermes core `tools.skill_usage` behind a capability probe.
+  already shared. Only the CLI, TUI, Desktop and private messaging chats are
+  answered; groups, channels and webhook/API routes are refused without naming
+  skills. Usage and candidate skills are read lazily from Hermes core
+  `tools.skill_usage` behind a capability probe, and every listed skill resolves
+  through the same profile-fenced resolver `share` uses.
 - Private `/wisdom share-suggest`, only when the user runs it, starts one normal
   Hermes turn in the same conversation through `PluginContext.inject_message`,
-  listing up to 30 top skills and asking for up to 10 ranked suggestions with exact
-  `/wisdom share <skill>` commands. The model may read skill files but cannot share.
+  listing up to 30 top skills and asking for up to 10 ranked suggestions with the
+  exact share command for that surface (`/wisdom share <skill>` in admitted
+  Telegram/Slack private chats, otherwise `hermes wisdom share <skill>`). The model
+  may read skill files and is told not to run share or publish commands.
   Without injection (no `allow_gateway_injection`, or no identifiable session) it
   replies with the ranked list and a ready-to-send prompt. The terminal command
   prints the first `top` page and points to the chat command.

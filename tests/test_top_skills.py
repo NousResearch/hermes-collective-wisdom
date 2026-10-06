@@ -15,10 +15,25 @@ import pytest
 from installed_test_support import JsonState
 
 from hermes_wisdom_plugin import top_skills
+from hermes_wisdom_plugin.native_context import InvocationCapture
 from hermes_wisdom_plugin.commands import build_parser, parse_slash, run_cli, run_slash
 from hermes_wisdom_plugin.runtime import CommandRuntime
 from hermes_wisdom_plugin.top_command import private_route, refusal
-from hermes_wisdom_plugin.top_skills import TopSkill, collect_top_skills, rank_key
+from hermes_wisdom_plugin.top_skills import (
+    TopSkill, clean_text, collect_top_skills, is_messaging, published_source_paths, rank_key,
+)
+
+BOUND: list = []
+
+
+@pytest.fixture(autouse=True)
+def _host_home_override(monkeypatch):
+    """Stand in for hermes_constants' context-local home override."""
+    BOUND.clear()
+    monkeypatch.setattr(top_skills, "_home_override", lambda: (
+        lambda home: BOUND.append(("set", home)) or len(BOUND),
+        lambda token: BOUND.append(("reset", token)),
+    ))
 
 
 def _skill(root: Path, relative: str, name: str, description: str = "") -> Path:
@@ -31,12 +46,37 @@ def _skill(root: Path, relative: str, name: str, description: str = "") -> Path:
     return path
 
 
-def _api(usage, *, bundled=(), hub=(), archived=()):
+def _front_name(skill_md: Path) -> str:
+    for line in skill_md.read_text(encoding="utf-8").splitlines():
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return skill_md.parent.name
+
+
+def _api(usage, *, bundled=(), hub=(), archived=(), suppressed=()):
+    """Host-shaped skill_usage: dot/dependency dirs skipped, resolution by frontmatter name."""
+
+    def iter_mds(base, *, local_only):
+        assert local_only
+        for skill_md in sorted(base.rglob("SKILL.md")):
+            parts = skill_md.relative_to(base).parts[:-1]
+            if not any(part.startswith(".") or part == "node_modules" for part in parts):
+                yield _front_name(skill_md), skill_md
+
+    def find_skill_dir(name):
+        home = Path(BOUND[-1][1]) if BOUND and BOUND[-1][0] == "set" else None
+        assert home is not None, "resolver used outside the profile override"
+        return next((md.parent for found, md in iter_mds(home / "skills", local_only=True)
+                     if found == name), None)
+
     return SimpleNamespace(
         load_usage=lambda: usage,
         is_bundled=lambda name: name in bundled,
         is_hub_installed=lambda name: name in hub,
         list_archived_skill_names=lambda: list(archived),
+        read_suppressed_names=lambda: set(suppressed),
+        _iter_skill_mds=iter_mds,
+        _find_skill_dir=find_skill_dir,
     )
 
 
@@ -69,6 +109,11 @@ def test_eligibility_excludes_bundled_hub_team_archived_external_and_unused(tmp_
     _skill(home, ".hub/hidden", "hidden")
     _skill(home, ".archive/old", "old")
     _skill(home, "unused", "unused")
+    _skill(home, "suppressed", "suppressed")
+    _skill(home, "pkg/node_modules/dep", "dep")
+    _skill(home, "dir-name", "front-name")
+    _skill(home, "_wisdom/mirror", "mirror")
+    slugged = _skill(home, "elsewhere", "team-slug")
     shared = _skill(home, "nested/shared", "shared")
     outside = tmp_path / "external" / "linked"
     outside.mkdir(parents=True)
@@ -76,20 +121,27 @@ def test_eligibility_excludes_bundled_hub_team_archived_external_and_unused(tmp_
     (home / "skills" / "linked").symlink_to(outside, target_is_directory=True)
     usage = {name: _record(uses=3) for name in (
         "mine", "bundled", "hub", "team", "archived", "hidden", "old", "linked", "shared",
+        "suppressed", "dep", "front-name", "dir-name", "mirror", "team-slug",
     )}
     usage["retired"] = _record(uses=2, state="archived")
     usage["unused"] = _record()
     installs = [
         {"state": "active", "slug": "team", "target_path": str(team)},
+        {"state": "active", "slug": "team-slug", "target_path": str(slugged.parent / "gone")},
         {"state": "active", "slug": "shared-on-portal", "target_path": str(shared),
          "target_provenance": {"kind": "publisher_source"}},
     ]
     result = collect_top_skills(
         home, installations=installs, published_paths=[str(mine)],
-        usage_api=lambda: _api(usage, bundled={"bundled"}, hub={"hub"}, archived={"archived"}),
+        usage_api=lambda: _api(usage, bundled={"bundled"}, hub={"hub"}, archived={"archived"},
+                               suppressed={"suppressed"}),
     )
     assert result.state == "ok"
-    assert {(row.name, row.shared) for row in result.items} == {("mine", True), ("shared", True)}
+    assert {(row.name, row.shared, row.description) for row in result.items} == {
+        ("mine", True, "mine helper"), ("shared", True, "shared helper"),
+        ("front-name", False, "front-name helper"),
+    }
+    assert BOUND[0] == ("set", str(home)) and BOUND[-1][0] == "reset"
 
 
 def test_missing_core_capability_is_an_unavailable_state(tmp_path, monkeypatch) -> None:
@@ -105,6 +157,40 @@ def test_missing_core_capability_is_an_unavailable_state(tmp_path, monkeypatch) 
     monkeypatch.setattr(top_skills, "import_module", missing)
     assert top_skills.load_usage_api() is None
     assert collect_top_skills(tmp_path).state == "unavailable"
+    assert collect_top_skills(tmp_path, usage_api=lambda: SimpleNamespace(
+        **{**vars(_api({})), "load_usage": lambda: ["not", "a", "map"]})).state == "unavailable"
+    assert collect_top_skills(tmp_path, usage_api=lambda: _api({})).state == "empty"
+    monkeypatch.setattr(top_skills, "_home_override", lambda: None)
+    assert collect_top_skills(tmp_path, usage_api=lambda: _api({})).state == "unavailable"
+
+
+def test_unexpected_failure_is_a_logged_error_state(tmp_path, caplog) -> None:
+    _skill(tmp_path, "mine", "mine")
+
+    def broken():
+        raise KeyError("bug")
+
+    api = SimpleNamespace(**{**vars(_api({"mine": _record(uses=1)})), "load_usage": broken})
+    assert collect_top_skills(tmp_path, usage_api=lambda: api).state == "error"
+    assert "KeyError" in caplog.text
+    assert BOUND[-1][0] == "reset"
+
+
+def test_shared_label_needs_a_completed_publication() -> None:
+    drafts = {"d1": {"source_path": "/s/one"}, "d2": {"source_path": "/s/two"},
+              "d3": {"source_path": "/s/three"}}
+    publications = {
+        "p1": {"status": "done", "publication_state": "published", "local_draft_id": "d1"},
+        "p2": {"status": "pending", "publication_state": "published", "local_draft_id": "d2"},
+        "p3": {"status": "done", "publication_state": "rejected", "local_draft_id": "d3"},
+    }
+    assert published_source_paths({"drafts": drafts, "publications": publications}) == ["/s/one"]
+
+
+def test_descriptions_are_single_line_printable_and_bounded() -> None:
+    assert clean_text("line\x1b[31m one\n two\u202e") == "line[31m one two"
+    long = clean_text("x" * 500)
+    assert len(long) == 200 and long.endswith("...")
 
 
 def test_no_recorded_usage_is_an_empty_state(tmp_path) -> None:
@@ -182,9 +268,11 @@ def _invocation(chat_type="private"):
 
 def test_private_route_matrix() -> None:
     local = {"platform": "", "source": "cli", "chat_type": "", "chat_id": "", "session_key": ""}
-    assert private_route(None, False, local) == {"kind": "local", "session_key": ""}
+    assert private_route(None, False, local) == {
+        "kind": "local", "native": False, "session_key": "",
+    }
     tui = {**local, "source": "tui", "session_key": "sk-1"}
-    assert private_route(None, False, tui) == {"kind": "local", "session_key": "sk-1"}
+    assert private_route(None, False, tui)["session_key"] == "sk-1"
     assert private_route(_invocation(), False, local)["origin"] == {
         "platform": "telegram", "chat_id": "42", "chat_type": "private",
         "user_id": "7", "user_name": "victor",
@@ -194,6 +282,49 @@ def test_private_route_matrix() -> None:
     assert private_route(None, False, group) is None
     assert private_route(None, False, {**group, "chat_type": "dm"})["kind"] == "messaging"
     assert private_route(None, False, {**group, "chat_type": ""}) is None
+    assert private_route(None, False, {**group, "platform": "Discord", "chat_type": "dm"})[
+        "origin"]["platform"] == "discord"
+    for shared_route in ("webhook", "msgraph_webhook", "api_server", "kanban", "gateway", "tool"):
+        assert private_route(None, False, {"source": shared_route, "session_key": "k"}) is None
+    assert is_messaging({"platform": "", "source": "telegram"})
+    assert private_route(_invocation(), False, local)["native"] is True
+    assert private_route(None, False, tui)["native"] is False
+
+
+def test_bound_session_platform_outranks_process_platform(monkeypatch) -> None:
+    bound = {"HERMES_SESSION_PLATFORM": "discord", "HERMES_SESSION_CHAT_TYPE": "group"}
+    fake = SimpleNamespace(get_session_env=lambda name, default="": bound.get(name, default))
+    monkeypatch.setattr(top_skills, "import_module", lambda _name: fake)
+    monkeypatch.setenv("HERMES_PLATFORM", "cli")
+    surface = top_skills.session_surface()
+    assert surface["platform"] == "discord"
+    assert private_route(None, False, surface) is None
+
+
+def test_private_chat_types_match_native_admission() -> None:
+    for chat_type in ("dm", "private", "im"):
+        assert top_skills.is_private_chat(chat_type)
+    for chat_type in ("direct", "group", "channel", ""):
+        assert not top_skills.is_private_chat(chat_type)
+
+
+def test_capability_probe_requires_the_share_resolver(monkeypatch) -> None:
+    full = _api({})
+    monkeypatch.setattr(top_skills, "import_module", lambda _name: full)
+    assert top_skills.load_usage_api() is full
+    partial = SimpleNamespace(**{key: value for key, value in vars(full).items()
+                                 if key != "_find_skill_dir"})
+    monkeypatch.setattr(top_skills, "import_module", lambda _name: partial)
+    assert top_skills.load_usage_api() is None
+
+
+def test_real_capture_reports_a_pending_gateway_command() -> None:
+    capture = InvocationCapture()
+    assert not capture.command_pending()
+    capture._value.set(SimpleNamespace(command="wisdom"))  # pylint: disable=protected-access
+    assert capture.command_pending()
+    capture._value.set(SimpleNamespace(command=""))  # pylint: disable=protected-access
+    assert not capture.command_pending()
 
 
 def _runtime(tmp_path, monkeypatch, *, invocation=None, pending=False, surface=None):
@@ -244,5 +375,21 @@ def test_private_slash_lists_ranked_skills(tmp_path, monkeypatch, route) -> None
         reply = _reply(runtime.slash("top"))
         assert "1. secret-skill | 4 uses | 1 edits | last used never" in reply
         assert _reply(runtime.slash("top 0")) == "Usage: /wisdom top [page]"
+    finally:
+        runtime.native.close()
+
+
+def test_pending_command_is_read_before_admission_consumes_it(tmp_path, monkeypatch) -> None:
+    _seed(tmp_path, monkeypatch)
+    runtime = _runtime(tmp_path, monkeypatch)
+    state = {"pending": True}
+
+    def consume(_raw):
+        state["pending"] = False
+
+    monkeypatch.setattr(runtime.native, "consume_request", consume)
+    monkeypatch.setattr(runtime.native, "command_pending", lambda: state["pending"])
+    try:
+        assert _reply(runtime.slash("top")) == refusal("top")
     finally:
         runtime.native.close()

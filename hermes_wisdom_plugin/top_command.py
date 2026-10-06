@@ -9,6 +9,7 @@ from typing import Any
 from .top_skills import (
     DEFAULT_PER_PAGE,
     EMPTY_TEXT,
+    ERROR_TEXT,
     MAX_PER_PAGE,
     UNAVAILABLE_TEXT,
     is_messaging,
@@ -34,12 +35,13 @@ def private_route(
     """Return where this private request came from, or ``None`` to refuse.
 
     An admitted native invocation is already fenced to a private Telegram/Slack
-    chat. A captured but unadmitted gateway command is a group or stale route.
-    Otherwise the host-bound session decides: messaging chats must be private;
-    the CLI, TUI and Desktop are the owner's own local sessions.
+    chat, the only place ``/wisdom share`` opens its review (``native``). A
+    captured but unadmitted gateway command is a group or stale route. Otherwise
+    the host-bound session decides: the CLI, TUI and Desktop are the owner's own
+    local sessions; any other surface must be a private messaging chat.
     """
     if invocation is not None:
-        return {"kind": "messaging", "origin": {
+        return {"kind": "messaging", "native": True, "origin": {
             key: value for key, value in {
                 "platform": invocation.platform, "chat_id": invocation.chat_id,
                 "chat_type": invocation.chat_type, "thread_id": invocation.thread_id,
@@ -53,14 +55,14 @@ def private_route(
         if not is_private_chat(surface.get("chat_type", "")) or not surface.get("chat_id"):
             return None
         platform = surface.get("platform") or surface.get("source") or ""
-        return {"kind": "messaging", "origin": {
+        return {"kind": "messaging", "native": False, "origin": {
             key: value for key, value in {
                 "platform": platform.strip().casefold(), "chat_id": surface.get("chat_id"),
                 "chat_type": surface.get("chat_type"), "thread_id": surface.get("thread_id"),
                 "user_id": surface.get("user_id"),
             }.items() if value
         }, "session_key": surface.get("session_key", "")}
-    return {"kind": "local", "session_key": surface.get("session_key", "")}
+    return {"kind": "local", "native": False, "session_key": surface.get("session_key", "")}
 
 
 def page_argument(args: list[str]) -> int:
@@ -80,7 +82,7 @@ def page_argument(args: list[str]) -> int:
 
 def state_text(state: str) -> str | None:
     """Return the fixed text for an empty or unavailable ranking."""
-    return {"unavailable": UNAVAILABLE_TEXT, "empty": EMPTY_TEXT}.get(state)
+    return {"unavailable": UNAVAILABLE_TEXT, "empty": EMPTY_TEXT, "error": ERROR_TEXT}.get(state)
 
 
 def render_rows(data: dict[str, Any]) -> list[str]:

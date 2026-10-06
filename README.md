@@ -187,23 +187,28 @@ hermes wisdom top [--page N] [--per-page N] [--json]
 
 Ranks your own local skills by Hermes-recorded usage: uses, then edits, then most
 recent use, then name. Each row shows uses, edits, last used and whether the skill
-is already shared. Bundled, Hub-installed, Wisdom-installed, archived and external
-skills are excluded. Pages hold 10 skills by default and at most 50. `--json` emits
-`items`, `page`, `per_page`, `total` and `pages` (plus `state`: `ok`, `empty` or
-`unavailable`). `/wisdom top [page]` shows the same list in the CLI, TUI, Desktop
-or a private messaging chat, with plain-text Next/Previous hints; group chats are
-refused without naming any skill. Usage comes from Hermes core skill usage records;
-on a Hermes without them the command reports that usage data is unavailable.
+is already shared. Bundled, Hub-installed, Wisdom-installed, archived, suppressed
+and external skills are excluded; every listed skill resolves the same way
+`hermes wisdom share` finds it. Pages hold 10 skills by default and at most 50.
+`--json` emits `items`, `page`, `per_page`, `total` and `pages` (plus `state`: `ok`,
+`empty`, `unavailable` or `error`). `/wisdom top [page]` shows the same list in the
+CLI, TUI, Desktop or a private messaging chat, with plain-text Next/Previous hints.
+Group chats, channels and webhook or API routes are refused without naming any
+skill. Usage comes from Hermes core skill usage records; on a Hermes without them
+the command reports that usage data is unavailable.
 
 ### Ask Hermes what to share
 
 Run `/wisdom share-suggest` in the CLI, TUI, Desktop or a private messaging chat.
 It starts a normal Hermes turn in the same conversation with up to 30 of your top
 skills (name, description, uses, edits, last used) and asks for up to 10 ranked
-suggestions, each with a short reason and the exact `/wisdom share <skill>`
-command. Hermes may read the skill files but cannot share anything; sharing still
-needs `/wisdom share <skill>` and its review. Nothing runs unless you ask. Group
-chats are refused without naming any skill.
+suggestions, each with a short reason and the exact share command for you to run:
+`/wisdom share <skill>` in a private Telegram or Slack chat, otherwise
+`hermes wisdom share <skill>` (`hermes -p <profile> wisdom share <skill>` for a named
+profile). Hermes may read the skill files and is told not to
+run any share or publish command; you decide and share each skill yourself through
+its review. Nothing runs unless you ask. Group chats are refused without naming any
+skill.
 
 The classic CLI starts the turn directly. TUI, Desktop and messaging chats need the
 operator to allow plugin-started turns for this profile:
@@ -213,7 +218,8 @@ hermes config set plugins.entries.collective-wisdom.allow_gateway_injection true
 ```
 
 Without that setting, or when the host cannot start the turn, the command replies
-with your ranked list, a ready-to-send prompt and the command above.
+with your ranked list, a ready-to-send prompt and the command above. When the turn
+is requested, the reply also carries that prompt in case no answer arrives.
 `hermes wisdom share-suggest` in a terminal prints the first page of `top` and
 points you to `/wisdom share-suggest`; it makes no model call.
 

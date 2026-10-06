@@ -1831,6 +1831,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 return slash_top(args, service)
             return slash_share_suggest(
                 args, service, route, inject=self.inject_message, plugin_id=self.plugin_id,
+                profile=self.profile[0],
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Collective Wisdom top skills failed (%s)", type(exc).__name__)
