@@ -67,7 +67,9 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     + 1024 * 1024
 )
 PRIVATE_RANKING_COMMANDS = frozenset({"top", "share-suggest"})
-CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "share", "prepared", "publish", "publication"})
+CONTRIBUTION_COMMANDS = frozenset({
+    "candidate", "suggest", "share", "prepared", "publish", "publication",
+})
 _CHECK_LABELS = (
     ("security_check", "Security check"),
     ("professionalism_check", "Professionalism check"),
@@ -524,7 +526,8 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
                     return "Usage: /wisdom share <local-skill>"
                 return (
                     "Sharing is only available in an admitted private review. "
-                    "Open /wisdom share <local-skill> in a private chat; no private state was opened here."
+                    "Open /wisdom share <local-skill> in a private chat; "
+                    "no private state was opened here."
                 )
             return (
                 "Contribution content is private. Use an admitted private review or the terminal "
