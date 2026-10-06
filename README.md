@@ -22,6 +22,8 @@ files; declared external setup commands require a separate Run setup choice.
   private chat, review its files and checks, then share it under your
   organization's publication policy.
 - **Install and update:** review compatibility and approve an exact version.
+- **Find what to share:** run `hermes wisdom top` or `/wisdom top [page]` in a
+  private chat to rank your own local skills by recorded Hermes usage.
 
 This release covers sharing you start yourself. Hermes sharing suggestions,
 recommendations, notification settings, automatic update maintenance and
@@ -175,6 +177,22 @@ For authorized scripted use, pass `--yes --json`; warnings additionally require
 entitlement refusals exit 1; `uncertain` exits 2 and names a status command.
 Do not resubmit an uncertain operation. Portal links are null when unavailable;
 destination teams use their authoritative organization ID when no display name is supplied.
+
+### See your top skills
+
+```bash
+hermes wisdom top [--page N] [--per-page N] [--json]
+```
+
+Ranks your own local skills by Hermes-recorded usage: uses, then edits, then most
+recent use, then name. Each row shows uses, edits, last used and whether the skill
+is already shared. Bundled, Hub-installed, Wisdom-installed, archived and external
+skills are excluded. Pages hold 10 skills by default and at most 50. `--json` emits
+`items`, `page`, `per_page`, `total` and `pages` (plus `state`: `ok`, `empty` or
+`unavailable`). `/wisdom top [page]` shows the same list in the CLI, TUI, Desktop
+or a private messaging chat, with plain-text Next/Previous hints; group chats are
+refused without naming any skill. Usage comes from Hermes core skill usage records;
+on a Hermes without them the command reports that usage data is unavailable.
 
 ### Prepare a skill to share
 

@@ -104,13 +104,19 @@ def test_registration_exposes_only_the_slash_dispatch_hook(tmp_path, monkeypatch
         assert entries["cli"] == entries["slash"] == "wisdom"
         assert entries["slack"] == "slack" and entries["telegram"] is True
         hint = entries["args_hint"]
-        assert "share" in hint and not any(token in hint.split() for token in HIDDEN_SLASH)
+        assert "share" in hint and "top" in hint
+        assert not any(token in hint.split() for token in HIDDEN_SLASH)
         manifest = yaml.safe_load((PROJECT_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
         assert manifest.get("provides_hooks") == list(release_scope.MANUAL_SHARING.hooks)
         assert manifest.get("provides_tools", []) == []
         entries["unload"]()
     finally:
         _unload(module_name)
+
+
+def test_owner_ranking_commands_ship_in_every_scope() -> None:
+    for scope in (release_scope.FULL, release_scope.MANUAL_SHARING):
+        assert scope.allows_cli("top") and scope.allows_slash("top")
 
 
 def test_cli_registers_manual_sharing_commands_only() -> None:

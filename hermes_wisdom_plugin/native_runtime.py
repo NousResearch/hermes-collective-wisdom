@@ -418,6 +418,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 service, invocation, reference, publisher_fact=row.get("publisher_fact"))
         raise ValueError("Unsupported Wisdom notice")
 
+    def command_pending(self) -> bool:
+        """Whether a messaging gateway captured this slash command, admitted or not."""
+        return not self._closed and self.capture.command_pending()
+
     def consume_request(self, raw_args: str) -> NativeInvocation | None:
         try:
             return self.capture.consume_command(raw_args, profile_name=self.profile_name)

@@ -9,10 +9,10 @@ The current release is manual skill sharing: a person chooses to share a skill, 
 teammates choose to install it. `hermes_wisdom_plugin/release_scope.py` names the
 surfaces the plugin registers (`ACTIVE = MANUAL_SHARING`).
 
-Registered: `hermes wisdom` setup, status, catalog, `share` and its preparation,
-publication and recovery commands, installation, updates, setup approval and
-uninstall; private `/wisdom` help, status, catalog, `share`, install and update
-reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
+Registered: `hermes wisdom` setup, status, catalog, `top`, `share` and its
+preparation, publication and recovery commands, installation, updates, setup
+approval and uninstall; private `/wisdom` help, status, catalog, `top`, `share`,
+install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
 catalog, installed and contribute pages.
 
 Implemented but not registered in this release: qualification capture and Hermes
@@ -43,6 +43,10 @@ tests run under the `full_release_scope` fixture.
 - Private Slack/Telegram `/wisdom share <local-skill>` opens the same owner-bound
   preparation and review flow for non-CLI operators. It never publishes from the
   command itself; the explicit native **Share My Skill** action remains required.
+- `hermes wisdom top` and private `/wisdom top [page]` rank the owner's own local
+  skills by Hermes-recorded usage (uses, edits, last used, name) and label skills
+  already shared. Group chats are refused without naming skills. Usage is read
+  lazily from Hermes core `tools.skill_usage` behind a capability probe.
 - After exact successful publication proof, register the unchanged author source in
   place for managed teammate updates. Failed local registration remains separately
   recoverable and never changes the remote publication result.

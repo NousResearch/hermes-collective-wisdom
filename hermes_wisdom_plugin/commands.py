@@ -34,6 +34,10 @@ from .package import (
 )
 from .release_scope import active as _release_scope
 from .share_command import run_share
+from .top_command import page_size as _page_size
+from .top_command import positive_page as _positive_page
+from .top_command import refusal as _private_refusal
+from .top_command import run_top
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
 from .direct_services import WISDOM_DISCLOSURE
@@ -61,6 +65,7 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     + MAX_METADATA_BYTES
     + 1024 * 1024
 )
+PRIVATE_RANKING_COMMANDS = frozenset({"top"})
 CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "share", "prepared", "publish", "publication"})
 _CHECK_LABELS = (
     ("security_check", "Security check"),
@@ -163,6 +168,10 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     )
     add("show", "Show one published skill").add_argument("skill_id")
     add("versions", "List published versions").add_argument("skill_id")
+    top = add("top", "Rank your own local skills by recorded Hermes usage")
+    top.add_argument("--page", type=_positive_page, default=1)
+    top.add_argument("--per-page", type=_page_size, default=10,
+                     help="Skills per page, 1 to 50 (default 10)")
     suggest = add("suggest", "Prepare one manually selected owner-private local draft")
     share = add("share", "Share one exact local skill with your team")
     share.add_argument("skill")
@@ -333,6 +342,8 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
     try:
         if command in {"share", "suggest"}:
             return _contribution_cli(args, service)
+        if command == "top":
+            return run_top(args, service)
         if command == "setup":
             accepted = bool(args.accept_disclosure)
             if not accepted:
@@ -496,8 +507,9 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
         return "Could not parse /wisdom arguments."
     try:
         command, args = parsed
-        if not _release_scope().allows_slash(command):
-            return _unsupported_command()
+        if not _release_scope().allows_slash(command) or command in PRIVATE_RANKING_COMMANDS:
+            # Private rankings are routed by CommandRuntime before this shared-safe view.
+            return _shared_chat_refusal(command)
         if command == "list":
             command = "browse"
         if command == "help":
@@ -1188,7 +1200,8 @@ def _emit(
 def _slash_help() -> str:
     scope = _release_scope()
     private = [entry for entry, command in (
-        ("/wisdom share <skill>", "share"), ("/wisdom settings", "settings"),
+        ("/wisdom share <skill>", "share"), ("/wisdom top [page]", "top"),
+        ("/wisdom settings", "settings"),
         ("/wisdom mute", "mute"), ("/wisdom candidate <id>", "candidate"),
         ("/wisdom suggest <skill>", "suggest"), ("/wisdom publish <draft>", "publish"),
         ("/wisdom prepared <action>", "prepared"),
@@ -1220,8 +1233,14 @@ def slash_args_hint() -> str:
     """Return the short host completion hint for the registered slash commands."""
     scope = _release_scope()
     return " | ".join(command for command in (
-        "help", "status", "browse", "show", "share", "install",
+        "help", "status", "browse", "show", "top", "share", "install",
     ) if scope.allows_slash(command))
+
+
+def _shared_chat_refusal(command: str) -> str:
+    if command in PRIVATE_RANKING_COMMANDS and _release_scope().allows_slash(command):
+        return _private_refusal(command)
+    return _unsupported_command()
 
 
 def _unsupported_command() -> str:
