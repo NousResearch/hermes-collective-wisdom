@@ -34,6 +34,7 @@ from .package import (
 )
 from .release_scope import active as _release_scope
 from .share_command import run_share
+from .share_suggest import run_share_suggest
 from .top_command import page_size as _page_size
 from .top_command import positive_page as _positive_page
 from .top_command import refusal as _private_refusal
@@ -65,7 +66,7 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     + MAX_METADATA_BYTES
     + 1024 * 1024
 )
-PRIVATE_RANKING_COMMANDS = frozenset({"top"})
+PRIVATE_RANKING_COMMANDS = frozenset({"top", "share-suggest"})
 CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "share", "prepared", "publish", "publication"})
 _CHECK_LABELS = (
     ("security_check", "Security check"),
@@ -172,6 +173,7 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     top.add_argument("--page", type=_positive_page, default=1)
     top.add_argument("--per-page", type=_page_size, default=10,
                      help="Skills per page, 1 to 50 (default 10)")
+    add("share-suggest", "List your top skills and how to ask Hermes which to share")
     suggest = add("suggest", "Prepare one manually selected owner-private local draft")
     share = add("share", "Share one exact local skill with your team")
     share.add_argument("skill")
@@ -342,8 +344,8 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
     try:
         if command in {"share", "suggest"}:
             return _contribution_cli(args, service)
-        if command == "top":
-            return run_top(args, service)
+        if command in {"top", "share-suggest"}:
+            return (run_top if command == "top" else run_share_suggest)(args, service)
         if command == "setup":
             accepted = bool(args.accept_disclosure)
             if not accepted:
@@ -1201,7 +1203,7 @@ def _slash_help() -> str:
     scope = _release_scope()
     private = [entry for entry, command in (
         ("/wisdom share <skill>", "share"), ("/wisdom top [page]", "top"),
-        ("/wisdom settings", "settings"),
+        ("/wisdom share-suggest", "share-suggest"), ("/wisdom settings", "settings"),
         ("/wisdom mute", "mute"), ("/wisdom candidate <id>", "candidate"),
         ("/wisdom suggest <skill>", "suggest"), ("/wisdom publish <draft>", "publish"),
         ("/wisdom prepared <action>", "prepared"),
@@ -1233,7 +1235,7 @@ def slash_args_hint() -> str:
     """Return the short host completion hint for the registered slash commands."""
     scope = _release_scope()
     return " | ".join(command for command in (
-        "help", "status", "browse", "show", "top", "share", "install",
+        "help", "status", "browse", "show", "top", "share", "share-suggest", "install",
     ) if scope.allows_slash(command))
 
 

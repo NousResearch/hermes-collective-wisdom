@@ -1696,6 +1696,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
+        inject_message: Callable[..., Any] | None = None,
+        plugin_id: str = "collective-wisdom",
     ):
         from .native_runtime import NativeSurfaceRuntime  # pylint: disable=import-outside-toplevel
 
@@ -1708,6 +1710,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         self.get_config = get_config
         self.set_config = set_config
         self.state = state
+        self.inject_message = inject_message
+        self.plugin_id = plugin_id
 
         self._lock = threading.RLock()
         self._closed = False
@@ -1814,6 +1818,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
     def _slash_private_ranking(self, command, args, invocation, gateway_command):
         """Answer owner-private usage rankings only in a private or local session."""
+        from .share_suggest import slash_share_suggest  # pylint: disable=import-outside-toplevel
         from .top_command import private_route, refusal, slash_top  # pylint: disable=import-outside-toplevel
         from .top_skills import session_surface  # pylint: disable=import-outside-toplevel
 
@@ -1822,7 +1827,11 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             return refusal(command)
         service = self._service()
         try:
-            return slash_top(args, service)
+            if command == "top":
+                return slash_top(args, service)
+            return slash_share_suggest(
+                args, service, route, inject=self.inject_message, plugin_id=self.plugin_id,
+            )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Collective Wisdom top skills failed (%s)", type(exc).__name__)
             return _REVIEW_UNAVAILABLE

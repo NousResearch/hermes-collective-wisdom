@@ -46,7 +46,7 @@ def private_route(
                 "user_id": invocation.actor_id, "user_name": invocation.actor_name,
                 "scope_id": invocation.scope_id,
             }.items() if value
-        }}
+        }, "session_key": str(getattr(invocation, "session_key", "") or "")}
     if gateway_command_pending:
         return None
     if is_messaging(surface):
@@ -59,7 +59,7 @@ def private_route(
                 "chat_type": surface.get("chat_type"), "thread_id": surface.get("thread_id"),
                 "user_id": surface.get("user_id"),
             }.items() if value
-        }}
+        }, "session_key": surface.get("session_key", "")}
     return {"kind": "local", "session_key": surface.get("session_key", "")}
 
 

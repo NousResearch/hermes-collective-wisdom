@@ -37,12 +37,12 @@ class ReleaseScope:  # pylint: disable=too-many-instance-attributes
 
 _MANUAL_CLI = (
     "setup", "status", "list", "browse", "show", "versions", "top", "suggest", "share",
-    "prepared", "publication", "install", "installed", "check", "update",
+    "share-suggest", "prepared", "publication", "install", "installed", "check", "update",
     "installed-setup", "uninstall", "help",
 )
 _MANUAL_SLASH = frozenset({
     "help", "status", "setup", "list", "browse", "show", "versions", "top", "share",
-    "prepared", "publication", "install", "installed", "check", "update",
+    "share-suggest", "prepared", "publication", "install", "installed", "check", "update",
     "uninstall", "installed-setup",
 })
 
@@ -53,6 +53,7 @@ FULL = ReleaseScope(
     cli_commands=(
         "setup", "status", "settings", "notifications", "mute", "inbox",
         "maintenance", "list", "browse", "show", "versions", "top", "suggest", "share",
+        "share-suggest",
         "prepared", "publication", "install", "installed", "check", "update",
         "installed-setup", "uninstall", "help",
     ),

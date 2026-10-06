@@ -116,7 +116,8 @@ def test_registration_exposes_only_the_slash_dispatch_hook(tmp_path, monkeypatch
 
 def test_owner_ranking_commands_ship_in_every_scope() -> None:
     for scope in (release_scope.FULL, release_scope.MANUAL_SHARING):
-        assert scope.allows_cli("top") and scope.allows_slash("top")
+        for command in ("top", "share-suggest"):
+            assert scope.allows_cli(command) and scope.allows_slash(command)
 
 
 def test_cli_registers_manual_sharing_commands_only() -> None:

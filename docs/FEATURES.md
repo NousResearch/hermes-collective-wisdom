@@ -9,14 +9,14 @@ The current release is manual skill sharing: a person chooses to share a skill, 
 teammates choose to install it. `hermes_wisdom_plugin/release_scope.py` names the
 surfaces the plugin registers (`ACTIVE = MANUAL_SHARING`).
 
-Registered: `hermes wisdom` setup, status, catalog, `top`, `share` and its
-preparation, publication and recovery commands, installation, updates, setup
-approval and uninstall; private `/wisdom` help, status, catalog, `top`, `share`,
-install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
+Registered: `hermes wisdom` setup, status, catalog, `top`, `share-suggest`,
+`share` and its preparation, publication and recovery commands, installation,
+updates, setup approval and uninstall; private `/wisdom` help, status, catalog,
+`top`, `share-suggest`, `share`, install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
 catalog, installed and contribute pages.
 
-Implemented but not registered in this release: qualification capture and Hermes
-sharing suggestions, proactive notices and recommendations, notification settings
+Implemented but not registered in this release: qualification capture and proactive
+Hermes sharing suggestions, proactive notices and recommendations, notification settings
 and mute, automatic update maintenance, the three model tools, the refinement
 auxiliary task, and model-written editorial copy. Preparation uses the skill's own
 name and description. Widening `ACTIVE` to `FULL` restores these surfaces; their
@@ -47,6 +47,13 @@ tests run under the `full_release_scope` fixture.
   skills by Hermes-recorded usage (uses, edits, last used, name) and label skills
   already shared. Group chats are refused without naming skills. Usage is read
   lazily from Hermes core `tools.skill_usage` behind a capability probe.
+- Private `/wisdom share-suggest`, only when the user runs it, starts one normal
+  Hermes turn in the same conversation through `PluginContext.inject_message`,
+  listing up to 30 top skills and asking for up to 10 ranked suggestions with exact
+  `/wisdom share <skill>` commands. The model may read skill files but cannot share.
+  Without injection (no `allow_gateway_injection`, or no identifiable session) it
+  replies with the ranked list and a ready-to-send prompt. The terminal command
+  prints the first `top` page and points to the chat command.
 - After exact successful publication proof, register the unchanged author source in
   place for managed teammate updates. Failed local registration remains separately
   recoverable and never changes the remote publication result.

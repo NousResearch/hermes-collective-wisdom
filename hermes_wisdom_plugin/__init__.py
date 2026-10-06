@@ -258,7 +258,8 @@ def register(ctx: Any) -> None:
     runtime = CommandRuntime(
         ctx.state.data_dir, profile, llm=ctx.llm, spawn_task=ctx.spawn_task,
         config=config, get_config=get_config, set_config=set_config,
-        state=ctx.state,
+        state=ctx.state, inject_message=getattr(ctx, "inject_message", None),
+        plugin_id=str(getattr(ctx, "plugin_id", "") or "collective-wisdom"),
     )
     lifecycle = LifecycleBridge(
         ctx.state.data_dir, profile, state=ctx.state, llm=ctx.llm, get_config=config_value,

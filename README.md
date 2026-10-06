@@ -23,9 +23,10 @@ files; declared external setup commands require a separate Run setup choice.
   organization's publication policy.
 - **Install and update:** review compatibility and approve an exact version.
 - **Find what to share:** run `hermes wisdom top` or `/wisdom top [page]` in a
-  private chat to rank your own local skills by recorded Hermes usage.
+  private chat to rank your own local skills by recorded Hermes usage. Run
+  `/wisdom share-suggest` in a chat to ask Hermes which of them are worth sharing.
 
-This release covers sharing you start yourself. Hermes sharing suggestions,
+This release covers sharing you start yourself. Proactive Hermes sharing suggestions,
 recommendations, notification settings, automatic update maintenance and
 model-written descriptions are implemented but not enabled; see
 [features](docs/FEATURES.md#release-scope).
@@ -193,6 +194,28 @@ skills are excluded. Pages hold 10 skills by default and at most 50. `--json` em
 or a private messaging chat, with plain-text Next/Previous hints; group chats are
 refused without naming any skill. Usage comes from Hermes core skill usage records;
 on a Hermes without them the command reports that usage data is unavailable.
+
+### Ask Hermes what to share
+
+Run `/wisdom share-suggest` in the CLI, TUI, Desktop or a private messaging chat.
+It starts a normal Hermes turn in the same conversation with up to 30 of your top
+skills (name, description, uses, edits, last used) and asks for up to 10 ranked
+suggestions, each with a short reason and the exact `/wisdom share <skill>`
+command. Hermes may read the skill files but cannot share anything; sharing still
+needs `/wisdom share <skill>` and its review. Nothing runs unless you ask. Group
+chats are refused without naming any skill.
+
+The classic CLI starts the turn directly. TUI, Desktop and messaging chats need the
+operator to allow plugin-started turns for this profile:
+
+```bash
+hermes config set plugins.entries.collective-wisdom.allow_gateway_injection true
+```
+
+Without that setting, or when the host cannot start the turn, the command replies
+with your ranked list, a ready-to-send prompt and the command above.
+`hermes wisdom share-suggest` in a terminal prints the first page of `top` and
+points you to `/wisdom share-suggest`; it makes no model call.
 
 ### Prepare a skill to share
 
