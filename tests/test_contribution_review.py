@@ -233,6 +233,7 @@ def test_partial_author_copy_is_not_overwritten_by_model(tmp_path: Path):
     assert result["editorial_status"] == "complete"
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_model_disclosure_preflight_blocks_credential_shaped_source(tmp_path: Path):
     llm = RecordingLlm()
     value, source, _ = reviewer(tmp_path, llm=llm)
@@ -245,6 +246,7 @@ def test_model_disclosure_preflight_blocks_credential_shaped_source(tmp_path: Pa
     assert result["professionalism_check"]["status"] == "unavailable"
     assert result["professionalism_check"]["availability_reason"] == "local_disclosure_preflight"
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("decision", [
     {"available": False, "allowed": True, "findings": []},
     {"available": True, "allowed": None, "findings": []},
@@ -277,6 +279,7 @@ def test_editorial_withholds_model_without_clean_host_preflight(
     assert all(call["schema_name"] != "wisdom_editorial_metadata" for call in llm.calls)
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_failed_model_can_be_retried_only_with_explicit_review(tmp_path: Path):
     llm = RecordingLlm(fail=True)
     value, _source, _ = reviewer(tmp_path, llm=llm)
@@ -287,6 +290,7 @@ def test_failed_model_can_be_retried_only_with_explicit_review(tmp_path: Path):
     reviewed = value.reopen(result["draft_id"], allow_model_review=True)
     assert reviewed["professionalism_check"]["status"] == "pass"
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_later_model_fills_only_missing_copy_on_same_unedited_source(tmp_path: Path):
     llm = RecordingLlm(fail=True)
     value, source, _ = reviewer(tmp_path, llm=llm)
@@ -308,6 +312,7 @@ def test_later_model_fills_only_missing_copy_on_same_unedited_source(tmp_path: P
     assert len(llm.calls) == count
     assert len(list((tmp_path / "state" / "contribution-prepared").iterdir())) == 1
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_explicitly_edited_draft_is_never_rewritten_by_later_model(tmp_path: Path):
     llm = RecordingLlm(fail=True)
     value, _source, _ = reviewer(tmp_path, llm=llm)
@@ -324,6 +329,7 @@ def test_explicitly_edited_draft_is_never_rewritten_by_later_model(tmp_path: Pat
     assert again["editorial_status"] == "incomplete"
     assert len(llm.calls) == before
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("description", [None, "x" * 321, "   "])
 def test_author_invalid_editorial_description_clears_completeness(
     tmp_path: Path, description: str | None

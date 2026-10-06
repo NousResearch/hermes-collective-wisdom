@@ -70,6 +70,7 @@ def _record_id(payload, label):
     return value.rsplit(":", 1)[-1]
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_real_sdk_response_binds_exact_message_for_registered_callbacks(tmp_path):
     async def scenario():
         service = Service()

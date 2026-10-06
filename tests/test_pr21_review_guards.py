@@ -106,6 +106,7 @@ def test_preparation_error_is_visible_retryable_and_not_packaging(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 @pytest.mark.parametrize("fails", [False, True])
 def test_settings_ack_fences_effects_and_preserves_completed_result(

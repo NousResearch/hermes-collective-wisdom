@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .professionalism import CHECK_LABELS
 from .local_security import safe_scan_findings
+from .release_scope import active as release_scope
 
 SECURITY_LABELS = {
     "private_keys": "Private keys", "live_credentials": "Live credentials",
@@ -217,13 +218,14 @@ def _candidate_lines(plan):
     return lines + _human_check_rows(plan)
 
 def _sharing_lines(plan):
+    benefit = plan.get('coworker_benefit')
     lines = [
         "ℹ️ Skill name: " + _readable(plan.get('editorial_name') or plan.get('slug')
                                       or 'Name unavailable'),
         "ℹ️ What it does: " + _readable(plan.get('editorial_description')
                                        or 'Description unavailable'),
-        "ℹ️ Why teammates benefit: " + _readable(plan.get('coworker_benefit')
-                                                or 'Benefit unavailable'),
+        *(["ℹ️ Why teammates benefit: " + _readable(benefit or 'Benefit unavailable')]
+          if benefit or release_scope().model_editorial else []),
         f"ℹ️ Publication name: {_readable(plan.get('slug') or 'Unavailable')}",
         "ℹ️ Nothing has been uploaded or shared by viewing these details.",
     ]

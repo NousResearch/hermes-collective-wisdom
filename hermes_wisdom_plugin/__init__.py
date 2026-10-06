@@ -190,6 +190,7 @@ def _register_local_awareness(  # pylint: disable=too-many-arguments,too-many-po
     ctx, runtime, lifecycle, profile, awareness_turns, awareness_lock, poll_lock,
     offer_turns,
 ):
+    """Register qualification capture and proactive notice hooks (dormant in v0)."""
     def synchronous_turn_thread() -> bool:
         """Never do credential or feed I/O on a host event-loop thread."""
         try:
@@ -234,7 +235,10 @@ def register(ctx: Any) -> None:
     from .native_tools import register_native_tools  # pylint: disable=import-outside-toplevel
     from .qualification import LifecycleBridge  # pylint: disable=import-outside-toplevel
     from .runtime import CommandRuntime, current_profile  # pylint: disable=import-outside-toplevel
+    from .commands import slash_args_hint  # pylint: disable=import-outside-toplevel
+    from .release_scope import active  # pylint: disable=import-outside-toplevel
 
+    scope = active()
     profile = current_profile()
     get_config = getattr(ctx, "get_config", None)
     set_config = getattr(ctx, "set_config", None)
@@ -264,11 +268,14 @@ def register(ctx: Any) -> None:
     awareness_lock = threading.Lock()
     poll_lock = threading.Lock()
 
-    runtime.registrations.append(ctx.register_auxiliary_task(
-        "hermes_collective_wisdom_refinement",
-        display_name="Collective Wisdom refinement review",
-        description="Classify only ambiguous local skill refinements after an owning human turn.",
-    ))
+    if "hermes_collective_wisdom_refinement" in scope.auxiliary_tasks:
+        runtime.registrations.append(ctx.register_auxiliary_task(
+            "hermes_collective_wisdom_refinement",
+            display_name="Collective Wisdom refinement review",
+            description=(
+                "Classify only ambiguous local skill refinements after an owning human turn."
+            ),
+        ))
 
     def close() -> None:
         with awareness_lock:
@@ -282,19 +289,22 @@ def register(ctx: Any) -> None:
         ctx.register_hook("pre_gateway_dispatch", runtime.native.hook)
     )
 
-    _register_local_awareness(
-        ctx, runtime, lifecycle, profile, awareness_turns, awareness_lock, poll_lock,
-        offer_turns,
-    )
+    # Suggestion capture, proactive notices and model tools stay implemented but
+    # are registered only by a release scope that ships them.
+    if set(scope.hooks) - {"pre_gateway_dispatch"}:
+        _register_local_awareness(
+            ctx, runtime, lifecycle, profile, awareness_turns, awareness_lock, poll_lock,
+            offer_turns,
+        )
     ctx.register_platform_handler("slack", runtime.native.wire_slack)
     ctx.register_telegram_handler(runtime.native.wire_telegram)
-    runtime.registrations.extend(register_native_tools(ctx, runtime))
+    runtime.registrations.extend(register_native_tools(ctx, runtime, scope.model_tools))
     runtime.registrations.append(ctx.register_cli_command(
-        "wisdom", "Collective Wisdom setup and discovery", build_parser, runtime.cli
+        "wisdom", "Share and install team skills", build_parser, runtime.cli
     ))
     registration = ctx.register_command(
-        "wisdom", runtime.slash, description="Browse shared Collective Wisdom skills",
-        args_hint="help | status | browse | show | versions", argument_mode="text",
+        "wisdom", runtime.slash, description="Share and install team skills",
+        args_hint=slash_args_hint(), argument_mode="text",
     )
     if registration is not None:
         runtime.registrations.append(registration)

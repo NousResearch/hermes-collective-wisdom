@@ -20,6 +20,7 @@ from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
 from .package import PackagePolicyError
 from .portal_urls import safe_portal_url
+from .release_scope import active as release_scope
 from .review_state import ReviewState
 from .install_review import confirmed_file_change
 from .terminal_ui import (
@@ -265,13 +266,21 @@ def _inspection_pages(record: dict[str, Any]) -> list[str]:
 
 
 def _candidate_review_ready(plan: dict[str, Any]) -> bool:
+    # Without model-written copy the release shares the skill's own name and
+    # description; no teammate-benefit line exists to require.
+    benefit = ("coworker_benefit",) if release_scope().model_editorial else ()
     return bool(
         plan.get("receipt") and plan.get("editorial_status") == "complete"
         and all(plan.get(key) for key in (
-            "editorial_name", "editorial_description", "coworker_benefit",
+            "editorial_name", "editorial_description", *benefit,
             "publication_mode", "policy_version", "authorization_expires_at", "hashes",
         ))
     )
+
+
+def _benefit_shown(value: Any) -> bool:
+    """Show the benefit line when copy exists or the release writes it."""
+    return bool(value) or release_scope().model_editorial
 
 
 def _confirmed_private_url(record: dict[str, Any]) -> str | None:
@@ -591,7 +600,8 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=t
         scan = (gateway or {}).get("status") if isinstance(gateway, dict) else None
         facts = "\n".join((
             f"What it does: {_safe(plan.get('editorial_description'), 'Description incomplete')}",
-            f"Why teammates benefit: {_safe(plan.get('coworker_benefit'), 'Benefit incomplete')}",
+            *([f"Why teammates benefit: {_safe(plan.get('coworker_benefit'), 'Benefit incomplete')}"]
+              if _benefit_shown(plan.get("coworker_benefit")) else []),
             f"Destination team: {_safe(record.get('team_name'), 'Team name unavailable')}",
             f"Publication policy: {_safe(mode, 'Unavailable')} (version {_safe(plan.get('policy_version'), 'unavailable')}). {handling}",
             f"Local security: {_safe(security.get('status'), 'unavailable')}; professionalism: {_safe(professional.get('status'), 'unavailable')}.",
@@ -682,7 +692,9 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
     safe, _checks = sharing_checks({**plan, "candidate_flow": True})
     name = editorial.get("editorial_name") or plan.get("editorial_name") or facts.get("name")
     description = editorial.get("editorial_description") or plan.get("editorial_description") or "Editorial description not yet available."
-    benefit = editorial.get("coworker_benefit") or plan.get("coworker_benefit") or "Coworker benefit not yet available."
+    benefit = editorial.get("coworker_benefit") or plan.get("coworker_benefit")
+    benefit_line = (f"Why others might benefit: {_safe(benefit or 'Coworker benefit not yet available.')}\n"
+                    if _benefit_shown(benefit) else "")
     complete = facts.get("editorial_status", plan.get("editorial_status")) == "complete"
     team = team_name
     reason = facts.get("editorial_failure")
@@ -695,12 +707,14 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
         "You created a skill that could help your team\n\n"
         f"Skill name: {_safe(name, 'Name unavailable')}\n"
         f"What it does: {_safe(description)}\n"
-        f"Why others might benefit: {_safe(benefit)}\n"
+        + benefit_line +
         f"Destination team: {_safe(team, 'Team name unavailable')}\n\n"
         "Would you like to review a sharing proposal?",
         notice=("Nothing has been uploaded or published. Review proposal opens the "
                 "local package and current policy without sharing. The final Share My Skill "
                 "action authorizes that exact proposal." if complete else
+                "Nothing has been uploaded or published. " + _LOCAL_COPY_REQUIRED
+                if not release_scope().model_editorial else
                 "Nothing has been uploaded or published. Editorial copy is incomplete (" +
                 reason.replace("_", " ") +
                 "); retry local preparation or edit the private draft before reviewing sharing."),
@@ -814,11 +828,16 @@ def _suggest_terminal_view(plan: dict[str, Any], state: str, result: Any = None)
     )
 
 
+_LOCAL_COPY_REQUIRED = ("Add a name and a description of up to 320 characters to the "
+                        "skill's SKILL.md frontmatter, then retry.")
+
+
 def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
+    detail = (_safe(plan.get("editorial_failure"), "Editorial copy or local checks are incomplete.")
+              if release_scope().model_editorial else _LOCAL_COPY_REQUIRED)
     return NativeView(
         "Sharing draft needs attention", _skill_name(plan),
-        [NativeItem("Preparation incomplete", _safe(plan.get("editorial_failure"),
-                    "Editorial copy or local checks are incomplete."))],
+        [NativeItem("Preparation incomplete", detail)],
         actions=[NativeAction("Retry local preparation", "suggest.refresh"),
                  NativeAction("Maybe Later", "suggest.keep")],
         notice="Nothing has been uploaded. Edit the local draft in the terminal if needed.",
@@ -1000,7 +1019,33 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
     return None
 
 
-def project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
+_MUTE_NOTICE = "Mute changes recommendations for all skills."
+
+
+def _released_actions(actions: list[NativeAction]) -> list[NativeAction]:
+    return [action for action in actions
+            if not (action.action or "").startswith("settings")]
+
+
+def project_view(record: dict[str, Any]) -> NativeView:
+    """Project a review, offering only controls the current release exposes.
+
+    The same projection is the callback allowlist, so a control removed here
+    cannot be invoked from an older card either.
+    """
+    view = _project_view(record)
+    if release_scope().notification_settings:
+        return view
+    return replace(
+        view,
+        actions=_released_actions(view.actions),
+        navigation_actions=_released_actions(view.navigation_actions),
+        items=[replace(item, actions=_released_actions(item.actions)) for item in view.items],
+        notice=view.notice.replace(" " + _MUTE_NOTICE, "").replace(_MUTE_NOTICE, ""),
+    )
+
+
+def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
     terminal = _terminal_state_view(record)
     if terminal is not None:
         return terminal

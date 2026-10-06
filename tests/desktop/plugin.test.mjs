@@ -257,9 +257,15 @@ async function enter(input, value) {
 const hash = character => `sha256:${character.repeat(64)}`
 const bootstrap = {
   status: { configured: true, state: 'active', pending_operations: [] },
-  settings: { notifications: { delivery_mode: 'agent' } },
-  activity: { mode: 'agent', assessments: [], interactions: [], installed_setup: [] },
+  surfaces: { notification_settings: false, share_suggestions: false },
   installations: []
+}
+// A release that ships notification settings and sharing suggestions.
+const fullBootstrap = {
+  ...bootstrap,
+  surfaces: { notification_settings: true, share_suggestions: true },
+  settings: { notifications: { delivery_mode: 'agent' } },
+  activity: { mode: 'agent', assessments: [], interactions: [], installed_setup: [] }
 }
 
 function installReview(overrides = {}) {
@@ -1553,10 +1559,27 @@ test('hostile markup and control-like text stays inert in exact draft review', a
   await mounted.cleanup()
 })
 
-test('Settings keeps simple notification controls without an Activity diagnostics tab', async t => {
+test('manual sharing release hides Settings and never requests sharing suggestions', async t => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
     if (path === '/bootstrap') return bootstrap
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path.startsWith('/drafts?')) return { drafts: [] }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(mounted.cleanup)
+  assert.equal(button(mounted, 'Settings'), undefined)
+  await click(button(mounted, 'Contribute'))
+  assert.ok(button(mounted, 'Share'))
+  assert.doesNotMatch(mounted.container.textContent, /Worth sharing|Sharing suggestions/)
+  assert.ok(!loaded.calls.rest.some(([path]) => path.startsWith('/candidates') || path.startsWith('/settings')))
+})
+
+test('Settings keeps simple notification controls without an Activity diagnostics tab', async t => {
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return fullBootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
     if (path === '/settings?view_id=view-remote-a-A') return {
       delivery_mode: 'agent', mode_writable: true,
@@ -1597,7 +1620,7 @@ test('Contribute lists share candidates and persists Not now through the backend
   ]
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
-    if (path === '/bootstrap') return bootstrap
+    if (path === '/bootstrap') return fullBootstrap
     if (path.startsWith('/catalog?')) return { skills: [] }
     if (path === '/candidates?view_id=view-remote-a-A') return { candidates }
     if (path === '/candidates/candidate-1/prepare') {

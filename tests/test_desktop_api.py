@@ -624,6 +624,7 @@ def test_closed_view_cannot_save_or_rereview_a_prepared_draft(tmp_path):
     assert not any(call[0].startswith("prepared_") for call in service.calls)
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_desktop_notice_route_returns_best_effort_human_surface_payload(tmp_path):
     service = Service(tmp_path / "a")
     app = FastAPI()
@@ -873,6 +874,7 @@ def test_malformed_confirm_is_validation_error_not_internal_error(payload):
     assert result.status_code == 422
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_mute_route_rejects_unknown_duration_before_workflow_dispatch():
     app = FastAPI()
     app.include_router(build_router(lambda: None))
@@ -1022,6 +1024,7 @@ def test_open_view_fails_closed_for_non_setup_native_owner_failures(tmp_path, fa
         DesktopWorkflowApi().open_view(FailingService(tmp_path))
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_router_covers_management_settings_enrolment_and_publication(  # pylint: disable=too-many-locals
     tmp_path,
 ):

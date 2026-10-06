@@ -3,6 +3,25 @@
 This document describes the current plugin-only implementation. Historical milestone
 inventories and superseded reliable-delivery designs are intentionally omitted.
 
+## Release scope
+
+The current release is manual skill sharing: a person chooses to share a skill, and
+teammates choose to install it. `hermes_wisdom_plugin/release_scope.py` names the
+surfaces the plugin registers (`ACTIVE = MANUAL_SHARING`).
+
+Registered: `hermes wisdom` setup, status, catalog, `share` and its preparation,
+publication and recovery commands, installation, updates, setup approval and
+uninstall; private `/wisdom` help, status, catalog, `share`, install and update
+reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
+catalog, installed and contribute pages.
+
+Implemented but not registered in this release: qualification capture and Hermes
+sharing suggestions, proactive notices and recommendations, notification settings
+and mute, automatic update maintenance, the three model tools, the refinement
+auxiliary task, and model-written editorial copy. Preparation uses the skill's own
+name and description. Widening `ACTIVE` to `FULL` restores these surfaces; their
+tests run under the `full_release_scope` fixture.
+
 ## Supported workflows
 
 - Enroll, inspect entitlement, and accept the explicit data-use disclosure.
@@ -14,7 +33,7 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
   capability changes. Explicit bounded maintenance may apply only policy-authorized
   automatic updates.
 - Record deterministic local usage/refinement signals and qualify contribution
-  candidates using fixed thresholds.
+  candidates using fixed thresholds (not registered in this release).
 - Prepare owner-private contribution drafts, edit and re-review their exact files and
   hashes, submit them according to server policy, inspect status, reopen conflicts,
   and decline private drafts.
@@ -28,7 +47,8 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
   place for managed teammate updates. Failed local registration remains separately
   recoverable and never changes the remote publication result.
 - Use Desktop management pages and private Slack/Telegram `/wisdom` commands for
-  explicit catalog, install, update, setup, publication, and settings reviews.
+  explicit catalog, install, update, setup, and publication reviews. Settings
+  reviews are not registered in this release.
 
 Every effect rechecks profile/account/organization ownership, entitlement, and the
 reviewed content. A notification, model message, button opening a review, or prior
@@ -36,7 +56,7 @@ setup approval cannot authorize a later effect.
 
 ## Best-effort proactive notices
 
-On supported private Desktop and messaging surfaces, an end-of-turn hook may perform
+Not registered in the manual skill-sharing release. On supported private Desktop and messaging surfaces, an end-of-turn hook may perform
 a bounded feed poll on each eligible turn and emit one deterministic human-facing notice.
 CLI/TUI instead append one candidate-only suggestion to the current answer after
 a verified skill load qualifies. This transform precedes final turn outcome: a

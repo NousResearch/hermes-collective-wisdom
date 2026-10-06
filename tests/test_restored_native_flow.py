@@ -416,6 +416,7 @@ def test_not_now_does_not_claim_success_when_preference_is_unconfirmed(tmp_path)
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface):
     async def scenario():
@@ -943,6 +944,7 @@ def test_safe_summary_requires_all_actual_hash_bound_checks(tmp_path, monkeypatc
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
     async def scenario():
         service = Service()
@@ -973,6 +975,7 @@ def test_snooze_opens_disclosed_settings_without_muting(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 @pytest.mark.parametrize("stale", [False, True])
 def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, stale):
@@ -1052,6 +1055,7 @@ def test_native_one_week_mute_uses_guarded_gateway_duration(tmp_path, surface, s
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_failed_mute_click_replaces_card_with_uncertain_confirmation(tmp_path, surface):
     class FailingMuteService(Service):
@@ -1078,6 +1082,7 @@ def test_failed_mute_click_replaces_card_with_uncertain_confirmation(tmp_path, s
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 @pytest.mark.parametrize("readback", ["unchanged", "stale_revision", "later_revision"])
 def test_mute_response_without_persisted_readback_never_confirms(tmp_path, surface, readback):
@@ -1159,6 +1164,7 @@ def test_real_local_packaging_failure_reaches_native_card(tmp_path, monkeypatch)
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
     async def scenario():
         service = Service()

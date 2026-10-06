@@ -18,10 +18,15 @@ files; declared external setup commands require a separate Run setup choice.
 ## What you can do
 
 - **Discover:** browse your organization's skills and inspect published versions.
-- **Share:** prepare a private local draft, review its files and checks, then
-  submit it under your organization's publication policy.
+- **Share:** run `hermes wisdom share <skill>` or `/wisdom share <skill>` in a
+  private chat, review its files and checks, then share it under your
+  organization's publication policy.
 - **Install and update:** review compatibility and approve an exact version.
-- **Manage:** inspect your inbox, choose a notification mode, and mute recommendations.
+
+This release covers sharing you start yourself. Hermes sharing suggestions,
+recommendations, notification settings, automatic update maintenance and
+model-written descriptions are implemented but not enabled; see
+[features](docs/FEATURES.md#release-scope).
 
 ## Get started
 
@@ -211,11 +216,10 @@ plugin alone does not update Gateway or Portal limits. Keep the complete local
 draft until the service supports it; the plugin never drops files to make a
 submission fit. Local preparation is not proof of successful publication.
 
-Optional model review requires `--allow-model-review`, which permits sending the
-draft to your configured model provider. Without it, that assessment is reported
-as unavailable, not passed.
+Preparation uses the skill's own name and description. Model review is not
+enabled in this release, so that assessment is reported as unavailable, not passed.
 
-### Manage updates and notifications
+### Manage updates
 
 | Task | Command |
 | --- | --- |
@@ -223,13 +227,11 @@ as unavailable, not passed.
 | Check for an update | `hermes wisdom check <skill-id> --json` |
 | Review an update | `hermes wisdom update <skill-id> --plan --json` |
 | Recover management of an already-published original | `hermes wisdom publication enroll <local-skill-name> --json` |
-| Inspect notification settings | `hermes wisdom settings --json` |
-| Mute proactive notifications for a week | `hermes wisdom mute 1w --json` |
 
 After approving an update plan, apply it with
 `hermes wisdom update --apply-receipt <receipt> --json`. Local edits block
-replacement by default. Advanced preservation, maintenance, and recovery options
-are in the [workflow reference](docs/WORKFLOWS.md).
+replacement by default. Advanced preservation and recovery options are in the
+[workflow reference](docs/WORKFLOWS.md).
 
 The [review restoration guide](docs/REVIEW_RESTORATION.md) describes private native
 invitations, complete bounded inspection, quiet dismissal, and the gaps that remain.

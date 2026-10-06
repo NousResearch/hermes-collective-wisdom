@@ -34,7 +34,8 @@ hermes wisdom update --apply-receipt <receipt> --json
 Changed or expired content requires a new review. Installation does not approve or run
 setup. Local edits block replacement unless the explicit preservation workflow is
 reviewed. Automatic updates run only from the explicit bounded maintenance command and
-only under freshly verified server policy:
+only under freshly verified server policy. The maintenance command is not registered
+in the manual skill-sharing release:
 
 ```bash
 hermes wisdom maintenance --refresh-policy --json
@@ -45,7 +46,7 @@ No scheduler or notice-repair worker is started.
 
 ## Local qualification
 
-The plugin observes successful host `on_skill_lifecycle` load/mutation facts. Fixed
+Not registered in the manual skill-sharing release. The plugin observes successful host `on_skill_lifecycle` load/mutation facts. Fixed
 local thresholds qualify repeated business-day use or repeated meaningful refinement
 with stability and recent-use checks. Session completion processes due stability jobs
 but is not itself usage evidence. Signed-out, mismatched-owner, shared, background, or
@@ -57,11 +58,13 @@ after an admitted successful private owning-human turn. Model output supplies on
 piece of refinement evidence; it never qualifies by itself and never grants publication
 consent.
 
-`hermes wisdom notifications --json` and `hermes wisdom inbox --json` are explicit
-local reads. They do not poll the feed, call a model, send a notice, or execute an
+`hermes wisdom notifications --json` and `hermes wisdom inbox --json` (not registered
+in the manual skill-sharing release) are explicit local reads. They do not poll the feed, call a model, send a notice, or execute an
 action.
 
 ## Best-effort end-turn notices
+
+Not registered in the manual skill-sharing release.
 
 Supported private Desktop and messaging routes may check for a notice at turn end.
 There is no proactive notice for plain CLI/TUI chat or unsupported clients.

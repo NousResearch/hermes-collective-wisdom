@@ -27,6 +27,7 @@ from .errors import (
 )
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError
+from .release_scope import active as release_scope
 
 
 def _require_current(may_apply: Callable[[], bool] | None) -> None:
@@ -517,7 +518,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                           if self._get_config is not None else None)
         except Exception:  # pylint: disable=broad-exception-caught
             configured = False
-        if configured is False:
+        if configured is False or not release_scope().model_editorial:
             allow_model_review = False
         result = self._contribution_reviewer().prepare(
             skill_name,
@@ -1050,7 +1051,8 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         self._installation_owner()
         result = self._contribution_reviewer().reopen(
-            draft_id, allow_model_review=bool(allow_model_review),
+            draft_id,
+            allow_model_review=bool(allow_model_review) and release_scope().model_editorial,
             reviewed_hashes=reviewed_hashes, may_apply=may_apply,
         )
         self.check_owner()
@@ -1766,6 +1768,10 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         if parsed is None:
             return "Invalid Wisdom command. Use /wisdom help."
         command, args = parsed
+        if not release_scope().allows_slash(command):
+            from .commands import run_slash  # pylint: disable=import-outside-toplevel
+            # Dormant reviews (settings, suggestions, recommendations) never open.
+            return run_slash(parsed, object())
         if invocation is not None:
             if command == "install":
                 return self._slash_native_install(invocation, args)
