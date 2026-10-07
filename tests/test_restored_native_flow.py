@@ -2,7 +2,7 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-few-public-methods,too-many-lines
 import asyncio
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from types import ModuleType, SimpleNamespace
 
@@ -20,6 +20,12 @@ from hermes_wisdom_plugin.native_inspection import inspection_pages
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import rich_html, plain_html
 from hermes_wisdom_plugin.runtime import InvocationService
+
+
+# Relative to now: a fixed date silently expires every plan once it passes.
+_AUTHORIZATION_EXPIRES_AT = (
+    datetime.now(timezone.utc) + timedelta(days=30)
+).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_registered_slack_wisdom_slash_uses_host_admission(tmp_path, monkeypatch):
@@ -129,7 +135,7 @@ class Service:
             "editorial_status": "complete", "slug": "incident-review",
             "hashes": {"content": "sha256:content", "author_description": "sha256:description",
                        "package_manifest": "sha256:manifest"},
-            "policy_version": 3, "authorization_expires_at": "2026-09-30T00:00:00Z",
+            "policy_version": 3, "authorization_expires_at": _AUTHORIZATION_EXPIRES_AT,
             "files": [{"path": "SKILL.md", "content_utf8": "first\nlast"}],
             "security_check": {"status": "pass"},
             "professionalism_check": {"status": "pass"},
