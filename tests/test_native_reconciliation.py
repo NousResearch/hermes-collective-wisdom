@@ -73,6 +73,7 @@ def _direct_private_card(tmp_path, monkeypatch):
     return controller, service, kernel, client, controller.load(record["id"]), clicked
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_private_upload_continues_on_same_card_with_exact_fresh_share(  # pylint: disable=too-many-locals
     tmp_path, monkeypatch,
 ):
@@ -185,6 +186,7 @@ def test_acknowledged_private_upload_with_unavailable_fresh_review_keeps_link_on
     assert client.state.calls == Counter(upload=1, submit=1)
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("fallback", ["expired", "unavailable"])
 def test_private_fallback_navigation_remains_usable(tmp_path, monkeypatch, fallback):
     controller, service, _kernel, client, record, clicked = _direct_private_card(
@@ -408,7 +410,7 @@ def test_incomplete_manual_editorial_cannot_upload_until_fresh_review(tmp_path, 
     controller = _controller(tmp_path)
     caller = _native_invocation()
     record = controller.request_suggest(service, caller, "incident")
-    assert "model_unavailable" in controller.view(record).to_text()
+    assert "SKILL.md frontmatter" in controller.view(record).to_text()
     assert not any(a.primary or a.action == "portal.draft" for a in controller.view(record).actions)
     controller.bind_message(record["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")

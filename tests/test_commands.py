@@ -48,6 +48,7 @@ def run_slash(raw_args, service):
     return render_slash(parse_slash(raw_args), service)
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("choice", ["status", "agent", "fixed"])
 def test_cli_notification_settings_are_explicit_and_status_does_not_write(choice, capsys):
     service = SimpleNamespace(mode="agent", calls=[])
@@ -72,6 +73,7 @@ def test_cli_notification_settings_are_explicit_and_status_does_not_write(choice
     )
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("command", ["settings fixed", "mute forever"])
 def test_shared_slash_controls_only_offer_terminal_handoff(command):
     service = _Service()
@@ -425,6 +427,7 @@ def test_parser_registers_only_bounded_commands_and_json_flags():
 
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_cli_suggest_defaults_to_model_route_but_honors_explicit_refusal(capsys):
     parser = _parser()
     service = _Service()
@@ -857,6 +860,7 @@ def test_prepared_edit_rejects_editor_symlink_replacement(tmp_path, capsys, monk
     assert not any(call[0] == "prepared_save" for call in service.calls)
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_cli_prepared_inspect_save_and_review_use_explicit_payload(tmp_path, capsys):
     parser = _parser()
     service = _Service()
@@ -1198,6 +1202,7 @@ def test_cli_unavailable_retry_guidance(  # pylint: disable=too-many-arguments,t
         assert "sign in" not in output.err.lower()
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("argv,retry_safe", [
     (["notifications"], True),
     (["notifications", "--mark-seen"], False),
@@ -1303,15 +1308,15 @@ def test_slash_setup_with_any_arguments_is_instruction_only():
     assert not service.calls
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_slash_help_distinguishes_reads_private_reviews_and_terminal_instructions():
     service = _Service()
     output = run_slash("help", service)
 
     for command in ("browse", "show", "versions", "status", "setup", "help"):
         assert f"/wisdom {command}" in output
-    for command in ("share", "review"):
-        assert f"/wisdom {command}" not in output
-    for command in ("candidate", "suggest", "prepared", "publish", "publication"):
+    assert "/wisdom review" not in output
+    for command in ("share", "candidate", "suggest", "prepared", "publish", "publication"):
         assert f"/wisdom {command} " in output
     for command in ("install", "installed", "check", "update", "uninstall"):
         assert f"/wisdom {command}" in output
@@ -1319,9 +1324,12 @@ def test_slash_help_distinguishes_reads_private_reviews_and_terminal_instruction
     assert not service.calls
 
 
-def test_slash_help_is_bounded_for_an_80_by_24_dialog():
+@pytest.mark.parametrize("scope", ["MANUAL_SHARING", "FULL"])
+def test_slash_help_is_bounded_for_an_80_by_24_dialog(monkeypatch, scope):
     """Plugin copy leaves room for the host dialog border and close hint."""
+    from hermes_wisdom_plugin import release_scope
 
+    monkeypatch.setattr(release_scope, "ACTIVE", getattr(release_scope, scope))
     lines = run_slash("help", _Service()).splitlines()
 
     assert len(lines) <= 16
@@ -1555,9 +1563,8 @@ def test_slash_rejects_mutation_commands_without_service_calls(command):
 
     output = run_slash(command, service)
 
-    assert output.startswith("Unsupported")
+    assert "admitted private review" in output
     assert not service.calls
-    assert "Terminal: /wisdom install" in output
 
 
 @pytest.mark.parametrize(
@@ -1644,7 +1651,11 @@ def _act_displayed(controller, record_id, action, service, caller):
     return controller.load(record_id)
 
 
-def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path, monkeypatch):
+@pytest.mark.usefixtures("full_release_scope")
+@pytest.mark.parametrize("command", ["suggest", "share"])
+def test_admitted_native_contribution_dispatches_prepare_review_not_handoff(
+    tmp_path, monkeypatch, command,
+):
     runtime = CommandRuntime(
         tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,
         spawn_task=lambda coroutine, **_kwargs: coroutine.close(),
@@ -1659,7 +1670,7 @@ def test_admitted_native_suggest_dispatches_prepare_review_not_handoff(tmp_path,
     )
 
     try:
-        assert runtime.slash("suggest local-skill") == ""
+        assert runtime.slash(f"{command} local-skill") == ""
         assert seen == [(invocation, "local-skill")]
     finally:
         runtime.close()
@@ -1885,6 +1896,7 @@ def test_direct_install_card_failure_reports_uncertain_outcome(tmp_path, monkeyp
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("raw", ["suggest", "suggest one two"])
 def test_admitted_native_suggest_rejects_missing_or_ambiguous_name(tmp_path, monkeypatch, raw):
     runtime = CommandRuntime(

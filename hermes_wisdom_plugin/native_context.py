@@ -220,6 +220,11 @@ class InvocationCapture:
             self._remember_lifecycle(captured)
         return None
 
+    def command_pending(self) -> bool:
+        """Whether this context holds a captured gateway slash command (no claim)."""
+        captured = self._value.get()
+        return captured is not None and bool(captured.command)
+
     def consume_command(self, raw_args: str, *, profile_name: str) -> NativeInvocation:
         """Consume the matching admitted slash command once."""
         return self._consume(

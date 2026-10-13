@@ -10,8 +10,9 @@ from test_native_plugin import load_native_plugin, unload_native_plugin, JsonSta
 @pytest.mark.parametrize("platform", ["cli", "tui"])
 @pytest.mark.parametrize("guard", ["none", "mute", "suppressed", "policy",
                                    "owner", "child", "profile"])
-def test_registered_local_transform(tmp_path, monkeypatch, platform, guard):
+def test_registered_local_transform(full_release_scope, tmp_path, monkeypatch, platform, guard):
     module_name, plugin = load_native_plugin()
+    full_release_scope(f"{module_name}.hermes_wisdom_plugin")
     try:
         runtime_module = __import__(
             f"{module_name}.hermes_wisdom_plugin.runtime", fromlist=["current_profile"]

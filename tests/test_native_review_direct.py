@@ -547,6 +547,7 @@ def test_second_confirmation_cannot_enter_an_applying_review(tmp_path: Path, mon
     assert service.applied == ["receipt-1"]
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_settings_card_applies_an_exact_mode_choice(tmp_path: Path, monkeypatch):
     """Settings retain current facts and expose the supported owner-fenced mutation."""
     service = Service()

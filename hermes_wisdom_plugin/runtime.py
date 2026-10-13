@@ -21,12 +21,13 @@ from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
-from .commands import read_unavailable
+from .commands import PRIVATE_RANKING_COMMANDS, read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
 )
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError
+from .release_scope import active as release_scope
 
 
 def _require_current(may_apply: Callable[[], bool] | None) -> None:
@@ -517,7 +518,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                           if self._get_config is not None else None)
         except Exception:  # pylint: disable=broad-exception-caught
             configured = False
-        if configured is False:
+        if configured is False or not release_scope().model_editorial:
             allow_model_review = False
         result = self._contribution_reviewer().prepare(
             skill_name,
@@ -1050,12 +1051,17 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         self._installation_owner()
         result = self._contribution_reviewer().reopen(
-            draft_id, allow_model_review=bool(allow_model_review),
+            draft_id,
+            allow_model_review=bool(allow_model_review) and release_scope().model_editorial,
             reviewed_hashes=reviewed_hashes, may_apply=may_apply,
         )
         self.check_owner()
         _require_current(may_apply)
         return result
+
+    def share_status(self, skill_name):
+        """Read retained incomplete sharing intent without replaying any effect."""
+        return self._publication_service().share_status(skill_name)
 
     def publication_review(
         self, draft_id, *, accept_warnings=False,
@@ -1568,6 +1574,24 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Inspect private installation state only through the terminal entry."""
         return self._installation_services()[1].installed()
 
+    def top_skills(self):
+        """Rank this profile's own local skills from Hermes usage; no account needed."""
+        from .top_skills import (  # pylint: disable=import-outside-toplevel
+            collect_top_skills, published_source_paths,
+        )
+
+        try:
+            installations = self.installed.installations()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            installations = []
+        try:
+            published = published_source_paths(self._state.get("wisdom-core"))
+        except (OSError, RuntimeError, TypeError, ValueError, AttributeError):
+            published = []
+        return collect_top_skills(
+            self.profile[1], installations=installations, published_paths=published,
+        )
+
     def resolve_managed_skill(self, reference):
         """Resolve an exact active managed name or ID for terminal setup/removal."""
         from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
@@ -1672,6 +1696,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
+        inject_message: Callable[..., Any] | None = None,
+        plugin_id: str = "collective-wisdom",
     ):
         from .native_runtime import NativeSurfaceRuntime  # pylint: disable=import-outside-toplevel
 
@@ -1684,6 +1710,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         self.get_config = get_config
         self.set_config = set_config
         self.state = state
+        self.inject_message = inject_message
+        self.plugin_id = plugin_id
 
         self._lock = threading.RLock()
         self._closed = False
@@ -1756,12 +1784,19 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
     def slash(self, raw_args: str):  # pylint: disable=too-many-return-statements
         """Route admitted native commands and read-only requests."""
+        gateway_command = self.native.command_pending()
         invocation = self.native.consume_request(raw_args)
         from .commands import parse_slash  # pylint: disable=import-outside-toplevel
         parsed = parse_slash(raw_args)
         if parsed is None:
             return "Invalid Wisdom command. Use /wisdom help."
         command, args = parsed
+        if not release_scope().allows_slash(command):
+            from .commands import run_slash  # pylint: disable=import-outside-toplevel
+            # Dormant reviews (settings, suggestions, recommendations) never open.
+            return run_slash(parsed, object())
+        if command in PRIVATE_RANKING_COMMANDS:
+            return self._slash_private_ranking(command, args, invocation, gateway_command)
         if invocation is not None:
             if command == "install":
                 return self._slash_native_install(invocation, args)
@@ -1781,14 +1816,41 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
         return resolve()
 
+    def _slash_private_ranking(self, command, args, invocation, gateway_command):
+        """Answer owner-private usage rankings only in a private or local session."""
+        from .share_suggest import slash_share_suggest  # pylint: disable=import-outside-toplevel
+        from .top_command import private_route, refusal, slash_top  # pylint: disable=import-outside-toplevel
+        from .top_skills import session_surface  # pylint: disable=import-outside-toplevel
+
+        route = private_route(invocation, gateway_command, session_surface())
+        if route is None:
+            return refusal(command)
+        service = self._service()
+        try:
+            if command == "top":
+                return slash_top(args, service)
+            return slash_share_suggest(
+                args, service, route, inject=self.inject_message, plugin_id=self.plugin_id,
+                profile=self.profile[0],
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Collective Wisdom top skills failed (%s)", type(exc).__name__)
+            return _REVIEW_UNAVAILABLE
+        finally:
+            self._close_service(service)
+
     def _slash_native_review(self, invocation, command: str, args: list[str]):
         target = " ".join(args)
-        if command == "suggest" and len(args) != 1:
-            return "Usage: /wisdom suggest <local-skill>"
+        if command in {"suggest", "share"} and len(args) != 1:
+            return f"Usage: /wisdom {command} <local-skill>"
         effect_review = {
             "update": self.native.begin_update,
             "publish": self.native.begin_publication,
             "suggest": self.native.begin_suggest,
+            # Share is the operator-facing name for the same owner-private
+            # preparation/review flow. The final Share My Skill button remains
+            # the only publication authority.
+            "share": self.native.begin_suggest,
         }.get(command)
         if effect_review is not None:
             return _native_review_reply(effect_review(invocation, target))

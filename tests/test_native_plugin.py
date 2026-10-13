@@ -14,7 +14,6 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
-import yaml
 from test_notices import Page, Service as FeedService, event
 
 from installed_test_support import JsonState
@@ -64,11 +63,12 @@ def test_root_loader_uses_synthetic_namespace_relative_import() -> None:
         unload_native_plugin(module_name)
 
 
-def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-many-locals
+def test_register_is_lazy_and_owns_both_command_handles(full_release_scope,   # pylint: disable=too-many-locals
     tmp_path, monkeypatch
 ) -> None:
     """Signed-out registration creates no local state or network clients."""
     module_name, plugin = load_native_plugin()
+    full_release_scope(f"{module_name}.hermes_wisdom_plugin")
     try:
         runtime_module = __import__(
             f"{module_name}.hermes_wisdom_plugin.runtime", fromlist=["CommandRuntime"]
@@ -136,11 +136,8 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
         assert set(entries["tools"]) == {
             "wisdom_inbox", "wisdom_inspect", "present_wisdom_consent",
         }
-        manifest = yaml.safe_load((PROJECT_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
-        assert set(manifest["provides_hooks"]) == {
-            name for name, _callback in entries["hooks"]
-        }
-        assert set(manifest["provides_tools"]) == set(entries["tools"])
+        # The manifest describes the shipped release; tests/test_release_scope.py
+        # pins it to the manual-sharing registration.
         assert all(
             definition["toolset"] == "skills"
             and callable(definition["handler"])
@@ -171,10 +168,11 @@ def test_register_is_lazy_and_owns_both_command_handles(  # pylint: disable=too-
 @pytest.mark.parametrize("platform", ["cli", "tui"])
 # pylint: disable=too-many-locals,too-many-statements
 def test_registered_end_turn_awareness_is_private_and_owner_bound(
-    tmp_path, monkeypatch, platform,
+    full_release_scope, tmp_path, monkeypatch, platform,
 ):
     """Registered hook → real notice projection, including restart and owner switch."""
     module_name, plugin = load_native_plugin()
+    full_release_scope(f"{module_name}.hermes_wisdom_plugin")
     try:
         runtime_module = __import__(
             f"{module_name}.hermes_wisdom_plugin.runtime", fromlist=["current_profile"]
@@ -258,6 +256,7 @@ def test_registered_end_turn_awareness_is_private_and_owner_bound(
         unload_native_plugin(module_name)
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("raw, expected", [
     ("update skill", ("begin_update", ("skill",))),
     ("publish draft", ("begin_publication", ("draft",))),
@@ -300,6 +299,7 @@ def test_admitted_slash_routes_only_explicit_native_actions(tmp_path, monkeypatc
         runtime.native.close()
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("raw, method", [
     ("browse incident", "begin_catalog"), ("settings", "begin_settings"),
 ])

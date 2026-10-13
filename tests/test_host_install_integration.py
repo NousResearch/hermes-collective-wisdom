@@ -15,7 +15,9 @@ from host_probe_support import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HOST_REVISION = "bf51fee548ceaa28d2c299a41c0f65066c04c061"
+# The last Hermes core commit with Skill Sync (tag wisdom-skill-sync-baseline); the
+# Skill Sync port also runs these probes against Hermes main via WISDOM_HOST_REVISION.
+EXPECTED_HOST_REVISION = "9cf7960f274ea2bdfe672d64d26389e9954dfeb6"
 PLUGIN_ID = "collective-wisdom"
 PROBE = r'''
 import base64

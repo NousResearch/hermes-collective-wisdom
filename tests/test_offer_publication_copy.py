@@ -15,6 +15,7 @@ from hermes_wisdom_plugin.native_telegram import plain_html, keyboard
 from hermes_wisdom_plugin.errors import WisdomValidationError
 
 
+@pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize('version,updating', [(1, False), (2, True)])
 def test_exact_version_metadata_reaches_both_native_cards(tmp_path, version, updating):
     client = Client()

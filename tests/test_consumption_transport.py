@@ -81,6 +81,7 @@ def test_terminal_mute_aliases_use_gateway_durations(choice, duration):
     assert session.calls[0][2]["json"]["duration"] == duration
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_terminal_parser_exposes_explicit_consumption_controls():
     import argparse
 

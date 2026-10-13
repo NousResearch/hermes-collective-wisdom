@@ -177,18 +177,21 @@ class NativeModelTools:
         }, sort_keys=True)
 
 
-def register_native_tools(context: Any, command_runtime: Any) -> list[Any]:
-    """Register all three exact historical tool names through the host API."""
+def register_native_tools(
+    context: Any, command_runtime: Any, names: tuple[str, ...] | None = None,
+) -> list[Any]:
+    """Register the release's exact historical tool names through the host API."""
     tools = NativeModelTools(command_runtime)
     handlers = {
         "wisdom_inbox": tools.inbox,
         "wisdom_inspect": tools.inspect,
         "present_wisdom_consent": tools.present,
     }
+    selected = tuple(handlers) if names is None else names
     return [
         context.register_tool(
-            name=name, schema=_SCHEMAS[name], toolset=_TOOLSET, handler=handler,
+            name=name, schema=_SCHEMAS[name], toolset=_TOOLSET, handler=handlers[name],
             check_fn=tools.available, is_async=False,
         )
-        for name, handler in handlers.items()
+        for name in selected
     ]

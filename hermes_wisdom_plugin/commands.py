@@ -32,6 +32,13 @@ from .package import (
     MAX_TREE_BYTES,
     PackagePolicyError,
 )
+from .release_scope import active as _release_scope
+from .share_command import run_share
+from .share_suggest import run_share_suggest
+from .top_command import page_size as _page_size
+from .top_command import positive_page as _positive_page
+from .top_command import refusal as _private_refusal
+from .top_command import run_top
 from .portal_urls import portal_version_url as _version_url
 from .portal_urls import safe_portal_url as _safe_url
 from .direct_services import WISDOM_DISCLOSURE
@@ -59,11 +66,10 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     + MAX_METADATA_BYTES
     + 1024 * 1024
 )
-CONTRIBUTION_COMMANDS = frozenset({"candidate", "suggest", "prepared", "publish", "publication"})
-_SLASH_COMMANDS = CONTRIBUTION_COMMANDS | frozenset(
-    {"setup", "status", "settings", "mute", "list", "browse", "show", "versions", "help",
-     "install", "installed", "check", "update", "uninstall", "installed-setup"}
-)
+PRIVATE_RANKING_COMMANDS = frozenset({"top", "share-suggest"})
+CONTRIBUTION_COMMANDS = frozenset({
+    "candidate", "suggest", "share", "prepared", "publish", "publication",
+})
 _CHECK_LABELS = (
     ("security_check", "Security check"),
     ("professionalism_check", "Professionalism check"),
@@ -85,10 +91,6 @@ _PUBLIC_STATUS_STATES = {
     "degraded": "attention required",
     "unavailable": "unavailable",
 }
-_CLI_COMMANDS = ("setup", "status", "settings", "notifications", "mute", "inbox",
-                 "maintenance", "list", "browse", "show", "versions", "suggest",
-                 "prepared", "publication", "install", "installed", "check", "update",
-                 "installed-setup", "uninstall", "help")
 
 
 class _SlashUsageError(ValueError):
@@ -123,6 +125,7 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
 
     parser.set_defaults(_wisdom_parser=parser)
     commands = parser.add_subparsers(dest="wisdom_command")
+    scope = _release_scope()
 
     def add(name: str, help_text: str) -> argparse.ArgumentParser:
         command = commands.add_parser(name, help=help_text)
@@ -138,45 +141,63 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         help="Accept the local telemetry and owner-private draft disclosure",
     )
     add("status", "Show local and Gateway Wisdom status")
-    settings = add("settings", "Inspect or explicitly change notification assessment mode")
-    settings.add_argument(
-        "notification_mode", nargs="?", default="status", choices=("status", "agent", "fixed")
-    )
-    notifications = add("notifications", "Show durable local Wisdom notices")
-    notifications.add_argument("--mark-seen", action="store_true")
-    mute = add("mute", "Manage organization-wide proactive Wisdom notifications")
-    mute.add_argument(
-        "mute_duration", nargs="?", default="status",
-        choices=["status", "1d", "1w", "30d", "forever", "off"],
-    )
-
-    add("inbox", "Read local Wisdom activity without polling or delivery")
-    maintenance = add("maintenance", "Refresh policy or run bounded automatic updates")
-    maintenance.add_argument("--refresh-policy", action="store_true")
-    maintenance.add_argument(
-        "--apply-automatic", action="store_true",
-        help="Apply only updates freshly authorized by automatic server policy",
-    )
+    if scope.allows_cli("settings"):
+        settings = add("settings", "Inspect or explicitly change notification assessment mode")
+        settings.add_argument(
+            "notification_mode", nargs="?", default="status",
+            choices=("status", "agent", "fixed"),
+        )
+    if scope.allows_cli("notifications"):
+        notifications = add("notifications", "Show durable local Wisdom notices")
+        notifications.add_argument("--mark-seen", action="store_true")
+    if scope.allows_cli("mute"):
+        mute = add("mute", "Manage organization-wide proactive Wisdom notifications")
+        mute.add_argument(
+            "mute_duration", nargs="?", default="status",
+            choices=["status", "1d", "1w", "30d", "forever", "off"],
+        )
+    if scope.allows_cli("inbox"):
+        add("inbox", "Read local Wisdom activity without polling or delivery")
+    if scope.allows_cli("maintenance"):
+        maintenance = add("maintenance", "Refresh policy or run bounded automatic updates")
+        maintenance.add_argument("--refresh-policy", action="store_true")
+        maintenance.add_argument(
+            "--apply-automatic", action="store_true",
+            help="Apply only updates freshly authorized by automatic server policy",
+        )
     add("list", "List published Collective Wisdom skills")
     add("browse", "Search the organization catalog by keyword").add_argument(
         "query", nargs="?"
     )
     add("show", "Show one published skill").add_argument("skill_id")
     add("versions", "List published versions").add_argument("skill_id")
+    top = add("top", "Rank your own local skills by recorded Hermes usage")
+    top.add_argument("--page", type=_positive_page, default=1)
+    top.add_argument("--per-page", type=_page_size, default=10,
+                     help="Skills per page, 1 to 50 (default 10)")
+    add("share-suggest", "List your top skills and how to ask Hermes which to share")
     suggest = add("suggest", "Prepare one manually selected owner-private local draft")
+    share = add("share", "Share one exact local skill with your team")
+    share.add_argument("skill")
+    share.add_argument("--yes", action="store_true", help="Confirm sharing the checked package")
+    share.add_argument("--accept-warnings", action="store_true",
+                       help="Acknowledge exact local scanner warnings, separately from sharing")
     suggest.add_argument("skill")
-    suggest.add_argument(
-        "--allow-model-review",
-        action="store_true", default=None,
-        help=(
-            "Authorize sending the exact private package and owner description to "
-            "the current model provider for editorial and professionalism review"
-        ),
-    )
-    suggest.add_argument(
-        "--no-model-review", action="store_false", dest="allow_model_review",
-        help="Keep preparation local without sending content to the configured model",
-    )
+    if scope.model_editorial:
+        suggest.add_argument(
+            "--allow-model-review",
+            action="store_true", default=None,
+            help=(
+                "Authorize sending the exact private package and owner description to "
+                "the current model provider for editorial and professionalism review"
+            ),
+        )
+        suggest.add_argument(
+            "--no-model-review", action="store_false", dest="allow_model_review",
+            help="Keep preparation local without sending content to the configured model",
+        )
+    else:
+        suggest.set_defaults(allow_model_review=False)
 
     prepared = commands.add_parser(
         "prepared", help="Inspect, save, or re-review one owner-private local draft"
@@ -198,10 +219,13 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     )
     review = prepared_action("review", "Re-run checks for the exact current draft")
     review.add_argument("draft_id")
-    review.add_argument(
-        "--allow-model-review", action="store_true",
-        help="Authorize sending exact draft content to the configured model provider",
-    )
+    if scope.model_editorial:
+        review.add_argument(
+            "--allow-model-review", action="store_true",
+            help="Authorize sending exact draft content to the configured model provider",
+        )
+    else:
+        review.set_defaults(allow_model_review=False)
     edit = prepared_action("edit", "Edit a disposable UTF-8 copy in VISUAL or EDITOR")
     edit.add_argument("draft_id")
     publication = commands.add_parser(
@@ -320,6 +344,10 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
     command = getattr(args, "wisdom_command", None)
     as_json = bool(getattr(args, "json", False))
     try:
+        if command in {"share", "suggest"}:
+            return _contribution_cli(args, service)
+        if command in {"top", "share-suggest"}:
+            return (run_top if command == "top" else run_share_suggest)(args, service)
         if command == "setup":
             accepted = bool(args.accept_disclosure)
             if not accepted:
@@ -339,16 +367,6 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             "publication", "installed", "check", "installed-setup",
         }:
             result = _run_noninteractive_cli(args, service, command)
-        elif command == "suggest":
-            result = service.suggest(
-                args.skill, allow_model_review=args.allow_model_review
-            )
-            if not as_json:
-                presentation = (
-                    {**result, "skill_name": args.skill} if isinstance(result, dict) else result
-                )
-                publication_result = _suggest_human(presentation, service)
-                return _publication_result_exit(publication_result)
         elif command == "prepared":
             result = _prepared_cli(args, service)
             if args.prepared_action == "edit":
@@ -361,7 +379,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 return 7
         elif command == "help":
             if as_json:
-                _emit({"commands": list(_CLI_COMMANDS)}, as_json=True)
+                _emit({"commands": list(_release_scope().cli_commands)}, as_json=True)
             else:
                 getattr(args, "_wisdom_parser").print_help()
             return 0
@@ -425,6 +443,18 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         return 8
 
 
+def _contribution_cli(args, service):
+    """Dispatch terminal-owned contribution flows, keeping their consent distinct."""
+    if args.wisdom_command == "share":
+        return run_share(args, service)
+    result = service.suggest(args.skill, allow_model_review=args.allow_model_review)
+    if args.json:
+        _emit(result, as_json=True, command="suggest")
+        return 0
+    presentation = {**result, "skill_name": args.skill} if isinstance(result, dict) else result
+    return _publication_result_exit(_suggest_human(presentation, service))
+
+
 def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-many-branches
     args: argparse.Namespace, service: Any, command: str,
 ) -> Any:
@@ -481,8 +511,9 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
         return "Could not parse /wisdom arguments."
     try:
         command, args = parsed
-        if command not in _SLASH_COMMANDS:
-            return _unsupported_command()
+        if not _release_scope().allows_slash(command) or command in PRIVATE_RANKING_COMMANDS:
+            # Private rankings are routed by CommandRuntime before this shared-safe view.
+            return _shared_chat_refusal(command)
         if command == "list":
             command = "browse"
         if command == "help":
@@ -490,6 +521,14 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
                 raise _SlashUsageError("Usage: /wisdom help")
             return _slash_help()
         if command in CONTRIBUTION_COMMANDS:
+            if command == "share":
+                if len(args) != 1:
+                    return "Usage: /wisdom share <local-skill>"
+                return (
+                    "Sharing is only available in an admitted private review. "
+                    "Open /wisdom share <local-skill> in a private chat; "
+                    "no private state was opened here."
+                )
             return (
                 "Contribution content is private. Use an admitted private review or the terminal "
                 "`hermes wisdom suggest`, `prepared`, and `publication` workflows. "
@@ -1164,21 +1203,49 @@ def _emit(
 
 
 def _slash_help() -> str:
+    scope = _release_scope()
+    private = [entry for entry, command in (
+        ("/wisdom share <skill>", "share"), ("/wisdom top [page]", "top"),
+        ("/wisdom share-suggest", "share-suggest"), ("/wisdom settings", "settings"),
+        ("/wisdom mute", "mute"), ("/wisdom candidate <id>", "candidate"),
+        ("/wisdom suggest <skill>", "suggest"), ("/wisdom publish <draft>", "publish"),
+        ("/wisdom prepared <action>", "prepared"),
+        ("/wisdom publication <action> <target>", "publication"),
+    ) if scope.allows_slash(command)]
+    rows: list[str] = []
+    for entry in private:  # Keep every line inside an 80x24 host dialog.
+        if rows and len(rows[-1]) + len(entry) + 12 <= 72:
+            rows[-1] += " | " + entry
+        else:
+            rows.append(entry)
     return "\n".join(
         (
             "Collective Wisdom commands",
             "",
             "Read: /wisdom browse [query] | /wisdom show <skill>",
             "      /wisdom versions <skill> | /wisdom status | /wisdom setup",
-            "Private: /wisdom settings | /wisdom mute | /wisdom candidate <id>",
-            "         /wisdom suggest <skill> | /wisdom prepared <action>",
-            "         /wisdom publish <draft> | /wisdom publication <action> <target>",
+            *(("Private: " if index == 0 else "         ") + row
+              for index, row in enumerate(rows)),
             "Terminal: /wisdom install | /wisdom installed | /wisdom check",
             "          /wisdom update | /wisdom installed-setup | /wisdom uninstall",
             "/wisdom help",
             "Private effects open a review when supported; terminal paths are shown.",
         )
     )
+
+
+def slash_args_hint() -> str:
+    """Return the short host completion hint for the registered slash commands."""
+    scope = _release_scope()
+    return " | ".join(command for command in (
+        "help", "status", "browse", "show", "top", "share", "share-suggest", "install",
+    ) if scope.allows_slash(command))
+
+
+def _shared_chat_refusal(command: str) -> str:
+    if command in PRIVATE_RANKING_COMMANDS and _release_scope().allows_slash(command):
+        return _private_refusal(command)
+    return _unsupported_command()
 
 
 def _unsupported_command() -> str:

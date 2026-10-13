@@ -981,7 +981,7 @@ function Settings({ bootstrap, client, lifecycle, viewId }) {
   ] })
 }
 
-function Contributions({ client, lifecycle, viewId }) {
+function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) {
   const queryClient = useQueryClient()
   const [skillName, setSkillName] = useState('')
   const [draft, setDraft] = useState(null)
@@ -994,9 +994,11 @@ function Contributions({ client, lifecycle, viewId }) {
   const [keptDraft, setKeptDraft] = useState(null)
   const [review, setReview] = useState(null)
   const [outcome, setOutcome] = useState(null)
+  // Sharing suggestions ship only in a release whose backend exposes them.
   const candidates = useQuery(queryOptions(
     ['candidates', lifecycle.key],
-    () => client.rest(`/candidates?view_id=${encodeURIComponent(viewId)}`)
+    () => client.rest(`/candidates?view_id=${encodeURIComponent(viewId)}`),
+    shareSuggestions
   ))
   const savedDrafts = useQuery(queryOptions(
     ['drafts', lifecycle.key],
@@ -1317,6 +1319,7 @@ function WisdomPage({ client }) {
   const available = client.active() && Boolean(connectionId) && gateway === 'open'
   const view = useQuery(queryOptions(['view', lifecycle.key], () => client.rest('/views', { method: 'POST' }), available))
   const bootstrap = useQuery(queryOptions(['bootstrap', lifecycle.key], () => client.rest('/bootstrap'), available))
+  const surfaces = bootstrap.data?.surfaces || {}
   useEffect(() => () => { tracker.mounted = false; tracker.generation += 1 }, [tracker])
 
   let content
@@ -1340,10 +1343,10 @@ function WisdomPage({ client }) {
     content = jsx(Enrollment, { client, lifecycle, viewId: view.data.view_id })
   } else if (tab === 'installed') {
     content = jsx(Installed, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
-  } else if (tab === 'settings') {
+  } else if (tab === 'settings' && surfaces.notification_settings === true) {
     content = jsx(Settings, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
   } else if (tab === 'contribute') {
-    content = jsx(Contributions, { client, lifecycle, viewId: view.data.view_id })
+    content = jsx(Contributions, { client, lifecycle, viewId: view.data.view_id, shareSuggestions: surfaces.share_suggestions === true })
   } else {
     content = jsx(Catalog, { client, lifecycle, viewId: view.data.view_id })
   }
@@ -1366,7 +1369,9 @@ function WisdomPage({ client }) {
     jsxs('header', { className: 'shrink-0 space-y-3 border-b border-(--ui-stroke-secondary) px-5 py-4', children: [
       jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
         jsxs('div', { className: 'flex items-center gap-2', children: [jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h1', { className: 'text-base font-semibold', children: 'Collective Wisdom' })] }),
-        jsx(Button, { onClick: () => setTab('settings'), size: 'sm', type: 'button', variant: tab === 'settings' ? 'secondary' : 'ghost', children: 'Settings' })
+        surfaces.notification_settings === true
+          ? jsx(Button, { onClick: () => setTab('settings'), size: 'sm', type: 'button', variant: tab === 'settings' ? 'secondary' : 'ghost', children: 'Settings' })
+          : null
       ] }),
       jsx('nav', { 'aria-label': 'Collective Wisdom sections', className: 'flex flex-wrap gap-1', children: tabs.map(([value, title]) =>
         jsx(Button, { onClick: () => setTab(value), size: 'sm', type: 'button', variant: tab === value ? 'secondary' : 'ghost', children: title }, value)
@@ -1385,7 +1390,7 @@ function WisdomPage({ client }) {
 export default {
   id: 'collective-wisdom',
   name: 'Collective Wisdom',
-  description: 'Browse, install, update, and publish owner-bound team skills with exact review.',
+  description: 'Share, browse, install, and update team skills with exact review.',
   defaultEnabled: false,
   register(ctx) {
     let active = true

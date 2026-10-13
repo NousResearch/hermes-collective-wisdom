@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 from .contract import author_description_hash, sha256_address
 from .editorial import (
+    MAX_EDITORIAL_DESCRIPTION_LENGTH,
+    MAX_EDITORIAL_NAME_LENGTH,
     apply_editorial_metadata_to_overlay,
     editorial_copy_complete,
     explicit_editorial_values,
@@ -43,6 +45,7 @@ from .package import (
 )
 from .professionalism import review_package, unavailable_review
 from .publisher_evidence import evidence_block, publication_description
+from .release_scope import active as release_scope
 
 
 OwnerProvider = Callable[[], dict[str, str]]
@@ -310,6 +313,14 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         _files_after, hash_after = exact_review_files(overlay)
         if hash_after != draft["content_hash"]:
             raise WisdomConflict("prepared package changed during review")
+        editorial = load_skill_editorial_metadata(overlay)
+        editorial_complete = draft.get("editorial_complete_hash") == content_hash
+        if not editorial_complete and not release_scope().model_editorial:
+            # This release shares the skill's own name and description as written.
+            name = " ".join(editorial["editorial_name"].split())
+            description = " ".join(editorial["editorial_description"].split())
+            editorial_complete = (0 < len(name) <= MAX_EDITORIAL_NAME_LENGTH
+                                  and 0 < len(description) <= MAX_EDITORIAL_DESCRIPTION_LENGTH)
         return {
             "state": "prepared",
             "draft_id": str(draft["id"]),
@@ -320,14 +331,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "description": str(draft["description"]),
             "drafted_description": str(draft["description"]),
             "system_specification": manifest.requirements.model_dump(mode="json"),
-            **load_skill_editorial_metadata(overlay),
-            "editorial_status": (
-                "complete" if draft.get("editorial_complete_hash") == content_hash
-                else "incomplete"
-            ),
-            "editorial_failure": (draft.get("editorial_failure")
-                                  if draft.get("editorial_complete_hash") != content_hash
-                                  else None),
+            **editorial,
+            "editorial_status": "complete" if editorial_complete else "incomplete",
+            "editorial_failure": None if editorial_complete else draft.get("editorial_failure"),
             "files": files,
             "hashes": {
                 "content": str(draft["content_hash"]),
@@ -662,6 +668,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             if not allow_model_review:
                 raise PackagePolicyError(
                     "local skill requires author copy or explicit model review authorization"
+                    if release_scope().model_editorial else
+                    "add a description to the skill's SKILL.md frontmatter before sharing"
                 )
             if not disclosure_ready:
                 raise PackagePolicyError(

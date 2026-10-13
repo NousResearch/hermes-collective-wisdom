@@ -3,6 +3,25 @@
 This document describes the current plugin-only implementation. Historical milestone
 inventories and superseded reliable-delivery designs are intentionally omitted.
 
+## Release scope
+
+The current release is manual skill sharing: a person chooses to share a skill, and
+teammates choose to install it. `hermes_wisdom_plugin/release_scope.py` names the
+surfaces the plugin registers (`ACTIVE = MANUAL_SHARING`).
+
+Registered: `hermes wisdom` setup, status, catalog, `top`, `share-suggest`,
+`share` and its preparation, publication and recovery commands, installation,
+updates, setup approval and uninstall; private `/wisdom` help, status, catalog,
+`top`, `share-suggest`, `share`, install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
+catalog, installed and contribute pages.
+
+Implemented but not registered in this release: qualification capture and proactive
+Hermes sharing suggestions, proactive notices and recommendations, notification settings
+and mute, automatic update maintenance, the three model tools, the refinement
+auxiliary task, and model-written editorial copy. Preparation uses the skill's own
+name and description. Widening `ACTIVE` to `FULL` restores these surfaces; their
+tests run under the `full_release_scope` fixture.
+
 ## Supported workflows
 
 - Enroll, inspect entitlement, and accept the explicit data-use disclosure.
@@ -14,15 +33,38 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
   capability changes. Explicit bounded maintenance may apply only policy-authorized
   automatic updates.
 - Record deterministic local usage/refinement signals and qualify contribution
-  candidates using fixed thresholds.
+  candidates using fixed thresholds (not registered in this release).
 - Prepare owner-private contribution drafts, edit and re-review their exact files and
   hashes, submit them according to server policy, inspect status, reopen conflicts,
   and decline private drafts.
+- Terminal `share <skill>` composes preparation, exact-hash review and submission
+  behind one Share choice, with separate scanner-warning acknowledgement and
+  prompt-free `--yes --json` automation. Retained unfinished operations are not resent.
+- Private Slack/Telegram `/wisdom share <local-skill>` opens the same owner-bound
+  preparation and review flow for non-CLI operators. It never publishes from the
+  command itself; the explicit native **Share My Skill** action remains required.
+- `hermes wisdom top` and private `/wisdom top [page]` rank the owner's own local
+  skills by Hermes-recorded usage (uses, edits, last used, name) and label skills
+  already shared. Only the CLI, TUI, Desktop and private messaging chats are
+  answered; groups, channels and webhook/API routes are refused without naming
+  skills. Usage and candidate skills are read lazily from Hermes core
+  `tools.skill_usage` behind a capability probe, and every listed skill resolves
+  through the same profile-fenced resolver `share` uses.
+- Private `/wisdom share-suggest`, only when the user runs it, starts one normal
+  Hermes turn in the same conversation through `PluginContext.inject_message`,
+  listing up to 30 top skills and asking for up to 10 ranked suggestions with the
+  exact share command for that surface (`/wisdom share <skill>` in admitted
+  Telegram/Slack private chats, otherwise `hermes wisdom share <skill>`). The model
+  may read skill files and is told not to run share or publish commands.
+  Without injection (no `allow_gateway_injection`, or no identifiable session) it
+  replies with the ranked list and a ready-to-send prompt. The terminal command
+  prints the first `top` page and points to the chat command.
 - After exact successful publication proof, register the unchanged author source in
   place for managed teammate updates. Failed local registration remains separately
   recoverable and never changes the remote publication result.
 - Use Desktop management pages and private Slack/Telegram `/wisdom` commands for
-  explicit catalog, install, update, setup, publication, and settings reviews.
+  explicit catalog, install, update, setup, and publication reviews. Settings
+  reviews are not registered in this release.
 
 Every effect rechecks profile/account/organization ownership, entitlement, and the
 reviewed content. A notification, model message, button opening a review, or prior
@@ -30,7 +72,7 @@ setup approval cannot authorize a later effect.
 
 ## Best-effort proactive notices
 
-On supported private Desktop and messaging surfaces, an end-of-turn hook may perform
+Not registered in the manual skill-sharing release. On supported private Desktop and messaging surfaces, an end-of-turn hook may perform
 a bounded feed poll on each eligible turn and emit one deterministic human-facing notice.
 CLI/TUI instead append one candidate-only suggestion to the current answer after
 a verified skill load qualifies. This transform precedes final turn outcome: a

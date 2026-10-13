@@ -4,6 +4,7 @@ The renderer receives opaque, short-lived view IDs. They are not Hermes session
 identities and carry no authority by themselves: every use is checked against
 the currently scoped profile and freshly read account/enrolment owner.
 """
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from .errors import (
 )
 from .direct_services import WISDOM_DISCLOSURE
 from .install_review import confirmed_file_change, confirmed_file_install
+from .release_scope import active as release_scope
 
 
 _PRE_ENROLLMENT_CODES = frozenset({
@@ -707,19 +709,20 @@ def _add_catalog_read_routes(router, api, invoke):
     @router.get("/bootstrap")
     def bootstrap():
         def read(service):
+            scope = release_scope()
             status = service.status(include_operations=True)
             configured = status.get("configured") is True
-            return {
-                "status": status,
-                "settings": service.notification_config(),
-                "activity": (
-                    service.inbox() if configured else {
-                        "mode": "agent", "assessments": [], "interactions": [],
-                        "installed_setup": [],
-                    }
-                ),
-                "installations": service.list_installations() if configured else [],
-            }
+            result = {"status": status, "surfaces": {
+                "notification_settings": scope.notification_settings,
+                "share_suggestions": "candidates" in scope.desktop_route_groups,
+            }, "installations": service.list_installations() if configured else []}
+            if scope.notification_settings:
+                result["settings"] = service.notification_config()
+                result["activity"] = service.inbox() if configured else {
+                    "mode": "agent", "assessments": [], "interactions": [],
+                    "installed_setup": [],
+                }
+            return result
         return invoke(read)
 
     @router.get("/catalog")
@@ -818,20 +821,20 @@ def _add_package_routes(router, api, invoke):
 
 
 def _add_catalog_and_install_routes(router, api, invoke):
-    from fastapi import Query  # pylint: disable=import-outside-toplevel
-
+    groups = release_scope().desktop_route_groups
     router.add_api_route(
         "/views", lambda: invoke(api.open_view), methods=["POST"], name="open_view"
     )
 
-    @router.post("/notices/end-turn")
-    def end_turn_notices():
-        def check(service):
-            notices: list[dict[str, Any]] = []
-            result = service.end_turn_notices(notices.extend)
-            return {**result, "notices": notices}
+    if "notices" in groups:
+        @router.post("/notices/end-turn")
+        def end_turn_notices():
+            def check(service):
+                notices: list[dict[str, Any]] = []
+                result = service.end_turn_notices(notices.extend)
+                return {**result, "notices": notices}
 
-        return invoke(check)
+            return invoke(check)
 
     router.add_api_route(
         "/views/{view_id}",
@@ -843,6 +846,12 @@ def _add_catalog_and_install_routes(router, api, invoke):
     _add_catalog_read_routes(router, api, invoke)
 
     _add_package_routes(router, api, invoke)
+    if "settings" in groups:
+        _add_settings_routes(router, api, invoke)
+
+
+def _add_settings_routes(router, api, invoke):
+    from fastapi import Query  # pylint: disable=import-outside-toplevel
 
     @router.patch("/settings/mode")
     def settings_mode(body: ModeBody):
@@ -942,7 +951,8 @@ def build_router(  # pylint: disable=too-many-locals
             service, body.view_id, body.skill_name
         ))
 
-    _add_candidate_routes(router, api, invoke)
+    if "candidates" in release_scope().desktop_route_groups:
+        _add_candidate_routes(router, api, invoke)
 
     @router.get("/drafts")
     def draft_list(view_id: str = Query(min_length=8, max_length=128)):

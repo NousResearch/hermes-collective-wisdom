@@ -2,14 +2,10 @@ manifest_version: 1
 kind: standalone
 name: collective-wisdom
 version: 0.1.0.dev0
-description: "Terminal setup and read-only discovery for Collective Wisdom."
+description: "Share, discover, install and manage team skills with Collective Wisdom."
+requires_hermes: ">=0.21.5"
+# The manual skill-sharing release registers only the private /wisdom dispatch
+# hook. Suggestion, notice and model-tool surfaces are dormant; see
+# hermes_wisdom_plugin/release_scope.py.
 provides_hooks:
   - pre_gateway_dispatch
-  - pre_llm_call
-  - on_skill_lifecycle
-  - transform_llm_output
-  - on_session_end
-provides_tools:
-  - wisdom_inbox
-  - wisdom_inspect
-  - present_wisdom_consent

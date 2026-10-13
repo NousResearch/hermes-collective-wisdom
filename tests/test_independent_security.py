@@ -79,6 +79,7 @@ def test_cancel_during_candidate_preparation_revokes_review(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_settings_effect_waits_for_display_ack(tmp_path):
     service = Service()
     changes = []

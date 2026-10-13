@@ -134,6 +134,7 @@ def test_q11_native_inspection_returns_real_qualification_event_id(tmp_path, mon
     assert inspected["networked"] is False
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_candidate_producer_projects_prepared_copy_only_for_current_source(tmp_path, monkeypatch):
     from hermes_wisdom_plugin.native_review import project_view  # pylint: disable=import-outside-toplevel
     from hermes_wisdom_plugin.contribution_review import ContributionReviewer  # pylint: disable=import-outside-toplevel
@@ -201,6 +202,7 @@ def _editorial_offer_service(tmp_path, skill, model, monkeypatch):
     monkeypatch.setattr(service, "_contribution_reviewer", lambda: reviewer)
     return service
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_candidate_model_validation_failure_keeps_owner_copy_and_no_safe_claim(
     tmp_path, monkeypatch,
 ):
@@ -300,6 +302,7 @@ def test_editorial_host_adapter_rejects_invalid_response_without_leaking(
     assert result["coworker_benefit"] == ""
     assert response_text not in caplog.text and "PRIVATE_INPUT" not in caplog.text
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_interrupted_editorial_upgrade_rebinds_verified_overlay(tmp_path, monkeypatch):
     from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
 
@@ -342,6 +345,7 @@ def test_candidate_local_checks_do_not_claim_gateway_safe(tmp_path, monkeypatch)
     view = project_view({"operation": "candidate", "state": "pending", "plan": plan})
     assert view.actions[0].label == "Review Checks"
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_independent_first_offers_are_single_flight(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor  # pylint: disable=import-outside-toplevel
     from threading import Event  # pylint: disable=import-outside-toplevel
@@ -378,6 +382,7 @@ def test_independent_first_offers_are_single_flight(tmp_path, monkeypatch):
     assert len(model.calls) == 2
     assert len(first._direct_state.prepared_drafts(OWNER)) == 1
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_interrupted_offer_recovers_saved_draft_without_model_repeat(tmp_path, monkeypatch):
     from test_contribution_review import RecordingLlm  # pylint: disable=import-outside-toplevel
 
@@ -400,6 +405,7 @@ def test_interrupted_offer_recovers_saved_draft_without_model_repeat(tmp_path, m
     assert len(model.calls) == 2
     assert len(later._direct_state.prepared_drafts(OWNER)) == 1
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_ordinary_manual_suggest_runs_model_then_respects_explicit_opt_out(tmp_path, monkeypatch):
     from hermes_wisdom_plugin.contribution_review import ContributionReviewer  # pylint: disable=import-outside-toplevel
     from hermes_wisdom_plugin.direct_services import DirectState  # pylint: disable=import-outside-toplevel
