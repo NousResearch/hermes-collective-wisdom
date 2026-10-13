@@ -299,8 +299,8 @@ def _host_modules(provider_state, pool_status, calls):
         "hermes_cli.auth_nous": SimpleNamespace(
             get_nous_auth_status_local=read_pool_status
         ),
-        "tools.skills_sync_client": SimpleNamespace(
-            resolve_sync_base_url=lambda: "https://gateway.example"
+        "hermes_cli.config": SimpleNamespace(
+            load_config_readonly=lambda: {"sync": {"base_url": "https://gateway.example/"}}
         ),
     }
 

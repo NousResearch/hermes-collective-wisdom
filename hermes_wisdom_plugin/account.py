@@ -12,6 +12,7 @@ from pathlib import Path
 from .client import WisdomGatewayCredentials
 from .entitlement import DEFAULT_SCOPE, EntitlementClaims
 from .errors import WisdomAuthError
+from .gateway_endpoint import host_config_loader, resolve_gateway_base_url
 
 _UNAVAILABLE = "Collective Wisdom credentials are unavailable"
 
@@ -218,9 +219,7 @@ def _read_current_host_account() -> _HostAccountSnapshot:  # pylint: disable=too
     get_nous_auth_status_local = import_module(
         "hermes_cli.auth_nous"
     ).get_nous_auth_status_local
-    resolve_sync_base_url = import_module(
-        "tools.skills_sync_client"
-    ).resolve_sync_base_url
+    load_host_config = host_config_loader(import_module("hermes_cli.config"))
 
     profile_name = get_active_profile_name()
     profile_home = _resolved_home(get_hermes_home())
@@ -244,7 +243,7 @@ def _read_current_host_account() -> _HostAccountSnapshot:  # pylint: disable=too
             raise RuntimeError("Nous credentials are missing")
         token = state.get("access_token")
         claims = decode_jwt_claims(token)
-    base_url = resolve_sync_base_url()
+    base_url = resolve_gateway_base_url(load_config=load_host_config)
     portal_base_url = resolve_portal_base_url(dict(state))
 
     if profile_name != get_active_profile_name() or profile_home != _resolved_home(
