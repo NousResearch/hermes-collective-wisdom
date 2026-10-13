@@ -17,7 +17,9 @@ from host_probe_support import (
 from hermes_wisdom_plugin.errors import WisdomConflict
 
 
-HOST_REVISION = "bf51fee548ceaa28d2c299a41c0f65066c04c061"
+# The last Hermes core commit with Skill Sync (tag wisdom-skill-sync-baseline); the
+# Skill Sync port also runs these probes against Hermes main via WISDOM_HOST_REVISION.
+HOST_REVISION = "9cf7960f274ea2bdfe672d64d26389e9954dfeb6"
 
 
 def _owner(account: str = "user-1") -> dict[str, str]:

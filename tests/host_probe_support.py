@@ -35,7 +35,12 @@ def _assert_clean(host_path: Path) -> None:
 def immutable_host_checkout(
     expected_revision: str, *, required_path: str | None = None
 ) -> Iterator[Path]:
-    """Yield the optional pinned stock host and verify it stays unchanged."""
+    """Yield the optional pinned stock host and verify it stays unchanged.
+
+    ``WISDOM_HOST_REVISION`` names a different unmodified host on purpose (for
+    example Hermes main for the Skill Sync port parity check); the checkout must
+    still be exactly that revision.
+    """
 
     agent_dir = os.environ.get("WISDOM_AGENT_DIR")
     if not agent_dir:
@@ -43,7 +48,8 @@ def immutable_host_checkout(
     host_path = Path(agent_dir).resolve()
     if required_path is not None:
         assert (host_path / required_path).is_file()
-    assert _git(host_path, "rev-parse", "HEAD") == expected_revision
+    expected = os.environ.get("WISDOM_HOST_REVISION", "").strip() or expected_revision
+    assert _git(host_path, "rev-parse", "HEAD") == expected
     _assert_clean(host_path)
     try:
         yield host_path

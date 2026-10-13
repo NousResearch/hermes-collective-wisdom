@@ -6,7 +6,8 @@ mirror from core", 2026-10-03). The plugin owns everything it needs from that co
 piece by piece against the last core commit that still had it.
 
 - **Baseline:** `9cf7960f274ea2bdfe672d64d26389e9954dfeb6`, the parent of the removal, tagged
-  `wisdom-skill-sync-baseline`. The last Hermes release that ships Skill Sync is `v2026.9.24`; `v0.21.6` and
+  `wisdom-skill-sync-baseline` on `victor-kyriazakos/hermes-agent`. It is also the host revision the
+  host-integration probes pin; the previous pin `bf51fee548` is Hermes 0.21.2, below `requires_hermes`. The last Hermes release that ships Skill Sync is `v2026.9.24`; `v0.21.6` and
   later do not.
 - **Archive:** the removed code is also preserved in the private `NousResearch/hermes-skill-sync` repository.
 - **Parity bar:** the plugin behaves the same on the baseline Hermes and on Hermes main.
@@ -31,5 +32,5 @@ piece by piece against the last core commit that still had it.
   imports `tools.skills_sync_client*` or `hermes_cli.subcommands.sync`.
 - A ported piece keeps the baseline's names, precedence and defaults unless a decision record says otherwise,
   so existing profiles keep working without edits.
-- Host compatibility is checked against both the baseline and Hermes main with the host integration tests
-  (`WISDOM_AGENT_DIR=<checkout>`).
+- Host compatibility is checked against both the baseline and Hermes main with the host integration tests:
+  `WISDOM_AGENT_DIR=<checkout>` (and `WISDOM_HOST_REVISION=<sha>` for a host other than the pin).
