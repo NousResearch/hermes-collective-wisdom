@@ -1,361 +1,291 @@
-# Hermes Collective Wisdom
+# Collective Wisdom for Hermes Agent
 
-**Share useful Hermes skills with your team—and discover skills your teammates have shared.**
+> Official [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin from Nous Research.
 
-Collective Wisdom is an opt-in plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
-It connects your local skills to your organization's catalog through Nous Portal
-and Gateway. Review a skill before installing it, prepare your own skills for
-sharing, and manage updates from Hermes.
+Collective Wisdom lets a team share the Hermes skills that work for them. An author shares a local
+skill after one exact review, and it appears in the team's skill library in Nous Portal. Teammates
+find it in the Portal or in Hermes and install that exact version. Hermes can rank your own most-used
+skills and, when you ask, suggest which ones are worth sharing. Sharing itself always stays your
+decision.
 
-You stay in control: installing the plugin does not upload your skills or enroll
-your profile. Sharing requires approval. Installing a shared skill adds only the reviewed
-files; declared external setup commands require a separate Run setup choice.
+You stay in control at every step:
 
-> **Early access:** production enrollment and catalog reads have been exercised.
-> End-to-end sharing, installation, and platform delivery are still being
-> dogfooded. See [testing](docs/TESTING.md) for verification scope.
+- Installing the plugin uploads nothing and enrolls nothing.
+- Every share is one review of the exact files that will be published.
+- Every install is one exact version, and declared setup commands never run without a separate approval.
+- Nothing happens in the background: Collective Wisdom acts only when you run one of its commands.
 
-## What you can do
+## Requirements
 
-- **Discover:** browse your organization's skills and inspect published versions.
-- **Share:** run `hermes wisdom share <skill>` or `/wisdom share <skill>` in a
-  private chat, review its files and checks, then share it under your
-  organization's publication policy.
-- **Install and update:** review compatibility and approve an exact version.
-- **Find what to share:** run `hermes wisdom top` or `/wisdom top [page]` in a
-  private chat to rank your own local skills by recorded Hermes usage. Run
-  `/wisdom share-suggest` in a chat to ask Hermes which of them are worth sharing.
+- Hermes Agent 0.21.5 or newer.
+- A Nous account in a team that has Collective Wisdom enabled. Personal accounts do not have access.
+- Linux or macOS for installing skills. Windows is not supported for managed skill installation.
 
-This release covers sharing you start yourself. Proactive Hermes sharing suggestions,
-recommendations, notification settings, automatic update maintenance and
-model-written descriptions are implemented but not enabled; see
-[features](docs/FEATURES.md#release-scope).
+## Install
 
-## Get started
-
-You'll need Hermes Agent v0.21.5 (the 2026.9.24 release) or newer, a Nous account with Wisdom access, and an organization
-whose Gateway has Wisdom enabled. Managed skill installation currently supports
-Linux and macOS; Windows installation is not yet supported.
-
-Run commands on the intended Hermes host/profile. For a named profile, add
-`--profile <name>` immediately after `hermes`.
-
-### 1. Install the plugin
-
-Replace `<commit-sha>` with a reviewed commit's full 40-character SHA:
+From the Hermes plugin catalog:
 
 ```bash
-hermes plugins install NousResearch/hermes-collective-wisdom --ref <commit-sha> --enable
+hermes plugins install collective-wisdom
 ```
 
-For private-repository access through SSH, use
-`git@github.com:NousResearch/hermes-collective-wisdom.git` instead of the repository
-shorthand. Never put a token in the clone URL.
+To install one exact commit from the repository instead:
 
-Start a fresh Hermes session. If you use the messaging gateway, run
-`hermes gateway restart` from a separate terminal. No Agent source patch is needed.
+```bash
+hermes plugins install NousResearch/hermes-collective-wisdom --ref <40-character-commit-sha> --enable
+```
 
-### 2. Sign in and enable Wisdom
+Install prepares the plugin's Python dependencies and asks before enabling it. Plugins are installed
+per profile: use `hermes -p <profile> plugins install collective-wisdom` for another profile. Start a
+new Hermes session afterwards. If you use the messaging gateway, also run `hermes gateway restart`.
 
-Already signed in to Nous? Check with `hermes auth status nous`. Otherwise, run
-`hermes auth add nous` and complete the browser sign-in. You do not need to change
-your conversation's model provider.
+In Hermes Desktop, enable Collective Wisdom in **Capabilities → Plugins** (also available through the
+command palette).
+
+## Sign in and enable
+
+Collective Wisdom uses the Nous sign-in Hermes already has. Check it, and sign in if needed:
+
+```bash
+hermes auth status nous
+hermes auth add nous          # only if you are not signed in
+```
+
+Then enable Collective Wisdom for this profile:
 
 ```bash
 hermes wisdom setup
-hermes wisdom status --json
 ```
 
-Setup presents the data-use disclosure and registers this profile after you
-accept. Successful status shows `"configured": true` and `"state": "active"`.
-Installation alone does not complete this step.
+Setup shows what data leaves your machine (see [Privacy and data use](#privacy-and-data-use)) and
+registers the profile with your team after you accept. Changing account or team means running setup
+again.
 
-### 3. Explore your team's skills
+## Verify
 
 ```bash
-hermes wisdom list --json
-hermes wisdom browse "incident"
+hermes wisdom status          # "active" when the profile is enrolled
+hermes wisdom browse          # your team's shared skills; empty until someone shares
 ```
 
-An empty catalog is normal if nobody in your organization has published a skill yet.
-Catalog rows and details also show owner/profile-local installation status: a managed
-installed version (and a newer catalog version when known), no local copy, an
-unmanaged same-name local copy, or unavailable inspection. This label is advisory;
-the installed version is the recorded revision, not a claim that local files are
-unchanged or setup is complete. Local edits are checked by the existing review flow;
-install, update, and removal still use their separately reviewed authority checks.
+## What you can do
 
-## Where to use it
+### Find what is worth sharing
 
-- **Terminal:** use `hermes wisdom` for enrollment, browsing, sharing, installation,
-  updates, and skill setup.
-- **Slack / Telegram:** use `/wisdom` for browsing and private review flows.
-  Sensitive actions require a private conversation and explicit approval.
-  Live platform acceptance is still in progress.
-- **CLI / TUI chat:** after an owning turn loads a skill and it newly qualifies,
-  a best-effort local sharing suggestion may be appended to the answer. It names
-  the checked private draft and gives a terminal review command; it never shares
-  automatically. The current Agent transform hook cannot distinguish a later
-  failed final outcome, so a suggestion may remain in a recovered failed answer.
-- **Desktop:** enable the package's Desktop half in **Capabilities → Plugins**
-  (also available through **⌘K → Plugins**), then open **Collective Wisdom**.
-  Catalog, Installed, Activity & Settings, and Contributions call the existing
-  workflows on the selected host/profile. Install runs the checks and applies a
-  clean package in one click; details remain available before acting. Material
-  warnings, removal, and sharing retain their explicit review controls.
+`hermes wisdom top` ranks your own local skills by how often Hermes used them, then by edits, then by
+last use. Skills that came with Hermes, from the Skills Hub or from your team are left out, and skills
+you already shared are labelled **Shared**.
 
-In Desktop chat, `/wisdom`, `/wisdom list`, `/wisdom browse [query]`, and
-`/wisdom show <skill-id>` open the same catalog/review workflow in a themed dialog.
-View is read-only. Install authorizes the checked installation without another
-confirmation; material warnings still require acknowledgement. Other Wisdom
-commands keep their normal route. The current Desktop
-middleware API leaves the submitted command in the composer; closing the dialog
-does not send it. A focused-chat/active-profile mismatch refuses requests
-rather than silently switching owners.
-
-In a private Slack or Telegram chat, `/wisdom share <local-skill>` opens the owner-
-private preparation and exact-content review. The final **Share My Skill** action
-is still required; group chats never open private contribution state. `/wisdom
-suggest <local-skill>` remains the prepare-only equivalent. Prepared-draft and
-publication recovery subcommands stay terminal-only because they can expose or
-change private draft state.
-
-The Desktop page also offers explicit enrollment after disclosure. At completed
-turns it checks a bounded feed without a polling delay and may show a direct
-best-effort notification. Contextual skill classification is deferred on stock
-hosts: `useful_only` does not promote catalog feed rows without a grounded match.
-A missed or failed notification is not queued or retried, and opening one starts a
-review rather than approving any effect. Contributions supports complete private
-draft editing and save-and-re-review, including text-file add/remove/rename and
-inert opaque-byte export. Catalog exposes Install; Installed exposes Check for
-updates and a separate exact-version Review update. Neither installs nor draft
-edits authorize publication. Install writes only the reviewed files; a declared
-setup command requires a separate Run setup choice. Manual setup and uncertain
-operation recovery remain in the existing native controls.
-Dashboard UI and full six-surface parity remain deferred.
-
-## Common tasks
-
-Use `hermes wisdom --help` for the full command list. Add `--help` to any
-subcommand for its options.
-
-### Install a skill
-
-```bash
-hermes wisdom install <skill-name>
-```
-
-The explicit install command runs the checks and installs a clean package without
-another approval prompt. `--json` changes output formatting, not that intent.
-To inspect without installing, add `--plan`; an inspected receipt can also be applied:
-
-```bash
-hermes wisdom install --apply-receipt <receipt> --json
-```
-
-Approval is bound to the reviewed version, files, and declared setup commands.
-A changed or expired plan needs another review. Setup instructions not explicitly
-declared as commands remain in the [manual setup flow](docs/WORKFLOWS.md#installed-skill-setup-terminal).
-If the Hermes scanner reports reviewable warnings, the interactive terminal
-shows the findings and offers explicit acknowledgement before final approval.
-Scripted reviews use `--accept-warnings` after authorized review; this is distinct
-from compatibility `--accept-partial`. An unavailable scan cannot be accepted.
+`/wisdom share-suggest` starts a normal Hermes turn in the current conversation with up to 30 of your
+top skills. Hermes answers with up to 10 ranked suggestions, each with a short reason and the exact
+command to share it. It never shares anything itself.
 
 ### Share a skill
 
 ```bash
-hermes wisdom share <local-skill-name>
+hermes wisdom share <skill>
 ```
 
-Review the destination team, exact files and checks, then choose Share once.
-Enter cancels. Scanner warnings require separate acknowledgement, and editing
-resets that acknowledgement. Preparation stays local and does not use a model.
-The server's current policy still determines immediate publication or team review.
+Share builds the exact package and shows one review: the team, who will see it, the version, the
+description, every file, and the local security checks. You can open a file, edit the description or
+the files, then choose **Share** or cancel. In a private Telegram chat or Slack DM, `/wisdom share
+<skill>` opens the same review as a card, and only the **Share My Skill** button publishes.
 
-For authorized scripted use, pass `--yes --json`; warnings additionally require
-`--accept-warnings`. JSON output is one object with `outcome`, `skill`, `version`,
-`portal_url`, and `detail`. `shared` and `already_shared` exit 0; scan/ownership/
-entitlement refusals exit 1; `uncertain` exits 2 and names a status command.
-Do not resubmit an uncertain operation. Portal links are null when unavailable;
-destination teams use their authoritative organization ID when no display name is supplied.
+The shared name and description come from the skill's `SKILL.md` frontmatter. A skill needs both,
+with a description of up to 320 characters, before it can be shared.
 
-### See your top skills
+The result is one of: shared (with the version, a Portal link and the install command for teammates),
+already shared, blocked by a security check, name already owned by another author, not entitled,
+invalid package, or uncertain. An uncertain result names a status command to check; do not share
+again until you have checked it.
+
+### Publish a new version
+
+Edit the skill and run the same share command. The review shows the version change, for example v1 to
+v2. Only the author of a skill can publish new versions under its name.
+
+### Discover skills
+
+In the Portal, the team library lists every shared skill with search by name, author and keywords,
+and highlights skills published or updated since you last looked. A skill's page shows its
+description, security checks, version history, requirements and the exact install commands.
+
+In Hermes:
 
 ```bash
-hermes wisdom top [--page N] [--per-page N] [--json]
+hermes wisdom browse [query]      # search the team library
+hermes wisdom show <skill>        # one skill
+hermes wisdom versions <skill>    # its published versions
 ```
 
-Ranks your own local skills by Hermes-recorded usage: uses, then edits, then most
-recent use, then name. Each row shows uses, edits, last used and whether the skill
-is already shared. Bundled, Hub-installed, Wisdom-installed, archived, suppressed
-and external skills are excluded; every listed skill resolves the same way
-`hermes wisdom share` finds it. Pages hold 10 skills by default and at most 50.
-`--json` emits `items`, `page`, `per_page`, `total` and `pages` (plus `state`: `ok`,
-`empty`, `unavailable` or `error`). `/wisdom top [page]` shows the same list in the
-CLI, TUI, Desktop or a private messaging chat, with plain-text Next/Previous hints.
-Group chats, channels and webhook or API routes are refused without naming any
-skill. Usage comes from Hermes core skill usage records; on a Hermes without them
-the command reports that usage data is unavailable.
+The same reads work as `/wisdom browse`, `/wisdom show` and `/wisdom versions` in any Hermes chat.
 
-### Ask Hermes what to share
+### Install a skill
 
-Run `/wisdom share-suggest` in the CLI, TUI, Desktop or a private messaging chat.
-It starts a normal Hermes turn in the same conversation with up to 30 of your top
-skills (name, description, uses, edits, last used) and asks for up to 10 ranked
-suggestions, each with a short reason and the exact share command for you to run:
-`/wisdom share <skill>` in a private Telegram or Slack chat, otherwise
-`hermes wisdom share <skill>` (`hermes -p <profile> wisdom share <skill>` for a named
-profile). Hermes may read the skill files and is told not to
-run any share or publish command; you decide and share each skill yourself through
-its review. Nothing runs unless you ask. Group chats are refused without naming any
-skill.
+```bash
+hermes wisdom install <skill>             # the latest version
+hermes wisdom install <skill>@v2          # an exact version
+hermes wisdom install <skill> --plan      # review without installing
+```
 
-The classic CLI starts the turn directly. TUI, Desktop and messaging chats need the
-operator to allow plugin-started turns for this profile:
+`<skill>` is the skill's name or its ID, both shown in the Portal. A clean package installs straight
+away into your profile's skills. If the Hermes skills scanner reports warnings, the install shows them
+and waits for your acknowledgement. Commands a skill declares for setup never run during install;
+review and approve them separately with `hermes wisdom installed-setup`.
+
+In a private Telegram chat or Slack DM, `/wisdom install <skill>` installs from the chat. In Hermes
+Desktop, install from the Collective Wisdom page or from the dialog that `/wisdom browse` opens.
+
+### Keep installed skills current
+
+```bash
+hermes wisdom installed           # skills installed through Collective Wisdom
+hermes wisdom check <skill>       # is a newer version available?
+hermes wisdom update <skill>      # review and apply one update
+hermes wisdom uninstall <skill>   # move an installed skill to recoverable trash
+```
+
+Updates are always reviewed and applied by you. If you edited an installed skill locally, the update
+stops rather than overwrite your changes.
+
+### Unpublish, take down and restore
+
+These actions live on the skill's page in the Portal, under **Manage skill**. Each one asks for a
+reason.
+
+- **Unpublish** hides a skill from the library. Its author can unpublish their own skill and publish
+  it again later.
+- **Take down** is the security removal for team owners and admins: only admins can still see the
+  skill. Admins can also restore it, and find retired skills with the library's status filter.
+
+Both stop new installs and updates. Copies already installed keep working, and `hermes wisdom check`
+shows the skill's new state.
+
+## Where it works
+
+| Surface | What you get |
+|---|---|
+| Terminal | Every `hermes wisdom` command. |
+| Hermes CLI chat and TUI | Reads (`browse`, `show`, `versions`, `status`, `help`), `top` and `share-suggest` answer in place. Commands that change something reply with the terminal command to run. |
+| Hermes Desktop | A Collective Wisdom page with **Catalog**, **Installed** and **Contribute** tabs. In chat, `/wisdom browse` and `/wisdom show` open the catalog in a dialog with Install. |
+| Telegram private chat, Slack DM | Review and confirmation cards for share, install and update, catalog cards, `top` and `share-suggest`. Every card is bound to the person who started it. |
+| Group chats and channels | Private actions are refused with a pointer to a private chat. No skill names or files are shown. |
+| Other platforms | Use the terminal. |
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `setup` | Accept the data-use disclosure and enroll this profile with your team. |
+| `status` | Show local and service readiness. |
+| `list`, `browse [query]` | Read the team library. |
+| `show <skill>`, `versions <skill>` | One skill and its published versions. |
+| `top` | Rank your own skills by usage (`--page`, `--per-page`, `--json`). |
+| `share-suggest` | Ask Hermes which of your skills are worth sharing (chat command). |
+| `share <skill>` | Review and share a skill or a new version. |
+| `install <skill>[@vN]` | Install an exact version; `--plan` reviews without installing. |
+| `installed`, `check <skill>` | Installed skills and update availability. |
+| `update <skill>` | Review and apply one update. |
+| `installed-setup` | Review and approve a skill's declared setup commands. |
+| `uninstall <skill>` | Move an installed skill to recoverable trash. |
+| `suggest`, `prepared`, `publication` | The individual draft and publication steps behind `share`. |
+| `help` | Command help. |
+
+Every command takes `--help`, and most take `--json` for scripts. In chat, use `/wisdom <command>`.
+In scripts, `--yes` confirms a share; scanner warnings additionally need `--accept-warnings`.
+
+## Configuration
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `HERMES_SYNC_BASE_URL` or `sync.base_url` in `config.yaml` | `https://gateway-gateway.nousresearch.com` | The Collective Wisdom service. Change it only when your team runs its own. |
+| `plugins.entries.collective-wisdom.allow_gateway_injection` | `false` | Lets `/wisdom share-suggest` start its Hermes turn in the TUI, Desktop and messaging chats. The classic CLI chat does not need it. |
 
 ```bash
 hermes config set plugins.entries.collective-wisdom.allow_gateway_injection true
 ```
 
-Without that setting, or when the host cannot start the turn, the command replies
-with your ranked list, a ready-to-send prompt and the command above. When the turn
-is requested, the reply also carries that prompt in case no answer arrives.
-`hermes wisdom share-suggest` in a terminal prints the first page of `top` and
-points you to `/wisdom share-suggest`; it makes no model call.
+Without that setting, `/wisdom share-suggest` replies with your ranked list and a ready-to-send prompt
+instead.
 
-### Prepare a skill to share
+## Access and roles
+
+Collective Wisdom is enabled per team. Every member of an enabled team can browse, install and share.
+Team owners and admins can also take down and restore skills. Access is checked each time Hermes
+refreshes your Nous sign-in, so a change to the team's access applies without reinstalling anything.
+
+## Security checks
+
+Every share is checked twice before anything is published:
+
+- **On your machine, before upload:** private keys, live credentials and secret-like assignments
+  block the share. Warnings from the Hermes skills scanner need your acknowledgement, and editing the
+  package resets it.
+- **On the service, before publishing:** the package and its description are scanned against the
+  built-in checks and your team's content rules, and scanned again at publish time against the
+  current rules. A blocked package is not published.
+
+Packages can contain the skill's `SKILL.md`, supporting files, `references/`, `scripts/`,
+`templates/` and `assets/`, up to 10 MiB in total. Compiled executables, symlinks, hard links,
+credentials and private keys are refused. Scripts in a package are never run during sharing, review
+or install.
+
+## Privacy and data use
+
+- **Network calls:** Collective Wisdom talks to the Collective Wisdom service (see
+  [Configuration](#configuration)) and uses your existing Nous sign-in. It asks for no other
+  credentials.
+- **What leaves your machine:** only what you approve: the package files and description of a skill
+  you share, its compatibility metadata, and the record of which skills you installed through
+  Collective Wisdom.
+- **What stays local:** usage signals for your skills, read from Hermes's own skill usage records,
+  stay on your profile. `top` reads them locally.
+- **Models:** `/wisdom share-suggest` sends the names, descriptions and usage counts of up to 30 of
+  your skills to the model of the conversation you run it in, and that model may read those skills'
+  files. No other command calls a model.
+- **No background activity:** there is no telemetry, no polling and no background process. The plugin
+  acts only when you run a Collective Wisdom command.
+
+## Troubleshooting
+
+- **"Collective Wisdom credentials are unavailable":** run `hermes auth status nous` and sign in again
+  if your session expired.
+- **The service does not offer Collective Wisdom:** your team does not have it enabled yet. Signing in
+  alone does not enable it.
+- **Setup asks for `--accept-disclosure`:** run `hermes wisdom setup` in an interactive terminal to
+  read and accept the disclosure. Use the flag in automation only after it has been accepted.
+- **A share is blocked:** remove the flagged content, then run the same share command again.
+  Credential and private-key findings always block; never disable the scanner.
+- **An uncertain result:** run the status command it names. Do not repeat the share or install until
+  you know whether the first one completed.
+- **A share command is refused in a group chat:** sharing happens in a private chat or the terminal.
+
+## Disable or remove
 
 ```bash
-hermes wisdom suggest <local-skill-name>
+hermes plugins disable collective-wisdom    # keep it installed, stop it loading
+hermes plugins remove collective-wisdom     # uninstall the plugin
 ```
 
-This prepares a local draft without uploading, publishing, or changing the
-original skill. Review the description, files, generated compatibility manifest,
-and security findings. See the [sharing workflow](docs/WORKFLOWS.md#private-contribution-preparation-terminal)
-for editing and the separate publication review/submission steps.
+Removing the plugin does not delete the skills it installed. They stay in your profile's skills
+directory as ordinary skills.
 
-After a publication is proven successful, Wisdom registers the unchanged original
-source as a managed installation in place; it does not copy, move, reinstall, or run
-setup. Teammate versions then use the ordinary explicit update review and local-edit
-protections. If remote publication succeeds but local registration does not, recover
-the retained proof with `hermes wisdom publication enroll <local-skill-name>`. That
-command performs read-only catalog/detail/content discovery and, after exact proof,
-may register the installation with Gateway and local managed state. It never replays
-publication or overwrites the source during enrollment.
-
-On an interactive terminal, choose to inspect files and warnings, edit the draft,
-continue to sharing review, or keep it for later. Sharing requires a separate
-final confirmation. `--json` selects noninteractive machine output instead; it
-never approves an action or opens a menu.
-
-Native Hermes skill packages may contain ordinary source/configuration files,
-`references/`, `refs/`, `scripts/`, `templates/`, `assets/`, and an inert
-`.gitignore`. Text, executable script intent, and common opaque resources retain
-their exact bytes. Packages have a 10 MiB aggregate payload limit and a separate
-bounded path/tree metadata budget; there is no independent 32-file or tiny
-per-file limit. Symlinks, hard links, special files, traversal/collisions,
-credentials/private keys, unsafe modes, and compiled executable payloads remain
-blocked. Package scripts are never executed during preparation or review.
-
-**Service compatibility:** a Gateway enforcing the older instruction-only,
-smaller-package contract still rejects these expanded packages. Updating this
-plugin alone does not update Gateway or Portal limits. Keep the complete local
-draft until the service supports it; the plugin never drops files to make a
-submission fit. Local preparation is not proof of successful publication.
-
-Preparation uses the skill's own name and description. Model review is not
-enabled in this release, so that assessment is reported as unavailable, not passed.
-
-### Manage updates
-
-| Task | Command |
-| --- | --- |
-| List managed installations | `hermes wisdom installed --json` |
-| Check for an update | `hermes wisdom check <skill-id> --json` |
-| Review an update | `hermes wisdom update <skill-id> --plan --json` |
-| Recover management of an already-published original | `hermes wisdom publication enroll <local-skill-name> --json` |
-
-After approving an update plan, apply it with
-`hermes wisdom update --apply-receipt <receipt> --json`. Local edits block
-replacement by default. Advanced preservation and recovery options are in the
-[workflow reference](docs/WORKFLOWS.md).
-
-The [review restoration guide](docs/REVIEW_RESTORATION.md) describes private native
-invitations, complete bounded inspection, quiet dismissal, and the gaps that remain.
-
-## Privacy and approval
-
-Local candidate signals and notice cursors are small owner-bound PluginState
-records; this plugin has no SQLite database, advisory outbox, delivery lease, or
-retry worker. Enrollment is not consent to upload
-local skill contents. Draft submission, installation, and setup execution each
-have their own approval; a model recommendation cannot approve an action.
-
-Proactive notices are deterministic and never add model messages, system-prompt
-text, or synthetic conversation turns. See [Security](SECURITY.md) for details.
-
-Organization policy determines direct versus moderated publication. An unavailable
-check is never reported as passed. Changing accounts or organizations requires
-setup again. After an uncertain upload or setup result, inspect recovery status
-rather than blindly repeating the action.
-
-## Troubleshooting setup
-
-- **Credentials unavailable:** check `hermes auth status nous`. An expired or
-  stale development login may need a fresh login. For production, use
-  `hermes auth add nous --portal-url https://portal.nousresearch.com --inference-url https://inference-api.nousresearch.com/v1`.
-  Do not import stale development credentials if offered; check intentional
-  environment overrides before changing routes.
-- **Gateway does not advertise Collective Wisdom:** ask your administrator to
-  enable Wisdom on the intended Gateway. Login alone does not enable the service.
-- **Setup requires `--accept-disclosure`:** run interactively to read and accept
-  the disclosure. Automation may use the flag only after explicit acceptance.
-- **No admitted private session:** verify enrollment with `hermes wisdom status
-  --json`, then use a supported main-agent/private session. There is no separate
-  user-facing admission switch.
-- **Scanner warnings:** inspect the original verdict and findings, then explicitly
-  acknowledge the exact review with `--accept-warnings` if appropriate. New
-  findings invalidate that acknowledgement. Credential/private-key findings and
-  unavailable scans remain hard stops; never disable the scanner.
-  The local credential preflight recognizes only complete, delimited synthetic
-  OpenAI/Anthropic-style example keys: a suffix of `test`, `dummy`, `example`,
-  or `placeholder`, optionally followed by `key` and independently by the literal
-  sequence `1234` (each optional part may have one `-` or `_` separator;
-  case-insensitive).
-  This applies to standalone key shapes and API-key assignments, not passwords,
-  generic secrets, or token assignments. A `test` substring, a Markdown code
-  fence, or a test filename grants no exemption. Unknown/extended key values
-  remain blocked; redaction, host warning review, and Gateway checks are unchanged.
-  Opaque-file checks retain their byte-preserving ASCII coverage. The synthetic
-  classifier is shared, but non-ASCII word boundaries and line locations are not
-  guaranteed to match decoded text; invalid bytes are never silently discarded.
-- **Gateway rejects a native package:** the deployed service may still have the
-  older instruction-only limits. Keep the local draft and retry after the service
-  contract is upgraded; do not remove supporting files to force acceptance.
-
-## Development and further reading
-
-Use Python 3.11–3.14 in an isolated environment:
+## Development
 
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pylint hermes_wisdom_plugin tests scripts/test_wisdom_offline_acceptance.py
 .venv/bin/python -m pytest
-npm ci --ignore-scripts
-npm test
-.venv/bin/python -m build
+.venv/bin/python -m pylint hermes_wisdom_plugin tests
+npm ci --ignore-scripts && npm test
 ```
 
-Isolated tests need no live credentials. An editable Python install alone does
-not install the native Hermes plugin. Optional host/Gateway checks and live
-acceptance requirements are documented separately:
+Tests run without live credentials. [Testing](docs/TESTING.md) covers the host-compatibility checks
+against Hermes releases. [Architecture](docs/ARCHITECTURE.md), [host APIs](docs/HOST-API.md),
+[workflows](docs/WORKFLOWS.md) and [features](docs/FEATURES.md) document the implementation, and
+[Contributing](CONTRIBUTING.md) the development expectations. See [Security](SECURITY.md) to report a
+vulnerability.
 
-- [Detailed workflows](docs/WORKFLOWS.md): advanced commands and host limitations.
-- [Testing](docs/TESTING.md): automated and live acceptance boundaries.
-- [Architecture](docs/ARCHITECTURE.md) and [host APIs](docs/HOST-API.md): implementation.
-- [Feature tracker](docs/FEATURES.md) and [release tasks](docs/FIRST-RELEASE.md): remaining work.
-- [Migration history](docs/MIGRATION.md) and [source baseline](docs/SOURCES.md): decisions and provenance.
-- [Contributing](CONTRIBUTING.md): development expectations.
+## License
 
-Inherited Hermes code retains its upstream MIT attribution; see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

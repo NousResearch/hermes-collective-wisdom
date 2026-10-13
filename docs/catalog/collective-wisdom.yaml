@@ -1,0 +1,21 @@
+name: collective-wisdom
+repo: https://github.com/NousResearch/hermes-collective-wisdom
+sha: 0000000000000000000000000000000000000000
+description: Share the skills that work for your team, then discover and install your teammates' exact
+  versions, with one review for every share and install.
+maintainer: NousResearch
+tier: official
+category: tools
+title: Collective Wisdom
+requires_hermes: ">=0.21.5"
+docs_url: https://github.com/NousResearch/hermes-collective-wisdom#readme
+version: "0.1.0"
+platforms: []
+known_issues:
+  - Requires a Nous account in a team with Collective Wisdom enabled.
+  - Installing skills is not supported on Windows.
+capabilities:
+  provides_tools: []
+  provides_hooks: [pre_gateway_dispatch]
+  provides_middleware: []
+  requires_env: []
