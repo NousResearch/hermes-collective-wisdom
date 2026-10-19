@@ -1,0 +1,12 @@
+;; macOS sandbox profile for the Collective Wisdom local launcher.
+;; Everything is allowed EXCEPT network traffic that leaves this Mac:
+;;   - TCP/UDP only to 127.0.0.1 / ::1 (loopback)
+;;   - DNS lookups blocked (the mDNSResponder socket), so not even a hostname
+;;     query leaves the machine. All services are addressed as 127.0.0.1.
+;; Child processes inherit the sandbox, so nothing started under it can opt out.
+(version 1)
+(allow default)
+(deny network-outbound (remote ip "*:*"))
+(allow network-outbound (remote ip "localhost:*"))
+(deny network-outbound (literal "/private/var/run/mDNSResponder"))
+(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))

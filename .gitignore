@@ -25,3 +25,7 @@ node_modules/
 .DS_Store
 *.swp
 *~
+
+# Local demo launcher runtime state (deleted on exit) and kept failure logs
+dev/local-demo/.run/
+dev/local-demo/last-logs/
