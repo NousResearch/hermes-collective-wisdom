@@ -16,6 +16,6 @@ known_issues:
   - Installing skills is not supported on Windows.
 capabilities:
   provides_tools: []
-  provides_hooks: [pre_gateway_dispatch]
+  provides_hooks: [pre_gateway_dispatch, on_session_start, transform_llm_output]
   provides_middleware: []
   requires_env: []

@@ -31,13 +31,18 @@ def _latest(detail):
     return (detail.get("latest_version_detail") or {}).get("version") or {}
 
 
+def _skill_owner(skill):
+    """cw/v1 ``owner_user_id`` (admins can reassign); older Gateways: the creator."""
+    return skill.get("owner_user_id") or skill.get("created_by_user_id")
+
+
 def _already_shared(prepared, detail, owner):
     skill = detail.get("skill") or {}
     latest = _latest(detail)
     hashes = prepared["hashes"]
     return (
         skill.get("state") == "active"
-        and skill.get("created_by_user_id") == owner["account_id"]
+        and _skill_owner(skill) == owner["account_id"]
         and isinstance(latest.get("version"), int)
         and all(latest.get(remote) == hashes[local] for remote, local in (
             ("content_hash", "content"), ("author_description_hash", "author_description"),
@@ -140,9 +145,7 @@ def _outcome(result, skill, team):
                        "Not shared. The server scan blocked this package. "
                        "Review the findings with: hermes wisdom publication status " + operation), 1
     if result.get("code") == "slug_owned":
-        return _result("slug_owned", skill,
-                       f'"{text(skill)}" is already shared by another author. '
-                       "Rename your skill."), 1
+        return _result("slug_owned", skill, collision_message(skill)), 1
     if (result.get("state"), result.get("publication_state")) == ("done", "published"):
         publication = result.get("publication_result") or {}
         version = publication.get("version")
@@ -153,6 +156,38 @@ def _outcome(result, skill, team):
                        "Submitted for team review; not shared yet."), 0
     return _result("uncertain", skill, "We could not confirm the result. Nothing will be resent. "
                    "Check with: hermes wisdom publication status " + operation), 2
+
+
+def collision_message(skill):
+    """The one sentence for a name a teammate already shares."""
+    return (f"A teammate already shares a skill called {text(skill)}. "
+            "Rename yours to share it.")
+
+
+def _folder(args, service, detail, owner):
+    """Choose the folder label: --folder, else prompt with a suggestion.
+
+    Returns the folder to send, or ``None`` to keep an existing skill's folder.
+    """
+    explicit = getattr(args, "folder", None)
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    skill = detail.get("skill") or {}
+    existing = skill.get("folder") if _skill_owner(skill) == owner["account_id"] else None
+    if isinstance(existing, str) and existing:
+        default, reason = existing, "current folder"
+    else:
+        suggest = getattr(service, "suggest_folder", None)
+        suggestion = suggest(args.skill) if callable(suggest) else {}
+        default = suggestion.get("folder") or "General"
+        reason = suggestion.get("reason") or ""
+    if args.json or args.yes or not sys.stdin.isatty():
+        return None if default == existing else default
+    if reason:
+        print(text(reason))
+    answer = input(f"Folder [{text(default)}]: ").strip()
+    chosen = answer or default
+    return None if chosen == existing else chosen
 
 
 def _submit(service, receipt, skill):
@@ -173,10 +208,16 @@ def _share(args, service):
     prepared = {**prepared, "slug": args.skill}
     detail = _catalog(service, args.skill)
     if _already_shared(prepared, detail, owner):
-        version = _latest(detail)["version"]
         return _result("already_shared", args.skill,
-                       f"Nothing to share: v{version} already matches your local skill",
-                       version, detail.get("portal_url")), 0
+                       "Nothing to share: your team already has this exact version",
+                       _latest(detail)["version"], detail.get("portal_url")), 0
+    skill = detail.get("skill") or {}
+    if skill.get("state") == "active" and _skill_owner(skill) not in (None, owner["account_id"]):
+        # Best-effort pre-check; the Gateway's unique name is the source of truth.
+        return _result("slug_owned", args.skill, collision_message(args.skill)), 1
+    folder = _folder(args, service, detail, owner)
+    if folder is not None:
+        service.set_share_folder(prepared["draft_id"], folder)
     review, stop = _review(args, service, prepared, owner, detail)
     if stop:
         messages = {
@@ -212,10 +253,28 @@ def _emit_result(args, result):
         print(f"Install  hermes wisdom install {name}")
 
 
+def _rename_and_retry(args, service, result):
+    """Inline rename after a name collision (interactive terminal only)."""
+    if (result.get("outcome") != "slug_owned" or args.json or args.yes
+            or not sys.stdin.isatty()):
+        return None
+    print(result["detail"])
+    new_name = input("New name (Enter to cancel): ").strip()
+    if not new_name:
+        return None
+    renamed = service.rename_local_skill(args.skill, new_name)
+    print(f"Renamed to {text(renamed['skill'])}.")
+    args.skill = renamed["skill"]
+    return _share(args, service)
+
+
 def run_share(args, service):
     """Print one stable JSON envelope or the human screen/outcome; never auto-retry."""
     try:
         result, code = _share(args, service)
+        retried = _rename_and_retry(args, service, result)
+        if retried is not None:
+            result, code = retried
     except WisdomAuthError:
         result, code = _result("not_entitled", args.skill,
                               "Collective Wisdom is not enabled for this account and team"), 1

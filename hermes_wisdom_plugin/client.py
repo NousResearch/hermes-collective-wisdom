@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -68,6 +69,36 @@ class WireModel(BaseModel):
     model_config = ConfigDict(extra="allow", strict=True)
 
 
+class AccessReview(WireModel):
+    """Frozen publish-time access review for one version (cw/v1 contract).
+
+    Older Gateways omit it; consumers treat absence as *missing* (fail-safe).
+    """
+
+    model_config = ConfigDict(extra="allow", strict=False)
+    access_expanded: bool = False
+    new_capabilities: list[str] = Field(default_factory=list, max_length=64)
+    scan_status: Literal["pass", "flagged"] | None = None
+
+
+def _optional_access_review(value: Any) -> dict[str, Any] | None:
+    """Return a normalized access review dict, or None when missing/unreadable."""
+
+    if not isinstance(value, dict):
+        return None
+    try:
+        review = AccessReview.model_validate(value)
+    except ValidationError:
+        return None
+    if review.scan_status not in {"pass", "flagged"}:
+        return None
+    return {
+        "access_expanded": bool(review.access_expanded),
+        "new_capabilities": [str(item)[:200] for item in review.new_capabilities[:8]],
+        "scan_status": review.scan_status,
+    }
+
+
 class SkillSummary(WireModel):
     """One organization-visible skill in a discovery page."""
 
@@ -84,6 +115,15 @@ class SkillSummary(WireModel):
     system_spec: SystemSpecification | None
     security_check: dict[str, Any] | None = None
     professionalism_check: dict[str, Any] | None = None
+    # cw/v1 additive fields; optional so older Gateways still parse.
+    folder: str | None = Field(default=None, max_length=128)
+    owner_user_id: str | None = Field(default=None, max_length=512)
+    latest_access_review: dict[str, Any] | None = None
+
+    @property
+    def access_review(self) -> dict[str, Any] | None:
+        """Normalized latest access review, or None when missing/unreadable."""
+        return _optional_access_review(self.latest_access_review)
 
 
 class SkillList(WireModel):
@@ -140,6 +180,9 @@ class InstallationItem(WireModel):
     update_mode: Literal["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"]
     skill_state: str = Field(min_length=1, max_length=64)
     takedown_generation: int | None = Field(default=None, ge=0)
+    # cw/v1 additive fields.
+    latest_access_review: dict[str, Any] | None = None
+    installer_kind: str | None = Field(default=None, max_length=16)
 
 
 class InstallationList(WireModel):
@@ -154,6 +197,28 @@ class InstallationDeactivation(WireModel):
     skill_id: str = Field(min_length=1, max_length=512)
     installation_id: str = Field(min_length=1, max_length=512)
     state: Literal["inactive"]
+
+
+class FolderCount(WireModel):
+    """One distinct folder label and its active skill count."""
+
+    name: str = Field(min_length=1, max_length=128)
+    count: int = Field(ge=0)
+
+
+class FolderList(WireModel):
+    """``GET folders`` response."""
+
+    folders: list[FolderCount] = Field(max_length=10_000)
+
+
+class ConsentState(WireModel):
+    """``GET/PUT consent`` response: per person, per org."""
+
+    model_config = ConfigDict(extra="allow", strict=False)
+    accepted: bool
+    disclosure_version: int | None = None
+    accepted_at: str | None = None
 
 
 class Capability(WireModel):
@@ -684,8 +749,13 @@ class WisdomClient:
         description_hash: str,
         manifest_hash: str,
         professionalism_review: dict[str, Any] | None = None,
+        folder: str | None | _Unset = None,
     ) -> Draft:
-        """Submit owner-private bytes for authoritative Gateway vetting."""
+        """Submit owner-private bytes for authoritative Gateway vetting.
+
+        ``folder`` is sent only when it is a string (or explicitly ``None`` via
+        ``CLEAR_FOLDER``); omitting it keeps an existing skill's folder.
+        """
 
         del description_hash, manifest_hash  # checked against the response by the controller
         payload: dict[str, Any] = {
@@ -696,6 +766,10 @@ class WisdomClient:
         }
         if professionalism_review is not None:
             payload["professionalism_review"] = professionalism_review
+        if isinstance(folder, str):
+            payload["folder"] = normalize_folder(folder)
+        elif folder is CLEAR_FOLDER:
+            payload["folder"] = None
         return self._request(
             "drafts", model=DraftResponse, method="POST",
             json_body=payload, publish=True, package_io=True,
@@ -937,8 +1011,14 @@ class WisdomClient:
         version: int,
         takedown_generation: int,
         update_mode: str | None,
+        agent: dict[str, str] | None = None,
     ) -> InstallationRecord:
-        """Record an install using a fresh install-scoped credential snapshot."""
+        """Record an install using a fresh install-scoped credential snapshot.
+
+        Cloud agents (``HERMES_WISDOM_AGENT_NAME`` + ``HERMES_WISDOM_AGENT_REF``)
+        are tagged ``installer_kind=agent`` on every record, including re-records
+        that change ``update_mode``.
+        """
 
         skill_id = _text(skill_id, "skill_id", _MAX_IDENTIFIER_BYTES)
         installation_id = _text(
@@ -956,6 +1036,7 @@ class WisdomClient:
         }
         if update_mode is not None:
             payload["update_mode"] = update_mode
+        payload.update(agent if agent is not None else agent_installer_fields())
         result = self._request(
             "installations",
             model=InstallationRecord,
@@ -977,6 +1058,37 @@ class WisdomClient:
         )
         return [item.model_dump(mode="json") for item in result.installations]
 
+    def folders(self) -> list[dict[str, Any]]:
+        """List distinct folders of active skills with counts (``GET folders``)."""
+
+        result = self._request("folders", model=FolderList)
+        return [item.model_dump(mode="json") for item in result.folders]
+
+    def set_skill_folder(self, skill_id: str, folder: str | None) -> dict[str, Any]:
+        """Change one skill's folder label (owner or admin; publish scope)."""
+
+        value = None if folder is None else normalize_folder(folder)
+        body = self._request(
+            f"skills/{_quoted_identifier(skill_id, 'skill_id')}/folder",
+            model=None, method="PUT", json_body={"folder": value}, publish=True,
+        )
+        return body if isinstance(body, dict) else {}
+
+    def consent(self) -> ConsentState:
+        """Read the caller's per-org data-use consent (``GET consent``)."""
+
+        return self._request("consent", model=ConsentState)
+
+    def accept_consent(self, disclosure_version: int) -> ConsentState:
+        """Record the caller's per-org consent; idempotent (``PUT consent``)."""
+
+        if not _is_plain_int(disclosure_version) or disclosure_version < 1:
+            raise WisdomValidationError("disclosure_version must be a positive integer")
+        return self._request(
+            "consent", model=ConsentState, method="PUT",
+            json_body={"disclosure_version": disclosure_version},
+        )
+
     def deactivate_install(
         self, installation_id: str, skill_id: str
     ) -> InstallationDeactivation:
@@ -996,6 +1108,47 @@ class WisdomClient:
         if result.installation_id != installation_id or result.skill_id != skill_id:
             raise WisdomError("Gateway acknowledged a different installation")
         return result
+
+
+class _Unset:  # pylint: disable=too-few-public-methods
+    """Sentinel type for an explicit folder clear on draft submit."""
+
+    def __repr__(self) -> str:
+        return "CLEAR_FOLDER"
+
+
+CLEAR_FOLDER = _Unset()
+MAX_FOLDER_CHARS = 48
+AGENT_NAME_ENV = "HERMES_WISDOM_AGENT_NAME"
+AGENT_REF_ENV = "HERMES_WISDOM_AGENT_REF"
+
+
+def normalize_folder(value: str) -> str:
+    """Trim and collapse whitespace; enforce the 1-48 character contract."""
+
+    if not isinstance(value, str):
+        raise WisdomValidationError("folder must be a string")
+    folder = " ".join(value.split())
+    if not folder or len(folder) > MAX_FOLDER_CHARS or "\x00" in folder:
+        raise WisdomValidationError(f"Folder names must be 1-{MAX_FOLDER_CHARS} characters")
+    return folder
+
+
+def agent_identity() -> tuple[str, str] | None:
+    """Return ``(agent_name, agent_ref)`` when both cloud-agent env vars are set."""
+
+    name = " ".join(str(os.environ.get(AGENT_NAME_ENV) or "").split())[:80]
+    ref = str(os.environ.get(AGENT_REF_ENV) or "").strip()[:128]
+    return (name, ref) if name and ref else None
+
+
+def agent_installer_fields() -> dict[str, str]:
+    """Installation body fields for a cloud agent; empty for a person's device."""
+
+    identity = agent_identity()
+    if identity is None:
+        return {}
+    return {"installer_kind": "agent", "agent_name": identity[0], "agent_ref": identity[1]}
 
 
 def _text(value: object, name: str, max_bytes: int) -> str:

@@ -638,12 +638,18 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
     if command == "installed":
         rows = value if isinstance(value, list) else data.get("installations")
         rows = rows if isinstance(rows, list) else []
-        lines = ["Managed installations", f"Results: {len(rows)}"]
+        from .team_status import updated_ago  # pylint: disable=import-outside-toplevel
+
+        lines = ["Installed team skills", f"Results: {len(rows)}"]
         for row in rows:
             if isinstance(row, dict):
+                details = [updated_ago(row.get("updated_at"))]
+                if row.get("auto_update") is False:
+                    details.append("Auto-update off")
+                suffix = " · ".join(item for item in details if item)
                 lines.append(
                     f"  - {text(row.get('slug') or 'Unnamed skill')}"
-                    f" v{text(row.get('version') or '?')}"
+                    + (f" · {suffix}" if suffix else "")
                 )
         return "\n".join(lines)
     if isinstance(value, list):

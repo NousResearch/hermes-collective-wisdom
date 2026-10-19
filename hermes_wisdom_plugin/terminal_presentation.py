@@ -66,33 +66,43 @@ def _installation_status(row: dict[str, Any]) -> tuple[str, str | None]:
 
 
 def _catalog_table(value: object) -> Table:
+    from .commands import (  # pylint: disable=import-outside-toplevel
+        group_by_folder, owner_label, used_by_label,
+    )
+
     data = value if isinstance(value, dict) else {}
     rows = data.get("skills") if isinstance(data.get("skills"), list) else []
     rows = [row for row in rows if isinstance(row, dict)]
     table = Table(title="Shared skills", show_lines=False, expand=True,
                   caption=f"Results: {len(rows)}", caption_style="dim")
     table.add_column("Name", style="bold", min_width=8, ratio=2, overflow="fold")
-    table.add_column("Status", min_width=10, ratio=2, overflow="fold")
+    table.add_column("Owner", min_width=8, ratio=2, overflow="fold")
     table.add_column("Version", style="dim", width=7, no_wrap=True)
-    table.add_column("Description", min_width=12, ratio=3, overflow="fold")
-    for item in rows:
-        name = item.get("slug") or item.get("id") or "Unnamed skill"
-        version = item.get("latest_version")
-        version_label = (
-            f"v{version}"
-            if isinstance(version, int) and not isinstance(version, bool) and version > 0
-            else "—"
-        )
-        status, status_style = _installation_status(item)
-        description = item.get("author_description") or "No description"
-        table.add_row(
-            _safe_text(name, style="bold"),
-            _safe_text(status, style=status_style),
-            _safe_text(version_label, style="dim"),
-            _safe_text(description),
-        )
+    table.add_column("Used by", style="dim", min_width=8, no_wrap=True)
+    table.add_column("Status", min_width=10, ratio=2, overflow="fold")
+    groups = group_by_folder(rows) if data.get("group_by") == "folder" else [(None, rows)]
+    for folder, members in groups:
+        if folder is not None:
+            table.add_row(_safe_text(f"{folder} ({len(members)})", style="bold underline"),
+                          Text(""), Text(""), Text(""), Text(""))
+        for item in members:
+            name = item.get("slug") or item.get("id") or "Unnamed skill"
+            version = item.get("latest_version")
+            version_label = (
+                f"v{version}"
+                if isinstance(version, int) and not isinstance(version, bool) and version > 0
+                else "—"
+            )
+            status, status_style = _installation_status(item)
+            table.add_row(
+                _safe_text(("  " if folder is not None else "") + str(name), style="bold"),
+                _safe_text(owner_label(item)),
+                _safe_text(version_label, style="dim"),
+                _safe_text(used_by_label(item.get("install_count")), style="dim"),
+                _safe_text(status, style=status_style),
+            )
     if not rows:
-        table.caption = Text("No matching shared skills.", style="dim")
+        table.caption = Text("Nobody has shared a skill yet.", style="dim")
     return table
 
 
@@ -195,35 +205,31 @@ def _show_table(value: object) -> Table:
 
 
 def _installed_table(value: object) -> Table:
+    from .team_status import updated_ago  # pylint: disable=import-outside-toplevel
+
     data = value if isinstance(value, dict) else {}
     raw_rows = value if isinstance(value, list) else data.get("installations")
     rows = raw_rows if isinstance(raw_rows, list) else []
-    table = Table(title="Managed installations", show_lines=False, expand=True)
+    table = Table(title="Installed team skills", show_lines=False, expand=True)
     table.add_column("Name", style="bold", min_width=10, ratio=2, overflow="fold")
-    table.add_column("Version", style="dim", width=9, no_wrap=True)
+    table.add_column("Updated", style="dim", min_width=12, ratio=1, overflow="fold")
     table.add_column("State", min_width=8, ratio=1, overflow="fold")
-    table.add_column("Update mode", style="dim", min_width=11, ratio=1, overflow="fold")
+    table.add_column("Auto-update", style="dim", min_width=11, ratio=1, overflow="fold")
     valid = [row for row in rows if isinstance(row, dict)]
     table.caption = Text(f"Results: {len(valid)}", style="dim")
     for row in valid:
         name = row.get("slug") or row.get("skill_id") or "unknown"
-        version = row.get("version", row.get("installed_version"))
-        version_label = (
-            f"v{version}"
-            if isinstance(version, int) and not isinstance(version, bool) and version > 0
-            else "Unknown"
-        )
         state = row.get("state") or row.get("skill_state") or "unknown"
         state_style = "green" if str(state).casefold() in {"active", "published"} else "yellow"
-        update_mode = row.get("update_mode") or row.get("effective_update_mode") or "Unknown"
+        auto = row.get("auto_update")
         table.add_row(
             _safe_text(name, style="bold"),
-            _safe_text(version_label, style="dim"),
+            _safe_text(updated_ago(row.get("updated_at")) or "—", style="dim"),
             _safe_text(state, style=state_style),
-            _safe_text(update_mode, style="dim"),
+            _safe_text("On" if auto is True else "Off" if auto is False else "—", style="dim"),
         )
     if not valid:
-        table.caption = Text("No managed installations.", style="dim")
+        table.caption = Text("No installed team skills.", style="dim")
     return table
 
 

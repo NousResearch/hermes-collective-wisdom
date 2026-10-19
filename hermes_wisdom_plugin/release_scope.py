@@ -38,7 +38,7 @@ class ReleaseScope:  # pylint: disable=too-many-instance-attributes
 _MANUAL_CLI = (
     "setup", "status", "list", "browse", "show", "versions", "top", "suggest", "share",
     "share-suggest", "prepared", "publication", "install", "installed", "check", "update",
-    "installed-setup", "uninstall", "help",
+    "auto-update", "installed-setup", "uninstall", "help",
 )
 _MANUAL_SLASH = frozenset({
     "help", "status", "setup", "list", "browse", "show", "versions", "top", "share",
@@ -55,31 +55,38 @@ FULL = ReleaseScope(
         "maintenance", "list", "browse", "show", "versions", "top", "suggest", "share",
         "share-suggest",
         "prepared", "publication", "install", "installed", "check", "update",
-        "installed-setup", "uninstall", "help",
+        "auto-update", "installed-setup", "uninstall", "help",
     ),
     slash_commands=_MANUAL_SLASH | frozenset({
         "settings", "mute", "candidate", "suggest", "publish",
     }),
     hooks=(
         "pre_gateway_dispatch", "pre_llm_call", "on_skill_lifecycle",
-        "transform_llm_output", "on_session_end",
+        "transform_llm_output", "on_session_end", "on_session_start",
     ),
     model_tools=("wisdom_inbox", "wisdom_inspect", "present_wisdom_consent"),
-    auxiliary_tasks=("hermes_collective_wisdom_refinement",),
+    auxiliary_tasks=(
+        "hermes_collective_wisdom_refinement", "hermes_collective_wisdom_assist",
+    ),
     desktop_route_groups=frozenset({"core", "candidates", "notices", "settings"}),
     notification_settings=True,
     model_editorial=True,
 )
 
-# User-initiated sharing and installation only. The slash gateway hook stays
-# registered because private /wisdom reviews arrive through it.
+# User-initiated sharing and installation, plus (cw/v1) auto-update of installed
+# team skills. The slash gateway hook stays registered because private /wisdom
+# reviews arrive through it; it also drives the rate-limited messaging-gateway
+# auto-update check. ``on_session_start`` freezes the one-line session note and
+# triggers the same check; ``transform_llm_output`` shows that frozen line once on
+# the session's first local reply. The assist auxiliary task is the one model
+# route for Combine and the share-folder suggestion.
 MANUAL_SHARING = ReleaseScope(
     name="manual-sharing",
     cli_commands=_MANUAL_CLI,
     slash_commands=_MANUAL_SLASH,
-    hooks=("pre_gateway_dispatch",),
+    hooks=("pre_gateway_dispatch", "on_session_start", "transform_llm_output"),
     model_tools=(),
-    auxiliary_tasks=(),
+    auxiliary_tasks=("hermes_collective_wisdom_assist",),
     desktop_route_groups=frozenset({"core"}),
     notification_settings=False,
     model_editorial=False,

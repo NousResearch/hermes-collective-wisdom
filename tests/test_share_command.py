@@ -56,6 +56,13 @@ class ShareCli:
             raise WisdomNotFound("not found")
         return self.detail
 
+    def suggest_folder(self, _skill):
+        return {"folder": "General", "reason": ""}
+
+    def set_share_folder(self, draft_id, folder):
+        self.reviewer.store.set_draft_folder(draft_id, dict(self.owner), folder)
+        return {"draft_id": draft_id, "folder": folder}
+
 
 def run(service, *flags):
     parser = argparse.ArgumentParser()
@@ -152,7 +159,7 @@ def test_already_shared_compares_author_and_latest_exact_hashes(tmp_path, capsys
     result = json.loads(capsys.readouterr().out)
     assert result["outcome"] == "already_shared"
     assert result["version"] == 3
-    assert "v3 already matches" in result["detail"]
+    assert "already has this exact version" in result["detail"]
     assert not service.client.state.calls["upload"]
 
 
@@ -180,7 +187,8 @@ def test_interactive_share_has_one_confirmation(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("builtins.input", answer)
     assert run(service) == 0
     output = capsys.readouterr().out
-    assert len(prompts) == 1
+    # cw/v1: the folder prompt (Enter keeps the suggestion), then one confirmation.
+    assert len(prompts) == 2 and prompts[0].startswith("Folder [")
     assert "Everyone in org-1, immediately. No reviewer." in output
     assert "bytes" in output
     assert "Shared with org-1 as v1" in output
@@ -255,7 +263,7 @@ def test_changed_source_after_confirmation_is_not_uploaded(tmp_path, capsys, mon
 def test_description_edit_is_in_submitted_exact_package(tmp_path, capsys, monkeypatch):
     service = ShareCli(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    answers = iter(["e", "A revised incident checklist.", "s"])
+    answers = iter(["", "e", "A revised incident checklist.", "s"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     assert run(service) == 0
     assert "Shared with" in capsys.readouterr().out
@@ -315,7 +323,7 @@ def test_edit_resets_flag_warning_acknowledgement(tmp_path, capsys, monkeypatch)
 
 @pytest.mark.parametrize("mode,line,code", [
     ("blocked", "Not shared. The server scan", 1),
-    ("owned", "already shared by another author", 1),
+    ("owned", "A teammate already shares a skill called", 1),
     ("uncertain", "Nothing will be resent", 2),
     ("denied", "not enabled for this account and team", 1),
     ("moderated", "not shared yet", 0),
@@ -388,7 +396,7 @@ def test_team_change_before_review_screen_refuses(tmp_path, capsys, monkeypatch)
 def test_view_file_is_read_only(tmp_path, capsys, monkeypatch):
     service = ShareCli(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    answers = iter(["v", "1", "q"])
+    answers = iter(["", "v", "1", "q"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     assert run(service) == 0
     assert "Use the checklist" in capsys.readouterr().out

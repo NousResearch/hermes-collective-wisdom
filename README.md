@@ -13,7 +13,8 @@ You stay in control at every step:
 - Installing the plugin uploads nothing and enrolls nothing.
 - Every share is one review of the exact files that will be published.
 - Every install is one exact version, and declared setup commands never run without a separate approval.
-- Nothing happens in the background: Collective Wisdom acts only when you run one of its commands.
+- Checks for new versions of skills you installed with auto-update on. Everything else happens only
+  when you run one of its commands.
 
 ## Requirements
 
@@ -242,9 +243,16 @@ or install.
   stay on your profile. `top` reads them locally.
 - **Models:** `/wisdom share-suggest` sends the names, descriptions and usage counts of up to 30 of
   your skills to the model of the conversation you run it in, and that model may read those skills'
-  files. No other command calls a model.
-- **No background activity:** there is no telemetry, no polling and no background process. The plugin
-  acts only when you run a Collective Wisdom command.
+  files. When you share, the skill's name, description and your team's folder names go to the
+  `hermes_collective_wisdom_assist` auxiliary model to suggest a folder. When you edited an installed
+  skill and a new version comes out, its old, edited and new `SKILL.md` go to the same auxiliary model
+  to prepare a combined version, which never applies without your click. Without an auxiliary model
+  these fall back to your local category and "Keep mine / Use new version".
+- **Background checks:** Checks for new versions of skills you installed with auto-update on — at the
+  start of a session and on the messaging gateway, at most once every 10 minutes per profile, using your
+  existing sign-in (never a refresh loop). A new version applies on its own only when you have not
+  edited your copy and the service's publish-time security scan passed; otherwise it waits for you
+  (`hermes wisdom status`). There is no telemetry.
 
 ## Troubleshooting
 

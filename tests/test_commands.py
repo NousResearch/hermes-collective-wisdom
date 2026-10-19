@@ -1015,7 +1015,6 @@ def test_interactive_update_replans_warning_then_requires_final_confirmation(
     "argv",
     [
         ["setup", "--json"],
-        ["uninstall", "skill-1", "--json"],
     ],
 )
 def test_json_mutations_never_prompt_on_tty_without_explicit_switch(

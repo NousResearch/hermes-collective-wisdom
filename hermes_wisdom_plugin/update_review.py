@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from .client import _optional_access_review
 from .contract import SystemSpecification, parse_manifest_bytes
 from .errors import WisdomAuthError, WisdomValidationError
 from .install_execution import (
@@ -300,6 +301,14 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             "latest_version": checked["latest_version"],
             "effective_update_mode": checked["update_mode"],
             "takedown_generation": checked["takedown_generation"],
+            # cw/v1: frozen publish-time verdict for latest_version; None = missing
+            # (older Gateway, legacy version or unreadable) and is treated fail-safe.
+            "latest_access_review": _optional_access_review(
+                authority.get("latest_access_review")
+            ),
+            "modified": _tree_hashes(Path(installation["target_path"]))
+            != installation.get("baseline"),
+            "slug": installation.get("slug"),
         }
 
     def _planning_authority(self, skill_id, owner, installation, *, automatic):
@@ -334,8 +343,16 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         accept_partial: bool = False,
         accept_warnings: bool = False,
         automatic: bool = False,
+        archive_modified: bool = False,
+        gateway_access_review: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create an exact review; acknowledgements become immutable receipt facts."""
+        """Create an exact review; acknowledgements become immutable receipt facts.
+
+        ``archive_modified`` is the cw/v1 "Use new version"/"Combine" choice: the
+        edited copy is kept only in the update archive (never as a sibling skill).
+        ``gateway_access_review`` is the frozen publish-time verdict; a ``pass``
+        verdict lets an automatic update apply even when access expanded.
+        """
 
         owner = self._owner()
         installation = self._installation(skill_id, owner, slug=slug)
@@ -345,6 +362,7 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             raise PackagePolicyError("manual update policy requires explicit review")
         if automatic and any((
             accept_sensitive, accept_partial, preserve_modified, accept_warnings,
+            archive_modified,
         )):
             raise WisdomValidationError("automatic policy cannot accept manual acknowledgements")
         incoming, _files, baseline = self.install_reviewer._prepare(  # pylint: disable=protected-access
@@ -367,15 +385,21 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         preserve_edited = preserve_modified or (
             automatic and authority["update_mode"] == "REQUIRED" and modified
         )
-        preservation = self._preservation(
-            installation,
-            authority["latest_version"],
-            modified=modified,
-            accepted=preserve_edited,
+        archive_edited = bool(archive_modified and modified and not preserve_edited)
+        preservation = (
+            {"action": "archive", "destination": None} if archive_edited
+            else self._preservation(
+                installation,
+                authority["latest_version"],
+                modified=modified,
+                accepted=preserve_edited,
+            )
         )
+        gateway_review = _optional_access_review(gateway_access_review)
+        gateway_pass = bool(gateway_review and gateway_review["scan_status"] == "pass")
         manual_allowed = bool(
             incoming["allowed"]
-            and (not modified or preserve_modified)
+            and (not modified or preserve_modified or archive_edited)
             and (not sensitive or accept_sensitive)
             and (not partial or accept_partial)
         )
@@ -384,7 +408,9 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             and outcome == "compatible"
             and incoming["local_scan"].get("allowed") is True
             and not incoming["local_scan"].get("findings")
-            and not sensitive
+            # cw/v1: the required Gateway publish-time scan is the gate for
+            # access expansion; only a readable ``pass`` verdict allows it.
+            and (not sensitive or gateway_pass)
             and (not modified or authority["update_mode"] == "REQUIRED")
         )
         allowed = automatic_allowed if automatic else manual_allowed
@@ -415,7 +441,8 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
                 "accepted_sensitive": bool(accept_sensitive),
                 "accepted_partial": bool(accept_partial),
                 "accepted_warnings": bool(accept_warnings),
-                "accepted_modified_preservation": bool(preserve_edited),
+                "accepted_modified_preservation": bool(preserve_edited or archive_edited),
+                "gateway_access_review": gateway_review,
             },
             "authorization": {
                 "kind": "automatic_policy" if automatic else "manual_receipt",
@@ -435,10 +462,14 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             raise WisdomValidationError("Update receipt has an invalid owner binding")
         return plan
 
-    def plan_automatic(self, skill_id: str) -> dict[str, Any]:
+    def plan_automatic(
+        self, skill_id: str, *, gateway_access_review: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Create a fresh policy-authorized plan, distinct from human confirmation."""
 
-        return self.plan(skill_id, automatic=True)
+        return self.plan(
+            skill_id, automatic=True, gateway_access_review=gateway_access_review,
+        )
 
     def _preservation(
         self, installation: dict[str, Any], version: int, *, modified: bool, accepted: bool

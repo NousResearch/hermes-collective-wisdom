@@ -219,12 +219,20 @@ def test_piped_warning_install_requires_explicit_warning_flag_without_applying(
     assert service.calls == [("plan", "skill", None, False)]
 
 
-def test_noninteractive_warning_install_and_uninstall_refuse_implicit_approval(monkeypatch):
+def test_noninteractive_warning_install_refuses_implicit_approval(monkeypatch):
     service = Service()
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
     assert run_cli(_args("install", "skill"), service) == 6
-    assert run_cli(_args("uninstall", "skill"), service) == 6
     assert service.calls == [("plan", "skill", None, False)]
+
+
+def test_uninstall_is_immediate_and_recoverable(monkeypatch):
+    """cw/v1: no confirm; the copy moves to the archive and Undo restores it."""
+    service = Service()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+    assert run_cli(_args("uninstall", "skill"), service) == 0
+    assert ("uninstall", "skill") in service.calls
 
 
 def test_installed_and_confirmed_uninstall(capsys):

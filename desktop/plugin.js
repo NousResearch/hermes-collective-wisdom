@@ -9,15 +9,14 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DisclosureCaret,
   EmptyState,
   host,
   Input,
   PALETTE_AREA,
   ROUTES_AREA,
-  ScrollArea,
-  Separator,
   SIDEBAR_NAV_AREA,
-  Textarea,
+  Switch,
   useMutation,
   useQuery,
   useQueryClient,
@@ -219,71 +218,9 @@ function FileManifest({ files, showContent }) {
   ) })
 }
 
-function saveReadyFile(file) {
-  const value = { path: text(file?.path), ...(file?.mode === 'exec' ? { mode: 'exec' } : {}) }
-  if (typeof file?.content_utf8 === 'string') return { ...value, content_utf8: file.content_utf8 }
-  return { ...value, content_base64: text(file?.content_base64) }
-}
-
-function dataHref(value) {
-  return `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(value, null, 2))}`
-}
-
-function PreparedEditor({ draftId, draftName, editor, onChange, onSave, saving }) {
-  const updateFile = (index, changes) => onChange({
-    ...editor,
-    files: editor.files.map((file, position) => position === index ? { ...file, ...changes } : file)
-  })
-  const removeFile = index => onChange({ ...editor, files: editor.files.filter((_file, position) => position !== index) })
-  const exportName = `wisdom-${text(draftName).replace(/[^a-zA-Z0-9._-]+/g, '-')}.json`
-  const exportPayload = {
-    draft_id: draftId,
-    author_description: editor.author_description,
-    files: editor.files.map(saveReadyFile),
-    expected_hashes: editor.expected_hashes
-  }
-  return jsxs('section', { className: 'space-y-3', children: [
-    jsx('h4', { className: 'text-xs font-semibold', children: 'Edit complete private draft' }),
-    jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Saving replaces the complete draft file set. Rename paths directly, remove files deliberately, and add text files below. Opaque bytes remain inert base64 and can be exported exactly.' }),
-    jsxs('label', { className: 'block space-y-1 text-xs', children: [
-      jsx('span', { className: 'block text-(--ui-text-quaternary)', children: 'Author description' }),
-      jsx(Textarea, { 'aria-label': 'Author description', className: 'min-h-20 w-full', onChange: event => onChange({ ...editor, author_description: event.target.value }), value: editor.author_description })
-    ] }),
-    jsx('a', { className: 'text-xs text-(--ui-accent)', download: exportName, href: dataHref(exportPayload), children: 'Export complete save-ready draft JSON' }),
-    jsx('ul', { className: 'space-y-3', children: editor.files.map((file, index) => {
-      const originalPath = file._label || file.path || 'new file'
-      const opaque = typeof file.content_utf8 !== 'string'
-      return jsxs('li', { className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-        jsx(Input, { 'aria-label': `Path for ${originalPath}`, onChange: event => updateFile(index, { path: event.target.value }), value: file.path }),
-        opaque
-          ? jsxs('div', { className: 'space-y-1', children: [
-              jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Opaque bytes (${text(file.content_base64).length} base64 characters); active preview is disabled.` }),
-              jsx('a', { className: 'text-xs text-(--ui-accent)', download: text(file.path).split('/').at(-1) || 'opaque.bin', href: `data:application/octet-stream;base64,${text(file.content_base64)}`, children: 'Export exact opaque bytes' })
-            ] })
-          : jsx(Textarea, { 'aria-label': `Content for ${originalPath}`, className: 'min-h-32 w-full font-mono text-xs', onChange: event => updateFile(index, { content_utf8: event.target.value }), value: file.content_utf8 }),
-        jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: [
-          jsxs('label', { className: 'flex items-center gap-2 text-xs', children: [
-            jsx(Checkbox, { 'aria-label': `Executable ${originalPath}`, checked: file.mode === 'exec', onCheckedChange: value => updateFile(index, { mode: value === true ? 'exec' : 'file' }) }),
-            'Executable intent'
-          ] }),
-          jsx(Button, { onClick: () => removeFile(index), size: 'sm', type: 'button', variant: 'secondary', children: `Remove ${originalPath}` })
-        ] })
-      ] }, `${index}-${originalPath}`)
-    }) }),
-    jsxs('div', { className: 'flex flex-wrap gap-2', children: [
-      jsx(Button, { onClick: () => onChange({ ...editor, files: [...editor.files, { _label: 'new file', path: '', mode: 'file', content_utf8: '' }] }), size: 'sm', type: 'button', variant: 'secondary', children: 'Add text file' }),
-      jsx(Button, { disabled: saving || !editor.author_description.trim() || editor.files.some(file => !text(file.path).trim()), loading: saving, onClick: onSave, size: 'sm', type: 'button', children: 'Save and re-review' })
-    ] })
-  ] })
-}
-
 function scanGuard(value) {
   const scan = isObject(value?.local_scan) ? value.local_scan : value
   return isObject(scan?.guard) ? scan.guard : scan
-}
-
-function hasReviewableWarnings(value) {
-  return value?.security_check?.local_status === 'warning_required' || scanGuard(value)?.allowed === false
 }
 
 function safeWarningFindings(value) {
@@ -598,18 +535,6 @@ function catalogAction(item) {
   return null
 }
 
-function describeCandidate(item) {
-  const reasons = isObject(item?.local_reasons) ? item.local_reasons : {}
-  if (item?.qualification === 'high_usage' && Number.isInteger(reasons.consecutive_business_days)) {
-    return `used on ${reasons.consecutive_business_days} consecutive business days`
-  }
-  const refinements = reasons.meaningful_refinements ?? reasons.edits
-  if (item?.qualification === 'refinement' && Number.isInteger(refinements) && Number.isInteger(reasons.stable_days)) {
-    return `refined ${refinements} times and stable for ${reasons.stable_days} days`
-  }
-  return 'qualified from local use and refinement signals'
-}
-
 function Catalog({ client, dialog = false, initialSearch = '', initialSelected = null, lifecycle, viewId }) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState(initialSearch)
@@ -797,441 +722,6 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   ] })
 }
 
-function Installed({ bootstrap, client, lifecycle, viewId }) {
-  const queryClient = useQueryClient()
-  const [preserve, setPreserve] = useState(true)
-  const [review, setReview] = useState(null)
-  const [setupPermission, setSetupPermission] = useState(null)
-  const [acknowledgements, setAcknowledgements] = useState({ warnings: false, partial: false, sensitive: false })
-  const [outcome, setOutcome] = useState(null)
-  const [checks, setChecks] = useState({})
-  const check = useCurrentMutation(
-    client,
-    lifecycle,
-    item => client.rest(`/updates/${encodeURIComponent(item.skill_id)}?view_id=${encodeURIComponent(viewId)}`),
-    result => setChecks(current => ({ ...current, [result.skill_id]: { result } })),
-    'Could not check for updates',
-    (error, item) => setChecks(current => ({ ...current, [item.skill_id]: { error: isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error), transient: isUnavailable(error) } }))
-  )
-  const update = useCurrentMutation(client, lifecycle, item => client.rest('/update/review', {
-    method: 'POST', body: requestBody(viewId, { skill_id: item.skill_id, preserve_modified: preserve, accept_sensitive: false, accept_partial: false, accept_warnings: false })
-  }), value => { setOutcome(null); setAcknowledgements({ warnings: false, partial: false, sensitive: false }); setReview({ ...value, name: label(installations.find(item => item.skill_id === value.skill_id)), operation: 'update' }) }, 'Could not prepare the update review')
-  const reReview = useCurrentMutation(client, lifecycle, async current => {
-    const next = await client.rest('/update/review', {
-      method: 'POST', body: requestBody(viewId, {
-        skill_id: current.skill_id,
-        preserve_modified: preserve,
-        accept_sensitive: acknowledgements.sensitive,
-        accept_partial: acknowledgements.partial,
-        accept_warnings: acknowledgements.warnings
-      })
-    })
-    if (current.content_hash !== next.content_hash || current.manifest_hash !== next.manifest_hash || warningIdentity(current) !== warningIdentity(next)) {
-      throw new Error('The exact update package or scanner findings changed. Start a fresh review and acknowledge the new facts.')
-    }
-    return { ...next, name: label(current), operation: 'update' }
-  }, setReview, 'Could not bind the update acknowledgements')
-  const uninstall = useCurrentMutation(client, lifecycle, item => client.rest('/uninstall/review', {
-    method: 'POST', body: requestBody(viewId, { skill_id: item.skill_id })
-  }), value => { setOutcome(null); setReview({ ...value, name: label(value.installation), operation: 'uninstall' }) }, 'Could not prepare the uninstall review')
-  const confirm = useCurrentMutation(client, lifecycle, async current => ({
-    operation: current.operation,
-    reviewed: current,
-    skillName: label(current),
-    result: await client.rest(current.operation === 'uninstall' ? '/uninstall/confirm' : '/update/confirm', {
-      method: 'POST', body: current.operation === 'uninstall'
-        ? requestBody(viewId, { review_id: current.review_id })
-        : requestBody(viewId, { receipt: current.receipt })
-    })
-  }), async (payload, token, isCurrent) => {
-    const { operation, result, skillName, reviewed } = payload
-    setReview(null)
-    const name = skillName !== 'Name unavailable' ? skillName : label(result)
-    if (operation === 'update' && Array.isArray(reviewed.setup_commands) && reviewed.setup_commands.length &&
-        completedFileChange(operation, result)) {
-      setSetupPermission({ receipt: reviewed.receipt, commands: reviewed.setup_commands, name, operation })
-      setOutcome({ ...result, name, kind: operation, setup_required: true, ready_to_use: null })
-      await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-      return
-    }
-    if (operationSucceeded(operation, result, name)) {
-      await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-      if (isCurrent(token)) host.notify({
-        kind: 'success',
-        message: operation === 'uninstall' ? `✅ ${name} removed` : `✅ ${name} updated`
-      })
-    } else {
-      setOutcome({ ...(result || { state: 'unknown' }), name, kind: operation })
-    }
-  }, 'The reviewed action was not completed')
-  const runSetup = useCurrentMutation(client, lifecycle, async pending => ({
-    pending,
-    result: await client.rest('/update/setup', {
-      method: 'POST', body: requestBody(viewId, { receipt: pending.receipt })
-    })
-  }), ({ pending, result }) => {
-    setSetupPermission(null)
-    setOutcome({ ...result, name: pending.name, kind: 'update' })
-  }, 'Could not confirm setup. Check its status before trying again.', () => {
-    setSetupPermission(null)
-  })
-  const installations = Array.isArray(bootstrap?.installations) ? bootstrap.installations : []
-  const decisions = installations.filter(item => checks[item.skill_id]?.result?.state === 'update_available')
-  return jsxs('div', { className: 'space-y-4', children: [
-    jsxs('label', { className: 'flex items-center gap-2 text-xs', children: [
-      jsx(Checkbox, { 'aria-label': 'Preserve locally modified files', checked: preserve, onCheckedChange: value => setPreserve(value === true) }),
-      'Preserve locally modified files when preparing updates'
-    ] }),
-    decisions.length ? jsx(Section, { title: 'Updates needing your decision', description: 'Review the exact new version before choosing to update. Local edits are preserved when enabled above.', children:
-      jsx('ul', { className: 'space-y-2', children: decisions.map(item => {
-        const result = checks[item.skill_id].result
-        return jsxs('li', { className: 'flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-          jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `${label(item)} v${item.version || '?'} → v${result.latest_version || '?'}` }),
-          jsx(Button, { disabled: update.isPending || (item.modified && !preserve), onClick: () => update.mutate(item), size: 'sm', type: 'button', children: 'Review update' })
-        ] }, item.skill_id)
-      }) })
-    }) : null,
-    installations.length === 0 ? jsx(EmptyState, { title: 'Nothing installed', description: 'Install a shared skill from Catalog.' }) : null,
-    jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: installations.map(item => {
-      const checked = checks[item.skill_id]
-      const updateAvailable = checked?.result?.state === 'update_available'
-      const checkStatus = checked?.error
-        ? `Update check unavailable: ${checked.error}`
-        : updateAvailable
-          ? `v${checked.result.latest_version || '?'} is available. Review is a separate exact-version step.`
-          : checked?.result?.state === 'current'
-            ? 'This installation is current.'
-            : checked?.result
-              ? `Update unavailable: ${checked.result.reason || checked.result.state || 'the service did not return a reviewable update.'}`
-              : 'Update review unavailable until you check for updates.'
-      const preservationBlocked = item.modified && !preserve
-      return jsxs('li', { className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
-        jsxs('div', { className: 'min-w-0 flex-1', children: [
-          jsx('div', { className: 'text-sm font-medium', children: label(item) }),
-          jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `Installed v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
-          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus }),
-          jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome?.skill_id === item.skill_id ? outcome : null })
-        ] }),
-        jsxs('div', { className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
-          jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: checked?.transient ? 'Retry' : 'Check for updates' }),
-          jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Remove' })
-        ] })
-      ] }, item.skill_id)
-    }) }),
-    review?.operation === 'update' ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: 'update', onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
-    review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, kind: review.operation, onCancel: () => setReview(null), onConfirm: () => confirm.mutate(review), review }) : null,
-    jsx(SetupPermission, { pending: setupPermission, busy: runSetup.isPending, onDefer: () => setSetupPermission(null), onRun: () => runSetup.mutate(setupPermission) }),
-    jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome && !installations.some(item => item.skill_id === outcome.skill_id) ? outcome : null })
-  ] })
-}
-
-function Settings({ bootstrap, client, lifecycle, viewId }) {
-  const queryClient = useQueryClient()
-  const settings = useQuery(queryOptions(
-    ['settings', lifecycle.key],
-    () => client.rest(`/settings?view_id=${encodeURIComponent(viewId)}`)
-  ))
-  const current = settings.data || {}
-  const mode = current.delivery_mode || bootstrap?.settings?.notifications?.delivery_mode || 'agent'
-  const setMode = useCurrentMutation(client, lifecycle, next => client.rest('/settings/mode', {
-    method: 'PATCH', body: requestBody(viewId, { mode: next, expected_mode: mode })
-  }), async (_result, token, isCurrent) => {
-    await Promise.all([
-      queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] }),
-      queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
-    ])
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Recommendation setting updated' })
-  }, 'Recommendation setting was not changed')
-  const mute = useCurrentMutation(client, lifecycle, duration => client.rest('/settings/mute', {
-    method: 'PATCH',
-    body: requestBody(viewId, { control_id: String(current.mute_control.revision), duration })
-  }), async (_result, token, isCurrent) => {
-    await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'settings', lifecycle.key] })
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Your notification mute was updated' })
-  }, 'Your notification mute was not changed')
-  const muteState = current.gateway_mute
-  const muteControl = current.mute_control
-  if (settings.error && isUnavailable(settings.error)) return jsx(ReadFailure, { error: settings.error, title: 'Settings unavailable', onRetry: () => settings.refetch() })
-  return jsxs('div', { className: 'space-y-6', children: [
-    jsx(Section, { title: 'Recommendations', description: mode === 'fixed'
-      ? 'Off: proactive Wisdom recommendations are paused. You can still browse and review skills here.'
-      : 'On: Wisdom may show useful skill and update recommendations.', children:
-      jsxs('div', { className: 'flex gap-2', children: [
-        jsx(Button, { disabled: current.mode_writable === false || mode === 'agent' || setMode.isPending, onClick: () => setMode.mutate('agent'), size: 'sm', type: 'button', variant: mode === 'agent' ? 'secondary' : 'ghost', children: 'On' }),
-        jsx(Button, { disabled: current.mode_writable === false || mode === 'fixed' || setMode.isPending, onClick: () => setMode.mutate('fixed'), size: 'sm', type: 'button', variant: mode === 'fixed' ? 'secondary' : 'ghost', children: 'Off' })
-      ] })
-    }),
-    jsx(Section, { title: 'Mute recommendations for you', description: 'Pause sharing suggestions and skill recommendations for you, not your teammates. You can still browse and install skills.', children: settings.error
-      ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Mute unavailable: ${text(settings.error?.message || settings.error)}` })
-      : !settings.data
-        ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading current mute setting…' })
-        : jsxs('div', { className: 'space-y-3', children: [
-            jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: muteState?.muted
-              ? `Recommendations are muted${muteState?.muted_until ? ` until ${muteState.muted_until}` : ''}.`
-              : 'Recommendations are on for you.' }),
-            muteControl ? jsxs('div', { className: 'flex flex-wrap gap-2', children: [
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_day'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 day' }),
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('1_week'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 1 week' }),
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('30_days'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute for 30 days' }),
-              jsx(Button, { disabled: mute.isPending, onClick: () => mute.mutate('forever'), size: 'sm', type: 'button', variant: 'secondary', children: 'Mute indefinitely' }),
-              jsx(Button, { disabled: mute.isPending || muteState?.muted !== true, onClick: () => mute.mutate(null), size: 'sm', type: 'button', variant: 'secondary', children: 'Unmute' })
-            ] }) : jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'Mute controls are unavailable here.' })
-          ] })
-    })
-  ] })
-}
-
-function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) {
-  const queryClient = useQueryClient()
-  const [skillName, setSkillName] = useState('')
-  const [draft, setDraft] = useState(null)
-  const [preparedReview, setPreparedReview] = useState(null)
-  const [editor, setEditor] = useState(null)
-  const [savedEditor, setSavedEditor] = useState(null)
-  const dirty = editor !== null && JSON.stringify(editor) !== JSON.stringify(savedEditor)
-  const [savedNotice, setSavedNotice] = useState(false)
-  const [warningAccepted, setWarningAccepted] = useState(false)
-  const [keptDraft, setKeptDraft] = useState(null)
-  const [review, setReview] = useState(null)
-  const [outcome, setOutcome] = useState(null)
-  // Sharing suggestions ship only in a release whose backend exposes them.
-  const candidates = useQuery(queryOptions(
-    ['candidates', lifecycle.key],
-    () => client.rest(`/candidates?view_id=${encodeURIComponent(viewId)}`),
-    shareSuggestions
-  ))
-  const savedDrafts = useQuery(queryOptions(
-    ['drafts', lifecycle.key],
-    () => client.rest(`/drafts?view_id=${encodeURIComponent(viewId)}`)
-  ))
-  const acceptDraft = value => {
-    setDraft(value)
-    setPreparedReview(null)
-    setEditor(null)
-    setSavedNotice(false)
-    setWarningAccepted(false)
-    setKeptDraft(null)
-    setReview(null)
-    setOutcome(null)
-  }
-  const prepareCandidate = useCurrentMutation(client, lifecycle, async item => ({
-    ...await client.rest(`/candidates/${encodeURIComponent(item.event_id)}/prepare`, {
-      method: 'POST', body: requestBody(viewId)
-    }), name: label(item)
-  }), acceptDraft, 'Could not prepare a private draft — nothing was uploaded or shared')
-  const notNow = useCurrentMutation(client, lifecycle, item => client.rest(`/candidates/${encodeURIComponent(item.event_id)}/not-now`, {
-    method: 'POST', body: requestBody(viewId)
-  }), async () => {
-    await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'candidates', lifecycle.key] })
-  }, 'Could not save Not now')
-  const prepare = useCurrentMutation(client, lifecycle, async () => ({
-    ...await client.rest('/drafts/prepare', {
-      method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
-    }), name: skillName.trim()
-  }), acceptDraft, 'Share preparation failed — nothing was uploaded or shared')
-  const inspectDraft = async () => client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}?view_id=${encodeURIComponent(viewId)}`)
-  const reviewPrepared = (draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
-    method: 'POST', body: requestBody(viewId, { reviewed_hashes: hashes })
-  })
-  const inspect = useCurrentMutation(client, lifecycle, async () => {
-    const inspected = await inspectDraft()
-    const reviewed = await reviewPrepared(draft.draft_id, inspected.expected_hashes)
-    return { inspected, reviewed }
-  }, ({ inspected, reviewed }) => {
-    const nextEditor = {
-      author_description: text(inspected.author_description),
-      files: (Array.isArray(inspected.files) ? inspected.files : []).map(file => ({ ...saveReadyFile(file), _label: text(file.path) })),
-      expected_hashes: inspected.expected_hashes
-    }
-    setEditor(nextEditor)
-    setSavedEditor(nextEditor)
-    setPreparedReview(reviewed)
-    setSavedNotice(false)
-    setWarningAccepted(false)
-  }, 'Could not inspect the prepared draft')
-  const save = useCurrentMutation(client, lifecycle, async () => {
-    const payload = {
-      author_description: editor.author_description,
-      files: editor.files.map(saveReadyFile),
-      expected_hashes: editor.expected_hashes
-    }
-    const saved = await client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}`, {
-      method: 'PUT', body: requestBody(viewId, payload)
-    })
-    const reviewed = await reviewPrepared(draft.draft_id, saved.hashes)
-    return { payload, reviewed }
-  }, ({ payload, reviewed }) => {
-    const nextEditor = { ...payload, files: payload.files.map(file => ({ ...file, _label: text(file.path) })), expected_hashes: reviewed.hashes }
-    setEditor(nextEditor)
-    setSavedEditor(nextEditor)
-    setPreparedReview(reviewed)
-    setSavedNotice(true)
-    setWarningAccepted(false)
-    setReview(null)
-  }, 'Could not save and re-review the prepared draft')
-  const publicationReview = useCurrentMutation(client, lifecycle, async () => {
-    if (dirty) throw new Error('Save and re-review or discard unsaved edits before continuing.')
-    const inspected = await inspectDraft()
-    const localReview = await reviewPrepared(draft.draft_id, inspected.expected_hashes)
-    const warnings = hasReviewableWarnings(localReview)
-    const details = safeWarningFindings(localReview)
-    if (warnings && !details.length) {
-      throw new Error('Draft kept: scanner warning details are unavailable; acknowledgement is blocked.')
-    }
-    if (warnings && !warningAccepted) {
-      throw new Error('Acknowledge the displayed scanner warnings for this exact package before continuing.')
-    }
-    const reviewed = await client.rest('/publication/review', {
-      method: 'POST',
-      body: requestBody(viewId, { draft_id: draft.draft_id, accept_warnings: warnings && warningAccepted })
-    })
-    if (warnings && warningIdentity(localReview) !== warningIdentity(reviewed)) {
-      throw new Error('The scanner findings changed during review. Inspect and acknowledge the updated exact warnings.')
-    }
-    const expected = inspected?.expected_hashes
-    if (!isObject(expected) || !isObject(reviewed?.hashes) || !['content', 'author_description', 'package_manifest'].every(key => expected[key] === reviewed.hashes[key])) {
-      throw new Error('Prepared bytes changed between inspection and publication review.')
-    }
-    return {
-      ...reviewed,
-      name: label(draft),
-      author_description: inspected.author_description,
-      drafted_description: inspected.author_description,
-      files: inspected.files,
-      operation: 'publication'
-    }
-  }, value => { setOutcome(null); setReview(value) }, 'Could not prepare the publication review')
-  const publish = useCurrentMutation(client, lifecycle, async current => ({
-    result: await client.rest('/publication/confirm', {
-      method: 'POST', body: requestBody(viewId, { receipt: current.receipt })
-    }),
-    name: label(current)
-  }), ({ result, name }) => {
-    setReview(null)
-    const named = { ...(result || { state: 'unknown' }), name }
-    if (name !== 'Name unavailable' && result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state) && result?.managed_enrollment?.state !== 'not_linked') {
-      host.notify({ kind: 'success', message: result.publication_state === 'published' ? `✅ ${name} shared` : `${name} submitted for team review` })
-    } else {
-      setOutcome(named)
-    }
-  }, 'Publication was not completed')
-  const warningRequired = hasReviewableWarnings(preparedReview)
-  const warningFindings = safeWarningFindings(preparedReview)
-  const busy = prepare.isPending || prepareCandidate.isPending || notNow.isPending || inspect.isPending || save.isPending || publicationReview.isPending || publish.isPending
-  const shareCandidates = Array.isArray(candidates.data?.candidates) ? candidates.data.candidates : []
-  const localDrafts = Array.isArray(savedDrafts.data?.drafts) ? savedDrafts.data.drafts : []
-  const keepDraft = () => {
-    if (dirty || busy) return
-    setKeptDraft(label(draft))
-    setReview(null)
-    setDraft(null)
-    setPreparedReview(null)
-    setEditor(null)
-    setSavedNotice(false)
-    setWarningAccepted(false)
-    queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'drafts', lifecycle.key] })
-  }
-  const transientRead = [candidates.error, savedDrafts.error].find(isUnavailable)
-  if (transientRead) return jsx(ReadFailure, { error: transientRead, title: 'Sharing data unavailable', onRetry: () => {
-    if (candidates.error) candidates.refetch()
-    if (savedDrafts.error) savedDrafts.refetch()
-  } })
-  return jsxs('div', { className: 'space-y-5', children: [
-    shareCandidates.length ? jsx(Section, { title: 'Worth sharing with your team', description: 'These suggestions come from local use and refinement signals. Share only prepares a private draft for your review.', children:
-      jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: shareCandidates.map(item =>
-        jsxs('li', { 'data-testid': `share-candidate-${item.event_id}`, className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
-          jsxs('div', { className: 'min-w-0', children: [
-            jsx('div', { className: 'text-sm font-medium', children: label(item) }),
-            jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: describeCandidate(item) })
-          ] }),
-          jsxs('div', { className: 'flex flex-wrap justify-end gap-2', children: [
-            jsx(Button, { disabled: busy || dirty, onClick: () => { if (!dirty) prepareCandidate.mutate(item) }, size: 'sm', type: 'button', children: 'Share' }),
-            jsx(Button, { disabled: busy, onClick: () => notNow.mutate(item), size: 'sm', type: 'button', variant: 'ghost', children: 'Not now' })
-          ] })
-        ] }, item.event_id)
-      ) })
-    }) : null,
-    candidates.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Sharing suggestions unavailable: ${text(candidates.error?.message || candidates.error)}` }) : null,
-    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: 'Preparing a skill stays local and private. Review its files and warnings before choosing Share.' }),
-    jsxs('div', { className: 'flex gap-2', children: [
-      jsx(Input, { 'aria-label': 'Local skill name', onChange: event => setSkillName(event.target.value), placeholder: 'Local skill name', value: skillName }),
-      jsx(Button, { disabled: !skillName.trim() || dirty || busy, loading: prepare.isPending, onClick: () => prepare.mutate(), type: 'button', children: 'Share' })
-    ] }),
-    localDrafts.length ? jsx(Section, { title: 'Saved local drafts', children:
-      jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: localDrafts.map(item =>
-        jsxs('li', { className: 'flex items-center justify-between gap-3 py-2', children: [
-          jsxs('div', { className: 'min-w-0', children: [
-            jsx('span', { className: 'text-sm font-medium', children: label(item) }),
-            item.updated_at && !Number.isNaN(Date.parse(item.updated_at))
-              ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `Saved ${new Date(item.updated_at).toLocaleString()}` }) : null
-          ] }),
-          jsx(Button, { disabled: busy || dirty || !item.draft_id || label(item) === 'Name unavailable',
-            onClick: () => acceptDraft({ draft_id: item.draft_id, name: label(item) }),
-            size: 'sm', type: 'button', variant: 'secondary', children: 'Resume' })
-        ] }, item.draft_id)
-      ) }) }) : null,
-    savedDrafts.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: 'Saved drafts are unavailable right now.' }) : null,
-    keptDraft ? jsxs(Section, { title: 'Draft kept', children: [
-      jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: `${keptDraft} was kept locally. Nothing was shared. Select Resume to continue later.` })
-    ] }) : null,
-    draft ? jsxs(Section, { title: 'Private draft', children: [
-      jsx(KeyValue, { name: 'skill', value: label(draft) }),
-      jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Nothing has been uploaded. The original skill is unchanged.' }),
-      jsxs('div', { className: 'flex flex-wrap gap-2', children: [
-        jsx(Button, { disabled: dirty || busy, onClick: () => inspect.mutate(), size: 'sm', type: 'button', variant: 'secondary', children: 'Review and edit exact files' }),
-        jsx(Button, { disabled: dirty || busy || (warningRequired && (!warningFindings.length || !warningAccepted)), onClick: () => publicationReview.mutate(), size: 'sm', type: 'button', children: 'Continue to sharing review' }),
-        jsx(Button, { disabled: dirty || busy, onClick: keepDraft, size: 'sm', type: 'button', variant: 'secondary', children: 'Keep draft and exit' })
-      ] })
-    ] }) : null,
-    preparedReview ? jsxs(Section, { title: 'Exact local package review', children: [
-      jsx(KeyValue, { name: 'author copy', value: preparedReview.author_description }),
-
-      jsx(CheckSummary, { title: 'Local package scanner', check: preparedReview.local_scan, authority: 'Local scan' }),
-      jsx(CheckSummary, { title: 'Local security and upload gate', check: preparedReview.security_check, authority: 'Local security' }),
-      warningRequired ? jsxs('section', { className: 'space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
-        jsx('h4', { className: 'text-xs font-semibold', children: 'Material scanner warnings' }),
-        jsx(FindingList, { items: warningFindings, empty: 'Warning details are unavailable; acknowledgement is blocked.' }),
-        warningFindings.length ? jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
-          jsx(Checkbox, { 'aria-label': 'Acknowledge displayed scanner warnings for this exact package', checked: warningAccepted, onCheckedChange: value => setWarningAccepted(value === true) }),
-          'Acknowledge the displayed scanner warnings for this exact package.'
-        ] }) : null
-      ] }) : null,
-      jsx(FileManifest, { files: preparedReview.files, showContent: true }),
-      dirty ? jsxs('div', { className: 'space-y-2', children: [
-        jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-secondary)', children: 'Unsaved changes stay only in this page. Save and re-review or discard them before continuing or keeping the draft.' }),
-        jsx(Button, { disabled: busy, onClick: () => setEditor(savedEditor), size: 'sm', type: 'button', variant: 'secondary', children: 'Discard unsaved edits' })
-      ] }) : null,
-      editor ? jsx('fieldset', { disabled: busy, className: 'min-w-0 border-0 p-0', children: jsx(PreparedEditor, { draftId: draft?.draft_id, draftName: label(draft), editor, onChange: value => { setEditor(value); setSavedNotice(false); setReview(null); setWarningAccepted(false) }, onSave: () => save.mutate(), saving: save.isPending }) }) : null,
-      savedNotice ? jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-secondary)', children: 'Draft saved and re-reviewed. Nothing was uploaded.' }) : null
-    ] }) : null,
-    review ? jsx(ReviewPanel, { busy: publish.isPending, kind: 'publication', onCancel: keepDraft, onConfirm: () => publish.mutate(review), review }) : null,
-    jsx(OperationOutcome, { kind: 'Publication', result: outcome })
-  ] })
-}
-
-function Enrollment({ client, lifecycle, viewId }) {
-  const queryClient = useQueryClient()
-  const [accepted, setAccepted] = useState(false)
-  const disclosure = useQuery(queryOptions(['disclosure', lifecycle.key], () => client.rest('/enrollment/disclosure')))
-  const enroll = useCurrentMutation(client, lifecycle, () => client.rest('/enrollment/confirm', {
-    method: 'POST', body: requestBody(viewId, { accepted, disclosure_version: disclosure.data.version })
-  }), async (_result, token, isCurrent) => {
-    await queryClient.invalidateQueries({ exact: true, queryKey: [...ROOT_KEY, 'bootstrap', lifecycle.key] })
-    if (isCurrent(token)) host.notify({ kind: 'success', message: 'Collective Wisdom enrolled for this profile' })
-  }, 'Enrollment was not completed')
-  if (disclosure.error && isUnavailable(disclosure.error)) return jsx(ReadFailure, { error: disclosure.error, title: 'Disclosure unavailable', onRetry: () => disclosure.refetch() })
-  return jsx(Section, { title: 'Enroll this profile', description: disclosure.data?.text || 'Loading disclosure…', children:
-    jsxs('div', { className: 'space-y-3', children: [
-      disclosure.error ? jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `Disclosure unavailable: ${text(disclosure.error?.message || disclosure.error)}` }) : null,
-      jsxs('label', { className: 'flex items-start gap-2 text-xs', children: [
-        jsx(Checkbox, { 'aria-label': 'Accept enrollment disclosure', checked: accepted, onCheckedChange: value => setAccepted(value === true) }),
-        'I reviewed and accept this disclosure for the currently connected profile.'
-      ] }),
-      jsx(Button, { disabled: !accepted || !disclosure.data, loading: enroll.isPending, onClick: () => enroll.mutate(), type: 'button', children: 'Enroll profile' })
-    ] })
-  })
-}
-
 function WisdomDialogCatalog({ client, request }) {
   const activeConnectionId = useValue(host.state.connectionId) || ''
   const activeProfile = useValue(host.state.profile) || 'default'
@@ -1307,6 +797,716 @@ function WisdomDialogHost({ client }) {
   })
 }
 
+
+// ---------------------------------------------------------------------------
+// cw/v1 Collective Wisdom page: master-detail, Installed | Browse.
+// Every list and status comes from GET /library (backend aggregates the CORE
+// team_status / folders modules); actions are one-click REST calls.
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 24 * 60 * 60 * 1000
+const libraryKey = lifecycle => [...ROOT_KEY, 'library', lifecycle.key]
+
+// Palette → page handoff ("Share a skill…" opens the picker on arrival).
+const pageIntent = {
+  listeners: new Set(),
+  revision: 0,
+  value: null,
+  set(value) { this.value = value; this.revision += 1; for (const listener of this.listeners) listener() },
+  take() { const value = this.value; this.value = null; return value },
+  subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) },
+  snapshot() { return this.revision }
+}
+
+function daysSince(iso) {
+  const stamp = Date.parse(text(iso))
+  if (Number.isNaN(stamp)) return null
+  return Math.max(0, Math.floor((Date.now() - stamp) / DAY_MS))
+}
+
+function updatedLabel(iso) {
+  const days = daysSince(iso)
+  if (days == null) return null
+  if (days === 0) return 'Updated today'
+  return `Updated ${days === 1 ? '1 day' : `${days} days`} ago`
+}
+
+function shortAgo(iso) {
+  const days = daysSince(iso)
+  if (days == null) return null
+  return days === 0 ? 'updated today' : `updated ${days}d ago`
+}
+
+function formatSize(bytes) {
+  if (!Number.isInteger(bytes)) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function newPowers(capabilities) {
+  const values = (Array.isArray(capabilities) ? capabilities : []).map(text).filter(Boolean)
+  if (!values.length) return null
+  if (values.length === 1) return values[0]
+  return `${values.slice(0, -1).join(', ')} and ${values.at(-1)}`
+}
+
+function usedByText(row) {
+  return text(row?.used_by?.label) || null
+}
+
+function rowName(row) {
+  return text(row?.name || row?.slug) || 'Name unavailable'
+}
+
+function statusBadge(row) {
+  const status = row?.status || {}
+  if (status.kind === 'needs_look') return { label: 'Needs a look', variant: 'warn' }
+  if (status.kind === 'updated' && status.seen === false) return { label: 'Updated', variant: 'success' }
+  if (status.kind === 'no_longer_shared') return { label: 'No longer shared', variant: 'muted' }
+  if (row?.auto_update === false) return { label: 'Auto-update off', variant: 'outline' }
+  return null
+}
+
+function WisdomBadge({ badge }) {
+  if (!badge) return null
+  return jsx(Badge, { size: 'xs', variant: badge.variant, children: badge.label })
+}
+
+// Same geometry as Capabilities' CapRow (h-11 two-line row, active fill).
+function ListRow({ action, active, badge, meta, onSelect, subtitle, title }) {
+  return jsxs('div', {
+    className: `group/row flex h-11 w-full shrink-0 items-center rounded-md hover:text-(--ui-text-primary) ${active ? 'bg-(--ui-row-active-background) text-(--ui-text-primary)' : 'text-(--ui-text-secondary)'}`,
+    children: [
+      jsxs('button', {
+        className: 'flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 pr-1.5 text-left',
+        onClick: onSelect,
+        type: 'button',
+        children: [
+          jsxs('span', { className: 'min-w-0 flex-1', children: [
+            jsxs('span', { className: 'flex min-w-0 items-center gap-1.5', children: [
+              jsx('span', { className: 'truncate text-[0.78rem] font-medium', children: title }),
+              jsx(WisdomBadge, { badge })
+            ] }),
+            subtitle ? jsx('span', { className: 'block truncate text-[0.62rem] text-(--ui-text-tertiary)', children: subtitle }) : null
+          ] }),
+          meta ? jsx('span', { className: 'shrink-0 rounded bg-(--ui-bg-quinary) px-1 py-px text-[0.6rem] tabular-nums leading-3.5 text-(--ui-text-tertiary)', children: meta }) : null
+        ]
+      }),
+      action ? jsx('span', { className: 'mr-1.5 flex shrink-0 items-center', children: action }) : null
+    ]
+  })
+}
+
+function GroupHeader({ collapsible = false, count, label: title, onToggle, open = true }) {
+  const content = [
+    collapsible ? jsx(DisclosureCaret, { open }) : null,
+    jsx('span', { className: 'truncate', children: title }),
+    count != null ? jsx('span', { className: 'ml-auto tabular-nums text-(--ui-text-quaternary)', children: count }) : null
+  ]
+  const className = 'mt-2 flex h-6 w-full items-center gap-1 px-2 text-[0.65rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)'
+  return collapsible
+    ? jsx('button', { 'aria-expanded': open, className: `${className} cursor-pointer hover:text-(--ui-text-secondary)`, onClick: onToggle, type: 'button', children: content })
+    : jsx('div', { className, children: content })
+}
+
+function ViewSwitch({ dot, onChange, value }) {
+  const options = [['installed', 'Installed'], ['browse', 'Browse']]
+  return jsx('div', { className: 'inline-grid w-fit auto-cols-fr grid-flow-col gap-0.5 rounded-[5px] bg-(--ui-bg-tertiary) p-0.5', role: 'tablist', children: options.map(([id, title]) =>
+    jsxs('button', {
+      'aria-selected': value === id,
+      className: `flex min-w-0 items-center justify-center gap-1 rounded-[3px] px-2.5 py-0.5 text-[0.6875rem] font-medium whitespace-nowrap transition-colors ${value === id ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`,
+      onClick: () => onChange(id),
+      role: 'tab',
+      type: 'button',
+      children: [
+        title,
+        id === 'installed' && dot ? jsx('span', { 'aria-label': 'Something needs a look', className: 'size-1.5 rounded-full bg-(--ui-orange)' }) : null
+      ]
+    }, id)
+  ) })
+}
+
+function KV({ name, value }) {
+  if (value == null || value === '') return null
+  return jsxs('div', { className: 'grid grid-cols-[7rem_minmax(0,1fr)] gap-2 py-1 text-xs', children: [
+    jsx('span', { className: 'text-(--ui-text-quaternary)', children: name }),
+    jsx('span', { className: 'min-w-0 break-words text-(--ui-text-secondary)', children: value })
+  ] })
+}
+
+function Callout({ children, tone = 'neutral' }) {
+  const border = tone === 'warn' ? 'border-(--ui-orange)/40' : tone === 'good' ? 'border-(--ui-green)/40' : 'border-(--ui-stroke-secondary)'
+  return jsx('div', { className: `space-y-2 rounded-[6px] border ${border} bg-(--ui-bg-quinary) p-3 text-xs text-(--ui-text-secondary)`, children })
+}
+
+function SkillPreview({ client, lifecycle, skillId }) {
+  const preview = useQuery(queryOptions(['preview', lifecycle.key, skillId], () => client.rest(`/skills/${encodeURIComponent(skillId)}/preview`), Boolean(skillId)))
+  if (preview.isLoading) return jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Loading SKILL.md…' })
+  if (preview.error) return jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: isUnavailable(preview.error) ? UNAVAILABLE_MESSAGE : 'Preview unavailable.' })
+  const data = preview.data || {}
+  if (data.skill_md) {
+    return jsx('pre', { className: 'max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-[6px] border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3 font-mono text-[0.7rem] leading-5 text-(--ui-text-secondary)', children: data.skill_md })
+  }
+  return jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: data.description || 'Install it to see the full SKILL.md.' })
+}
+
+function NeedsLookPanel({ busy, client, lifecycle, onCombine, onFlaggedUpdate, row, viewId }) {
+  const [showFull, setShowFull] = useState(false)
+  const reason = row.status?.reason
+  const full = useQuery(queryOptions(
+    ['combine', lifecycle.key, row.skill_id],
+    () => client.rest(`/combine/${encodeURIComponent(row.skill_id)}?view_id=${encodeURIComponent(viewId)}`),
+    showFull && reason === 'edited'
+  ))
+  if (reason === 'flagged') {
+    const powers = newPowers(row.status?.new_capabilities)
+    return jsxs(Callout, { tone: 'warn', children: [
+      jsx('p', { className: 'font-medium text-(--ui-text-primary)', children: 'The new version needs more access, and the security check flagged it.' }),
+      jsx('p', { children: powers ? `It now ${powers}. Until you update, you stay on your current version.` : 'Until you update, you stay on your current version.' }),
+      jsx('div', { className: 'flex flex-wrap gap-2 pt-1', children:
+        jsx(Button, { disabled: busy, loading: busy, onClick: onFlaggedUpdate, size: 'sm', type: 'button', children: 'Update' })
+      })
+    ] })
+  }
+  const canCombine = reason === 'edited'
+  return jsxs(Callout, { tone: 'warn', children: [
+    jsx('p', { className: 'font-medium text-(--ui-text-primary)', children: canCombine
+      ? 'You edited this skill, and a new version is out.'
+      : 'You edited this skill. Hermes can\'t combine automatically.' }),
+    canCombine && row.status?.summary ? jsx('p', { children: row.status.summary }) : null,
+    !canCombine ? jsx('p', { children: 'Keep your copy, or switch to the new version (your copy goes to the archive).' }) : null,
+    canCombine ? jsx(Button, { onClick: () => setShowFull(value => !value), size: 'inline', type: 'button', variant: 'ghost', children: showFull ? 'Hide full skill' : 'Show full skill' }) : null,
+    canCombine && showFull
+      ? full.isLoading
+        ? jsx('p', { className: 'text-(--ui-text-tertiary)', children: 'Preparing the combined version…' })
+        : full.data?.available
+          ? jsx('pre', { className: 'max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-[4px] border border-(--ui-stroke-tertiary) p-2 font-mono text-[0.7rem]', children: full.data.skill_md })
+          : jsx('p', { className: 'text-(--ui-text-tertiary)', children: full.error ? 'The combined version is unavailable right now.' : 'Hermes can\'t combine automatically.' })
+      : null,
+    jsxs('div', { className: 'flex flex-wrap gap-2 pt-1', children: [
+      canCombine ? jsx(Button, { disabled: busy, onClick: () => onCombine('combine'), size: 'sm', type: 'button', children: 'Combine' }) : null,
+      jsx(Button, { disabled: busy, onClick: () => onCombine('keep_mine'), size: 'sm', type: 'button', variant: 'outline', children: 'Keep mine' }),
+      jsx(Button, { disabled: busy, onClick: () => onCombine('use_new'), size: 'sm', type: 'button', variant: 'ghost', children: 'Use new version' })
+    ] })
+  ] })
+}
+
+function SkillDetail({ actions, client, lifecycle, selection, viewId, viewedUpdate }) {
+  const { kind, row } = selection
+  const installed = kind === 'installed'
+  const shared = kind === 'shared' || (kind === 'browse' && row.shared_by_me)
+  const status = installed ? (viewedUpdate || row.status || {}) : {}
+  const needsLook = installed && status.kind === 'needs_look'
+  const version = installed ? row.installed_version || row.latest_version : row.latest_version
+  const when = shortAgo(installed ? row.applied_at || row.updated_at : row.updated_at)
+  const updateAvailable = installed && !needsLook && row.auto_update === false &&
+    isPositiveInt(row.latest_version) && isPositiveInt(row.installed_version) && row.latest_version > row.installed_version
+  const browseInstalled = kind === 'browse' && row.installed
+  const powers = status.kind === 'updated' ? newPowers(status.new_capabilities) : null
+
+  const footer = []
+  if (kind === 'browse' && !row.installed && !row.shared_by_me) {
+    footer.push(jsx(Button, { disabled: actions.busy, loading: actions.installing === row.skill_id, onClick: () => actions.install(row), size: 'sm', type: 'button', children: 'Install' }, 'install'))
+    footer.push(jsx('span', { className: 'text-[0.68rem] text-(--ui-text-tertiary)', children: 'Nothing runs until you use it.' }, 'hint'))
+  }
+  if (browseInstalled) footer.push(jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Installed' }, 'installed'))
+  if (shared) {
+    footer.push(row.edited
+      ? jsx(Button, { disabled: actions.busy, onClick: () => actions.share(row.source_name || row.slug, { update: true, folder: row.folder, name: rowName(row) }), size: 'sm', type: 'button', children: 'Share update' }, 'share')
+      : jsx(Button, { disabled: true, size: 'sm', type: 'button', variant: 'secondary', children: 'Up to date' }, 'share'))
+  }
+  footer.push(jsx('span', { className: 'flex-1' }, 'spacer'))
+  if (row.portal_url) footer.push(jsx(Button, { onClick: () => actions.openPortal(row.portal_url), size: 'sm', type: 'button', variant: 'ghost', children: 'Open in Portal ↗' }, 'portal'))
+  if (installed) footer.push(jsx(Button, { disabled: actions.busy, onClick: () => actions.uninstall(row), size: 'sm', type: 'button', variant: 'ghost', className: 'text-(--ui-danger)', children: 'Uninstall' }, 'uninstall'))
+
+  return jsxs('main', { className: 'flex min-h-0 flex-col overflow-hidden', children: [
+    jsx('div', { className: 'min-h-0 flex-1 overflow-y-auto overscroll-contain', children: jsxs('div', { className: 'mx-auto max-w-2xl space-y-5 px-5 py-4', children: [
+      jsxs('header', { className: 'space-y-1.5', children: [
+        jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: [
+          jsx('h2', { className: 'text-base font-semibold text-(--ui-text-primary)', children: rowName(row) }),
+          row.folder ? jsx(Badge, { variant: 'muted', children: row.folder }) : null,
+          shared ? jsx(Badge, { variant: row.edited ? 'warn' : 'success', children: row.edited ? 'Edited since you shared' : 'Shared' }) : null,
+          installed ? jsx(WisdomBadge, { badge: statusBadge({ ...row, status }) }) : null
+        ] }),
+        row.description ? jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: row.description }) : null
+      ] }),
+      jsxs('div', { className: 'divide-y divide-(--ui-stroke-tertiary)', children: [
+        jsx(KV, { name: 'Folder', value: row.folder || 'No folder' }),
+        jsx(KV, { name: 'Owner', value: row.owner }),
+        jsx(KV, { name: 'Version', value: version ? [`v${version}`, installed && updateAvailable ? `v${row.latest_version} available` : null, when].filter(Boolean).join(' · ') : when }),
+        jsx(KV, { name: 'Used by', value: usedByText(row) })
+      ] }),
+      kind === 'browse' && row.local_name_collision ? jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'You also have a local skill with this name. The team copy installs alongside it.' }) : null,
+      installed && status.kind === 'no_longer_shared' ? jsx(Callout, { children: jsx('p', { children: 'No longer shared. Your copy keeps working but won\'t receive updates.' }) }) : null,
+      installed && status.kind === 'updated' ? jsx(Callout, { tone: 'good', children: jsx('p', { children: powers ? `Updated — now ${powers}.` : 'Updated to the latest version.' }) }) : null,
+      updateAvailable ? jsx(Callout, { children: jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: [
+        jsx('span', { className: 'flex-1', children: `v${row.latest_version} is available. Nothing changes until you update.` }),
+        jsx(Button, { disabled: actions.busy, onClick: () => actions.manualUpdate(row), size: 'xs', type: 'button', children: 'Update' })
+      ] }) }) : null,
+      installed && status.kind !== 'no_longer_shared' ? jsxs('div', { className: 'flex items-start justify-between gap-4 rounded-[6px] border border-(--ui-stroke-tertiary) p-3', children: [
+        jsxs('div', { className: 'space-y-0.5', children: [
+          jsx('div', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Auto-update' }),
+          jsx('p', { className: 'text-[0.68rem] leading-4 text-(--ui-text-tertiary)', children: row.auto_update
+            ? 'New versions install automatically. If you\'ve edited it, Hermes asks first.'
+            : 'You\'ll see new versions here, but nothing changes until you update.' })
+        ] }),
+        jsx(Switch, { 'aria-label': 'Auto-update', checked: row.auto_update === true, disabled: actions.busy, onCheckedChange: value => actions.setAutoUpdate(row, value === true) })
+      ] }) : null,
+      needsLook
+        ? jsx(NeedsLookPanel, {
+            busy: actions.busy, client, lifecycle, row: { ...row, status }, viewId,
+            onCombine: choice => actions.combine(row, choice),
+            onFlaggedUpdate: () => actions.flaggedUpdate(row)
+          })
+        : jsxs('section', { className: 'space-y-2', children: [
+            jsx('h3', { className: 'text-[0.65rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)', children: 'SKILL.md' }),
+            jsx(SkillPreview, { client, lifecycle, skillId: row.skill_id })
+          ] })
+    ] }) }),
+    jsx('footer', { className: 'shrink-0 border-t border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-5 py-2.5', children:
+      jsx('div', { className: 'mx-auto flex max-w-2xl flex-wrap items-center gap-2', children: footer })
+    })
+  ] })
+}
+
+function ShareDialog({ client, lifecycle, onClose, request, viewId }) {
+  const queryClient = useQueryClient()
+  const [prepared, setPrepared] = useState(null)
+  const [folder, setFolder] = useState('')
+  const [menu, setMenu] = useState(false)
+  const [rename, setRename] = useState('')
+  const [nameTaken, setNameTaken] = useState(false)
+  const [checks, setChecks] = useState(null)
+  const [acknowledged, setAcknowledged] = useState(false)
+  const start = useCurrentMutation(client, lifecycle, () => client.rest('/share/start', {
+    method: 'POST', body: requestBody(viewId, { skill_name: request.skillName })
+  }), value => {
+    setPrepared(value)
+    setFolder(text(request.folder || value?.suggestion?.folder))
+    setNameTaken(value?.name_taken === true)
+    setChecks(value?.checks || null)
+  }, 'Could not prepare this skill for sharing — nothing was shared', () => onClose())
+  useEffect(() => { start.mutate() }, [])
+  const confirm = useCurrentMutation(client, lifecycle, () => client.rest('/share/confirm', {
+    method: 'POST',
+    body: requestBody(viewId, {
+      draft_id: prepared.draft_id,
+      skill_name: request.skillName,
+      folder: folder.trim() || null,
+      rename: nameTaken && rename.trim() ? rename.trim() : null,
+      accept_warnings: acknowledged
+    })
+  }), async (result, token, isCurrent) => {
+    if (result?.state === 'name_taken') { setNameTaken(true); return }
+    if (result?.state === 'checks_failed') { setChecks(result.checks || { ok: false, blocked: true, messages: [] }); return }
+    await queryClient.invalidateQueries({ queryKey: libraryKey(lifecycle) })
+    if (!isCurrent(token)) return
+    const name = text(result?.skill_name || request.skillName)
+    if (result?.state === 'shared') {
+      host.notify({ kind: 'success', message: request.update ? `Shared an update to ${name}.` : `Shared ${name}${result.folder ? ` in ${result.folder}` : ''}.` })
+    } else if (result?.state === 'submitted') {
+      host.notify({ kind: 'info', message: `${name} was sent to your team admins for review.` })
+    } else {
+      host.notify({ kind: 'warning', message: `Sharing ${name} didn't finish. Check again before retrying.` })
+    }
+    onClose()
+  }, 'Sharing was not completed')
+  const options = Array.isArray(prepared?.folder_options) ? prepared.folder_options : []
+  const typed = folder.trim()
+  const matches = options.filter(option => !typed || text(option.name).toLowerCase().includes(typed.toLowerCase()))
+  const isNewFolder = typed && !options.some(option => text(option.name).toLowerCase() === typed.toLowerCase())
+  const suggestion = prepared?.suggestion || {}
+  const showReason = !request.folder && suggestion.reason && typed && typed === text(suggestion.folder)
+  const files = Array.isArray(prepared?.files) ? prepared.files : []
+  const totalSize = files.reduce((sum, file) => sum + (Number.isInteger(file.size) ? file.size : 0), 0)
+  const team = text(prepared?.team_name) || 'your team'
+  const checksFailed = checks && checks.ok === false
+  const blocked = checksFailed && checks.blocked
+  const shareDisabled = !prepared || confirm.isPending || blocked ||
+    (checksFailed && checks.needs_acknowledgement && !acknowledged) || (nameTaken && !rename.trim())
+  return jsx(Dialog, { open: true, onOpenChange: open => { if (!open && !confirm.isPending) onClose() }, children:
+    jsxs(DialogContent, { className: 'max-w-[32rem] text-(--ui-text-primary)', children: [
+      jsxs(DialogHeader, { children: [
+        jsx(DialogTitle, { children: request.update ? `Share an update to ${request.name || request.skillName}` : `Share ${request.skillName}` }),
+        jsx(DialogDescription, { className: 'text-(--ui-text-tertiary)', children: request.update
+          ? 'Teammates with auto-update on get it automatically.'
+          : `Everyone in ${team} can find and install it. You'll be listed as the owner.` })
+      ] }),
+      !prepared
+        ? jsx('p', { className: 'py-6 text-center text-xs text-(--ui-text-tertiary)', children: 'Preparing your skill and choosing a folder…' })
+        : jsxs('div', { className: 'space-y-4', children: [
+            nameTaken ? jsxs('div', { className: 'space-y-1.5', children: [
+              jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: `A teammate already shares a skill called ${request.skillName}. Rename yours to share it.` }),
+              jsx(Input, { 'aria-label': 'New name', autoFocus: true, onChange: event => setRename(event.target.value), placeholder: 'New name', value: rename })
+            ] }) : null,
+            jsxs('div', { className: 'relative space-y-1', children: [
+              jsxs('label', { className: 'flex items-center justify-between text-[0.68rem] font-medium text-(--ui-text-tertiary)', children: [
+                'Folder',
+                showReason ? jsx('span', { className: 'font-normal', children: 'Suggested' }) : null
+              ] }),
+              jsxs('div', { className: 'flex gap-1', children: [
+                jsx(Input, {
+                  'aria-label': 'Folder', 'aria-expanded': menu, className: 'flex-1', maxLength: 48, role: 'combobox',
+                  onChange: event => { setFolder(event.target.value); setMenu(true) },
+                  onFocus: () => setMenu(true),
+                  onKeyDown: event => { if (event.key === 'Escape') setMenu(false); if (event.key === 'Enter') setMenu(false) },
+                  placeholder: 'Pick or type a folder', value: folder
+                }),
+                jsx(Button, { 'aria-label': 'Show folders', onClick: () => setMenu(value => !value), size: 'sm', type: 'button', variant: 'ghost', children: jsx(Codicon, { name: 'chevron-down', size: '0.8rem' }) })
+              ] }),
+              menu ? jsxs('div', { className: 'absolute inset-x-0 top-full z-20 mt-1 max-h-52 overflow-y-auto rounded-[6px] border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-1 shadow-lg', role: 'listbox', children: [
+                ...matches.map(option => jsxs('button', {
+                  className: 'flex w-full items-center justify-between rounded-[4px] px-2 py-1 text-left text-xs hover:bg-(--ui-row-active-background)',
+                  onClick: () => { setFolder(text(option.name)); setMenu(false) }, role: 'option', type: 'button',
+                  children: [jsx('span', { children: option.name }), jsx('span', { className: 'tabular-nums text-(--ui-text-quaternary)', children: option.count || '' })]
+                }, option.name)),
+                isNewFolder ? jsx('button', { className: 'w-full rounded-[4px] px-2 py-1 text-left text-xs text-(--ui-text-secondary) hover:bg-(--ui-row-active-background)', onClick: () => setMenu(false), type: 'button', children: `+ New folder "${typed}"` }) : null,
+                !matches.length && !isNewFolder ? jsx('p', { className: 'px-2 py-1 text-xs text-(--ui-text-tertiary)', children: 'Type a name to create a folder.' }) : null
+              ] }) : null,
+              showReason ? jsx('p', { className: 'text-[0.68rem] text-(--ui-text-tertiary)', children: suggestion.reason }) : null
+            ] }),
+            jsxs('details', { className: 'rounded-[6px] border border-(--ui-stroke-tertiary) text-xs', children: [
+              jsxs('summary', { className: 'flex cursor-pointer items-center justify-between px-3 py-2 text-(--ui-text-secondary)', children: [
+                jsx('span', { children: `${files.length} ${files.length === 1 ? 'file' : 'files'}${totalSize ? ` · ${formatSize(totalSize)}` : ''}` }),
+                jsx('span', { className: 'text-(--ui-text-quaternary)', children: 'Show' })
+              ] }),
+              jsx('ul', { className: 'space-y-0.5 border-t border-(--ui-stroke-tertiary) px-3 py-2', children: files.map(file =>
+                jsxs('li', { className: 'flex justify-between gap-2 font-mono text-[0.68rem]', children: [
+                  jsx('span', { className: 'truncate', children: file.path }),
+                  jsx('span', { className: 'shrink-0 text-(--ui-text-quaternary)', children: formatSize(file.size) })
+                ] }, file.path)
+              ) })
+            ] }),
+            checksFailed ? jsxs(Callout, { tone: 'warn', children: [
+              jsx('p', { className: 'font-medium text-(--ui-text-primary)', children: blocked ? 'A check failed, so this skill can\'t be shared yet.' : 'A check found something to look at before sharing.' }),
+              Array.isArray(checks.messages) && checks.messages.length
+                ? jsx('ul', { className: 'list-disc space-y-0.5 pl-4', children: checks.messages.map((message, index) => jsx('li', { children: message }, index)) })
+                : null,
+              !blocked && checks.needs_acknowledgement ? jsxs('label', { className: 'flex items-center gap-2', children: [
+                jsx(Checkbox, { 'aria-label': 'I have read these warnings', checked: acknowledged, onCheckedChange: value => setAcknowledged(value === true) }),
+                'I\'ve read these and still want to share.'
+              ] }) : null
+            ] }) : null
+          ] }),
+      jsxs('div', { className: 'flex items-center justify-end gap-2 pt-2', children: [
+        jsx(Button, { disabled: confirm.isPending, onClick: onClose, size: 'sm', type: 'button', variant: 'ghost', children: 'Cancel' }),
+        jsx(Button, { disabled: shareDisabled, loading: confirm.isPending, onClick: () => confirm.mutate(), size: 'sm', type: 'button', children: 'Share' })
+      ] })
+    ] })
+  })
+}
+
+function SharePicker({ client, lifecycle, onClose, onPick }) {
+  const [search, setSearch] = useState('')
+  const skills = useQuery(queryOptions(['local-skills', lifecycle.key], () => client.rest('/local-skills')))
+  const rows = (Array.isArray(skills.data?.skills) ? skills.data.skills : []).filter(row => {
+    const needle = search.trim().toLowerCase()
+    return !needle || `${row.name} ${row.description}`.toLowerCase().includes(needle)
+  })
+  return jsx(Dialog, { open: true, onOpenChange: open => { if (!open) onClose() }, children:
+    jsxs(DialogContent, { className: 'max-w-[30rem] text-(--ui-text-primary)', children: [
+      jsxs(DialogHeader, { children: [
+        jsx(DialogTitle, { children: 'Share a skill' }),
+        jsx(DialogDescription, { className: 'text-(--ui-text-tertiary)', children: 'Pick one of your skills. Only that skill is shared.' })
+      ] }),
+      jsx(Input, { 'aria-label': 'Search your skills', autoFocus: true, onChange: event => setSearch(event.target.value), placeholder: 'Search your skills', type: 'search', value: search }),
+      jsx('div', { className: 'max-h-[min(55vh,26rem)] overflow-y-auto', children: skills.isLoading
+        ? jsx('p', { className: 'py-6 text-center text-xs text-(--ui-text-tertiary)', children: 'Loading your skills…' })
+        : skills.error
+          ? jsx(ReadFailure, { error: skills.error, onRetry: () => skills.refetch(), title: 'Your skills are unavailable' })
+          : rows.length
+            ? rows.map(row => jsx(ListRow, { onSelect: () => onPick(row.name), subtitle: row.description, title: row.name }, row.name))
+            : jsx(EmptyState, { title: search ? 'No matching skills' : 'Nothing left to share', description: search ? undefined : 'Every skill you made is already shared, or you haven\'t made one yet.' })
+      })
+    ] })
+  })
+}
+
+function InstallConfirm({ busy, onCancel, onConfirm, pending }) {
+  if (!pending) return null
+  return jsx(Dialog, { open: true, onOpenChange: open => { if (!open) onCancel() }, children:
+    jsxs(DialogContent, { className: 'max-w-[26rem] text-(--ui-text-primary)', children: [
+      jsxs(DialogHeader, { children: [
+        jsx(DialogTitle, { children: `Install ${pending.skill_name}?` }),
+        jsx(DialogDescription, { className: 'text-(--ui-text-secondary)', children: pending.sentence })
+      ] }),
+      jsxs('div', { className: 'flex justify-end gap-2 pt-2', children: [
+        jsx(Button, { disabled: busy, onClick: onCancel, size: 'sm', type: 'button', variant: 'ghost', children: 'Cancel' }),
+        jsx(Button, { disabled: busy, loading: busy, onClick: onConfirm, size: 'sm', type: 'button', children: 'Install' })
+      ] })
+    ] })
+  })
+}
+
+function useLibraryActions({ client, lifecycle, viewId, onShare }) {
+  const queryClient = useQueryClient()
+  const [confirmInstall, setConfirmInstall] = useState(null)
+  const [setupPermission, setSetupPermission] = useState(null)
+  const refresh = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: libraryKey(lifecycle) }),
+    queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'preview', lifecycle.key] }),
+    queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'combine', lifecycle.key] })
+  ])
+  const install = useCurrentMutation(client, lifecycle, ({ row, confirmed = false }) => client.rest('/install/now', {
+    method: 'POST', body: requestBody(viewId, { skill_id: row.skill_id, auto_update: true, confirmed })
+  }), async (result, token, isCurrent) => {
+    if (result?.state === 'confirm') { setConfirmInstall(result); return }
+    setConfirmInstall(null)
+    if (result?.state === 'blocked') {
+      host.notify({ kind: 'warning', message: text(result.sentence) })
+      return
+    }
+    await refresh()
+    if (!isCurrent(token)) return
+    if (result?.state === 'installed') {
+      host.notify({ kind: 'success', message: `Installed ${result.skill_name}. Ready in new sessions. Auto-update is ${result.auto_update === false ? 'off' : 'on'}.` })
+      if (Array.isArray(result.setup_commands) && result.setup_commands.length && result.receipt) {
+        setSetupPermission({ receipt: result.receipt, commands: result.setup_commands.map(command => typeof command === 'string' ? command : JSON.stringify(command)), name: result.skill_name, operation: 'install' })
+      }
+    } else {
+      host.notify({ kind: 'warning', message: `Installing ${text(result?.skill_name) || 'this skill'} didn't finish. Check Installed before trying again.` })
+    }
+  }, 'Install did not complete')
+  const runSetup = useCurrentMutation(client, lifecycle, pending => client.rest('/install/setup', {
+    method: 'POST', body: requestBody(viewId, { receipt: pending.receipt })
+  }), (_result, token, isCurrent) => {
+    const name = setupPermission?.name
+    setSetupPermission(null)
+    if (isCurrent(token)) host.notify({ kind: 'success', message: `Setup finished for ${name}.` })
+  }, 'Setup did not complete. Check its status before trying again.', () => setSetupPermission(null))
+  const restore = useCurrentMutation(client, lifecycle, row => client.rest(`/uninstall/${encodeURIComponent(row.skill_id)}/undo`, {
+    method: 'POST', body: requestBody(viewId)
+  }).then(result => ({ result, row })), async ({ row }, token, isCurrent) => {
+    await refresh()
+    if (isCurrent(token)) host.notify({ kind: 'success', message: `Restored ${rowName(row)}.` })
+  }, 'Could not restore the skill')
+  const uninstall = useCurrentMutation(client, lifecycle, row => client.rest(`/uninstall/${encodeURIComponent(row.skill_id)}`, {
+    method: 'POST', body: requestBody(viewId)
+  }).then(result => ({ result, row })), async ({ result, row }, token, isCurrent) => {
+    await refresh()
+    if (!isCurrent(token)) return
+    if (result?.uninstalled === true || result?.state === 'inactive' || result?.state === 'done') {
+      host.notify({ kind: 'success', message: `Removed ${rowName(row)}`, detail: 'Moved to the archive.', action: { label: 'Undo', onClick: () => restore.mutate(row) } })
+    } else {
+      host.notify({ kind: 'warning', message: `Removing ${rowName(row)} didn't finish. Check Installed before trying again.` })
+    }
+  }, 'Uninstall did not complete')
+  const setAutoUpdate = useCurrentMutation(client, lifecycle, ({ row, enabled }) => client.rest(`/installations/${encodeURIComponent(row.skill_id)}/auto-update`, {
+    method: 'PATCH', body: requestBody(viewId, { enabled })
+  }), refresh, 'Auto-update was not changed')
+  const combine = useCurrentMutation(client, lifecycle, ({ row, choice }) => client.rest(`/combine/${encodeURIComponent(row.skill_id)}`, {
+    method: 'POST', body: requestBody(viewId, { choice })
+  }).then(result => ({ result, row, choice })), async ({ row, choice }, token, isCurrent) => {
+    await refresh()
+    if (!isCurrent(token)) return
+    const name = rowName(row)
+    host.notify({ kind: 'success', message: choice === 'keep_mine'
+      ? `Kept your version of ${name}. The next version will ask again.`
+      : choice === 'combine' ? `Combined ${name}. Your old copy is in the archive.` : `Updated ${name}. Your copy is in the archive.` })
+  }, 'The update was not applied')
+  const flaggedUpdate = useCurrentMutation(client, lifecycle, row => client.rest(`/update/${encodeURIComponent(row.skill_id)}/flagged`, {
+    method: 'POST', body: requestBody(viewId)
+  }).then(result => ({ result, row })), async ({ row }, token, isCurrent) => {
+    await refresh()
+    if (isCurrent(token)) host.notify({ kind: 'success', message: `Updated ${rowName(row)}.` })
+  }, 'The update was not applied')
+  const manualUpdate = useCurrentMutation(client, lifecycle, row => client.rest(`/update/${encodeURIComponent(row.skill_id)}/apply`, {
+    method: 'POST', body: requestBody(viewId)
+  }).then(result => ({ result, row })), async ({ result, row }, token, isCurrent) => {
+    await refresh()
+    if (!isCurrent(token)) return
+    if (result?.updated === true) host.notify({ kind: 'success', message: `Updated ${rowName(row)}.` })
+    else host.notify({ kind: 'warning', message: `Updating ${rowName(row)} didn't finish. Check again before retrying.` })
+  }, 'The update was not applied')
+  const busy = install.isPending || uninstall.isPending || restore.isPending || setAutoUpdate.isPending ||
+    combine.isPending || flaggedUpdate.isPending || manualUpdate.isPending
+  return {
+    busy,
+    installing: install.isPending ? install.variables?.row?.skill_id : null,
+    install: row => install.mutate({ row }),
+    uninstall: row => uninstall.mutate(row),
+    setAutoUpdate: (row, enabled) => setAutoUpdate.mutate({ row, enabled }),
+    combine: (row, choice) => combine.mutate({ row, choice }),
+    flaggedUpdate: row => flaggedUpdate.mutate(row),
+    manualUpdate: row => manualUpdate.mutate(row),
+    share: (skillName, options = {}) => onShare({ skillName, ...options }),
+    openPortal: url => { if (/^https:\/\//.test(text(url))) void client.openExternal?.(url) },
+    dialogs: [
+      jsx(InstallConfirm, {
+        busy: install.isPending, pending: confirmInstall,
+        onCancel: () => setConfirmInstall(null),
+        onConfirm: () => install.mutate({ row: { skill_id: confirmInstall.skill_id }, confirmed: true })
+      }, 'install-confirm'),
+      setupPermission ? jsx(Dialog, { open: true, onOpenChange: open => { if (!open) setSetupPermission(null) }, children:
+        jsx(DialogContent, { className: 'max-w-[32rem] text-(--ui-text-primary)', children:
+          jsx(SetupPermission, { busy: runSetup.isPending, pending: setupPermission, onDefer: () => setSetupPermission(null), onRun: () => runSetup.mutate(setupPermission) })
+        })
+      }, 'setup') : null
+    ]
+  }
+}
+
+function Library({ client, data, lifecycle, viewId }) {
+  const queryClient = useQueryClient()
+  const [view, setView] = useState(data.needs_look > 0 || data.installed.length || data.shared.length ? 'installed' : 'browse')
+  const [selectedKey, setSelectedKey] = useState(null)
+  const [search, setSearch] = useState('')
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const [picker, setPicker] = useState(false)
+  const [share, setShare] = useState(null)
+  const [viewedUpdates, setViewedUpdates] = useState({})
+  const seenRef = useRef(new Set())
+  const actions = useLibraryActions({ client, lifecycle, viewId, onShare: setShare })
+  useSyncExternalStore(listener => pageIntent.subscribe(listener), () => pageIntent.snapshot(), () => pageIntent.snapshot())
+  useEffect(() => { if (pageIntent.value?.share) { pageIntent.take(); setPicker(true) } })
+
+  const needle = search.trim().toLowerCase()
+  const matches = row => !needle || [row.name, row.slug, row.description, row.owner, row.folder].some(value => text(value).toLowerCase().includes(needle))
+  const installed = data.installed.filter(matches)
+  const shared = data.shared.filter(matches)
+  const browse = data.browse.filter(matches)
+  const needsLook = installed.filter(row => row.status?.kind === 'needs_look')
+  const otherInstalled = installed.filter(row => row.status?.kind !== 'needs_look')
+  const groups = new Map()
+  for (const row of browse) {
+    const name = text(row.folder) || 'Other'
+    if (!groups.has(name)) groups.set(name, [])
+    groups.get(name).push(row)
+  }
+  const folders = [...groups.keys()].sort((a, b) => (a === 'Other') - (b === 'Other') || a.localeCompare(b))
+
+  const entries = view === 'installed'
+    ? [...needsLook.map(row => ['installed', row]), ...shared.map(row => ['shared', row]), ...otherInstalled.map(row => ['installed', row])]
+    : folders.flatMap(name => groups.get(name).map(row => ['browse', row]))
+  const keyOf = (kind, row) => `${kind}:${row.skill_id}`
+  const selectedEntry = entries.find(([kind, row]) => keyOf(kind, row) === selectedKey) || entries[0] || null
+  const selection = selectedEntry ? { kind: selectedEntry[0], row: selectedEntry[1] } : null
+
+  // Viewing an Updated item clears its badge; keep showing what changed while it stays open.
+  useEffect(() => {
+    const row = selection?.kind === 'installed' ? selection.row : null
+    if (!row || row.status?.kind !== 'updated' || row.status?.seen !== false || seenRef.current.has(row.skill_id)) return
+    seenRef.current.add(row.skill_id)
+    setViewedUpdates(current => ({ ...current, [row.skill_id]: row.status }))
+    client.rest(`/status/${encodeURIComponent(row.skill_id)}/seen`, { method: 'POST', body: requestBody(viewId) })
+      .then(() => queryClient.invalidateQueries({ queryKey: libraryKey(lifecycle) }))
+      .catch(() => { seenRef.current.delete(row.skill_id) })
+  }, [selection?.row?.skill_id, selection?.row?.status?.kind, selection?.row?.status?.seen])
+
+  const teamEmpty = !data.browse.length && !data.installed.length && !data.shared.length
+  const shareButton = jsx('button', { className: 'cursor-pointer text-[0.68rem] font-medium text-(--ui-text-tertiary) hover:text-(--ui-text-primary)', onClick: () => setPicker(true), type: 'button', children: 'Share a skill…' })
+  const row = (kind, item) => {
+    const key = keyOf(kind, item)
+    const active = selection && keyOf(selection.kind, selection.row) === key
+    if (kind === 'shared') {
+      return jsx(ListRow, { active, badge: { label: item.edited ? 'Edited since you shared' : 'Shared', variant: item.edited ? 'warn' : 'success' }, meta: usedByText(item), onSelect: () => setSelectedKey(key), subtitle: [item.folder, item.no_longer_shared ? 'No longer shared' : null].filter(Boolean).join(' · ') || item.description, title: rowName(item) }, key)
+    }
+    if (kind === 'installed') {
+      const status = viewedUpdates[item.skill_id] && item.status?.kind !== 'needs_look' ? { ...item.status, seen: true } : item.status
+      return jsx(ListRow, { active, badge: statusBadge({ ...item, status }), onSelect: () => setSelectedKey(key), subtitle: [item.owner, updatedLabel(item.applied_at || item.updated_at)].filter(Boolean).join(' · '), title: rowName(item) }, key)
+    }
+    const action = item.installed
+      ? jsx('span', { className: 'text-[0.62rem] text-(--ui-text-quaternary)', children: 'Installed' })
+      : item.shared_by_me
+        ? jsx('span', { className: 'text-[0.62rem] text-(--ui-text-quaternary)', children: 'Yours' })
+        : jsx(Button, { disabled: actions.busy, loading: actions.installing === item.skill_id, onClick: () => actions.install(item), size: 'xs', type: 'button', variant: 'secondary', children: 'Install' })
+    return jsx(ListRow, { action, active, meta: usedByText(item), onSelect: () => setSelectedKey(key), subtitle: [item.owner, item.description].filter(Boolean).join(' · '), title: rowName(item) }, key)
+  }
+
+  let list
+  if (teamEmpty) {
+    list = jsxs('div', { className: 'space-y-3 px-2 py-8 text-center', children: [
+      jsx(EmptyState, { className: 'min-h-0', title: 'Nobody has shared a skill yet', description: 'Share one of yours and your team can install it.' }),
+      jsx(Button, { onClick: () => setPicker(true), size: 'sm', type: 'button', children: 'Share a skill' })
+    ] })
+  } else if (view === 'installed') {
+    list = !installed.length && !shared.length
+      ? jsxs('div', { className: 'space-y-3 px-2 py-8 text-center', children: [
+          jsx(EmptyState, { className: 'min-h-0', title: needle ? 'No matches' : 'Nothing installed yet', description: needle ? undefined : 'Browse what your team shared.' }),
+          needle ? null : jsx(Button, { onClick: () => setView('browse'), size: 'sm', type: 'button', variant: 'secondary', children: 'Browse' })
+        ] })
+      : [
+          needsLook.length ? jsx(GroupHeader, { count: needsLook.length, label: 'Needs a look' }, 'g-needs') : null,
+          ...needsLook.map(item => row('installed', item)),
+          shared.length ? jsx(GroupHeader, { count: shared.length, label: 'Shared by you' }, 'g-shared') : null,
+          ...shared.map(item => row('shared', item)),
+          otherInstalled.length ? jsx(GroupHeader, { count: otherInstalled.length, label: 'From your team' }, 'g-team') : null,
+          ...otherInstalled.map(item => row('installed', item))
+        ]
+  } else {
+    list = !browse.length
+      ? jsx(EmptyState, { className: 'min-h-32', title: 'No matches', description: `No team skills match “${search.trim()}”.` })
+      : folders.flatMap(name => {
+          const open = !collapsed.has(name)
+          return [
+            jsx(GroupHeader, { collapsible: true, count: groups.get(name).length, label: name, open, onToggle: () => setCollapsed(current => {
+              const next = new Set(current)
+              if (next.has(name)) next.delete(name)
+              else next.add(name)
+              return next
+            }) }, `g-${name}`),
+            ...(open ? groups.get(name).map(item => row('browse', item)) : [])
+          ]
+        })
+  }
+
+  return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
+    jsxs('header', { className: 'flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-(--ui-stroke-tertiary) px-4 py-2.5', children: [
+      jsxs('div', { className: 'flex items-center gap-2', children: [
+        jsx(Codicon, { name: 'library', size: '1rem' }),
+        jsx('h1', { className: 'text-sm font-semibold', children: 'Collective Wisdom' }),
+        data.team_name ? jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: data.team_name }) : null
+      ] }),
+      jsx(ViewSwitch, { dot: data.needs_look > 0, onChange: next => { setView(next); setSelectedKey(null) }, value: view })
+    ] }),
+    jsxs('div', { className: 'grid min-h-0 flex-1 grid-cols-1 sm:grid-cols-[minmax(16rem,0.75fr)_minmax(0,1fr)]', children: [
+      jsxs('aside', { className: 'flex min-h-0 flex-col border-r border-(--ui-stroke-tertiary) p-2', children: [
+        jsxs('div', { className: 'mb-1 flex h-6 shrink-0 items-center justify-between gap-2 pl-2 pr-1', children: [
+          jsx('span', { className: 'text-[0.68rem] font-medium text-(--ui-text-tertiary)', children: view === 'installed' ? 'Installed' : `${data.team_name || 'Team'} skills` }),
+          shareButton
+        ] }),
+        teamEmpty ? null : jsx(Input, { 'aria-label': 'Search skills', className: 'mb-1 h-7 text-xs', onChange: event => setSearch(event.target.value), placeholder: 'Search names, owners, folders', type: 'search', value: search }),
+        jsx('div', { className: 'min-h-0 flex-1 overflow-y-auto overscroll-contain', children: list })
+      ] }),
+      selection
+        ? jsx(SkillDetail, { actions, client, lifecycle, selection, viewId, viewedUpdate: viewedUpdates[selection.row.skill_id] && selection.row.status?.kind !== 'needs_look' ? viewedUpdates[selection.row.skill_id] : null }, keyOf(selection.kind, selection.row))
+        : jsx('main', { className: 'grid min-h-0 place-items-center p-6', children: jsx(EmptyState, { title: 'Select a skill', description: 'Its details show here.' }) })
+    ] }),
+    picker ? jsx(SharePicker, { client, lifecycle, onClose: () => setPicker(false), onPick: name => { setPicker(false); setShare({ skillName: name }) } }) : null,
+    share ? jsx(ShareDialog, { client, lifecycle, onClose: () => setShare(null), request: share, viewId }, share.skillName) : null,
+    ...actions.dialogs
+  ] })
+}
+
+function SignedOut({ onRetry }) {
+  return jsx('div', { className: 'grid h-full place-items-center p-8', children: jsxs('div', { className: 'max-w-sm space-y-3 text-center', children: [
+    jsx(Codicon, { name: 'organization', size: '1.75rem' }),
+    jsx('h2', { className: 'text-sm font-semibold', children: 'Share skills with your team' }),
+    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: 'See the skills your teammates shared and share your own. Available on Nous team plans.' }),
+    jsxs('div', { className: 'flex justify-center gap-2', children: [
+      jsx(Button, { onClick: () => host.navigate('/settings?tab=providers'), size: 'sm', type: 'button', children: 'Sign in with Nous' }),
+      jsx(Button, { onClick: onRetry, size: 'sm', type: 'button', variant: 'ghost', children: 'Check again' })
+    ] })
+  ] }) })
+}
+
+function ConsentGate({ client, consent, lifecycle, viewId }) {
+  const queryClient = useQueryClient()
+  const accept = useCurrentMutation(client, lifecycle, () => client.rest('/consent', {
+    method: 'POST', body: requestBody(viewId)
+  }), async () => {
+    await queryClient.invalidateQueries({ queryKey: [...ROOT_KEY, 'consent', lifecycle.key] })
+    await queryClient.invalidateQueries({ queryKey: libraryKey(lifecycle) })
+  }, 'Collective Wisdom could not be turned on')
+  return jsx('div', { className: 'grid h-full place-items-center p-8', children: jsxs('div', { className: 'max-w-md space-y-4', children: [
+    jsxs('div', { className: 'flex items-center gap-2', children: [jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h2', { className: 'text-sm font-semibold', children: 'Collective Wisdom' })] }),
+    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: `Share skills with ${text(consent?.team_name) || 'your team'} and install the ones they share.` }),
+    jsx('p', { className: 'whitespace-pre-line rounded-[6px] border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3 text-xs leading-5 text-(--ui-text-secondary)', children: text(consent?.disclosure_text) }),
+    jsx('div', { className: 'flex justify-end', children: jsx(Button, { disabled: !viewId, loading: accept.isPending, onClick: () => accept.mutate(), size: 'sm', type: 'button', children: 'Continue' }) })
+  ] }) })
+}
+
 function WisdomPage({ client }) {
   const connectionId = useValue(host.state.connectionId) || ''
   const profile = useValue(host.state.profile) || 'default'
@@ -1315,89 +1515,52 @@ function WisdomPage({ client }) {
   const tracker = useRef({ generation: 0, gateway: null, manualGeneration: -1, mounted: true, signature: null }).current
   tracker.mounted = true
   const lifecycle = { ...lifecycleFor({ connectionId, profile }, gateway, manualGeneration, tracker), mounted: () => tracker.mounted }
-  const [tab, setTab] = useState('catalog')
   const available = client.active() && Boolean(connectionId) && gateway === 'open'
-  const view = useQuery(queryOptions(['view', lifecycle.key], () => client.rest('/views', { method: 'POST' }), available))
-  const bootstrap = useQuery(queryOptions(['bootstrap', lifecycle.key], () => client.rest('/bootstrap'), available))
-  const surfaces = bootstrap.data?.surfaces || {}
+  const consent = useQuery(queryOptions(['consent', lifecycle.key], () => client.rest('/consent'), available))
+  const view = useQuery(queryOptions(['view', lifecycle.key], () => client.rest('/views', { method: 'POST' }), available && Boolean(consent.data)))
+  const ready = consent.data?.accepted === true && consent.data?.configured === true
+  const library = useQuery(queryOptions(['library', lifecycle.key], () => client.rest('/library'), available && ready))
   useEffect(() => () => { tracker.mounted = false; tracker.generation += 1 }, [tracker])
+  const reload = () => setManualGeneration(value => value + 1)
 
-  let content
   if (!available) {
-    content = jsxs('div', { className: 'space-y-3', children: [
-      jsx(EmptyState, { title: 'Collective Wisdom unavailable', description: connectionId ? `Gateway is ${gateway}. Reconnect before opening a new review.` : 'Desktop did not provide a connection identity. This SDK/backend combination cannot safely route Wisdom operations.' }),
-      jsx(Button, { onClick: () => setManualGeneration(value => value + 1), type: 'button', variant: 'secondary', children: 'Recheck connection' })
-    ] })
-  } else if (bootstrap.error || view.error) {
-    const error = [bootstrap.error, view.error].find(isAuthError) || bootstrap.error || view.error
-    content = jsxs('div', { className: 'space-y-3', children: [
-      jsx(EmptyState, { title: isAuthError(error) ? 'Ownership must be rechecked' : 'Collective Wisdom unavailable', description: isAuthError(error) ? 'The backend rejected this owner/view. Cached data was dropped; create a fresh view for the current connection and profile.' : isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
-      jsx(Button, { onClick: isUnavailable(error) ? () => {
-        if (bootstrap.error) bootstrap.refetch()
-        if (view.error) view.refetch()
-      } : () => setManualGeneration(value => value + 1), type: 'button', variant: 'secondary', children: isUnavailable(error) ? 'Retry' : 'Reload with a fresh review' })
-    ] })
-  } else if (!bootstrap.data || !view.data) {
-    content = jsx('p', { className: 'p-5 text-sm text-(--ui-text-tertiary)', children: 'Loading owner-bound Wisdom data…' })
-  } else if (bootstrap.data.status?.configured !== true) {
-    content = jsx(Enrollment, { client, lifecycle, viewId: view.data.view_id })
-  } else if (tab === 'installed') {
-    content = jsx(Installed, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
-  } else if (tab === 'settings' && surfaces.notification_settings === true) {
-    content = jsx(Settings, { bootstrap: bootstrap.data, client, lifecycle, viewId: view.data.view_id })
-  } else if (tab === 'contribute') {
-    content = jsx(Contributions, { client, lifecycle, viewId: view.data.view_id, shareSuggestions: surfaces.share_suggestions === true })
-  } else {
-    content = jsx(Catalog, { client, lifecycle, viewId: view.data.view_id })
-  }
-
-  if (available && !bootstrap.error && !view.error && view.data && bootstrap.data?.status?.configured === true && ['installed', 'contribute'].includes(tab)) {
-    const pending = (bootstrap.data.status.pending_operations || []).filter(row =>
-      tab === 'contribute' ? row.kind === 'publication' : row.kind !== 'publication')
-    content = jsxs('div', { className: 'space-y-4', children: [
-      ...pending.map(row => jsx(OperationOutcome, {
-        kind: ({ publication: 'Publication', install: 'Install', update: 'Update', wisdom_setup: 'Setup' })[row.kind] || 'Action',
-        result: { ...row, phase: row.phase || row.stage,
-          detail: 'An earlier action has not finished. Open a terminal and run hermes wisdom status --json to check its current state before trying again.' }
-      }, row.operation_id)),
-      content
-    ] })
-  }
-
-  const tabs = [['catalog', 'Catalog'], ['installed', 'Installed'], ['contribute', 'Contribute']]
-  return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
-    jsxs('header', { className: 'shrink-0 space-y-3 border-b border-(--ui-stroke-secondary) px-5 py-4', children: [
-      jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
-        jsxs('div', { className: 'flex items-center gap-2', children: [jsx(Codicon, { name: 'library', size: '1rem' }), jsx('h1', { className: 'text-base font-semibold', children: 'Collective Wisdom' })] }),
-        surfaces.notification_settings === true
-          ? jsx(Button, { onClick: () => setTab('settings'), size: 'sm', type: 'button', variant: tab === 'settings' ? 'secondary' : 'ghost', children: 'Settings' })
-          : null
-      ] }),
-      jsx('nav', { 'aria-label': 'Collective Wisdom sections', className: 'flex flex-wrap gap-1', children: tabs.map(([value, title]) =>
-        jsx(Button, { onClick: () => setTab(value), size: 'sm', type: 'button', variant: tab === value ? 'secondary' : 'ghost', children: title }, value)
-      ) })
-    ] }),
-    jsx(ScrollArea, { className: 'min-h-0 flex-1', children: jsxs('main', { className: 'mx-auto w-full max-w-4xl space-y-5 p-5', children: [
-      jsxs('details', { children: [
-        jsx('summary', { className: 'cursor-pointer text-xs text-(--ui-text-quaternary)', children: 'Connection details' }),
-        jsx('p', { className: 'mt-2 text-xs text-(--ui-text-tertiary)', children: `connection ${connectionId || 'unavailable'} · profile ${profile} · generation ${lifecycle.generation} · gateway ${gateway}` })
-      ] }),
-      jsx(Separator, {}), content
+    return jsx('div', { className: 'grid h-full place-items-center p-8', children: jsxs('div', { className: 'space-y-3 text-center', children: [
+      jsx(EmptyState, { className: 'min-h-0', title: 'Collective Wisdom unavailable', description: connectionId ? `Hermes is ${gateway}. Reconnect to continue.` : 'Hermes Desktop did not provide a connection for this page.' }),
+      jsx(Button, { onClick: reload, size: 'sm', type: 'button', variant: 'secondary', children: 'Check again' })
     ] }) })
-  ] })
+  }
+  const error = consent.error || view.error || library.error
+  if (error) {
+    const signedOut = isAuthError(error) || error?.status === 403 || error?.statusCode === 403 || /\b403\b/.test(text(error?.message))
+    if (signedOut && (consent.error || !consent.data)) return jsx(SignedOut, { onRetry: reload })
+    return jsx('div', { className: 'grid h-full place-items-center p-8', children: jsxs('div', { className: 'space-y-3 text-center', children: [
+      jsx(EmptyState, { className: 'min-h-0', title: signedOut ? 'Your account changed' : 'Collective Wisdom unavailable', description: signedOut ? 'Reload to continue with the current account.' : isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
+      jsx(Button, { onClick: isUnavailable(error) ? () => { consent.refetch(); if (view.error) view.refetch(); if (library.error) library.refetch() } : reload, size: 'sm', type: 'button', variant: 'secondary', children: isUnavailable(error) ? 'Retry' : 'Reload' })
+    ] }) })
+  }
+  if (!consent.data) return jsx('p', { className: 'p-5 text-sm text-(--ui-text-tertiary)', children: 'Loading Collective Wisdom…' })
+  if (!ready) return jsx(ConsentGate, { client, consent: consent.data, lifecycle, viewId: view.data?.view_id })
+  if (!library.data || !view.data) return jsx('p', { className: 'p-5 text-sm text-(--ui-text-tertiary)', children: 'Loading your team\'s skills…' })
+  return jsx(Library, { client, data: {
+    team_name: library.data.team_name,
+    needs_look: library.data.needs_look || 0,
+    installed: Array.isArray(library.data.installed) ? library.data.installed : [],
+    shared: Array.isArray(library.data.shared) ? library.data.shared : [],
+    browse: Array.isArray(library.data.browse) ? library.data.browse : []
+  }, lifecycle, viewId: view.data.view_id })
 }
 
 export default {
   id: 'collective-wisdom',
   name: 'Collective Wisdom',
-  description: 'Share, browse, install, and update team skills with exact review.',
+  description: 'Share skills with your team, install theirs, and keep them up to date.',
   defaultEnabled: false,
   register(ctx) {
     let active = true
     const client = { active: () => active, rest: (...args) => {
       if (!active) return Promise.reject(Object.assign(new Error('Collective Wisdom plugin is disabled.'), { stale: true }))
       return ctx.rest(...args)
-    } }
+    }, openExternal: url => (active && ctx.os?.openExternal ? ctx.os.openExternal(url) : Promise.resolve(false)) }
     // /notices/end-turn consumes a human offer without session/message binding.
     // Do not poll it from an unbound gateway event or from historical footer mounts.
     const openDiscovery = draft => {
@@ -1424,8 +1587,9 @@ export default {
     ctx.onDispose(() => { active = false; slashDialog.close() })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: WISDOM_ROUTE }, render: () => jsx(WisdomPage, { client }) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'library', label: 'Wisdom', path: WISDOM_ROUTE } },
-      { id: 'open', area: PALETTE_AREA, data: { id: 'collective-wisdom.open', label: 'Collective Wisdom: Open', keywords: ['wisdom', 'skills', 'catalog', 'install', 'contribute'], run: () => host.navigate(WISDOM_ROUTE) } },
+      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'library', label: 'Collective Wisdom', path: WISDOM_ROUTE } },
+      { id: 'open', area: PALETTE_AREA, data: { id: 'collective-wisdom.open', label: 'Collective Wisdom: Open', keywords: ['wisdom', 'skills', 'team', 'browse', 'install'], run: () => host.navigate(WISDOM_ROUTE) } },
+      { id: 'share', area: PALETTE_AREA, data: { id: 'collective-wisdom.share', label: 'Collective Wisdom: Share a skill…', keywords: ['wisdom', 'share', 'skill', 'team'], run: () => { pageIntent.set({ share: true }); host.navigate(WISDOM_ROUTE) } } },
       { id: 'slash-dialog', area: COMPOSER_AREAS.top, render: () => jsx(WisdomDialogHost, { client }) },
       { id: 'slash-middleware', area: COMPOSER_AREAS.middleware, order: 40, data: { handler: openDiscovery } }
     ])

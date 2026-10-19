@@ -63,11 +63,10 @@ def test_browse_tty_uses_bordered_wrapping_table_with_safe_rich_text(monkeypatch
     rendered = output.getvalue()
     plain = _plain(rendered)
     assert "Shared skills" in plain
-    assert all(heading in plain for heading in ("Name", "Status", "Version", "Description"))
+    assert all(heading in plain for heading in ("Name", "Owner", "Used by", "Status"))
     assert "Installed" in plain and "v11" in plain
     assert all(token in plain for token in ("bold", "red", "owned"))
     assert "\x1b]8;" not in rendered
-    assert "being" in plain and "clipped" in plain
     assert "┏" in plain and "┘" in plain
     assert max(map(len, plain.splitlines())) <= 60
     assert "\x1b[" in rendered
@@ -183,7 +182,7 @@ def test_installed_tty_uses_actual_installation_fields(monkeypatch, width):
 
     rendered = output.getvalue()
     plain = _plain(rendered)
-    assert "Managed installations" in plain
+    assert "Installed team skills" in plain
     assert "incident" in plain
     assert "skill-2" not in plain
     assert "Unnamed skill" in plain
@@ -215,9 +214,9 @@ def test_summary_commands_use_semantic_terminal_tables(monkeypatch, command, pay
 
 
 @pytest.mark.parametrize(("command", "payload", "message"), [
-    ("browse", {"skills": []}, "No matching shared skills."),
+    ("browse", {"skills": []}, "Nobody has shared a skill yet."),
     ("versions", {"versions": []}, "No published versions."),
-    ("installed", {"installations": []}, "No managed installations."),
+    ("installed", {"installations": []}, "No installed team skills."),
 ])
 def test_empty_tty_tables_are_explicit(monkeypatch, command, payload, message):
     """Empty tty tables are explicit."""

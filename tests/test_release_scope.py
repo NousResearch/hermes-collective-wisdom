@@ -98,9 +98,13 @@ def test_registration_exposes_only_the_slash_dispatch_hook(tmp_path, monkeypatch
     )
     try:
         plugin.register(context)
-        assert entries["hooks"] == ["pre_gateway_dispatch"]
+        # cw/v1: dispatch also triggers auto-update; session start freezes the
+        # one-line note shown with the first reply. One aux task for Combine/folders.
+        assert entries["hooks"] == [
+            "pre_gateway_dispatch", "on_session_start", "transform_llm_output",
+        ]
         assert not entries["tools"]
-        assert not entries["auxiliary"]
+        assert entries["auxiliary"] == ["hermes_collective_wisdom_assist"]
         assert entries["cli"] == entries["slash"] == "wisdom"
         assert entries["slack"] == "slack" and entries["telegram"] is True
         hint = entries["args_hint"]

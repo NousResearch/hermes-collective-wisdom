@@ -3,8 +3,10 @@
 
 from typing import Any
 import asyncio
+import contextvars
 import shlex
 import threading
+import time
 
 
 
@@ -228,6 +230,116 @@ def _register_local_awareness(  # pylint: disable=too-many-arguments,too-many-po
     )
 
 
+_DORMANT_AWARENESS_HOOKS = frozenset({"pre_llm_call", "on_skill_lifecycle", "on_session_end"})
+_NOTE_SESSIONS = 64
+
+
+class _TeamUpdates:
+    """Session-start note and rate-limited auto-update for installed team skills.
+
+    The note is computed from local state only and frozen per session at
+    ``on_session_start``; it is appended once to that session's first local reply.
+    The auto-update check runs off the turn thread, at most once per 10 minutes
+    per profile (claimed in plugin state before any credential read), so offline
+    or signed-out profiles never retry hot.
+    """
+
+    def __init__(self, runtime: Any, profile: Any) -> None:
+        self.runtime = runtime
+        self.profile = profile
+        self.notes: dict[str, str] = {}
+        self.lock = threading.Lock()
+        self.running = False
+        self.last_trigger = 0.0
+
+    def session_start(self, **facts: Any) -> None:
+        from .runtime import current_profile  # pylint: disable=import-outside-toplevel
+        from .team_status import (  # pylint: disable=import-outside-toplevel
+            note_platform_allowed, session_note,
+        )
+
+        session_id = str(facts.get("session_id") or "")
+        try:
+            if current_profile() != self.profile:
+                return
+        except Exception:  # pylint: disable=broad-exception-caught
+            return
+        if session_id and note_platform_allowed(facts.get("platform")):
+            note = session_note(self.runtime, consume=True)
+            if note:
+                with self.lock:
+                    if len(self.notes) >= _NOTE_SESSIONS:
+                        self.notes.pop(next(iter(self.notes)))
+                    self.notes[session_id] = note
+        self.trigger()
+
+    def gateway_dispatch(self, **kwargs: Any) -> Any:
+        result = self.runtime.native.hook(**kwargs)
+        self.trigger()
+        return result
+
+    def first_reply(self, **facts: Any) -> str | None:
+        from .team_status import note_platform_allowed  # pylint: disable=import-outside-toplevel
+
+        response = facts.get("response_text")
+        if not isinstance(response, str) or not response:
+            return None
+        if not note_platform_allowed(facts.get("platform")):
+            return None
+        with self.lock:
+            note = self.notes.pop(str(facts.get("session_id") or ""), None)
+        return f"{response}\n\n{note}" if note else None
+
+    def trigger(self) -> None:
+        """Start one background maintenance pass unless one is already running."""
+        now = time.monotonic()
+        with self.lock:
+            # Cheap in-process debounce; the durable 10-minute claim is in plugin state.
+            if self.running or (self.last_trigger and now - self.last_trigger < 60):
+                return
+            self.running = True
+            self.last_trigger = now
+        context = contextvars.copy_context()
+        thread = threading.Thread(
+            target=context.run, args=(self._run,), name="collective-wisdom-auto-update",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            with self.lock:
+                self.running = False
+
+    def _run(self) -> None:
+        from .runtime import current_profile  # pylint: disable=import-outside-toplevel
+
+        service = None
+        try:
+            if current_profile() != self.profile:
+                return
+            service = self.runtime._service()  # pylint: disable=protected-access
+            service.maintenance_tick()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # Signed out, offline or not enrolled: try again next interval.
+        finally:
+            if service is not None:
+                self.runtime._close_service(service)  # pylint: disable=protected-access
+            with self.lock:
+                self.running = False
+
+
+def _register_team_updates(ctx: Any, runtime: Any, profile: Any, scope: Any) -> None:
+    """Register the cw/v1 session-start note and auto-update trigger."""
+    updates = _TeamUpdates(runtime, profile)
+    runtime.registrations.append(
+        ctx.register_hook("pre_gateway_dispatch", updates.gateway_dispatch)
+    )
+    if "on_session_start" in scope.hooks:
+        runtime.registrations.append(ctx.register_hook("on_session_start", updates.session_start))
+    if "transform_llm_output" in scope.hooks:
+        runtime.registrations.append(ctx.register_hook("transform_llm_output", updates.first_reply))
+
+
 def register(ctx: Any) -> None:
     """Register lazily, including when signed out; start no background work."""
     from .commands import build_parser  # pylint: disable=import-outside-toplevel
@@ -269,6 +381,15 @@ def register(ctx: Any) -> None:
     awareness_lock = threading.Lock()
     poll_lock = threading.Lock()
 
+    if "hermes_collective_wisdom_assist" in scope.auxiliary_tasks:
+        runtime.registrations.append(ctx.register_auxiliary_task(
+            "hermes_collective_wisdom_assist",
+            display_name="Collective Wisdom assist",
+            description=(
+                "Combine your edits with a teammate's new skill version and suggest a "
+                "folder when you share a skill."
+            ),
+        ))
     if "hermes_collective_wisdom_refinement" in scope.auxiliary_tasks:
         runtime.registrations.append(ctx.register_auxiliary_task(
             "hermes_collective_wisdom_refinement",
@@ -286,13 +407,13 @@ def register(ctx: Any) -> None:
         runtime.close()
 
     ctx.on_unload(close)
-    runtime.registrations.append(
-        ctx.register_hook("pre_gateway_dispatch", runtime.native.hook)
-    )
+    # The private /wisdom dispatch hook also drives the rate-limited auto-update
+    # check on the messaging gateway (no plugin housekeeping-tick hook exists).
+    _register_team_updates(ctx, runtime, profile, scope)
 
     # Suggestion capture, proactive notices and model tools stay implemented but
     # are registered only by a release scope that ships them.
-    if set(scope.hooks) - {"pre_gateway_dispatch"}:
+    if set(scope.hooks) & _DORMANT_AWARENESS_HOOKS:
         _register_local_awareness(
             ctx, runtime, lifecycle, profile, awareness_turns, awareness_lock, poll_lock,
             offer_turns,

@@ -27,9 +27,16 @@ class Installed:
 
 class Reviewer:
     def check(self, _skill_id):
-        return {"state": "update_available", "effective_update_mode": "AUTO_WITH_NOTICE"}
+        # cw/v1: auto-apply needs a readable Gateway scan pass for the new version.
+        return {
+            "state": "update_available", "effective_update_mode": "AUTO_WITH_NOTICE",
+            "latest_version": 2,
+            "latest_access_review": {
+                "access_expanded": False, "new_capabilities": [], "scan_status": "pass",
+            },
+        }
 
-    def plan_automatic(self, skill_id):
+    def plan_automatic(self, skill_id, **_kwargs):
         return {"receipt": f"receipt:{skill_id}"}
 
 
@@ -97,10 +104,10 @@ def test_modified_automatic_update_is_review_only_and_does_not_block_neighbor():
             ]
 
     class ModifiedReviewer(Reviewer):
-        def plan_automatic(self, skill_id):
+        def plan_automatic(self, skill_id, **kwargs):
             if skill_id == "skill-a":
                 raise PackagePolicyError("installed package has local modifications")
-            return super().plan_automatic(skill_id)
+            return super().plan_automatic(skill_id, **kwargs)
 
     executor = Executor()
     result = AutomaticUpdateMaintenance(
@@ -110,9 +117,11 @@ def test_modified_automatic_update_is_review_only_and_does_not_block_neighbor():
     assert result == {
         "results": [
             {
+                # cw/v1: a refused plan pauses as "Needs a look" (single Update).
                 "skill_id": "skill-a",
-                "state": "needs_review",
-                "reason": "installed package has local modifications",
+                "state": "needs_look",
+                "reason": "flagged",
+                "detail": "installed package has local modifications",
             },
             {
                 "skill_id": "skill-b",

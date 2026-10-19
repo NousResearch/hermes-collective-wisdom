@@ -4,8 +4,12 @@ name: collective-wisdom
 version: 0.1.0.dev0
 description: "Share, discover, install and manage team skills with Collective Wisdom."
 requires_hermes: ">=0.21.5"
-# The manual skill-sharing release registers only the private /wisdom dispatch
-# hook. Suggestion, notice and model-tool surfaces are dormant; see
+# The manual skill-sharing release registers the private /wisdom dispatch hook
+# (which also drives the rate-limited auto-update check on the gateway), the
+# session-start note/auto-update trigger, and the one-shot note on the first
+# local reply. Suggestion, notice and model-tool surfaces are dormant; see
 # hermes_wisdom_plugin/release_scope.py.
 provides_hooks:
   - pre_gateway_dispatch
+  - on_session_start
+  - transform_llm_output

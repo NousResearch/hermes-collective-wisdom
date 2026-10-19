@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -274,3 +275,165 @@ class QualificationState:  # pylint: disable=too-many-public-methods
             for row in value["skills"].values():
                 if row["canonical_path"] not in active_paths:
                     row["deleted_at"] = datetime.now(timezone.utc).isoformat()
+
+
+_TEAM_KEY = "wisdom-team-updates"
+_TEAM_LOCK = "\0wisdom-team-updates"
+_TEAM_FIELDS = (
+    "slug", "kind", "reason", "version", "new_capabilities", "summary", "updated_at",
+    "seen", "noted", "skipped_version", "prepared", "combine_attempt_tick",
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def owner_key(owner: dict[str, Any]) -> str:
+    """Stable, non-secret key for one exact installation owner binding."""
+    return hashlib.sha256(
+        json.dumps(owner, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+
+
+class TeamUpdateState:
+    """Owner-bound team-skill status: updated / needs-a-look / prepared Combine.
+
+    Receipts and journals stay in ``installed-core``; this record only holds the
+    small facts the status model, session note and Combine choice need.
+    """
+
+    # pylint: disable=duplicate-code
+    def __init__(self, state: Any, root: Path) -> None:
+        if state is None or not callable(getattr(state, "get", None)) or not callable(
+            getattr(state, "set", None)
+        ):
+            raise TypeError("host PluginState is required")
+        self.state = state
+        self.root = Path(root).resolve(strict=False)
+
+    def _path(self) -> None:
+        if Path(self.state.path).resolve(strict=False).parent != self.root:
+            raise RuntimeError("Collective Wisdom profile root changed during state operation")
+
+    def _load(self) -> dict[str, Any]:
+        value = self.state.get(_TEAM_KEY)
+        self._path()
+        if value is None:
+            return {"version": 1, "owners": {}, "ticks": {}}
+        if (not isinstance(value, dict) or value.get("version") != 1
+                or not isinstance(value.get("owners"), dict)):
+            raise RuntimeError("Collective Wisdom team update state is invalid")
+        value.setdefault("ticks", {})
+        return value
+
+    @contextmanager
+    def change(self) -> Iterator[dict[str, Any]]:
+        with managed_operation_guard(self.root, _TEAM_LOCK, wait=True):
+            value = self._load()
+            yield value
+            self._path()
+            self.state.set(_TEAM_KEY, value)
+            self._path()
+    # pylint: enable=duplicate-code
+
+    @staticmethod
+    def _skills(value: dict[str, Any], owner: dict[str, Any]) -> dict[str, Any]:
+        bucket = value["owners"].setdefault(owner_key(owner), {"skills": {}})
+        return bucket.setdefault("skills", {})
+
+    def records(self, owner: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        bucket = self._load()["owners"].get(owner_key(owner)) or {}
+        return copy.deepcopy(bucket.get("skills") or {})
+
+    def record(self, owner: dict[str, Any], skill_id: str) -> dict[str, Any]:
+        return self.records(owner).get(skill_id) or {}
+
+    def update(self, owner: dict[str, Any], skill_id: str, **changes: Any) -> dict[str, Any]:
+        unknown = set(changes) - set(_TEAM_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown team update fields: {sorted(unknown)}")
+        with self.change() as value:
+            row = self._skills(value, owner).setdefault(skill_id, {})
+            row.update(copy.deepcopy(changes))
+            return copy.deepcopy(row)
+
+    def set_needs_look(  # pylint: disable=too-many-arguments
+        self, owner: dict[str, Any], skill_id: str, *, slug: str | None, reason: str,
+        version: int, new_capabilities: list[str] | tuple[str, ...] = (),
+        summary: str | None = None, prepared: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self.record(owner, skill_id)
+        # A newer version discards any prepared result built for an older one.
+        keep_prepared = prepared if prepared is not None else (
+            current.get("prepared")
+            if (current.get("prepared") or {}).get("theirs_version") == version else None
+        )
+        return self.update(
+            owner, skill_id, slug=slug, kind="needs_look", reason=reason, version=version,
+            new_capabilities=list(new_capabilities)[:8], summary=summary,
+            prepared=keep_prepared,
+        )
+
+    def set_updated(  # pylint: disable=too-many-arguments
+        self, owner: dict[str, Any], skill_id: str, *, slug: str | None, version: int,
+        new_capabilities: list[str] | tuple[str, ...] = (), seen: bool = False,
+    ) -> dict[str, Any]:
+        return self.update(
+            owner, skill_id, slug=slug, kind="updated", reason=None, version=version,
+            new_capabilities=list(new_capabilities)[:8], summary=None,
+            updated_at=_now_iso(), seen=seen, noted=seen, prepared=None,
+        )
+
+    def set_skipped(self, owner: dict[str, Any], skill_id: str, version: int) -> dict[str, Any]:
+        """Keep mine: skip exactly this version; the next one asks again."""
+        return self.update(
+            owner, skill_id, kind=None, reason=None, skipped_version=version,
+            prepared=None, summary=None, new_capabilities=[],
+        )
+
+    def set_no_longer_shared(
+        self, owner: dict[str, Any], skill_id: str, slug: str | None,
+    ) -> dict[str, Any]:
+        return self.update(
+            owner, skill_id, slug=slug, kind="no_longer_shared", reason=None,
+            prepared=None, summary=None, new_capabilities=[],
+        )
+
+    def clear_needs_look(self, owner: dict[str, Any], skill_id: str) -> None:
+        with self.change() as value:
+            row = self._skills(value, owner).get(skill_id)
+            if isinstance(row, dict) and row.get("kind") in {"needs_look", "no_longer_shared"}:
+                row.update(kind=None, reason=None, prepared=None, summary=None,
+                           new_capabilities=[])
+
+    def mark_seen(self, owner: dict[str, Any], skill_id: str) -> None:
+        with self.change() as value:
+            row = self._skills(value, owner).get(skill_id)
+            if isinstance(row, dict):
+                row["seen"] = True
+
+    def mark_noted(self, owner: dict[str, Any], skill_ids: list[str]) -> None:
+        with self.change() as value:
+            skills = self._skills(value, owner)
+            for skill_id in skill_ids:
+                if isinstance(skills.get(skill_id), dict):
+                    skills[skill_id]["noted"] = True
+
+    def tick_due(self, profile: str, interval_seconds: float) -> bool:
+        """Claim one maintenance tick for a profile; never more than once per interval."""
+        now = datetime.now(timezone.utc)
+        with self.change() as value:
+            last = value["ticks"].get(profile)
+            try:
+                elapsed = (now - datetime.fromisoformat(str(last))).total_seconds()
+            except (TypeError, ValueError):
+                elapsed = None
+            if elapsed is not None and 0 <= elapsed < interval_seconds:
+                return False
+            value["ticks"][profile] = now.isoformat()
+            return True
+
+    def current_tick(self, profile: str) -> str | None:
+        tick = self._load()["ticks"].get(profile)
+        return str(tick) if tick else None

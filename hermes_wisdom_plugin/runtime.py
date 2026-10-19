@@ -36,6 +36,8 @@ def _require_current(may_apply: Callable[[], bool] | None) -> None:
         raise WisdomAuthError("Collective Wisdom review is no longer current")
 
 SLASH_BUDGET_SECONDS = 25.0
+MAINTENANCE_INTERVAL_SECONDS = 600.0
+_AUTO_UPDATE_MODES = frozenset({"AUTO_WITH_NOTICE", "REQUIRED"})
 NATIVE_INSPECTION_CHARS = 500
 _UNAVAILABLE = "Collective Wisdom is unavailable. Complete setup in your terminal."
 _REVIEW_UNAVAILABLE = "Couldn't open Collective Wisdom right now. Please try again."
@@ -240,6 +242,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
             self._qualification = QualificationState(self._state, self.root)
         return self._qualification
+
+    @property
+    def team_state(self):
+        """Owner-bound team-skill status (updated / needs a look / prepared Combine)."""
+        from .local_state import TeamUpdateState  # pylint: disable=import-outside-toplevel
+
+        return TeamUpdateState(self._state, self.root)
 
     def notice_feed(self, cursor: str | None):
         """Read one cursor page without claiming or settling delivery."""
@@ -504,8 +513,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         *,
         allow_model_review=None,
         may_apply: Callable[[], bool] | None = None,
+        folder: str | None = None,
     ):
-        """Prepare one exact owner-private local draft without submission authority."""
+        """Prepare one exact owner-private local draft without submission authority.
+
+        ``folder`` (cw/v1) is bound to the prepared draft and sent with the draft
+        submission; ``None`` keeps an already-shared skill's folder.
+        """
 
         _require_current(may_apply)
         owner = self._installation_owner()
@@ -529,7 +543,50 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         if owner != self._installation_owner():
             raise WisdomAuthError("Collective Wisdom contribution owner changed")
+        draft_id = result.get("draft_id") if isinstance(result, dict) else None
+        if folder is not None and isinstance(draft_id, str) and draft_id:
+            self.set_share_folder(draft_id, folder)
+            result = {**result, "folder": " ".join(folder.split())}
         return result
+
+    def set_share_folder(self, draft_id: str, folder: str | None) -> dict[str, Any]:
+        """Bind one folder label to an owner-private prepared draft."""
+        from .client import normalize_folder  # pylint: disable=import-outside-toplevel
+
+        owner = self._installation_owner()
+        value = None if folder is None or not str(folder).strip() else normalize_folder(folder)
+        assert self._direct_state is not None
+        self._direct_state.set_draft_folder(draft_id, owner, value)
+        return {"draft_id": draft_id, "folder": value}
+
+    def folder_options(self) -> list[dict[str, Any]]:
+        """Org folders with counts plus Hermes categories (share dialog dropdown)."""
+        from .folders import folder_options  # pylint: disable=import-outside-toplevel
+
+        return folder_options(self)
+
+    def suggest_folder(self, skill_name: str) -> dict[str, str]:
+        """One folder suggestion with a short reason; never raises."""
+        from .folders import suggest_folder  # pylint: disable=import-outside-toplevel
+
+        return suggest_folder(self, skill_name)
+
+    def set_skill_folder(self, skill_id: str, folder: str | None) -> dict[str, Any]:
+        """Change a shared skill's folder (owner or admin)."""
+        self.require_setup()
+        result = self.client.set_skill_folder(skill_id, folder)
+        self.check_owner()
+        return result
+
+    def rename_local_skill(self, skill_name: str, new_name: str) -> dict[str, str]:
+        """Rename a local skill so it can be shared under an unclaimed name."""
+        from .share_rename import rename_local_skill  # pylint: disable=import-outside-toplevel
+
+        self._installation_owner()
+        source = self._contribution_reviewer().source(skill_name)
+        renamed = rename_local_skill(source, new_name)
+        self.check_owner()
+        return {"skill": new_name, "path": str(renamed)}
 
     @property
     def qualification_state(self):
@@ -895,27 +952,59 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
     def maintenance(self, *, refresh_policy=False, apply_automatic=False):
         """Explicit bounded producer; automatic mutation requires its own flag."""
 
-        from .automatic_updates import (  # pylint: disable=import-outside-toplevel
-            AutomaticUpdateMaintenance,
-        )
         owner = self._installation_owner()
         self.local_state.bind_owner(owner)
         policy = self.client.agent_led_policy()
         updates = None
         if apply_automatic:
-            reviewer, executor = self._update_services()
-            updates = AutomaticUpdateMaintenance(
-                self.installed,
-                reviewer,
-                executor,
-                self._installation_owner,
-                limit=8,
-            ).run()
+            updates = self._automatic_maintenance(tick=None).run()
         self.check_owner()
         return {
             "policy": policy.model_dump(mode="json") if refresh_policy else None,
             "automatic_updates": updates,
         }
+
+    def _automatic_maintenance(self, *, tick: str | None):
+        from .automatic_updates import (  # pylint: disable=import-outside-toplevel
+            AutomaticUpdateMaintenance,
+        )
+        from .combine import prepare  # pylint: disable=import-outside-toplevel
+
+        reviewer, executor = self._update_services()
+        return AutomaticUpdateMaintenance(
+            self.installed, reviewer, executor, self._installation_owner, limit=8,
+            team_state=self.team_state,
+            prepare_combine=lambda skill_id: prepare(self, skill_id, tick=tick),
+            tick=tick,
+        )
+
+    def maintenance_tick(self, *, force: bool = False) -> dict[str, Any] | None:
+        """Session-start / gateway-tick auto-update, at most once per 10 minutes.
+
+        Returns ``None`` when not enrolled, rate-limited or signed out. The tick is
+        claimed before any credential read so an auth failure never retries hot,
+        and credentials are read once (no refresh loop).
+        """
+        if self._local_identity() is None:
+            return None
+        profile = self.profile[0]
+        team = self.team_state
+        if not force and not team.tick_due(profile, MAINTENANCE_INTERVAL_SECONDS):
+            return None
+        tick = team.current_tick(profile)
+        try:
+            self._installation_owner()
+        except WisdomError:
+            return None
+        result = self._automatic_maintenance(tick=tick).run()
+        self.check_owner()
+        return result
+
+    def team_statuses(self) -> list[dict[str, Any]]:
+        """Installed team skills as up_to_date / updated / needs_look / no_longer_shared."""
+        from .team_status import team_statuses  # pylint: disable=import-outside-toplevel
+
+        return [status.as_dict() for status in team_statuses(self)]
 
     def prepared_drafts(self):
         """List current owner's saved local drafts without exposing package bytes."""
@@ -1265,8 +1354,16 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         return result
 
-    def install_plan(self, reference, *, update_mode=None, accept_warnings=False):
-        """Prepare an owner-bound terminal review without installing any files."""
+    def install_plan(self, reference, *, update_mode=None, accept_warnings=False,
+                     auto_update: bool = True):
+        """Prepare an owner-bound terminal review without installing any files.
+
+        cw/v1: auto-update is on by default (``AUTO_WITH_NOTICE``);
+        ``auto_update=False`` pins the install (``MANUAL``). An explicit
+        ``update_mode`` still wins.
+        """
+        if update_mode is None:
+            update_mode = "AUTO_WITH_NOTICE" if auto_update else "MANUAL"
         return self._installation_services()[0].plan(
             reference, update_mode=update_mode,
             accept_warnings=bool(accept_warnings),
@@ -1571,8 +1668,27 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                 "setup": {"state": "passed", "steps": len(commands)}}
 
     def list_installations(self):
-        """Inspect private installation state only through the terminal entry."""
-        return self._installation_services()[1].installed()
+        """Inspect private installation state only through the terminal entry.
+
+        Rows carry ``auto_update`` and ``updated_at`` (last local apply) so lists
+        can say "Updated 2 days ago" instead of version numbers.
+        """
+        rows = self._installation_services()[1].installed()
+        try:
+            records = self.team_state.records(self._installation_owner())
+        except (WisdomError, RuntimeError, ValueError):
+            records = {}
+        return [
+            {
+                **row,
+                "auto_update": (row.get("effective_update_mode") or row.get("update_mode"))
+                in _AUTO_UPDATE_MODES,
+                "updated_at": (records.get(str(row.get("skill_id"))) or {}).get("updated_at")
+                or row.get("installed_at"),
+            }
+            if isinstance(row, dict) else row
+            for row in rows
+        ]
 
     def top_skills(self):
         """Rank this profile's own local skills from Hermes usage; no account needed."""
@@ -1622,6 +1738,51 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         )
         self.check_owner()
         _require_current(may_apply)
+        return result
+
+    def set_auto_update(self, skill_id: str, enabled: bool) -> dict[str, Any]:
+        """Re-record the install with a new update mode (Gateway clamps to org policy)."""
+        from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+        from .setup_lock import managed_operation_guard  # pylint: disable=import-outside-toplevel
+
+        owner = self._installation_owner()
+        mode = "AUTO_WITH_NOTICE" if enabled else "MANUAL"
+        with managed_operation_guard(Path(self.installed.root), skill_id):
+            installation = self.installed.installation(skill_id, owner=owner)
+            if not isinstance(installation, dict) or installation.get("state") != "active":
+                raise WisdomNotFound("Installed team skill not found")
+            version = installation.get("version")
+            remote = next((
+                row for row in self.client.installations(owner["installation_id"])
+                if isinstance(row, dict) and row.get("skill_id") == skill_id
+            ), None)
+            if (not isinstance(version, int) or remote is None
+                    or remote.get("installed_version") != version
+                    or not isinstance(remote.get("takedown_generation"), int)):
+                raise WisdomConflict("Installation changed; check it again before retrying")
+            self.check_owner()
+            server = self.client.record_install(
+                skill_id=skill_id, installation_id=owner["installation_id"],
+                version=version, takedown_generation=remote["takedown_generation"],
+                update_mode=mode,
+            )
+            effective = server.effective_update_mode
+            self.installed.record_install({**installation, "update_mode": effective})
+        self.check_owner()
+        return {
+            "skill_id": skill_id, "slug": installation.get("slug"),
+            "auto_update": effective in _AUTO_UPDATE_MODES,
+            "effective_update_mode": effective,
+            "requested_update_mode": mode,
+        }
+
+    def restore_uninstalled(self, skill_id: str) -> dict[str, Any]:
+        """Undo an uninstall: move the archived copy back and re-record the install."""
+        from .uninstall_undo import restore_uninstalled  # pylint: disable=import-outside-toplevel
+
+        owner = self._installation_owner()
+        result = restore_uninstalled(self, owner, skill_id)
+        self.check_owner()
         return result
 
     def require_setup(self):

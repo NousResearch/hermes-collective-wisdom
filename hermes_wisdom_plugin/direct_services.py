@@ -33,7 +33,8 @@ from .wire import ObjectSet, build_commit, build_tree_from_snapshot
 
 WISDOM_DISCLOSURE = (
     "Candidate signals stay on this profile. Only owner-approved private draft bytes, "
-    "author copy, manifest metadata, and managed-install state reach the Gateway."
+    "author copy, manifest metadata, and managed-install state reach the Gateway. "
+    "Checks for new versions of skills you installed with auto-update on."
 )
 
 _KEY = "wisdom-core"
@@ -381,6 +382,16 @@ class DirectState:
                 "created_at": current["created_at"], "updated_at": _now(),
             }
             return True
+
+    def set_draft_folder(
+        self, draft_id: str, owner: dict[str, str], folder: str | None,
+    ) -> None:
+        """Bind the cw/v1 folder label to one owner-private prepared draft."""
+        with self.change() as value:
+            row = value["drafts"].get(draft_id)
+            if not isinstance(row, dict) or row.get("owner") != owner:
+                raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
+            row.update({"folder": folder, "updated_at": _now()})
 
     def set_draft_state(self, draft_id: str, state: str) -> None:
         with self.change() as value:
@@ -1415,6 +1426,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
     ) -> dict[str, Any]:
         _objects, request = self._snapshot(draft, owner)
         request["professionalism_review"] = prepared.get("professionalism_check")
+        if isinstance(draft.get("folder"), str) and draft["folder"]:
+            # cw/v1: first publication sets the folder; later versions keep it
+            # unless the owner chose one in this share.
+            request["folder"] = draft["folder"]
         hashes = {
             "content": request["content_hash"],
             "author_description": request["description_hash"],
@@ -1691,6 +1706,18 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         _current(may_apply)
         try:
             remote = self.client.submit_draft(**operation["request"])
+        except WisdomConflict as exc:
+            if exc.code == "slug_owned" and exc.status == 409:
+                # The per-org unique name is the source of truth: a teammate
+                # already shares this name, so nothing was created.
+                self.state.update_publication(
+                    operation_id, phase="publication_rejected", rejection_code="slug_owned",
+                )
+                return operation, self.status(operation_id)
+            return operation, self._uncertain(
+                operation_id, "draft_submission_unknown",
+                "Draft submission outcome is unknown; exact reconciliation is required.",
+            )
         except WisdomValidationError as exc:
             if exc.status == 422:
                 return operation, self._reject_submission(operation_id, exc)

@@ -127,9 +127,10 @@ def test_register_is_lazy_and_owns_both_command_handles(full_release_scope,   # 
         assert plugin.register(context) is None
         assert entries["auxiliary"][0] == "hermes_collective_wisdom_refinement"
         assert entries["cli"][0] == entries["slash"][0] == "wisdom"
+        # cw/v1 team updates register first (dispatch trigger, session note, first reply).
         assert [name for name, _callback in entries["hooks"]] == [
-            "pre_gateway_dispatch", "pre_llm_call",
-            "on_skill_lifecycle", "transform_llm_output", "on_session_end"
+            "pre_gateway_dispatch", "on_session_start", "transform_llm_output",
+            "pre_llm_call", "on_skill_lifecycle", "transform_llm_output", "on_session_end",
         ]
         assert entries["slack"][0] == "slack"
         assert callable(entries["telegram"])
@@ -158,8 +159,8 @@ def test_register_is_lazy_and_owns_both_command_handles(full_release_scope,   # 
         assert disposed == [
             "slash", "cli", "present_wisdom_consent", "wisdom_inspect", "wisdom_inbox",
             "on_session_end", "transform_llm_output", "on_skill_lifecycle",
-            "pre_llm_call", "pre_gateway_dispatch",
-            "hermes_collective_wisdom_refinement",
+            "pre_llm_call", "transform_llm_output", "on_session_start", "pre_gateway_dispatch",
+            "hermes_collective_wisdom_refinement", "hermes_collective_wisdom_assist",
         ]
     finally:
         unload_native_plugin(module_name)

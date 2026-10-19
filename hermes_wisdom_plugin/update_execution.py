@@ -123,7 +123,7 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             raise PackagePolicyError("reviewed update is not allowed")
         preservation = verified.plan.get("preservation")
         if not isinstance(preservation, dict) or preservation.get("action") not in {
-            "none", "preserve_unmanaged_copy",
+            "none", "preserve_unmanaged_copy", "archive",
         }:
             raise PackagePolicyError("reviewed edited-copy action does not authorize replacement")
         self._require_current(may_apply)
@@ -314,7 +314,9 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
 
     def _preserve_copy(self, payload, recovery, operation_id, owner):
         preservation = payload["preservation"]
-        if preservation.get("action") == "none":
+        if preservation.get("action") in {"none", "archive"}:
+            # "archive": the edited copy stays only in the update recovery archive
+            # (``.archive/collective-wisdom-updates/<op>/previous-managed``).
             if preservation.get("destination") is not None:
                 raise PackagePolicyError("unreviewed edited-copy destination")
             return

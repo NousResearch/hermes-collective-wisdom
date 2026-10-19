@@ -180,6 +180,7 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     share = add("share", "Share one exact local skill with your team")
     share.add_argument("skill")
     share.add_argument("--yes", action="store_true", help="Confirm sharing the checked package")
+    share.add_argument("--folder", help="Folder label for the shared skill (default: suggested)")
     share.add_argument("--accept-warnings", action="store_true",
                        help="Acknowledge exact local scanner warnings, separately from sharing")
     suggest.add_argument("skill")
@@ -273,6 +274,14 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
         help="Acknowledge exact current local scanner warnings during review",
     )
     install.add_argument("--update-mode", choices=["MANUAL", "AUTO_WITH_NOTICE", "REQUIRED"])
+    install.add_argument(
+        "--no-auto-update", action="store_false", dest="auto_update", default=True,
+        help="Pin this version; Hermes shows newer versions but changes nothing",
+    )
+    if scope.allows_cli("auto-update"):
+        auto_update = add("auto-update", "Turn auto-update on or off for one installed skill")
+        auto_update.add_argument("skill_id")
+        auto_update.add_argument("auto_update_state", choices=("on", "off"))
     add("installed", "Inspect this enrolment's managed installations")
     add("check", "Check one managed skill for an authoritative update").add_argument(
         "skill_id"
@@ -296,6 +305,10 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     update.add_argument(
         "--accept-warnings", action="store_true",
         help="Acknowledge exact current local scanner warnings during review",
+    )
+    update.add_argument(
+        "--choice", choices=("combine", "keep-mine", "use-new", "update"),
+        help="Resolve a skill that needs a look without prompting (used by cloud agents)",
     )
     installed_setup = commands.add_parser(
         "installed-setup", help="Inspect and separately approve installed-skill setup"
@@ -330,9 +343,10 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     recover_setup.add_argument(
         "--acknowledge-effects-checked-and-stopped", action="store_true"
     )
-    uninstall = add("uninstall", "Move a managed skill to recoverable trash")
+    uninstall = add("uninstall", "Remove an installed team skill (moves it to the archive)")
     uninstall.add_argument("skill_id")
-    uninstall.add_argument("--yes", action="store_true", help="Confirm recoverable removal")
+    # Accepted for older scripts; removal never asks (it can be undone from the archive).
+    uninstall.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     add("help", "Show Collective Wisdom command help")
 
 
@@ -344,6 +358,8 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
     command = getattr(args, "wisdom_command", None)
     as_json = bool(getattr(args, "json", False))
     try:
+        if command in _CONSENT_GATED and not getattr(args, "apply_receipt", None):
+            _first_run_consent(service, interactive=not as_json and sys.stdin.isatty())
         if command in {"share", "suggest"}:
             return _contribution_cli(args, service)
         if command in {"top", "share-suggest"}:
@@ -360,7 +376,10 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 if answer.strip().lower() not in {"y", "yes"}:
                     return 7
                 accepted = True
-            result = service.setup(accept_disclosure=accepted)
+            # `setup` stays as an alias of the first-run notice: record the
+            # per-org consent server-side, then enrol this profile.
+            from .consent import accept as _accept_consent  # pylint: disable=import-outside-toplevel
+            result = _accept_consent(service)["status"]
         elif command in {
             "status", "settings", "notifications", "mute", "inbox",
             "maintenance", "list", "browse", "show", "versions",
@@ -377,6 +396,13 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             result = action[command](args, service)
             if result is None:
                 return 7
+        elif command == "auto-update":
+            result = service.set_auto_update(
+                _managed_reference(service, args.skill_id), args.auto_update_state == "on",
+            )
+            if not as_json:
+                print(_auto_update_text(result))
+                return 0
         elif command == "help":
             if as_json:
                 _emit({"commands": list(_release_scope().cli_commands)}, as_json=True)
@@ -443,6 +469,34 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         return 8
 
 
+# Commands that open the first-run data-use notice when this profile has not
+# consented yet. Local-only commands (help, top, share-suggest) never prompt.
+# `status` stays a local inspection and `publication` acts on receipts that
+# already imply consent; neither opens the notice.
+_CONSENT_GATED = frozenset({
+    "list", "browse", "show", "versions", "share", "suggest", "install",
+    "installed", "check", "update", "uninstall", "auto-update", "prepared",
+})
+
+
+def _first_run_consent(service: Any, *, interactive: bool) -> None:
+    """Show the existing setup disclosure once with Continue; never for agents."""
+    from .consent import ensure_consent  # pylint: disable=import-outside-toplevel
+
+    if not callable(getattr(service, "status", None)) or not hasattr(service, "setup"):
+        return
+    ensure_consent(service, interactive=interactive)
+
+
+def _auto_update_text(result: dict[str, Any]) -> str:
+    name = _text(result.get("slug") or result.get("skill_id") or "This skill")
+    if result.get("auto_update"):
+        return f"Auto-update is on for {name}."
+    if result.get("requested_update_mode") == "AUTO_WITH_NOTICE":
+        return f"Your team's policy keeps auto-update off for {name}."
+    return f"Auto-update is off for {name}. Hermes will show new versions but change nothing."
+
+
 def _contribution_cli(args, service):
     """Dispatch terminal-owned contribution flows, keeping their consent distinct."""
     if args.wisdom_command == "share":
@@ -455,12 +509,39 @@ def _contribution_cli(args, service):
     return _publication_result_exit(_suggest_human(presentation, service))
 
 
+def _status_row(row: dict) -> dict:
+    """Stable `status --json` row shape (read by the Portal for cloud agents)."""
+    return {
+        "skill_id": row.get("skill_id"),
+        "slug": row.get("slug"),
+        "name": row.get("slug"),
+        "folder": row.get("folder"),
+        "version": row.get("installed_version"),
+        "latest_version": row.get("latest_version"),
+        "status": row.get("kind"),
+        "reason": row.get("reason"),
+        "summary": row.get("summary"),
+        "new_capabilities": list(row.get("new_capabilities") or ()),
+        "auto_update": row.get("auto_update"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
 def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-many-branches
     args: argparse.Namespace, service: Any, command: str,
 ) -> Any:
     """Dispatch commands that never own a prompt or cancellation exit."""
     if command == "status":
-        return service.status(include_operations=True)
+        result = service.status(include_operations=True)
+        if isinstance(result, dict) and result.get("configured") is True and callable(
+            getattr(service, "team_statuses", None)
+        ):
+            try:
+                team = service.team_statuses()
+                result = {**result, "team": team, "skills": [_status_row(row) for row in team]}
+            except WisdomUnavailable:
+                result = {**result, "team_unavailable": True}
+        return result
     if command == "settings":
         service.require_setup()
         if args.notification_mode != "status":
@@ -486,7 +567,7 @@ def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-m
         if command == "list":
             return service.list_skills()
         if command == "browse":
-            return {"skills": service.search_skills(args.query)}
+            return {"skills": service.search_skills(args.query), "group_by": "folder"}
         if command == "show":
             return service.show(args.skill_id)
         return {"versions": service.versions(args.skill_id)}
@@ -553,13 +634,24 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
         if command == "status":
             if args:
                 raise _SlashUsageError("Usage: /wisdom status")
-            return _render_status(service.status())
+            status = service.status()
+            if (isinstance(status, dict) and status.get("configured") is True
+                    and callable(getattr(service, "team_statuses", None))):
+                try:
+                    status = {**status, "team": service.team_statuses()}
+                except WisdomUnavailable:
+                    status = {**status, "team_unavailable": True}
+            return _render_status(status)
         if command == "browse":
             query, page = _paged_arguments(
                 args, "Usage: /wisdom browse [query] [--page N]"
             )
             service.require_setup()
-            return _render_browse(service.search_skills(query or None), query, page)
+            skills = service.search_skills(query or None)
+            ordered = [row for _folder, rows in group_by_folder(
+                [row for row in skills if isinstance(row, dict)]
+            ) for row in rows]
+            return _render_browse(ordered, query, page)
         if command == "show":
             if len(args) != 1:
                 raise _SlashUsageError("Usage: /wisdom show <skill>")
@@ -597,13 +689,7 @@ def read_unavailable(parsed: tuple[str, list[str]]) -> str | None:
 
 
 def _uninstall_cli(args, service):
-    """Preserve the reference terminal-only recoverable removal confirmation."""
-    if not args.yes:
-        if args.json or not sys.stdin.isatty():
-            raise PackagePolicyError("noninteractive uninstall requires --yes")
-        answer = input("Move this managed skill to recoverable Wisdom trash? [y/N] ")
-        if answer.strip().lower() not in {"y", "yes"}:
-            return None
+    """Remove immediately; the copy moves to the archive and can be restored."""
     return service.uninstall(_managed_reference(service, args.skill_id))
 
 
@@ -760,6 +846,11 @@ def _read_prepared_payload(  # pylint: disable=too-many-branches
     return value
 
 
+def _auto_update_kwargs(args) -> dict[str, bool]:
+    """Only send ``auto_update`` when the user turned it off (on is the default)."""
+    return {} if getattr(args, "auto_update", True) else {"auto_update": False}
+
+
 def _acknowledged_install_plan(args, service, plan):
     """Review warnings once and refuse an unapproved change on re-review."""
     if not _has_reviewable_warnings(plan) or args.accept_warnings:
@@ -780,7 +871,8 @@ def _acknowledged_install_plan(args, service, plan):
         return None
     original_identity = _review_identity(plan)
     plan = service.install_plan(
-        args.reference, update_mode=args.update_mode, accept_warnings=True
+        args.reference, update_mode=args.update_mode, accept_warnings=True,
+        **_auto_update_kwargs(args),
     )
     if not plan.get("setup_commands"):
         _emit(plan, as_json=False, command="install")
@@ -809,6 +901,7 @@ def _install_cli(args, service):  # pylint: disable=too-many-return-statements,t
         args.reference,
         update_mode=args.update_mode,
         accept_warnings=bool(args.accept_warnings),
+        **_auto_update_kwargs(args),
     )
     if args.plan:
         return plan
@@ -859,6 +952,16 @@ def _update_cli(args, service):  # pylint: disable=too-many-return-statements,to
         return service.update_apply(args.apply_receipt)
     if not args.skill_id:
         raise PackagePolicyError("update requires a skill id or --apply-receipt")
+    if getattr(args, "choice", None):
+        if args.plan or acknowledgements:
+            raise PackagePolicyError("--choice cannot be combined with --plan or acknowledgements")
+        return _choice_update(service, args.skill_id, args.choice)
+    if not (args.plan or args.json or acknowledgements) and sys.stdin.isatty() and callable(
+        getattr(service, "team_statuses", None)
+    ):
+        guided = _guided_update(args, service)
+        if guided is not _NOT_GUIDED:
+            return guided
     plan = service.update_plan(
         args.skill_id,
         preserve_modified=args.preserve_modified,
@@ -909,6 +1012,74 @@ def _update_cli(args, service):  # pylint: disable=too-many-return-statements,to
     return _result_with_reviewed_slug(result, plan)
 
 
+_NOT_GUIDED = object()
+
+
+def _choice_update(service, reference, choice):
+    """Non-interactive needs-a-look resolution (`update <skill> --choice ...`)."""
+    from . import combine  # pylint: disable=import-outside-toplevel
+
+    skill_id = _managed_reference(service, reference)
+    if choice == "update":
+        return combine.apply_flagged_update(service, skill_id)
+    return combine.apply(service, skill_id, choice.replace("-", "_"))
+
+
+def _guided_update(args, service):  # pylint: disable=too-many-return-statements
+    """Walk Combine / Keep mine / Use new version, or the single Update."""
+    from . import combine  # pylint: disable=import-outside-toplevel
+    from .team_status import reason_sentence  # pylint: disable=import-outside-toplevel
+
+    skill_id = _managed_reference(service, args.skill_id)
+    status = next((item for item in service.team_statuses()
+                   if item.get("skill_id") == skill_id), None)
+    if status is None:
+        return _NOT_GUIDED
+    checked = service.check_update(skill_id)
+    if checked.get("state") != "update_available":
+        print(f"{_text(status['slug'])} is up to date.")
+        return None
+    name = _text(status["slug"])
+    if checked.get("modified") is True:
+        prepared = combine.prepare(service, skill_id)
+        can_combine = prepared is not None and prepared.other_files != "conflict"
+        print(f"{name}: you edited this skill and a new version is out.")
+        if can_combine:
+            print(_text(prepared.summary, limit=400))
+            options = {"1": "combine", "2": "keep_mine", "3": "use_new", "4": "show"}
+            menu = "1. Combine\n2. Keep mine\n3. Use new version\n4. Show full skill"
+        else:
+            print("Hermes can't combine automatically.")
+            options = {"1": "keep_mine", "2": "use_new"}
+            menu = "1. Keep mine\n2. Use new version"
+        while True:
+            print(menu)
+            choice = options.get(input("Choose (Enter to cancel): ").strip())
+            if choice is None:
+                return None
+            if choice == "show":
+                print("\n" + "\n".join(
+                    _without_controls(line) for line in prepared.skill_md.splitlines()
+                ) + "\n")
+                continue
+            break
+        result = combine.apply(service, skill_id, choice)
+        if choice == "keep_mine":
+            print(f"Kept your copy of {name}. The next version will ask again.")
+            return None
+        return result
+    if status.get("kind") == "needs_look":
+        from .team_status import SkillStatus  # pylint: disable=import-outside-toplevel
+        print(f"{name}: " + reason_sentence(SkillStatus(**{
+            **status, "new_capabilities": tuple(status.get("new_capabilities") or ()),
+        })))
+    else:
+        print(f"{name}: a new version is available.")
+    if input("Update now? [y/N] ").strip().casefold() not in {"y", "yes"}:
+        return None
+    return combine.apply_flagged_update(service, skill_id)
+
+
 def _installed_setup_cli(args, service):
     """Dispatch explicit setup controls; no conversational confirmation exists."""
     if args.setup_action == "inspect":
@@ -937,7 +1108,7 @@ def _terminal_handoff(command):
         "install": "hermes wisdom install <skill-name>",
         "installed": "hermes wisdom installed",
         "check": "hermes wisdom check <skill-name>",
-        "update": "hermes wisdom update <skill-name> --plan",
+        "update": "hermes wisdom update <skill-name>",
         "installed-setup": "hermes wisdom installed-setup inspect <skill-name>",
         "uninstall": "hermes wisdom uninstall <skill-name>",
     }
@@ -1134,6 +1305,8 @@ def _human_render(  # pylint: disable=too-many-return-statements
         ))
     if command == "prepared":
         return _render_prepared_human(data)
+    if command in {"browse", "list"} and data.get("group_by") == "folder":
+        return _render_browse_grouped(data)
     if command == "publication" and isinstance(data.get("operation_id"), str) and not data.get(
         "receipt"
     ):
@@ -1194,7 +1367,11 @@ def _emit(
             isinstance(row, dict) and isinstance(row.get("slug"), str) and row["slug"]
             for row in rows
         )
-        if (not error and all_named and command not in {"show", "versions", "check"}
+        team_status = command == "status" and isinstance(value, dict) and (
+            "team" in value or value.get("team_unavailable")
+        )
+        if (not error and all_named and not team_status
+                and command not in {"show", "versions", "check"}
                 and emit_terminal(command, value, stream, summary)):
             return
         print(summary, file=stream)
@@ -1299,14 +1476,108 @@ def _render_status(value: object) -> str:
     )
     if not configured and state == "ready":
         state = "not configured"
-    return "\n".join(
-        (
-            "Collective Wisdom status",
-            "",
-            f"Setup: {'ready' if configured else 'required'}",
-            f"State: {state}",
-        )
+    lines = [
+        "Collective Wisdom status",
+        "",
+        f"Setup: {'ready' if configured else 'required'}",
+        f"State: {state}",
+    ]
+    lines.extend(_render_team_status(data))
+    return "\n".join(lines)
+
+
+def _render_team_status(data: dict[str, Any]) -> list[str]:
+    """Needs-a-look items with one plain reason and the exact command."""
+    from .team_status import (  # pylint: disable=import-outside-toplevel
+        SkillStatus, reason_sentence, update_command, updated_phrase,
     )
+
+    if data.get("team_unavailable"):
+        return ["", "Couldn't check your team skills right now."]
+    rows = data.get("team")
+    if not isinstance(rows, list):
+        return []
+    statuses = []
+    for row in rows:
+        if isinstance(row, dict):
+            try:
+                statuses.append(SkillStatus(**{
+                    **row, "new_capabilities": tuple(row.get("new_capabilities") or ()),
+                }))
+            except TypeError:
+                continue
+    needs = [item for item in statuses if item.kind == "needs_look"]
+    updated = [item for item in statuses if item.kind == "updated" and not item.seen]
+    gone = [item for item in statuses if item.kind == "no_longer_shared"]
+    lines: list[str] = [""]
+    if not needs:
+        lines.append("Nothing needs a look.")
+    else:
+        lines.append(f"Needs a look ({len(needs)}):")
+        for item in needs:
+            lines.append(f"  {_text(item.slug)} — {_text(reason_sentence(item), limit=400)}")
+            lines.append(f"    Run: {update_command(item)}")
+    for item in updated:
+        lines.append(f"  {_text(item.slug)} — {_text(updated_phrase(item))}")
+    for item in gone:
+        lines.append(f"  {_text(item.slug)} — {reason_sentence(item)}")
+    return lines
+
+
+def used_by_label(value: object) -> str:
+    """Used-by counts are hidden below 10, the same as the Portal."""
+    count = value if isinstance(value, int) and not isinstance(value, bool) else None
+    if count is None:
+        return "—"
+    return "Under 10" if count < 10 else str(count)
+
+
+def _folder_name(row: dict[str, Any]) -> str:
+    folder = row.get("folder")
+    return " ".join(folder.split()) if isinstance(folder, str) and folder.strip() else "No folder"
+
+
+def group_by_folder(rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group skills by folder label (case-insensitive), largest folders first."""
+    groups: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+    for row in rows:
+        name = _folder_name(row)
+        groups.setdefault(name.casefold(), (name, []))[1].append(row)
+    return sorted(
+        groups.values(),
+        key=lambda item: (item[0] == "No folder", -len(item[1]), item[0].casefold()),
+    )
+
+
+def owner_label(row: dict[str, Any]) -> str:
+    """Display owner: the display name when the Gateway sends one, else "A teammate".
+
+    Never print raw account IDs: browse output can land in shared chats.
+    """
+    return _text(
+        row.get("owner_display_name") or row.get("created_by_display_name") or "A teammate",
+        limit=80,
+    )
+
+
+def _render_browse_grouped(value: dict[str, Any]) -> str:
+    rows = [row for row in value.get("skills") or [] if isinstance(row, dict)]
+    lines = ["Shared skills", f"Results: {len(rows)}"]
+    for folder, members in group_by_folder(rows):
+        lines.extend(("", f"{_text(folder)} ({len(members)})"))
+        for row in members:
+            version = _positive_version(row.get("latest_version"))
+            lines.append(
+                f"  {_text(row.get('slug') or 'Unnamed skill')} · {owner_label(row)}"
+                f" · v{version or '?'} · Used by {used_by_label(row.get('install_count'))}"
+                f" · {_installation_status_text(row)}"
+            )
+            description = row.get("author_description")
+            if isinstance(description, str) and description.strip():
+                lines.append(f"    {_text(description)}")
+    if not rows:
+        lines.append("Nobody has shared a skill yet.")
+    return "\n".join(lines)
 
 
 def _render_browse(rows: object, query: str, page: int) -> str:
@@ -1315,15 +1586,20 @@ def _render_browse(rows: object, query: str, page: int) -> str:
     selected = skills[start : start + PAGE_SIZE]
     heading = f'Results for "{_text(query)}"' if query else "Skills published by your team"
     lines = ["Shared skills", "", f"{heading} - page {page}"]
+    folder = None
     for item in selected:
         slug = _text(item.get("slug") or item.get("id") or "Unnamed skill")
         version = _positive_version(item.get("latest_version"))
         description = _text(item.get("author_description") or "No description")
+        if _folder_name(item) != folder:
+            folder = _folder_name(item)
+            lines.extend(("", f"[{_text(folder)}]"))
         lines.extend(
             (
                 "",
                 slug,
                 f"v{version or '?'} - {description}",
+                f"{owner_label(item)} · Used by {used_by_label(item.get('install_count'))}",
                 _installation_status_text(item),
                 _review_states(item),
                 f"Show: {_slash_command('show', slug)}",
