@@ -25,6 +25,9 @@ class ReleaseScope:  # pylint: disable=too-many-instance-attributes
     desktop_route_groups: frozenset[str]
     notification_settings: bool
     model_editorial: bool
+    # Propose a name/description with the owner's model only when the skill's
+    # own copy cannot be shared as written. Independent of model_editorial.
+    model_copy: bool
 
     def allows_cli(self, command: str) -> bool:
         """Return whether ``hermes wisdom <command>`` is registered."""
@@ -69,6 +72,7 @@ FULL = ReleaseScope(
     desktop_route_groups=frozenset({"core", "candidates", "notices", "settings"}),
     notification_settings=True,
     model_editorial=True,
+    model_copy=True,
 )
 
 # User-initiated sharing and installation only. The slash gateway hook stays
@@ -83,6 +87,7 @@ MANUAL_SHARING = ReleaseScope(
     desktop_route_groups=frozenset({"core"}),
     notification_settings=False,
     model_editorial=False,
+    model_copy=True,
 )
 
 ACTIVE = MANUAL_SHARING

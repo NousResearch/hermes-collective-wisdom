@@ -1220,6 +1220,7 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
     if (path === '/publication/review') return {
       receipt: 'publication-receipt', draft_id: 'local:1', skill_id: 'local-skill', hashes,
       description: 'Exact author copy for teammates.',
+      copy_provenance_line: 'Description written by Hermes from your SKILL.md.',
       security_check: { upload_allowed: true, summary: 'Exact local security gate allows upload.', findings: [] },
       professionalism_check: { state: 'unavailable', summary: 'Optional model review unavailable.', findings: [] },
       local_scan: { allowed: true, summary: 'Host scan passed.', findings: [] },
@@ -1237,6 +1238,7 @@ test('publication inspects full bytes, renders checks/hashes/author copy, and re
   assert.match(mounted.container.textContent, /Nothing has been uploaded/)
   await click(button(mounted, 'Continue to sharing review'))
   assert.match(mounted.container.textContent, /Exact author copy for teammates/)
+  assert.match(mounted.container.textContent, /copy sourceDescription written by Hermes from your SKILL\.md\./)
   assert.match(mounted.container.textContent, /# Exact reviewed bytes/)
   assert.doesNotMatch(mounted.container.textContent, new RegExp(hash('3')))
   assert.match(mounted.container.textContent, /Local security: passed/)

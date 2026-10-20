@@ -19,13 +19,15 @@ from typing import Any, Callable, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .contribution_review import exact_review_files
+from .contribution_review import exact_review_files, shown_copy_provenance
 from .credential_scan import scan_credentials
 from .editorial import (
-    MAX_EDITORIAL_DESCRIPTION_LENGTH, MAX_EDITORIAL_NAME_LENGTH, load_skill_editorial_metadata,
+    copy_problem_message, load_skill_editorial_metadata, overlay_copy_problem,
 )
 from .contract import author_description_hash, parse_manifest_bytes, sha256_address
-from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
+from .errors import (
+    ShareCopyError, WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+)
 from .installed_setup import inspect_installed_setup
 from .release_scope import active as release_scope
 from .package import (
@@ -37,7 +39,11 @@ from .wire import ObjectSet, build_commit, build_tree_from_snapshot
 
 WISDOM_DISCLOSURE = (
     "Candidate signals stay on this profile. Only owner-approved private draft bytes, "
-    "author copy, manifest metadata, and managed-install state reach the Gateway."
+    "author copy, manifest metadata, and managed-install state reach the Gateway. "
+    "When a skill you share has a name or description that cannot be shared as written, "
+    "its SKILL.md is sent to your configured model provider to propose them; turn this off "
+    "with: hermes config set "
+    "plugins.entries.collective-wisdom.settings.qualification.allow_model_review false"
 )
 
 _KEY = "wisdom-core"
@@ -1194,6 +1200,9 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         if existing is not None:
             return self._review_existing(existing, owner, may_apply, accept_warnings)
         prepared = self.reviewer.reopen(draft_id, may_apply=may_apply)
+        if prepared.get("editorial_problem"):
+            # The skill's own name or description cannot be shared as written.
+            raise ShareCopyError(str(prepared["editorial_problem"]))
         draft = self.state.draft(draft_id)
         if draft is None or draft.get("owner") != owner or draft.get("state") != "prepared":
             raise WisdomAuthError("Collective Wisdom contribution draft owner changed")
@@ -1295,13 +1304,14 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             return {}
         draft = self.state.draft(str(operation.get("local_draft_id") or "")) or {}
         complete = draft.get("editorial_complete_hash") == operation["hashes"]["content"]
+        problem = None
         if not complete and not release_scope().model_editorial:
             # Same rule as local preparation: the skill's own copy is shared as written.
-            name = " ".join(editorial["editorial_name"].split())
-            description = " ".join(editorial["editorial_description"].split())
-            complete = (0 < len(name) <= MAX_EDITORIAL_NAME_LENGTH
-                        and 0 < len(description) <= MAX_EDITORIAL_DESCRIPTION_LENGTH)
-        return {**editorial, "editorial_status": "complete" if complete else "incomplete"}
+            problem = overlay_copy_problem(Path(overlay))
+            complete = problem is None
+        return {**editorial, "editorial_status": "complete" if complete else "incomplete",
+                **({"editorial_problem": copy_problem_message(problem)} if problem else {}),
+                **shown_copy_provenance(draft, editorial)}
 
     @staticmethod
     def _slug(value: str) -> str:

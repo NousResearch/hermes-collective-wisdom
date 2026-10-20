@@ -406,6 +406,7 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
     jsx(KeyValue, { name: 'from version', value: review?.from_version ?? (kind === 'update' && review?.local_baseline === 'unknown' ? 'Local copy (published version unknown)' : undefined) }),
     jsx(KeyValue, { name: 'files', value: Array.isArray(review?.files) ? review.files.length : null }),
     isPublication ? jsx(KeyValue, { name: 'author copy', value: review?.drafted_description || review?.description || review?.author_description }) : null,
+    isPublication ? jsx(KeyValue, { name: 'copy source', value: review?.copy_provenance_line }) : null,
     isPublication ? jsx(KeyValue, { name: 'Gateway outcome', value: review?.publication_mode === 'moderated' ? 'Moderated: confirmation submits for team moderation' : review?.publication_mode === 'open' ? 'Open: confirmation may publish directly' : review?.publication_mode === 'managed' ? 'Managed: confirmation follows organization-managed Gateway handling' : 'Unavailable' }) : null,
 
     warnings.length ? jsxs('section', { className: 'space-y-1 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
@@ -1185,6 +1186,7 @@ function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) 
     ] }) : null,
     preparedReview ? jsxs(Section, { title: 'Exact local package review', children: [
       jsx(KeyValue, { name: 'author copy', value: preparedReview.author_description }),
+      jsx(KeyValue, { name: 'copy source', value: preparedReview.copy_provenance_line }),
 
       jsx(CheckSummary, { title: 'Local package scanner', check: preparedReview.local_scan, authority: 'Local scan' }),
       jsx(CheckSummary, { title: 'Local security and upload gate', check: preparedReview.security_check, authority: 'Local security' }),

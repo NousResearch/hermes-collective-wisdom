@@ -6,7 +6,7 @@ import json
 import shlex
 import sys
 
-from .errors import WisdomAuthError, WisdomError, WisdomNotFound, WisdomConflict
+from .errors import ShareCopyError, WisdomAuthError, WisdomError, WisdomNotFound, WisdomConflict
 from .package import PackagePolicyError
 from .portal_urls import safe_portal_url
 from .terminal_ui import (
@@ -59,6 +59,14 @@ def _screen(prepared, owner, detail, mode):
     print(f'Share "{title}"\nTeam        {team}\nVisibility  {visibility}'
           f'\nVersion     {version_line}')
     print(text(prepared.get("description") or "", limit=4096))
+    if prepared.get("copy_provenance_line"):
+        print(text(prepared["copy_provenance_line"]))
+        labels = {"editorial_name": "name", "editorial_description": "description"}
+        original = prepared.get("copy_original") or {}
+        for key in prepared.get("copy_written_by_hermes") or []:
+            if key in labels:
+                print(f"Original {labels[key]} in SKILL.md: "
+                      + text(original.get(key) or "(missing)", limit=4096))
     inventory = {**prepared, "files": [
         {**item, "size": len(base64.b64decode(item["content_base64"], validate=True))}
         for item in prepared["files"]
@@ -215,6 +223,10 @@ def _share(args, service):
             raise WisdomConflict("The earlier share changed; check publication status")
     else:
         prepared = service.suggest(args.skill, allow_model_review=False)
+        if prepared.get("editorial_problem"):
+            # The skill's own name or description cannot be shared as written.
+            return _result("copy_incomplete", args.skill,
+                           text(prepared["editorial_problem"], limit=4096)), 1
     prepared = {**prepared, "slug": args.skill}
     detail = _catalog(service, args.skill)
     if operation_id is None and _already_shared(prepared, detail, owner):
@@ -264,6 +276,9 @@ def run_share(args, service):
     except WisdomAuthError:
         result, code = _result("not_entitled", args.skill,
                               "Collective Wisdom is not enabled for this account and team"), 1
+    except ShareCopyError as exc:
+        # The skill's own copy cannot be shared and Hermes could not propose it.
+        result, code = _result("copy_incomplete", args.skill, text(exc, limit=4096)), 1
     except WisdomError as exc:
         if exc.code in {"slug_owned", "scan_blocked"}:
             result, code = _outcome({"code": exc.code}, args.skill, "")
