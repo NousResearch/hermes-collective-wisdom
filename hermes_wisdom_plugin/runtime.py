@@ -1078,6 +1078,17 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         return result
 
+    def publication_gateway_review(
+        self, operation_id, *, may_apply: Callable[[], bool] | None = None,
+    ):
+        """Read Gateway advisory findings awaiting acknowledgement; grants nothing."""
+
+        _require_current(may_apply)
+        result = self._publication_service().gateway_review(operation_id, may_apply=may_apply)
+        self.check_owner()
+        _require_current(may_apply)
+        return result
+
     def publication_submit(
         self, receipt, *, may_apply: Callable[[], bool] | None = None,
     ):

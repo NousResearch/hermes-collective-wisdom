@@ -230,6 +230,15 @@ def _sharing_lines(plan):
         "ℹ️ Nothing has been uploaded or shared by viewing these details.",
     ]
     lines.extend(_human_check_rows(plan))
+    server = plan.get("server_checks") or {}
+    gateway = server.get("security_check") if isinstance(server, dict) else None
+    if isinstance(gateway, dict) and gateway.get("status"):
+        findings = gateway.get("findings")
+        lines.append(f"{_status_icon(gateway['status'])} Gateway checks: "
+                     f"{_readable(gateway['status'])}; findings: "
+                     f"{len(findings) if isinstance(findings, list) else 0}")
+        for finding in findings if isinstance(findings, list) else []:
+            lines.extend(_finding_lines(finding))
     scan = plan.get("local_scan")
     if isinstance(scan, dict):
         findings = scan.get("findings")

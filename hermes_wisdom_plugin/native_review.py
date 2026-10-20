@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import secrets
 import time
 import unicodedata
@@ -16,7 +17,7 @@ from typing import Any, Callable
 
 from .errors import (
     SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict, WisdomNotFound,
-    WisdomValidationError,
+    WisdomValidationError, describe_exception,
 )
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
@@ -26,7 +27,7 @@ from .release_scope import active as release_scope
 from .review_state import ReviewState
 from .install_review import confirmed_file_change
 from .terminal_ui import (
-    has_reviewable_warnings,
+    gateway_findings, has_reviewable_warnings, render_gateway_findings,
     render_findings, render_operation_outcome, review_identity, safe_scan_details,
 )
 
@@ -37,6 +38,7 @@ TELEGRAM_TEXT_LIMIT = 3500
 # Card buttons stay short enough to render whole on Slack and Telegram phones.
 MAX_ACTION_LABEL = 20
 _UNHANDLED = object()
+logger = logging.getLogger(__name__)
 
 
 
@@ -570,6 +572,22 @@ def _publication_effect(action: str, service: Any, receipt: str,
     del action
     return service.publication_submit(receipt, may_apply=may_apply)
 
+
+def _definite_refusal(exc: BaseException) -> bool:
+    """A domain refusal is a known outcome; transport/acknowledgement failures stay unknown.
+
+    A status-less validation error can follow a committed write (for example a
+    mismatched acknowledgement), so only HTTP-status or explicitly coded refusals count.
+    """
+    from .errors import WisdomUnavailable  # pylint: disable=import-outside-toplevel
+    if isinstance(exc, WisdomUnavailable):
+        return False
+    if isinstance(exc, (WisdomConflict, WisdomNotFound, PackagePolicyError)):
+        return True
+    return isinstance(exc, WisdomValidationError) and (
+        exc.status is not None or exc.code == "scan_review_required"
+    )
+
 def _apply_review_action(  # pylint: disable=too-many-return-statements
     action: str, operation: str, plan: dict[str, Any], service: Any,
     may_apply: Callable[[], bool],
@@ -1031,6 +1049,33 @@ def _share_cancelled(record: dict[str, Any]) -> bool:
     )
 
 
+def _gateway_advisory_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """Gateway findings after upload, on the same card: Acknowledge enables Share."""
+    count = len(gateway_findings(plan))
+    noun = "item" + ("" if count == 1 else "s")
+    summary = (render_gateway_findings(plan, limit=3) if count else
+               "Gateway reported an advisory verdict without finding details.")
+    actions = [NativeAction("Acknowledge", "publish.ack", primary=True),
+               NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
+    view = NativeView(
+        "⚠️ Gateway checks",
+        f"Gateway checks found {count} {noun} to review.",
+        [NativeItem("Findings", summary)],
+        fields=[NativeField("Team", _safe(record.get("team_name"), "Team name unavailable")),
+                NativeField("Skill", _safe(plan.get("slug") or _skill_name(plan))),
+                NativeField("Files", _file_summary(plan.get("files"))),
+                NativeField("Checks", f"⚠️ {count} Gateway {noun}")],
+        actions=actions,
+        notice="Uploaded but not shared yet. View details lists every finding. "
+        "Acknowledge to continue to Share, or Cancel to leave it unshared.",
+    )
+    if _approval_is_lossless(view):
+        return view
+    # The full list stays one tap away in View details; the card never dead-ends.
+    return replace(view, items=[NativeItem(
+        "Findings", f"{count} {noun}. Open View details to read every finding.")])
+
+
 def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint: disable=too-many-return-statements
     if (record.get("state") == "pending" and record.get("operation") == "publish"
             and record.get("screen") == "authorization_expired"):
@@ -1044,7 +1089,16 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
     if record.get("operation") == "publish" and record.get("state") in {"completed", "uncertain"}:
         return _publication_result_view(record)
     if _share_cancelled(record):
+        if isinstance(record.get("plan"), dict) and record["plan"].get("operation_id"):
+            return NativeView(
+                "Not shared", "This skill is uploaded but not shared with your team. "
+                "Run /wisdom share again to finish sharing.", dismissed=True)
         return NativeView("Share cancelled", "Nothing was uploaded.", dismissed=True)
+    if record.get("failure") == "publication_refused":
+        return NativeView(
+            "❌ Not shared", "This card didn't share anything. "
+            "Run /wisdom share again to see the current state and continue.",
+            dismissed=True)
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",
@@ -1113,6 +1167,8 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     raw_plan = record.get("plan")
     plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
     state = str(record.get("state") or "pending")
+    if state == "pending" and record.get("screen") == "gateway_advisory":
+        return _gateway_advisory_view(record, plan)
     if state == "pending" and record.get("screen") == "checks":
         safe, checks = sharing_checks({**plan, "candidate_flow": True})
         return NativeView(
@@ -1437,7 +1493,12 @@ class NativeReviewController:
             try:
                 review = service.publication_review(operation_id)
             except WisdomConflict:
-                review = None  # e.g. Gateway advisory needs a terminal acknowledgement
+                review = None
+                advisory = self._resume_gateway_advisory(
+                    service, invocation, skill_name, operation_id,
+                )
+                if advisory is not None:
+                    return advisory
             if (isinstance(review, dict) and review.get("operation_id") == operation_id
                     and isinstance(review.get("receipt"), str) and review["receipt"]):
                 record = self._insert(service, invocation, "publish", {
@@ -1455,6 +1516,27 @@ class NativeReviewController:
                 "operation_id", "state", "phase", "publication_state", "code",
             )},
         })
+
+    def _resume_gateway_advisory(
+        self, service: Any, invocation: NativeInvocation, skill_name: str, operation_id: str,
+    ) -> dict[str, Any] | None:
+        """Reopen a pending Gateway advisory on the same Acknowledge card."""
+        read = getattr(service, "publication_gateway_review", None)
+        review = read(operation_id) if callable(read) else None
+        if not (isinstance(review, dict) and review.get("operation_id") == operation_id
+                and review.get("review_required") == "gateway_advisory"):
+            return None
+        record = self._insert(service, invocation, "publish", {
+            **{key: value for key, value in review.items() if key != "receipt"},
+            "skill_name": skill_name, "candidate_flow": True,
+        })
+        if not _plan_owner_matches(record):
+            raise WisdomConflict("The publication owner changed; open it again")
+        updated = {**record, "screen": "gateway_advisory", "gateway_advisory": True,
+                   "page": 0, "inspected_through": 0}
+        if not self.state.compare_replace(record, updated):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(updated)
 
     def load(self, record_id: str) -> dict[str, Any]:
         row = self.state.get(record_id)
@@ -1628,7 +1710,9 @@ class NativeReviewController:
         elif action == "checks":
             result.update(screen="checks")
         elif action == "back":
-            if (record.get("screen") == "details" and record["plan"].get("candidate_flow") is True):
+            if record.get("screen") == "details" and record.get("gateway_advisory") is True:
+                result.update(screen="gateway_advisory", page=0, inspected_through=0)
+            elif (record.get("screen") == "details" and record["plan"].get("candidate_flow") is True):
                 result.update(screen="approval", page=0, inspected_through=0)
             else:
                 result.update(screen="offer", page=0, inspected_through=-1)
@@ -1754,6 +1838,8 @@ class NativeReviewController:
             return self._one_click_package(
                 record, action, service, invocation, authority, progress=progress,
             )
+        if action == "publish.ack" and record.get("operation") == "publish":
+            return self._acknowledge_gateway(record, service, invocation, authority)
         if (record.get("operation") in {"install", "update"}
                 and record.get("screen") == "setup"):
             if action == "setup.defer":
@@ -1986,15 +2072,33 @@ class NativeReviewController:
         try:
             outcome = _apply_review_action(action, operation, plan, service, current)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            uncertain = {
+            refused = operation == "publish" and _definite_refusal(exc)
+            logger.warning(
+                "Collective Wisdom %s %s (%s) operation=%s review=%s", operation,
+                "refused" if refused else "outcome unknown", describe_exception(exc),
+                plan.get("operation_id") or "new", record.get("id"),
+            )
+            failed = ({**claimed, "state": "failed", "failure": "publication_refused",
+                       "result": {"outcome": "refused"},
+                       "updated_at": self.clock()} if refused else {
                 **claimed, "state": "uncertain", "result": {"outcome": "unknown"},
                 "updated_at": self.clock(),
-            }
-            if (self.state.compare_replace(claimed, uncertain)
+            })
+            if (self.state.compare_replace(claimed, failed)
                     and operation in {"settings", "publish"}
                     and not isinstance(exc, WisdomAuthError)):
-                return copy.deepcopy(uncertain)
+                return copy.deepcopy(failed)
             raise
+        if operation == "publish" and isinstance(outcome, dict):
+            advisory = self._gateway_advisory_outcome(claimed, plan, outcome)
+            if advisory is not None:
+                return advisory
+            if outcome.get("state") == "uncertain":
+                logger.warning(
+                    "Collective Wisdom publication outcome unknown operation=%s phase=%s "
+                    "review=%s", outcome.get("operation_id"), outcome.get("phase"),
+                    record.get("id"),
+                )
         result = {
             **claimed, "state": "completed", "result": outcome,
             "updated_at": self.clock(),
@@ -2007,6 +2111,61 @@ class NativeReviewController:
         if not self.state.compare_replace(claimed, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
+
+    def _gateway_advisory_outcome(
+        self, claimed: dict[str, Any], plan: dict[str, Any], outcome: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Turn the same card into the Gateway findings card; nothing was approved."""
+        if not (outcome.get("state") == "pending"
+                and outcome.get("review_required") == "gateway_advisory"
+                and isinstance(outcome.get("operation_id"), str)):
+            return None
+        display = {key: value for key, value in plan.items()
+                   if key not in {"receipt", "authorization_expires_at", "warning_acceptance"}}
+        display.update(operation_id=outcome["operation_id"],
+                       server_checks=copy.deepcopy(outcome.get("server_checks")),
+                       review_required="gateway_advisory")
+        pending = {
+            **claimed, "state": "pending", "plan": display, "screen": "gateway_advisory",
+            "gateway_advisory": True, "page": 0, "inspected_through": 0,
+            "display_ready": False, "effect_action": None, "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(claimed, pending):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(pending)
+
+    def _acknowledge_gateway(
+        self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
+        authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Bind an acknowledgement to the live Gateway evidence, then offer Share."""
+        plan = record["plan"]
+        operation_id = plan.get("operation_id")
+        if record.get("screen") != "gateway_advisory" or not isinstance(operation_id, str):
+            raise StaleControlError()
+        review = service.publication_review(operation_id, accept_warnings=True)
+        if not (isinstance(review, dict) and review.get("operation_id") == operation_id
+                and isinstance(review.get("receipt"), str) and review["receipt"]
+                and _plan_owner_matches({**record, "plan": review})):
+            raise WisdomConflict("The publication changed; open it again")
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        if gateway_findings(review) != gateway_findings(plan):
+            # New evidence: show it on the same card and ask again.
+            updated = {**record, "plan": {
+                **{key: value for key, value in review.items()
+                   if key not in {"receipt", "authorization_expires_at", "warning_acceptance"}},
+                "skill_name": plan.get("skill_name"), "candidate_flow": True,
+                "review_required": "gateway_advisory",
+            }, "display_ready": False, "updated_at": self.clock()}
+        else:
+            updated = {**record, "plan": {
+                **review, "skill_name": plan.get("skill_name"), "candidate_flow": True,
+            }, "screen": "approval", "gateway_advisory": False, "page": 0,
+                "inspected_through": 0, "display_ready": False, "updated_at": self.clock()}
+        if not self.state.compare_replace(record, updated):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(updated)
 
     def _act_special(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, action: str, record: dict[str, Any], service: Any,

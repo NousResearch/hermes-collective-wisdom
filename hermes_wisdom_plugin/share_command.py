@@ -10,8 +10,9 @@ from .errors import WisdomAuthError, WisdomError, WisdomNotFound, WisdomConflict
 from .package import PackagePolicyError
 from .portal_urls import safe_portal_url
 from .terminal_ui import (
-    edit_prepared, has_reviewable_warnings, render_file_preview, render_findings,
-    render_inventory, review_identity, safe_scan_details, text,
+    edit_prepared, gateway_findings, has_reviewable_warnings, render_file_preview,
+    render_findings, render_gateway_findings, render_inventory, review_identity,
+    safe_scan_details, text,
 )
 
 _AWAITING_REVIEW = frozenset({"policy_review_required", "approval_rejected"})
@@ -64,20 +65,29 @@ def _screen(prepared, owner, detail, mode):
     ]}
     print(render_inventory(inventory).replace("[executable]", "[script]"))
     print(render_findings(prepared))
+    gateway = render_gateway_findings(prepared)
+    if gateway:
+        print(f"Gateway findings ({len(gateway_findings(prepared))})\n{gateway}")
+        print("Already uploaded; not shared until you confirm.")
+        return
     print("Server scan runs on submit. Nothing has been uploaded.")
 
 
 def _warnings(args, prepared):
-    if not has_reviewable_warnings(prepared):
+    gateway = prepared.get("review_required") == "gateway_advisory"
+    if not has_reviewable_warnings(prepared) and not gateway:
         return False
-    if not safe_scan_details(prepared.get("local_scan")):
+    if has_reviewable_warnings(prepared) and not safe_scan_details(prepared.get("local_scan")):
         raise WisdomConflict("Scanner warning details are unavailable; sharing is blocked")
     if args.accept_warnings:
         return True
     if args.json or args.yes or not sys.stdin.isatty():
         return None
-    print(render_findings(prepared))
-    answer = input("Acknowledge the displayed scanner warnings for this exact package? [y/N] ")
+    print(render_gateway_findings(prepared) if gateway else render_findings(prepared))
+    question = ("Acknowledge the displayed Gateway findings for this exact package? [y/N] "
+                if gateway else
+                "Acknowledge the displayed scanner warnings for this exact package? [y/N] ")
+    answer = input(question)
     return True if answer.strip().lower() in {"y", "yes", "a"} else None
 
 
@@ -165,6 +175,13 @@ def _outcome(result, skill, team):
     if (result.get("state"), result.get("publication_state")) == ("done", "pending_moderation"):
         return _result("pending_moderation", skill,
                        "Submitted for team review; not shared yet."), 0
+    if result.get("review_required") == "gateway_advisory":
+        findings = render_gateway_findings(result)
+        return _result("gateway_review_required", skill,
+                       "Not shared yet. Gateway checks found items to review:\n"
+                       + (findings or "(no details reported)")
+                       + "\nAcknowledge them and finish with: hermes wisdom share "
+                       + shlex.quote(text(skill)) + " --accept-warnings"), 1
     return _result("uncertain", skill, "We could not confirm the result. Nothing will be resent. "
                    "Check with: hermes wisdom publication status " + operation), 2
 
@@ -187,7 +204,13 @@ def _share(args, service):
             return _outcome(pending, args.skill, text(owner["organization_id"]))
         # Finish the earlier share's retained operation; never prepare a duplicate.
         operation_id = str(pending["operation_id"])
-        prepared = service.publication_review(operation_id)
+        if pending.get("review_required") == "gateway_advisory":
+            # Display only: acknowledgement is re-bound to live Gateway evidence below.
+            prepared = service.publication_gateway_review(operation_id)
+            if not isinstance(prepared, dict):
+                prepared = service.publication_review(operation_id)
+        else:
+            prepared = service.publication_review(operation_id)
         if prepared.get("operation_id") != operation_id:
             raise WisdomConflict("The earlier share changed; check publication status")
     else:

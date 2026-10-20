@@ -1279,6 +1279,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "server_checks": {"security_check": self._gateway_check(remote)},
             "network_submission": False,
             "authorization_expires_at": expires_at,
+            **({"review_required": "gateway_advisory"} if gateway_acceptance else {}),
         }
 
     def _operation_editorial(self, operation: dict[str, Any]) -> dict[str, Any]:
@@ -1779,6 +1780,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             }
         if operation["phase"] == "policy_review_required":
             return operation, self.status(operation_id)
+        remote = None
         if operation.get("remote_draft_id"):
             remote = self._remote(operation, may_apply)
             remote_state = str(_value(remote, "state"))
@@ -1800,10 +1802,16 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                 operation_id, phase="policy_review_required", resume_phase=operation["phase"]
             )
             return operation, self.status(operation_id)
-        return self._approve_ready(operation)
+        return self._approve_ready(operation, remote)
 
-    def _require_approval_scan(self, operation: dict[str, Any]) -> None:
-        """Require a known verdict and exact acknowledgement of Gateway advisories."""
+    def _require_approval_scan(
+        self, operation: dict[str, Any], remote: Any = None,
+    ) -> dict[str, Any] | None:
+        """Require a known verdict and exact acknowledgement of Gateway advisories.
+
+        An unacknowledged advisory is a defined outcome, not an error: nothing was
+        approved and the operation waits for the author to acknowledge the findings.
+        """
         verdict = operation.get("remote_scan_verdict")
         acceptance = operation.get("gateway_warning_acceptance")
         advisory_accepted = (
@@ -1811,21 +1819,62 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             and acceptance.get("accepted") is True
             and acceptance.get("gateway_evidence_hash") == operation.get("gateway_evidence_hash")
         )
-        if verdict not in {"pass", "blocked", "advisory"} or (
-            verdict == "advisory" and not advisory_accepted
-        ):
-            self.state.update_publication(
-                operation["id"], phase="policy_review_required", resume_phase="submitted"
-            )
-            raise WisdomValidationError("Gateway scan verdict requires a fresh review")
+        if verdict in {"pass", "blocked"} or advisory_accepted:
+            return None
+        self.state.update_publication(
+            operation["id"], phase="policy_review_required", resume_phase="submitted"
+        )
+        if verdict == "advisory" and remote is not None:
+            return self._advisory_pending(operation["id"], remote)
+        raise WisdomValidationError(
+            "Gateway scan verdict requires a fresh review", code="scan_review_required",
+        )
 
-    def _approve_ready(
-        self, operation: dict[str, Any],
+    def _advisory_pending(self, operation_id: str, remote: Any) -> dict[str, Any]:
+        result = self.status(operation_id)
+        result.update(
+            review_required="gateway_advisory",
+            server_checks={"security_check": self._gateway_check(remote)},
+            detail="Gateway checks reported findings. Acknowledge them to finish sharing; "
+                   "nothing was approved or published.",
+        )
+        return result
+
+    def gateway_review(
+        self, operation_id: str, *, may_apply: Callable[[], bool] | None = None,
+    ) -> dict[str, Any] | None:
+        """Read-only display of Gateway advisory findings awaiting acknowledgement.
+
+        Carries no receipt: acknowledging still requires ``review(...,
+        accept_warnings=True)``, which binds the acceptance to the live evidence.
+        """
+        _current(may_apply)
+        operation = self._operation(operation_id)
+        if operation.get("status") == "done" or operation.get("phase") != "policy_review_required":
+            return None
+        remote = self._remote(operation, may_apply)
+        if _value(remote, "scanVerdict") != "advisory" or _value(remote, "state") != "ready":
+            return None
+        return {
+            **self._operation_review(operation), **self._operation_editorial(operation),
+            "state": "policy_review_required", "phase": "policy_review_required",
+            "review_required": "gateway_advisory",
+            "draft_id": operation["local_draft_id"], "operation_id": operation["id"],
+            "hashes": copy.deepcopy(operation["hashes"]),
+            "warning_acceptance": copy.deepcopy(operation.get("warning_acceptance")),
+            "server_checks": {"security_check": self._gateway_check(remote)},
+            "network_submission": False,
+        }
+
+    def _approve_ready(  # pylint: disable=too-many-return-statements
+        self, operation: dict[str, Any], remote: Any = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         operation_id = operation["id"]
         if operation.get("remote_state") != "ready":
             return operation, None
-        self._require_approval_scan(operation)
+        advisory = self._require_approval_scan(operation, remote)
+        if advisory is not None:
+            return operation, advisory
         if operation["phase"] == "approval_unknown":
             return operation, self._uncertain(
                 operation_id, "approval_unknown",
@@ -1919,8 +1968,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             )
             return operation, self._approval_rejection(operation["id"])
         if verdict == "advisory":
-            result = self.status(operation["id"])
-            result["server_checks"] = {"security_check": self._gateway_check(revised)}
+            result = self._advisory_pending(operation["id"], revised)
             result["detail"] = (
                 "Gateway rescan produced advisory findings; review the successor before approval."
             )
@@ -2062,7 +2110,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
                     "code": operation["rejection_code"], "retry_safe": False}
         if phase == "approval_rejected":
             return self._approval_rejection(operation_id)
-        return {
+        result = {
             "operation_id": operation_id,
             "state": "uncertain" if "unknown" in phase else "pending",
             "phase": phase, "remote_draft_id": operation.get("remote_draft_id"),
@@ -2070,6 +2118,10 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "retryable_with_fresh_base": phase == "base_conflict",
             "retry_safe": phase in {"intent", "objects_uploaded"},
         }
+        if phase == "policy_review_required" and operation.get("remote_scan_verdict") == "advisory":
+            # Local hint only; the acknowledgement is re-bound to live Gateway evidence.
+            result["review_required"] = "gateway_advisory"
+        return result
 
     def share_status(self, skill_name: str) -> dict[str, Any] | None:
         """Fence repeated one-shot calls behind any unfinished source operation."""
