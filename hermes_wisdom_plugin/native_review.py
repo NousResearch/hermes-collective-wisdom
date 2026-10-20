@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from .catalog_table import COLUMNS as CATALOG_COLUMNS
+from .catalog_table import installed_cell, one_line, version_cell
 from .errors import (
     ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
     WisdomNotFound, WisdomValidationError, describe_exception,
@@ -82,6 +84,27 @@ class NativeItem:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeTableRow:
+    """One listing row: table cells plus the compact one-line form for plain chat."""
+    cells: tuple[str, ...]
+    name: str
+    compact: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTable:
+    """A listing rendered as a native table where the surface supports one.
+
+    ``actions`` replace the per-item controls while the table is shown; they use
+    the same callback ids as the items, which remain the fallback layout.
+    """
+    columns: tuple[str, ...]
+    rows: list[NativeTableRow]
+    actions: list[NativeAction] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeView:  # pylint: disable=too-many-instance-attributes
     title: str
     summary: str
@@ -91,6 +114,7 @@ class NativeView:  # pylint: disable=too-many-instance-attributes
     navigation_actions: list[NativeAction] = field(default_factory=list)
     dismissed: bool = False
     fields: list[NativeField] = field(default_factory=list)
+    table: NativeTable | None = None
 
     def to_text(self) -> str:
         lines = [self.title]
@@ -99,6 +123,16 @@ class NativeView:  # pylint: disable=too-many-instance-attributes
         if self.fields:
             lines.append("")
             lines.extend(f"{fact.label}: {fact.value}" for fact in self.fields)
+        if self.table is not None:
+            for row in self.table.rows:
+                lines.extend(("", f"{row.name} · {row.compact}"))
+                if row.detail:
+                    lines.append(row.detail)
+            if self.notice:
+                lines.extend(("", self.notice))
+            lines.extend(f"{action.label}: {action.url}"
+                         for action in [*self.table.actions, *self.actions] if action.url)
+            return "\n".join(lines)
         for item in self.items:
             if item.preamble:
                 lines.extend(("", item.preamble))
@@ -436,24 +470,42 @@ def _catalog_rows(data: Any) -> list[dict[str, Any]]:
     return [data]
 
 
+def _catalog_table(rows: list[NativeTableRow], items: list[NativeItem]) -> NativeTable:
+    """Browse rows as a table: Install for not-installed rows, then Portal links."""
+    installs, links = [], []
+    for row, item in zip(rows, items):
+        for action in item.actions:
+            if action.url:
+                links.append(replace(action, label=f"Open {row.name}", row=1))
+            else:
+                installs.append(replace(action, label=f"Install {row.name}"))
+    return NativeTable(CATALOG_COLUMNS, rows, [*installs, *links])
+
+
+def _catalog_facts(row: dict[str, Any], version: Any, detail: Any) -> list[str]:
+    facts = []
+    if version is not None:
+        facts.append(f"Version: v{_safe(version)}")
+    if detail:
+        facts.append(_safe(" ".join(str(detail).split())))
+    facts.append(_installed_label(row))
+    for label, key in (("Status", "state"), ("Author", "created_by_display_name")):
+        if row.get(key):
+            facts.append(f"{label}: {_safe(row[key])}")
+    return facts
+
+
 def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
     command = str(plan.get("command") or "browse").title()
     items = []
+    rows: list[NativeTableRow] = []
     for index, row in enumerate(_catalog_rows(plan.get("data"))[:5]):
         title = _skill_name(row)
         if title == "Name unavailable" and command == "Versions":
             title = _skill_name(plan)
         detail = row.get("author_description") or row.get("description") or ""
         version = row.get("version", row.get("latest_version"))
-        facts = []
-        if version is not None:
-            facts.append(f"Version: v{_safe(version)}")
-        if detail:
-            facts.append(_safe(" ".join(str(detail).split())))
-        facts.append(_installed_label(row))
-        for label, key in (("Status", "state"), ("Author", "created_by_display_name")):
-            if row.get(key):
-                facts.append(f"{label}: {_safe(row[key])}")
+        facts = _catalog_facts(row, version, detail)
         actions = []
         skill_id = row.get("id") or row.get("skill_id")
         status = row.get("installation_status")
@@ -463,14 +515,21 @@ def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
         if row.get("portal_url"):
             actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
         items.append(NativeItem(title, "\n".join(facts) or "Published skill", actions))
+        rows.append(NativeTableRow(
+            (title, version_cell(version), installed_cell(status),
+             one_line(detail) or "No description"), title,
+            f"{version_cell(version)} · {_installed_label(row)}",
+            one_line(detail) or "No description",
+        ))
     if not items:
         items = [NativeItem("No matching skills", "The catalog returned no results.")]
+    table = _catalog_table(rows, items) if command == "Browse" and rows else None
     return NativeView(
         "Collective Wisdom catalog", f"{command}: " + (
             _skill_name(plan) if command != "Browse" else _safe(plan.get("target"), "All skills")
         ),
         items, notice=(f"State: {state}" if state != "pending" else ""),
-        dismissed=state != "pending",
+        dismissed=state != "pending", table=table,
     )
 
 
@@ -1135,6 +1194,7 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
         return replace(
             original, actions=[], navigation_actions=[], dismissed=True,
             items=[replace(item, actions=[]) for item in original.items],
+            table=replace(original.table, actions=[]) if original.table else None,
         )
     if record.get("failure") == "share_preparation_failed" and record.get("state") == "pending":
         return NativeView(

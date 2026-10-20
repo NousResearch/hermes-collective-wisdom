@@ -73,6 +73,16 @@ def _structured_html(view: NativeView) -> str:
         lines.append("")
         lines.extend(f"<b>{html.escape(fact.label)}:</b> {html.escape(fact.value)}"
                      for fact in view.fields)
+    if view.table is not None:
+        for row in view.table.rows:
+            lines.extend(("", f"<b>{html.escape(row.name)}</b> · {html.escape(row.compact)}"))
+            if row.detail:
+                lines.append(html.escape(row.detail))
+        if view.notice:
+            lines.extend(("", f"<i>{html.escape(view.notice)}</i>"))
+        lines.extend(f"{html.escape(action.label)}: {html.escape(action.url)}"
+                     for action in [*view.table.actions, *view.actions] if action.url)
+        return "\n".join(lines)
     for item in view.items:
         if item.preamble:
             lines.extend(("", f"<i>{html.escape(item.preamble)}</i>"))
@@ -119,6 +129,9 @@ def _plain_fallback_view(view: NativeView) -> NativeView:
             for item in view.items
         ],
         actions=[action for action in view.actions if not action.primary],
+        table=replace(view.table, actions=[
+            action for action in view.table.actions if not action.primary
+        ]) if view.table is not None else None,
         notice=(
             view.notice + " " if view.notice else ""
         ) + "Approval is unavailable because this fallback cannot show every review fact.",
@@ -185,9 +198,40 @@ def _rich_detail(item: NativeItem) -> str:
     )
     return rendered
 
+
+def _rich_table(view: NativeView) -> str:
+    """A Bot API rich ``<table>``: bold header cells, every value escaped."""
+    table = view.table
+    if table is None:
+        return ""
+    header = "<tr>" + "".join(f"<th>{html.escape(cell)}</th>" for cell in table.columns) + "</tr>"
+    body = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row.cells) + "</tr>"
+        for row in table.rows
+    )
+    return f"<table bordered>{header}{body}</table>"
+
+
+def _rich_table_html(view: NativeView, record_id: str) -> str:
+    parts = [f"<h5>{_escaped(view.title, 1_000)}</h5>"]
+    if view.summary:
+        parts.append(f"<p>{_escaped(view.summary, 2_000)}</p>")
+    parts.append(_rich_table(view))
+    if view.notice:
+        parts.append(f"<p><i>{_escaped(view.notice, 2_000)}</i></p>")
+    table_actions = view.table.actions if view.table is not None else []
+    parts.append(_rich_rows([*table_actions, *view.actions], record_id))
+    return "".join(parts)
+
+
 def rich_html(view: NativeView, record_id: str) -> str:
     """Render a bounded Bot API rich-message card with embedded controls."""
 
+    if view.table is not None:
+        rendered = _rich_table_html(view, record_id)
+        if len(rendered) <= RICH_TEXT_LIMIT:
+            return rendered
+        view = replace(view, table=None)
     heading_tag = "p" if _compact_receipt(view) else "h5"
     heading = f"<{heading_tag}>{_escaped(view.title, 1_000)}</{heading_tag}>"
     parts = [heading]
@@ -238,6 +282,12 @@ def rich_html_is_lossless(view: NativeView, record_id: str) -> bool:
         rendered = rich_html(view, record_id)
     except (ValueError, TypeError):
         return False
+    if view.table is not None:
+        controls = [*view.table.actions, *view.actions]
+        return (
+            _rich_table(view) in rendered
+            and all(_rich_button(action, record_id) in rendered for action in controls)
+        )
     values = [view.title, view.summary, view.notice]
     values.extend(value for item in view.items for value in (item.preamble, item.title))
     controls = [*view.navigation_actions, *view.actions]
@@ -267,6 +317,8 @@ def _rich_projection(view: NativeView, record_id: str) -> str:
     """Reject lossy approval cards before either rich transport makes a request."""
     actions = [*view.navigation_actions, *view.actions]
     actions.extend(action for item in view.items for action in item.actions)
+    if view.table is not None:
+        actions.extend(view.table.actions)
     if any(action.primary for action in actions) and not rich_html_is_lossless(view, record_id):
         raise RichProjectionUnsupported("Telegram rich approval facts exceed the API limit")
     return rich_html(view, record_id)
@@ -296,7 +348,8 @@ def keyboard(view: NativeView, record_id: str) -> Any:
     rows = []
     groups = [
         view.navigation_actions,
-        *(item.actions for item in view.items),
+        *(_rows(view.table.actions) if view.table is not None
+          else (item.actions for item in view.items)),
         *_rows(view.actions),
     ]
     for actions in groups:

@@ -109,7 +109,8 @@ def _cells(data: dict[str, Any]) -> list[tuple[str, ...]]:
     ]
 
 
-def _markdown_cell(value: str) -> str:
+def markdown_cell(value: str) -> str:
+    """Escape a value for one GFM table cell (pipes, backslashes, backticks)."""
     return value.replace("\\", "\\\\").replace("|", "\\|").replace("`", "'")
 
 
@@ -120,7 +121,7 @@ def render_markdown_table(data: dict[str, Any]) -> list[str]:
     surfaces without table support (Telegram MarkdownV2, Discord) receive the
     host's own table-to-list rewrite, so the reply stays structured everywhere.
     """
-    rows = [tuple(_markdown_cell(cell) for cell in row) for row in _cells(data)]
+    rows = [tuple(markdown_cell(cell) for cell in row) for row in _cells(data)]
     rows = [(row[0], f"`{row[1]}`", *row[2:]) for row in rows]
     return [
         "| " + " | ".join(_COLUMNS) + " |",

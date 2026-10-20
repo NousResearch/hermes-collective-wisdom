@@ -11,6 +11,10 @@ from .native_review import NativeView, action_label, callback_value, slack_secti
 _MAX_ITEMS = 5
 _MAX_FIELDS = 10
 _MAX_FIELD_TEXT = 2000
+# Native table block limits (host plugins/platforms/slack/block_kit.py).
+MAX_TABLE_ROWS = 100
+MAX_TABLE_COLS = 20
+MAX_TABLE_CHARS = 10000
 
 
 def is_link_button(action: dict[str, Any]) -> bool:
@@ -108,8 +112,37 @@ def _lead_blocks(view: NativeView) -> list[dict[str, Any]]:
     return [section]
 
 
+def _table_cell(text: str, *, bold: bool = False) -> dict[str, Any]:
+    element: dict[str, Any] = {"type": "text", "text": text}
+    if bold:
+        element["style"] = {"bold": True}
+    return {"type": "rich_text", "elements": [
+        {"type": "rich_text_section", "elements": [element]},
+    ]}
+
+
+def table_block(view: NativeView) -> dict[str, Any] | None:
+    """A native Block Kit ``table`` for a listing, or None when Slack would reject it."""
+    table = view.table
+    if table is None or not table.rows:
+        return None
+    grid = [table.columns, *(row.cells for row in table.rows)]
+    if (len(grid) > MAX_TABLE_ROWS or len(table.columns) > MAX_TABLE_COLS
+            or any(len(cells) != len(table.columns) for cells in grid)
+            or sum(len(cell) for cells in grid for cell in cells) > MAX_TABLE_CHARS
+            or any(not cell.strip() or not cell.isprintable() for cells in grid for cell in cells)):
+        return None
+    return {"type": "table", "rows": [
+        [_table_cell(cell, bold=True) for cell in table.columns],
+        *([_table_cell(cell) for cell in cells] for cells in grid[1:]),
+    ]}
+
+
 def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
-    """Header, facts, items, context line, divider, actions."""
+    """Header, facts, items (or a listing table), context line, divider, actions."""
+    table = table_block(view)
+    if table is not None:
+        return _table_blocks(view, table, record_id)
     item_bodies = _item_bodies(view)
     approval_is_lossless = (
         len(view.items) <= _MAX_ITEMS
@@ -154,6 +187,27 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
     if actions and len(rendered) > 1:
         rendered.append({"type": "divider"})
     rendered.extend(actions)
+    return rendered[:50]
+
+
+def _table_blocks(
+    view: NativeView, table: dict[str, Any], record_id: str,
+) -> list[dict[str, Any]]:
+    rendered: list[dict[str, Any]] = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": _trim(view.title, 150), "emoji": True},
+    }]
+    rendered.extend(_lead_blocks(view))
+    rendered.append(table)
+    if view.notice:
+        rendered.append({"type": "context", "elements": [{"type": "mrkdwn",
+            "text": slack_section_text(view.notice)}]})
+    controls = [*(view.table.actions if view.table else []), *view.actions]
+    for row in sorted({action.row for action in controls}):
+        rendered.extend(_action_blocks(
+            [action for action in controls if action.row == row], record_id,
+            row=f"table_{row}",
+        ))
     return rendered[:50]
 
 

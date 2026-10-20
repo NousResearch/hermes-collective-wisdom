@@ -1272,10 +1272,54 @@ def test_slash_list_alias_paginates_five_items_and_back_navigation():
     first = run_slash("list", service)
     second = run_slash("browse --page 2", service)
 
-    assert first.count("Show: /wisdom show") == PAGE_SIZE
-    assert "Next: /wisdom browse --page 2" in first
-    assert second.count("Show: /wisdom show") == 1
-    assert "Back: /wisdom browse --page 1" in second
+    assert first.count("| `incident-") == PAGE_SIZE
+    assert "Next: `/wisdom browse --page 2`" in first
+    assert second.count("| `incident-") == 1
+    assert "| 6 | `incident-5` | v6 |" in second
+    assert "Back: `/wisdom browse --page 1`" in second
+
+
+def test_slash_browse_is_a_markdown_table_with_escaping_trimming_and_paging():
+    service = _Service()
+    service.rows[0]["slug"] = "pipe|tick`skill"
+    service.rows[0]["author_description"] = "Line one\nline | two " + "x" * 100
+    service.rows[0]["installation_status"] = {"state": "not_installed", "text": "Not installed"}
+    service.rows[1]["installation_status"] = {
+        "state": "installed", "text": "Installed v1", "installed_version": 1,
+        "latest_version": 2,
+    }
+    service.rows[2]["installation_status"] = {"state": "installed", "text": "Installed v3"}
+    service.rows[3]["latest_version"] = True
+
+    lines = run_slash("browse --page 1", service).splitlines()
+
+    assert lines[:3] == [
+        "**Shared skills · Skills published by your team · page 1**",
+        "",
+        "| # | Skill | Version | Installed | Description |",
+    ]
+    assert lines[3] == "|---:|:---|:---|:---|:---|"
+    assert lines[4].startswith("| 1 | `pipe\\|tick'skill` | v1 | No | Line one line \\| two x")
+    assert lines[4].endswith("x… |")
+    assert len(lines[4].split(" | ")[-1].removesuffix(" |")) == 81  # 80 chars + one escape
+    assert lines[5] == "| 2 | `incident-1` | v2 | v1 (update to v2) | Description 1 |"
+    assert lines[6] == "| 3 | `incident-2` | v3 | Yes | Description 2 |"
+    assert lines[7] == "| 4 | `incident-3` | - | Unknown | Description 3 |"
+    assert lines[-3:] == ["Details: `/wisdom show <skill>`", "", "Next: `/wisdom browse --page 2`"]
+    middle = run_slash("browse --page 2", _Service()).splitlines()
+    assert middle[-1] == "Back: `/wisdom browse --page 1`"
+    service.rows.extend(dict(service.rows[0], slug=f"extra-{index}") for index in range(5))
+    assert run_slash("browse --page 2", service).splitlines()[-1] == (
+        "Back: `/wisdom browse --page 1` · Next: `/wisdom browse --page 3`"
+    )
+    assert "Security check" not in "\n".join(lines)
+
+
+def test_slash_browse_empty_page_has_no_table():
+    output = run_slash("browse --page 9", _Service())
+    assert "No matching shared skills." in output
+    assert "| # |" not in output
+    assert output.splitlines()[-1] == "Back: `/wisdom browse --page 8`"
 
 
 @pytest.mark.parametrize(
@@ -1380,8 +1424,8 @@ def test_slash_browse_omits_account_local_install_and_private_check_details():
     output = run_slash("browse incident", _Service())
 
     assert "incident-0" in output
-    assert "Security check: Pass" in output
-    assert "Professionalism check: Pending" in output
+    assert "Security check" not in output
+    assert "Professionalism check" not in output
     for private in (
         "account-secret",
         "/Users/private",
@@ -1390,7 +1434,7 @@ def test_slash_browse_omits_account_local_install_and_private_check_details():
         "PRIVATE_FINDING",
     ):
         assert private not in output
-    assert "Installation status unavailable" in output
+    assert "Unknown" in output
     assert "Review install" not in output
     assert "Install:" not in output
 
@@ -1405,7 +1449,7 @@ def test_slash_browse_sanitizes_untrusted_text_and_navigation_controls():
     assert "résumé-helper" in output
     assert "Keep Unicode 🦝" in output
     assert "café" in output
-    assert "Next: /wisdom browse 'café [31m' --page 2" in output
+    assert "Next: `/wisdom browse 'café [31m' --page 2`" in output
     assert "\x1b" not in output
     assert "\x07" not in output
 
@@ -1414,7 +1458,8 @@ def test_slash_navigation_preserves_full_query():
     query = "café  " + "long-query" * 60
     service = _Service()
     output = run_slash(shlex.join(("browse", query)), service)
-    next_command = next(line.removeprefix("Next: ") for line in output.splitlines()
+    next_command = next(line.removeprefix("Next: `").removesuffix("`")
+                        for line in output.splitlines()
                         if line.startswith("Next: "))
     assert shlex.split(next_command) == ["/wisdom", "browse", query, "--page", "2"]
 
@@ -1499,7 +1544,7 @@ def test_slash_navigation_preserves_browse_show_versions_parent_intent():
     show = run_slash("show incident-handoff", service)
     versions = run_slash("versions incident-handoff", service)
 
-    assert "Show: /wisdom show incident-0" in browse
+    assert "| `incident-0` |" in browse
     assert "Versions: /wisdom versions incident-handoff" in show
     assert "Back: /wisdom browse" in show
     assert "Back: /wisdom show incident-handoff" in versions

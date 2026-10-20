@@ -85,7 +85,7 @@ def test_catalog_browse_renders_owner_local_managed_install_status(tmp_path, mon
         "state": "installed", "text": "Installed v1 · update to v2 available",
         "installed_version": 1, "latest_version": 2,
     }
-    assert "Installed v1 · update to v2 available" in rendered
+    assert "| `" in rendered and "| v2 | v1 (update to v2) |" in rendered
 
 
 def test_public_update_routes_resolve_unique_skill_name_before_review():

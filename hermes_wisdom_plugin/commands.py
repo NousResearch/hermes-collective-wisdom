@@ -35,6 +35,11 @@ from .package import (
 from .release_scope import active as _release_scope
 from .share_command import run_share
 from .share_suggest import run_share_suggest
+from .catalog_table import COLUMNS as _CATALOG_COLUMNS
+from .catalog_table import installed_cell as _installed_cell
+from .catalog_table import one_line as _one_line
+from .catalog_table import version_cell as _version_cell
+from .top_command import markdown_cell as _markdown_cell
 from .top_command import page_size as _page_size
 from .top_command import positive_page as _positive_page
 from .top_command import refusal as _private_refusal
@@ -1343,41 +1348,53 @@ def _render_status(value: object) -> str:
     )
 
 
+_BROWSE_COLUMNS = ("#", "Skill", *_CATALOG_COLUMNS[1:])
+
+
+def _browse_cells(item: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        _text(item.get("slug") or item.get("id") or "Unnamed skill"),
+        _version_cell(item.get("latest_version")),
+        _installed_cell(item.get("installation_status")),
+        _one_line(item.get("author_description") or "No description"),
+    )
+
+
 def _render_browse(rows: object, query: str, page: int) -> str:
+    """One GFM table per page, matching ``/wisdom top``; details stay in show."""
     skills = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
     start = (page - 1) * PAGE_SIZE
     selected = skills[start : start + PAGE_SIZE]
     heading = f'Results for "{_text(query)}"' if query else "Skills published by your team"
-    lines = ["Shared skills", "", f"{heading} - page {page}"]
-    for item in selected:
-        slug = _text(item.get("slug") or item.get("id") or "Unnamed skill")
-        version = _positive_version(item.get("latest_version"))
-        description = _text(item.get("author_description") or "No description")
-        lines.extend(
-            (
-                "",
-                slug,
-                f"v{version or '?'} - {description}",
-                _installation_status_text(item),
-                _review_states(item),
-                f"Show: {_slash_command('show', slug)}",
-            )
-        )
+    lines = [f"**Shared skills · {_markdown_cell(heading)} · page {page}**", ""]
     if not selected:
-        lines.extend(("", "No matching shared skills."))
-    lines.extend(_browse_navigation(query, page, start + PAGE_SIZE < len(skills)))
+        lines.append("No matching shared skills.")
+    else:
+        lines.extend((
+            "| " + " | ".join(_BROWSE_COLUMNS) + " |",
+            "|---:|:---|:---|:---|:---|",
+        ))
+        for number, item in enumerate(selected, start=start + 1):
+            slug, version, installed, description = (
+                _markdown_cell(cell) for cell in _browse_cells(item)
+            )
+            lines.append(
+                f"| {number} | `{slug}` | {version} | {installed} | {description} |"
+            )
+        lines.extend(("", "Details: `/wisdom show <skill>`"))
+    navigation = _browse_navigation(query, page, start + PAGE_SIZE < len(skills))
+    if navigation:
+        lines.extend(("", " · ".join(navigation)))
     return "\n".join(lines)
 
 
 def _browse_navigation(query: str, page: int, has_next: bool) -> list[str]:
-    lines: list[str] = []
+    hints: list[str] = []
     if page > 1:
-        lines.extend(("", f"Back: {_paged_command('browse', query, page - 1)}"))
+        hints.append(f"Back: `{_paged_command('browse', query, page - 1)}`")
     if has_next:
-        if not lines:
-            lines.append("")
-        lines.append(f"Next: {_paged_command('browse', query, page + 1)}")
-    return lines
+        hints.append(f"Next: `{_paged_command('browse', query, page + 1)}`")
+    return hints
 
 
 def _installation_status_text(value: object) -> str:
