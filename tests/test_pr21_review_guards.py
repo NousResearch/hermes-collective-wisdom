@@ -124,7 +124,7 @@ def test_settings_ack_fences_effects_and_preserves_completed_result(
             return {"muted": True}
         monkeypatch.setattr(service, "choose_notification_mute", mute, raising=False)
         ui = surface(tmp_path, service)
-        identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
+        identity = ui.runtime.begin(ui.caller, "incident")["review_id"]
         await ui.flush()
         started, release = asyncio.Event(), asyncio.Event()
         original = ui.chat_update

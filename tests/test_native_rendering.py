@@ -61,9 +61,9 @@ def test_candidate_share_approval_has_one_heading_and_emphasized_owned_labels(mo
     assert slack.count("*") == 18  # Eight owned labels and the one skill heading.
     assert rich_html_is_lossless(view, "record-1")
     assert html.unescape(plain_html(view)) == view.to_text()
-    assert [(action.label, action.action, action.primary) for action in view.actions][:2] == [
-        ("Share My Skill", "confirm", True),
-        ("Review/edit in Portal", "portal.draft", False),
+    assert [(action.label, action.action, action.primary) for action in view.actions] == [
+        ("Share My Skill", "confirm", True), ("View More Details", "details", False),
+        ("Cancel", "cancel", False),
     ]
 
 def test_labeled_approval_with_long_fact_does_not_keep_rich_primary_control():
