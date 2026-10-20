@@ -16,15 +16,21 @@ from typing import Any, Callable
 
 from .contract import author_description_hash, sha256_address
 from .editorial import (
-    MAX_EDITORIAL_DESCRIPTION_LENGTH,
-    MAX_EDITORIAL_NAME_LENGTH,
     apply_editorial_metadata_to_overlay,
+    copy_problem_message,
+    copy_provenance_line,
     editorial_copy_complete,
     explicit_editorial_values,
     load_skill_editorial_metadata,
+    local_copy_problem,
+    overlay_copy_problem,
+    propose_share_copy,
     resolve_editorial_metadata,
+    share_copy_model_input,
+    share_copy_values,
 )
 from .errors import (
+    ShareCopyError,
     WisdomAuthError,
     WisdomConflict,
     WisdomError,
@@ -46,6 +52,12 @@ from .package import (
 from .professionalism import review_package, unavailable_review
 from .publisher_evidence import evidence_block, publication_description
 from .release_scope import active as release_scope
+
+# Host scanner findings that mean the skill text may carry a secret, so it must not
+# be sent to the owner's model for share copy. Critical findings of any category
+# also block, to stay conservative where the scanner is most certain.
+_SHARE_COPY_DISCLOSURE_CATEGORIES = frozenset({"credential_exposure"})
+_SHARE_COPY_BLOCKING_SEVERITY = "critical"
 
 
 OwnerProvider = Callable[[], dict[str, str]]
@@ -153,6 +165,43 @@ def _draft_author_description(skill_markdown: str, llm: Any) -> str:
             "the configured model did not return an author description"
         )
     return text
+
+
+def shown_copy_provenance(draft: dict[str, Any], editorial: dict[str, str]) -> dict[str, Any]:
+    """Report Hermes-written copy only while the prepared package still shows it."""
+
+    proposed = draft.get("copy_proposed")
+    if not isinstance(proposed, dict):
+        return {}
+    written = [key for key, value in proposed.items()
+               if isinstance(value, str) and editorial.get(key) == value]
+    if "editorial_description" in written and not str(
+            draft.get("description") or "").startswith(str(proposed["editorial_description"])):
+        # The owner rewrote the shared description; it is no longer Hermes' wording.
+        written.remove("editorial_description")
+    if not written:
+        return {}
+    original = draft.get("copy_original")
+    original = original if isinstance(original, dict) else {}
+    return {
+        "copy_written_by_hermes": written,
+        "copy_provenance_line": copy_provenance_line(written),
+        "copy_original": {key: str(original.get(key) or "") for key in written},
+    }
+
+
+def _without_replaced_copy(
+    frontmatter: dict[str, Any], fields: list[str],
+) -> dict[str, Any]:
+    """Treat explicit copy Hermes replaced as absent so the overlay takes the proposal."""
+
+    metadata = frontmatter.get("metadata")
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
+    if not fields or not isinstance(metadata, dict) or not isinstance(hermes, dict):
+        return frontmatter
+    return {**frontmatter, "metadata": {**metadata, "hermes": {
+        key: value for key, value in hermes.items() if key not in fields
+    }}}
 
 
 class ContributionReviewer:  # pylint: disable=too-few-public-methods
@@ -315,12 +364,12 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomConflict("prepared package changed during review")
         editorial = load_skill_editorial_metadata(overlay)
         editorial_complete = draft.get("editorial_complete_hash") == content_hash
+        copy_problem = None
         if not editorial_complete and not release_scope().model_editorial:
             # This release shares the skill's own name and description as written.
-            name = " ".join(editorial["editorial_name"].split())
-            description = " ".join(editorial["editorial_description"].split())
-            editorial_complete = (0 < len(name) <= MAX_EDITORIAL_NAME_LENGTH
-                                  and 0 < len(description) <= MAX_EDITORIAL_DESCRIPTION_LENGTH)
+            copy_problem = overlay_copy_problem(overlay)
+            editorial_complete = copy_problem is None
+        failure = None if editorial_complete else draft.get("editorial_failure")
         return {
             "state": "prepared",
             "draft_id": str(draft["id"]),
@@ -333,7 +382,10 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "system_specification": manifest.requirements.model_dump(mode="json"),
             **editorial,
             "editorial_status": "complete" if editorial_complete else "incomplete",
-            "editorial_failure": None if editorial_complete else draft.get("editorial_failure"),
+            "editorial_failure": failure,
+            **({"editorial_problem": copy_problem_message(copy_problem)}
+               if copy_problem else {}),
+            **shown_copy_provenance(draft, editorial),
             "files": files,
             "hashes": {
                 "content": str(draft["content_hash"]),
@@ -649,8 +701,91 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 ready = False
         return ready
 
-    def _prepare_editorial(
+    def _share_copy_disclosure_block(self, frontmatter, skill_markdown) -> str | None:
+        """Why the skill must not reach the owner's model for share copy, or None.
+
+        Both checks run over exactly the bytes the model call would disclose
+        (the SKILL.md prefix plus the shareable name and description), staged as
+        a SKILL.md for the host scanner; other package files are never sent, so
+        they do not decide this. The share itself still scans the whole package.
+        The model call only proposes copy the owner reviews before sharing, so the
+        question is disclosure: a credential match from the plugin's preflight or
+        a credential finding from the host scan blocks it, and so does a scan that
+        did not run. Other scanner findings (shell snippets, unpinned installs)
+        are not a disclosure risk; they still gate the share itself.
+        """
+        payload = [("SKILL.md", "file", share_copy_model_input(frontmatter, skill_markdown))]
+        if not model_disclosure_ready(payload):
+            return "disclosure_blocked"
+        try:
+            guard = _scan_snapshot(self.host, self.store.root / "model-inputs", payload)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return "disclosure_unchecked"
+        if guard.get("available") is not True:
+            return "disclosure_unchecked"
+        findings = guard.get("findings")
+        if guard.get("allowed") is not True or not isinstance(findings, list) or any(
+            not isinstance(finding, dict)
+            or finding.get("category") in _SHARE_COPY_DISCLOSURE_CATEGORIES
+            or finding.get("severity") == _SHARE_COPY_BLOCKING_SEVERITY
+            for finding in findings
+        ):
+            return "disclosure_blocked"
+        return None
+
+    def _propose_share_copy(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, source, source_hash, frontmatter, skill_markdown, allow_model_copy, may_apply,
+    ):
+        """Manual sharing: the skill's own copy, or model-proposed copy when it cannot share.
+
+        Returns None when the skill's own name and description can be shared as
+        written (no model call). Otherwise proposes only the failing fields, or
+        raises ShareCopyError with the measured problem before anything is saved.
+        """
+        problem = local_copy_problem(*share_copy_values(frontmatter))
+        if problem is None:
+            return None
+        if allow_model_copy is False:
+            raise ShareCopyError(copy_problem_message(problem, "model_copy_disabled"))
+        if self.llm is None:
+            raise ShareCopyError(copy_problem_message(problem, "model_unavailable"))
+        blocked = self._share_copy_disclosure_block(frontmatter, skill_markdown)
+        if source_fingerprint(source) != source_hash:
+            raise WisdomConflict("source changed during local disclosure preflight")
+        if blocked is not None:
+            raise ShareCopyError(copy_problem_message(problem, blocked))
+        self._require_current(may_apply)
+        proposal = propose_share_copy(
+            frontmatter=frontmatter, skill_markdown=skill_markdown, llm=self.llm,
+        )
+        self._require_current(may_apply)
+        if proposal.get("failure") or not proposal["provenance"]:
+            raise ShareCopyError(copy_problem_message(
+                problem, proposal.get("failure") or "model_error", proposal.get("rejected")))
+        original = dict(zip(("editorial_name", "editorial_description"),
+                            share_copy_values(frontmatter)))
+        written = list(proposal["written_by_hermes"])
+        return {
+            "editorial_name": proposal["editorial_name"],
+            "editorial_description": proposal["editorial_description"],
+            "coworker_benefit": "",
+            "changed": False,
+            "provenance": proposal["provenance"],
+            "written_by_hermes": written,
+            "original": {key: original[key][:4096] for key in written},
+        }
+
+    def _share_description(self, skill_id, description, proposed) -> str:
+        """The shared description: Hermes' proposal when it replaced the skill's own."""
+        if "editorial_description" in proposed["written_by_hermes"]:
+            description = proposed["editorial_description"]
+        if self.source_store is not None:
+            description = publication_description(self.source_store, skill_id, description)
+        return str(description)
+
+    def _prepare_editorial(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, source, source_hash, skill_id, allow_model_review, may_apply,
+        allow_model_copy=None,
     ):
         frontmatter = self.host.parse_skill_frontmatter(source)
         if not isinstance(frontmatter, dict):
@@ -659,6 +794,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         skill_markdown = next(body for path, _mode, body in source_files
                               if path == "SKILL.md").decode("utf-8")
         description = _existing_author_description(frontmatter)
+        if not release_scope().model_editorial and release_scope().model_copy:
+            proposed = self._propose_share_copy(
+                source, source_hash, frontmatter, skill_markdown, allow_model_copy, may_apply,
+            )
+            if proposed is not None:
+                return frontmatter, self._share_description(
+                    skill_id, description, proposed), proposed
         disclosure_ready = self._editorial_disclosure_ready(
             source_files, description, frontmatter, allow_model_review,
         )
@@ -666,10 +808,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomConflict("source changed during local disclosure preflight")
         if description is None:
             if not allow_model_review:
+                if not release_scope().model_editorial:
+                    raise ShareCopyError(copy_problem_message(
+                        local_copy_problem(*share_copy_values(frontmatter))
+                        or "Description is missing."
+                    ))
                 raise PackagePolicyError(
                     "local skill requires author copy or explicit model review authorization"
-                    if release_scope().model_editorial else
-                    "add a description to the skill's SKILL.md frontmatter before sharing"
                 )
             if not disclosure_ready:
                 raise PackagePolicyError(
@@ -709,11 +854,17 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 overlay,
                 editorial_name=editorial_name,
                 editorial_description=editorial_description,
-                frontmatter=frontmatter,
+                frontmatter=_without_replaced_copy(frontmatter, written),
                 coworker_benefit=(editorial["coworker_benefit"]
                                   if editorial["provenance"] else None),
             )
 
+        # Manual sharing writes only the fields Hermes proposed into the overlay.
+        written = list(editorial.get("written_by_hermes") or [])
+        proposed = {key: editorial[key] for key in written} if written else (
+            {"editorial_name": editorial["editorial_name"],
+             "editorial_description": editorial["editorial_description"]}
+            if editorial["provenance"] else {})
         try:
             package: PreparedPackage = prepare_package(
                 source,
@@ -722,10 +873,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 author_description=description,
                 owner=expected_owner["account_id"],
                 installation_id=expected_owner["installation_id"],
-                editorial_name=(editorial["editorial_name"]
-                                if editorial["provenance"] else None),
-                editorial_description=(editorial["editorial_description"]
-                                       if editorial["provenance"] else None),
+                editorial_name=proposed.get("editorial_name"),
+                editorial_description=proposed.get("editorial_description"),
                 editorial_applier=apply_editorial,
             )
             if source_fingerprint(source) != source_hash:
@@ -749,6 +898,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                     else None
                 ),
                 "editorial_failure": editorial.get("failure"),
+                **({"copy_proposed": proposed,
+                    "copy_original": dict(editorial.get("original") or {}),
+                    "copy_provenance": dict(editorial["provenance"])} if written else {}),
             }
             self._require_current(may_apply)
             if existing is not None:
@@ -790,10 +942,17 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
     def prepare(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
         self, skill_name: str, *, allow_model_review: bool | None = None,
         may_apply: Callable[[], bool] | None = None,
+        allow_model_copy: bool | None = None,
     ) -> dict[str, Any]:
-        """Prepare locally; explicit model refusal overrides the default route."""
+        """Prepare locally; explicit model refusal overrides the default route.
+
+        ``allow_model_copy`` governs only manual sharing's proposed name and
+        description: False is an explicit refusal, None allows it when a host
+        model is available.
+        """
         if allow_model_review is None:
             allow_model_review = self.llm is not None
+        model_copy = not release_scope().model_editorial and release_scope().model_copy
 
         self._require_current(may_apply)
         expected_owner = self._owner()
@@ -806,8 +965,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         existing = self.store.prepared_draft(skill_id, source_hash, expected_owner)
         if existing is not None:
             self._assert_draft_owner(existing, expected_owner)
-            if (not allow_model_review or existing.get("editorial_complete_hash")
-                or existing.get("author_edited")):
+            # A saved draft whose own copy cannot be shared is prepared again so
+            # Hermes can propose copy (or name why it cannot) instead of reusing it.
+            stale_copy = (model_copy and not existing.get("author_edited")
+                          and overlay_copy_problem(Path(str(existing["overlay_path"]))))
+            if not stale_copy and (
+                    not allow_model_review or existing.get("editorial_complete_hash")
+                    or existing.get("author_edited")):
                 result = self._result(
                     existing,
                     allow_model_review=allow_model_review and not existing.get("author_edited"),
@@ -819,6 +983,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
 
         frontmatter, description, editorial = self._prepare_editorial(
             source, source_hash, skill_id, allow_model_review, may_apply,
+            allow_model_copy,
         )
         self._assert_owner(expected_owner, may_apply)
         if existing is not None and not editorial["provenance"]:

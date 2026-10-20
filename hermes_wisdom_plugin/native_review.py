@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import secrets
 import time
 import unicodedata
@@ -14,9 +15,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from .catalog_table import COLUMNS as CATALOG_COLUMNS
+from .catalog_table import installed_cell, one_line, version_cell
 from .errors import (
-    SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict, WisdomNotFound,
-    WisdomValidationError,
+    ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
+    WisdomNotFound, WisdomValidationError, describe_exception,
 )
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
@@ -26,7 +29,7 @@ from .release_scope import active as release_scope
 from .review_state import ReviewState
 from .install_review import confirmed_file_change
 from .terminal_ui import (
-    has_reviewable_warnings,
+    gateway_findings, has_reviewable_warnings, render_gateway_findings,
     render_findings, render_operation_outcome, review_identity, safe_scan_details,
 )
 
@@ -37,6 +40,7 @@ TELEGRAM_TEXT_LIMIT = 3500
 # Card buttons stay short enough to render whole on Slack and Telegram phones.
 MAX_ACTION_LABEL = 20
 _UNHANDLED = object()
+logger = logging.getLogger(__name__)
 
 
 
@@ -80,6 +84,27 @@ class NativeItem:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeTableRow:
+    """One listing row: table cells plus the compact one-line form for plain chat."""
+    cells: tuple[str, ...]
+    name: str
+    compact: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTable:
+    """A listing rendered as a native table where the surface supports one.
+
+    ``actions`` replace the per-item controls while the table is shown; they use
+    the same callback ids as the items, which remain the fallback layout.
+    """
+    columns: tuple[str, ...]
+    rows: list[NativeTableRow]
+    actions: list[NativeAction] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeView:  # pylint: disable=too-many-instance-attributes
     title: str
     summary: str
@@ -89,6 +114,7 @@ class NativeView:  # pylint: disable=too-many-instance-attributes
     navigation_actions: list[NativeAction] = field(default_factory=list)
     dismissed: bool = False
     fields: list[NativeField] = field(default_factory=list)
+    table: NativeTable | None = None
 
     def to_text(self) -> str:
         lines = [self.title]
@@ -97,6 +123,16 @@ class NativeView:  # pylint: disable=too-many-instance-attributes
         if self.fields:
             lines.append("")
             lines.extend(f"{fact.label}: {fact.value}" for fact in self.fields)
+        if self.table is not None:
+            for row in self.table.rows:
+                lines.extend(("", f"{row.name} · {row.compact}"))
+                if row.detail:
+                    lines.append(row.detail)
+            if self.notice:
+                lines.extend(("", self.notice))
+            lines.extend(f"{action.label}: {action.url}"
+                         for action in [*self.table.actions, *self.actions] if action.url)
+            return "\n".join(lines)
         for item in self.items:
             if item.preamble:
                 lines.extend(("", item.preamble))
@@ -434,24 +470,42 @@ def _catalog_rows(data: Any) -> list[dict[str, Any]]:
     return [data]
 
 
+def _catalog_table(rows: list[NativeTableRow], items: list[NativeItem]) -> NativeTable:
+    """Browse rows as a table: Install for not-installed rows, then Portal links."""
+    installs, links = [], []
+    for row, item in zip(rows, items):
+        for action in item.actions:
+            if action.url:
+                links.append(replace(action, label=f"Open {row.name}", row=1))
+            else:
+                installs.append(replace(action, label=f"Install {row.name}"))
+    return NativeTable(CATALOG_COLUMNS, rows, [*installs, *links])
+
+
+def _catalog_facts(row: dict[str, Any], version: Any, detail: Any) -> list[str]:
+    facts = []
+    if version is not None:
+        facts.append(f"Version: v{_safe(version)}")
+    if detail:
+        facts.append(_safe(" ".join(str(detail).split())))
+    facts.append(_installed_label(row))
+    for label, key in (("Status", "state"), ("Author", "created_by_display_name")):
+        if row.get(key):
+            facts.append(f"{label}: {_safe(row[key])}")
+    return facts
+
+
 def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
     command = str(plan.get("command") or "browse").title()
     items = []
+    rows: list[NativeTableRow] = []
     for index, row in enumerate(_catalog_rows(plan.get("data"))[:5]):
         title = _skill_name(row)
         if title == "Name unavailable" and command == "Versions":
             title = _skill_name(plan)
         detail = row.get("author_description") or row.get("description") or ""
         version = row.get("version", row.get("latest_version"))
-        facts = []
-        if version is not None:
-            facts.append(f"Version: v{_safe(version)}")
-        if detail:
-            facts.append(_safe(" ".join(str(detail).split())))
-        facts.append(_installed_label(row))
-        for label, key in (("Status", "state"), ("Author", "created_by_display_name")):
-            if row.get(key):
-                facts.append(f"{label}: {_safe(row[key])}")
+        facts = _catalog_facts(row, version, detail)
         actions = []
         skill_id = row.get("id") or row.get("skill_id")
         status = row.get("installation_status")
@@ -461,14 +515,21 @@ def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
         if row.get("portal_url"):
             actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
         items.append(NativeItem(title, "\n".join(facts) or "Published skill", actions))
+        rows.append(NativeTableRow(
+            (title, version_cell(version), installed_cell(status),
+             one_line(detail) or "No description"), title,
+            f"{version_cell(version)} · {_installed_label(row)}",
+            one_line(detail) or "No description",
+        ))
     if not items:
         items = [NativeItem("No matching skills", "The catalog returned no results.")]
+    table = _catalog_table(rows, items) if command == "Browse" and rows else None
     return NativeView(
         "Collective Wisdom catalog", f"{command}: " + (
             _skill_name(plan) if command != "Browse" else _safe(plan.get("target"), "All skills")
         ),
         items, notice=(f"State: {state}" if state != "pending" else ""),
-        dismissed=state != "pending",
+        dismissed=state != "pending", table=table,
     )
 
 
@@ -569,6 +630,22 @@ def _publication_effect(action: str, service: Any, receipt: str,
                         may_apply: Callable[[], bool]) -> Any:
     del action
     return service.publication_submit(receipt, may_apply=may_apply)
+
+
+def _definite_refusal(exc: BaseException) -> bool:
+    """A domain refusal is a known outcome; transport/acknowledgement failures stay unknown.
+
+    A status-less validation error can follow a committed write (for example a
+    mismatched acknowledgement), so only HTTP-status or explicitly coded refusals count.
+    """
+    from .errors import WisdomUnavailable  # pylint: disable=import-outside-toplevel
+    if isinstance(exc, WisdomUnavailable):
+        return False
+    if isinstance(exc, (WisdomConflict, WisdomNotFound, PackagePolicyError)):
+        return True
+    return isinstance(exc, WisdomValidationError) and (
+        exc.status is not None or exc.code == "scan_review_required"
+    )
 
 def _apply_review_action(  # pylint: disable=too-many-return-statements
     action: str, operation: str, plan: dict[str, Any], service: Any,
@@ -680,6 +757,12 @@ def _share_ready(record: dict[str, Any], plan: dict[str, Any]) -> bool:
     )
 
 
+def _copy_note(plan: dict[str, Any]) -> str:
+    """Provenance of Hermes-written share copy; View details shows the original."""
+    line = plan.get("copy_provenance_line")
+    return _safe(line) + " View details shows your original. " if line else ""
+
+
 def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
     """The single /wisdom share confirmation: Share, Cancel, View details."""
     from .native_inspection import _date  # pylint: disable=import-outside-toplevel
@@ -693,7 +776,8 @@ def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
         "📤 Share skill",
         _safe(plan.get("editorial_description"), "Description unavailable"),
         fields=_share_fields(record, plan), actions=actions,
-        notice=f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
+        notice=_copy_note(plan)
+        + f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
         if ready else "Sharing facts are incomplete. Run hermes wisdom share in a terminal.",
     )
     if not _approval_is_lossless(view):
@@ -774,7 +858,7 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
         notice=("Nothing has been uploaded or published. Review proposal opens the "
                 "local package and current policy without sharing. The final Share "
                 "action authorizes that exact proposal." if complete else
-                "Nothing has been uploaded or published. " + _LOCAL_COPY_REQUIRED
+                "Nothing has been uploaded or published. " + _copy_problem(facts)
                 if not release_scope().model_editorial else
                 "Nothing has been uploaded or published. Editorial copy is incomplete (" +
                 reason.replace("_", " ") +
@@ -889,13 +973,18 @@ def _suggest_terminal_view(plan: dict[str, Any], state: str, result: Any = None)
     )
 
 
-_LOCAL_COPY_REQUIRED = ("Add a name and a description of up to 320 characters to the "
+_LOCAL_COPY_REQUIRED = ("The skill's name or description cannot be shared as written. Edit the "
                         "skill's SKILL.md frontmatter, then retry.")
+
+
+def _copy_problem(plan: dict[str, Any]) -> str:
+    """The measured copy problem when known, else the unspecific fallback."""
+    return _safe(plan.get("editorial_problem"), _LOCAL_COPY_REQUIRED)
 
 
 def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
     detail = (_safe(plan.get("editorial_failure"), "Editorial copy or local checks are incomplete.")
-              if release_scope().model_editorial else _LOCAL_COPY_REQUIRED)
+              if release_scope().model_editorial else _copy_problem(plan))
     return NativeView(
         "Skill needs attention", _skill_name(plan),
         [NativeItem("Preparation incomplete", detail)],
@@ -1031,6 +1120,33 @@ def _share_cancelled(record: dict[str, Any]) -> bool:
     )
 
 
+def _gateway_advisory_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """Gateway findings after upload, on the same card: Acknowledge enables Share."""
+    count = len(gateway_findings(plan))
+    noun = "item" + ("" if count == 1 else "s")
+    summary = (render_gateway_findings(plan, limit=3) if count else
+               "Gateway reported an advisory verdict without finding details.")
+    actions = [NativeAction("Acknowledge", "publish.ack", primary=True),
+               NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
+    view = NativeView(
+        "⚠️ Gateway checks",
+        f"Gateway checks found {count} {noun} to review.",
+        [NativeItem("Findings", summary)],
+        fields=[NativeField("Team", _safe(record.get("team_name"), "Team name unavailable")),
+                NativeField("Skill", _safe(plan.get("slug") or _skill_name(plan))),
+                NativeField("Files", _file_summary(plan.get("files"))),
+                NativeField("Checks", f"⚠️ {count} Gateway {noun}")],
+        actions=actions,
+        notice="Uploaded but not shared yet. View details lists every finding. "
+        "Acknowledge to continue to Share, or Cancel to leave it unshared.",
+    )
+    if _approval_is_lossless(view):
+        return view
+    # The full list stays one tap away in View details; the card never dead-ends.
+    return replace(view, items=[NativeItem(
+        "Findings", f"{count} {noun}. Open View details to read every finding.")])
+
+
 def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint: disable=too-many-return-statements
     if (record.get("state") == "pending" and record.get("operation") == "publish"
             and record.get("screen") == "authorization_expired"):
@@ -1044,7 +1160,16 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
     if record.get("operation") == "publish" and record.get("state") in {"completed", "uncertain"}:
         return _publication_result_view(record)
     if _share_cancelled(record):
+        if isinstance(record.get("plan"), dict) and record["plan"].get("operation_id"):
+            return NativeView(
+                "Not shared", "This skill is uploaded but not shared with your team. "
+                "Run /wisdom share again to finish sharing.", dismissed=True)
         return NativeView("Share cancelled", "Nothing was uploaded.", dismissed=True)
+    if record.get("failure") == "publication_refused":
+        return NativeView(
+            "❌ Not shared", "This card didn't share anything. "
+            "Run /wisdom share again to see the current state and continue.",
+            dismissed=True)
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",
@@ -1069,6 +1194,7 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
         return replace(
             original, actions=[], navigation_actions=[], dismissed=True,
             items=[replace(item, actions=[]) for item in original.items],
+            table=replace(original.table, actions=[]) if original.table else None,
         )
     if record.get("failure") == "share_preparation_failed" and record.get("state") == "pending":
         return NativeView(
@@ -1113,6 +1239,8 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     raw_plan = record.get("plan")
     plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
     state = str(record.get("state") or "pending")
+    if state == "pending" and record.get("screen") == "gateway_advisory":
+        return _gateway_advisory_view(record, plan)
     if state == "pending" and record.get("screen") == "checks":
         safe, checks = sharing_checks({**plan, "candidate_flow": True})
         return NativeView(
@@ -1399,7 +1527,14 @@ class NativeReviewController:
         existing = self._existing_share(service, invocation, str(skill_name).strip())
         if existing is not None:
             return existing
-        prepared = service.suggest(str(skill_name).strip())
+        try:
+            prepared = service.suggest(str(skill_name).strip())
+        except ShareCopyError as exc:
+            # Nothing could be prepared; the card names the measured copy problem.
+            return self._insert(service, invocation, "suggest", {
+                "skill_name": str(skill_name).strip(), "native_stage": "prepared",
+                "editorial_status": "incomplete", "editorial_problem": str(exc),
+            })
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):
@@ -1437,7 +1572,12 @@ class NativeReviewController:
             try:
                 review = service.publication_review(operation_id)
             except WisdomConflict:
-                review = None  # e.g. Gateway advisory needs a terminal acknowledgement
+                review = None
+                advisory = self._resume_gateway_advisory(
+                    service, invocation, skill_name, operation_id,
+                )
+                if advisory is not None:
+                    return advisory
             if (isinstance(review, dict) and review.get("operation_id") == operation_id
                     and isinstance(review.get("receipt"), str) and review["receipt"]):
                 record = self._insert(service, invocation, "publish", {
@@ -1455,6 +1595,27 @@ class NativeReviewController:
                 "operation_id", "state", "phase", "publication_state", "code",
             )},
         })
+
+    def _resume_gateway_advisory(
+        self, service: Any, invocation: NativeInvocation, skill_name: str, operation_id: str,
+    ) -> dict[str, Any] | None:
+        """Reopen a pending Gateway advisory on the same Acknowledge card."""
+        read = getattr(service, "publication_gateway_review", None)
+        review = read(operation_id) if callable(read) else None
+        if not (isinstance(review, dict) and review.get("operation_id") == operation_id
+                and review.get("review_required") == "gateway_advisory"):
+            return None
+        record = self._insert(service, invocation, "publish", {
+            **{key: value for key, value in review.items() if key != "receipt"},
+            "skill_name": skill_name, "candidate_flow": True,
+        })
+        if not _plan_owner_matches(record):
+            raise WisdomConflict("The publication owner changed; open it again")
+        updated = {**record, "screen": "gateway_advisory", "gateway_advisory": True,
+                   "page": 0, "inspected_through": 0}
+        if not self.state.compare_replace(record, updated):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(updated)
 
     def load(self, record_id: str) -> dict[str, Any]:
         row = self.state.get(record_id)
@@ -1628,7 +1789,9 @@ class NativeReviewController:
         elif action == "checks":
             result.update(screen="checks")
         elif action == "back":
-            if (record.get("screen") == "details" and record["plan"].get("candidate_flow") is True):
+            if record.get("screen") == "details" and record.get("gateway_advisory") is True:
+                result.update(screen="gateway_advisory", page=0, inspected_through=0)
+            elif (record.get("screen") == "details" and record["plan"].get("candidate_flow") is True):
                 result.update(screen="approval", page=0, inspected_through=0)
             else:
                 result.update(screen="offer", page=0, inspected_through=-1)
@@ -1754,6 +1917,8 @@ class NativeReviewController:
             return self._one_click_package(
                 record, action, service, invocation, authority, progress=progress,
             )
+        if action == "publish.ack" and record.get("operation") == "publish":
+            return self._acknowledge_gateway(record, service, invocation, authority)
         if (record.get("operation") in {"install", "update"}
                 and record.get("screen") == "setup"):
             if action == "setup.defer":
@@ -1986,15 +2151,33 @@ class NativeReviewController:
         try:
             outcome = _apply_review_action(action, operation, plan, service, current)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            uncertain = {
+            refused = operation == "publish" and _definite_refusal(exc)
+            logger.warning(
+                "Collective Wisdom %s %s (%s) operation=%s review=%s", operation,
+                "refused" if refused else "outcome unknown", describe_exception(exc),
+                plan.get("operation_id") or "new", record.get("id"),
+            )
+            failed = ({**claimed, "state": "failed", "failure": "publication_refused",
+                       "result": {"outcome": "refused"},
+                       "updated_at": self.clock()} if refused else {
                 **claimed, "state": "uncertain", "result": {"outcome": "unknown"},
                 "updated_at": self.clock(),
-            }
-            if (self.state.compare_replace(claimed, uncertain)
+            })
+            if (self.state.compare_replace(claimed, failed)
                     and operation in {"settings", "publish"}
                     and not isinstance(exc, WisdomAuthError)):
-                return copy.deepcopy(uncertain)
+                return copy.deepcopy(failed)
             raise
+        if operation == "publish" and isinstance(outcome, dict):
+            advisory = self._gateway_advisory_outcome(claimed, plan, outcome)
+            if advisory is not None:
+                return advisory
+            if outcome.get("state") == "uncertain":
+                logger.warning(
+                    "Collective Wisdom publication outcome unknown operation=%s phase=%s "
+                    "review=%s", outcome.get("operation_id"), outcome.get("phase"),
+                    record.get("id"),
+                )
         result = {
             **claimed, "state": "completed", "result": outcome,
             "updated_at": self.clock(),
@@ -2007,6 +2190,64 @@ class NativeReviewController:
         if not self.state.compare_replace(claimed, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
+
+    def _gateway_advisory_outcome(
+        self, claimed: dict[str, Any], plan: dict[str, Any], outcome: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Turn the same card into the Gateway findings card; nothing was approved."""
+        if not (outcome.get("state") == "pending"
+                and outcome.get("review_required") == "gateway_advisory"
+                and isinstance(outcome.get("operation_id"), str)):
+            return None
+        display = {key: value for key, value in plan.items()
+                   if key not in {"receipt", "authorization_expires_at", "warning_acceptance"}}
+        display.update(operation_id=outcome["operation_id"],
+                       server_checks=copy.deepcopy(outcome.get("server_checks")),
+                       gateway_evidence_hash=outcome.get("gateway_evidence_hash"),
+                       review_required="gateway_advisory")
+        pending = {
+            **claimed, "state": "pending", "plan": display, "screen": "gateway_advisory",
+            "gateway_advisory": True, "page": 0, "inspected_through": 0,
+            "display_ready": False, "effect_action": None, "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(claimed, pending):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(pending)
+
+    def _acknowledge_gateway(
+        self, record: dict[str, Any], service: Any, invocation: NativeInvocation,
+        authority: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Bind an acknowledgement to the live Gateway evidence, then offer Share."""
+        plan = record["plan"]
+        operation_id = plan.get("operation_id")
+        if record.get("screen") != "gateway_advisory" or not isinstance(operation_id, str):
+            raise StaleControlError()
+        review = service.publication_review(operation_id, accept_warnings=True)
+        if not (isinstance(review, dict) and review.get("operation_id") == operation_id
+                and isinstance(review.get("receipt"), str) and review["receipt"]
+                and _plan_owner_matches({**record, "plan": review})):
+            raise WisdomConflict("The publication changed; open it again")
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        rendered = plan.get("gateway_evidence_hash")
+        if not (isinstance(rendered, str) and rendered
+                and review.get("gateway_evidence_hash") == rendered):
+            # Not exactly the evidence this card rendered: show it here and ask again.
+            updated = {**record, "plan": {
+                **{key: value for key, value in review.items()
+                   if key not in {"receipt", "authorization_expires_at", "warning_acceptance"}},
+                "skill_name": plan.get("skill_name"), "candidate_flow": True,
+                "review_required": "gateway_advisory",
+            }, "display_ready": False, "updated_at": self.clock()}
+        else:
+            updated = {**record, "plan": {
+                **review, "skill_name": plan.get("skill_name"), "candidate_flow": True,
+            }, "screen": "approval", "gateway_advisory": False, "page": 0,
+                "inspected_through": 0, "display_ready": False, "updated_at": self.clock()}
+        if not self.state.compare_replace(record, updated):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(updated)
 
     def _act_special(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, action: str, record: dict[str, Any], service: Any,
@@ -2066,18 +2307,55 @@ class NativeReviewController:
     def _refresh_suggest(
         self, record: dict[str, Any], plan: dict[str, Any], service: Any,
     ) -> dict[str, Any]:
+        if plan.get("candidate_flow") is not True and (
+                not (plan.get("draft_id") or plan.get("local_draft_id"))
+                or plan.get("editorial_problem")):
+            # The skill's own copy could not be shared. The owner edits SKILL.md,
+            # so Retry prepares the current source again instead of the old draft.
+            return self._reprepare_suggest(record, plan, service)
         refreshed = _prepared_review(service, plan)
         updated = {**record, "plan": {
             **refreshed, "skill_name": plan.get("skill_name"), "native_stage": "prepared",
             **({"candidate_flow": True} if plan.get("candidate_flow") is True else {}),
         }, "updated_at": self.clock()}
+        return self._advance_prepared(record, updated, refreshed, service)
+
+    def _reprepare_suggest(
+        self, record: dict[str, Any], plan: dict[str, Any], service: Any,
+    ) -> dict[str, Any]:
+        name = str(plan.get("skill_name") or "").strip()
+        if not name:
+            raise WisdomValidationError("Collective Wisdom draft review is unavailable")
+        try:
+            prepared = service.suggest(name)
+        except ShareCopyError as exc:
+            return {**record, "plan": {
+                "skill_name": name, "native_stage": "prepared",
+                "editorial_status": "incomplete", "editorial_problem": str(exc),
+            }, "updated_at": self.clock()}
+        if not isinstance(prepared, dict) or not str(
+            prepared.get("draft_id") or prepared.get("local_draft_id") or ""
+        ):
+            raise WisdomValidationError("prepared draft identity is unavailable")
+        updated = {**record, "plan": {
+            **prepared, "skill_name": name, "native_stage": "prepared",
+        }, "updated_at": self.clock()}
+        if prepared.get("editorial_status") != "complete":
+            return updated
+        displayed = _prepared_review(service, updated["plan"])
+        return self._advance_prepared(record, updated, displayed, service)
+
+    def _advance_prepared(
+        self, record: dict[str, Any], updated: dict[str, Any], refreshed: dict[str, Any],
+        service: Any,
+    ) -> dict[str, Any]:
         if refreshed.get("editorial_status") != "complete":
             return updated
         if has_reviewable_warnings(refreshed):
             if safe_scan_details(refreshed.get("local_scan")):
                 updated["plan"]["native_stage"] = "warnings"
             return updated
-        return self._sharing_review(record, plan, refreshed, service, False)
+        return self._sharing_review(record, updated["plan"], refreshed, service, False)
 
     def _act_suggest(
         self, action: str, record: dict[str, Any], service: Any,

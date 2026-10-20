@@ -98,8 +98,14 @@ the files, then choose **Share** or cancel. In a private Telegram chat or Slack 
 <skill>` opens the same review as a card with **Share**, **Cancel** and **View details**, and only
 **Share** publishes.
 
-The shared name and description come from the skill's `SKILL.md` frontmatter. A skill needs both,
-with a description of up to 320 characters, before it can be shared.
+The shared name and description come from the skill's `SKILL.md` frontmatter. Shared copy needs a
+name of up to 100 characters and a description of up to 320. If either one is missing or too long,
+Hermes sends the `SKILL.md` to your configured model, which proposes only that field, and the review
+says "Description written by Hermes from your SKILL.md". View details shows your original, you can
+edit the proposal in `hermes wisdom share`, and **Share** publishes exactly what the review shows.
+When Hermes cannot propose copy (no model, the setting below is off, the skill may contain a secret,
+or the model fails), the review names the exact problem, for example "Description is 839
+characters; the limit is 320.", and nothing is uploaded.
 
 The result is one of: shared (with the version, a Portal link and the install command for teammates),
 already shared, blocked by a security check, name already owned by another author, not entitled,
@@ -207,9 +213,11 @@ In scripts, `--yes` confirms a share; scanner warnings additionally need `--acce
 |---|---|---|
 | `HERMES_SYNC_BASE_URL` or `sync.base_url` in `config.yaml` | `https://gateway-gateway.nousresearch.com` | The Collective Wisdom service. Change it only when your team runs its own. |
 | `plugins.entries.collective-wisdom.allow_gateway_injection` | `false` | Lets `/wisdom share-suggest` start its Hermes turn in the TUI, Desktop and messaging chats. The classic CLI chat does not need it. |
+| `plugins.entries.collective-wisdom.settings.qualification.allow_model_review` | unset | Set to `false` to stop share from sending a skill's `SKILL.md` to your model to propose a missing or too-long name or description. Unset allows it. |
 
 ```bash
 hermes config set plugins.entries.collective-wisdom.allow_gateway_injection true
+hermes config set plugins.entries.collective-wisdom.settings.qualification.allow_model_review false
 ```
 
 Without that setting, `/wisdom share-suggest` replies with your ranked list and a ready-to-send prompt
@@ -249,7 +257,11 @@ or install.
   stay on your profile. `top` reads them locally.
 - **Models:** `/wisdom share-suggest` sends the names, descriptions and usage counts of up to 30 of
   your skills to the model of the conversation you run it in, and that model may read those skills'
-  files. No other command calls a model.
+  files. When a skill you share has a name or description that cannot be shared as written, share
+  sends that skill's `SKILL.md` to your configured model provider to propose them. It does not when
+  the copy is valid or the local checks find something that looks like a secret. Turn it off with
+  `hermes config set plugins.entries.collective-wisdom.settings.qualification.allow_model_review false`.
+  No other command calls a model.
 - **No background activity:** there is no telemetry, no polling and no background process. The plugin
   acts only when you run a Collective Wisdom command.
 

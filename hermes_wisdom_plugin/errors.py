@@ -57,6 +57,16 @@ class WisdomValidationError(WisdomError):
     exit_code = 6
 
 
+class ShareCopyError(WisdomValidationError):
+    """The skill's name or description cannot be shared; nothing was prepared.
+
+    The message names the measured problem and is safe to show the owner.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, code="share_copy_incomplete")
+
+
 class StaleControlError(WisdomValidationError):
     """A callback names a control the current card projection does not offer.
 

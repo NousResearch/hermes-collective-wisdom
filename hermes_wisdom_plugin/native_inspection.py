@@ -217,6 +217,20 @@ def _candidate_lines(plan):
                      + _readable(facts['editorial_failure']).replace('_', ' '))
     return lines + _human_check_rows(plan)
 
+def _copy_origin_lines(plan):
+    """Which shown copy Hermes wrote, and the skill's own original wording."""
+    line = plan.get("copy_provenance_line")
+    if not line:
+        return []
+    labels = {"editorial_name": "name", "editorial_description": "description"}
+    original = plan.get("copy_original") if isinstance(plan.get("copy_original"), dict) else {}
+    return ["ℹ️ " + _readable(line)] + [
+        f"ℹ️ Original {label} in SKILL.md: "
+        + _readable(original.get(key) or "(missing)")
+        for key, label in labels.items() if key in (plan.get("copy_written_by_hermes") or [])
+    ]
+
+
 def _sharing_lines(plan):
     benefit = plan.get('coworker_benefit')
     lines = [
@@ -227,9 +241,19 @@ def _sharing_lines(plan):
         *(["ℹ️ Why teammates benefit: " + _readable(benefit or 'Benefit unavailable')]
           if benefit or release_scope().model_editorial else []),
         f"ℹ️ Publication name: {_readable(plan.get('slug') or 'Unavailable')}",
+        *_copy_origin_lines(plan),
         "ℹ️ Nothing has been uploaded or shared by viewing these details.",
     ]
     lines.extend(_human_check_rows(plan))
+    server = plan.get("server_checks") or {}
+    gateway = server.get("security_check") if isinstance(server, dict) else None
+    if isinstance(gateway, dict) and gateway.get("status"):
+        findings = gateway.get("findings")
+        lines.append(f"{_status_icon(gateway['status'])} Gateway checks: "
+                     f"{_readable(gateway['status'])}; findings: "
+                     f"{len(findings) if isinstance(findings, list) else 0}")
+        for finding in findings if isinstance(findings, list) else []:
+            lines.extend(_finding_lines(finding))
     scan = plan.get("local_scan")
     if isinstance(scan, dict):
         findings = scan.get("findings")

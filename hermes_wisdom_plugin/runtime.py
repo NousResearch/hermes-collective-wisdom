@@ -519,12 +519,16 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                           if self._get_config is not None else None)
         except Exception:  # pylint: disable=broad-exception-caught
             configured = False
+        # The same explicit refusal also stops manual sharing from asking the
+        # model to propose a name/description the skill's own copy cannot share.
+        allow_model_copy = False if configured is False else None
         if configured is False or not release_scope().model_editorial:
             allow_model_review = False
         result = self._contribution_reviewer().prepare(
             skill_name,
             allow_model_review=allow_model_review,
             may_apply=may_apply,
+            allow_model_copy=allow_model_copy,
         )
         self.check_owner()
         _require_current(may_apply)
@@ -1077,6 +1081,23 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         _require_current(may_apply)
         return result
+
+    def publication_gateway_review(
+        self, operation_id, *, may_apply: Callable[[], bool] | None = None,
+    ):
+        """Read Gateway advisory findings awaiting acknowledgement; grants nothing."""
+
+        _require_current(may_apply)
+        result = self._publication_service().gateway_review(operation_id, may_apply=may_apply)
+        self.check_owner()
+        _require_current(may_apply)
+        return result
+
+    def publication_gateway_shown(self, operation_id, evidence_hash):
+        """Record the exact Gateway evidence a terminal printed; grants nothing."""
+
+        self._publication_service().mark_gateway_shown(operation_id, evidence_hash)
+        self.check_owner()
 
     def publication_submit(
         self, receipt, *, may_apply: Callable[[], bool] | None = None,

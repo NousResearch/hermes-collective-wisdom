@@ -208,7 +208,8 @@ def test_cli_share_suggest_prints_the_list_and_chat_pointer(capsys):
     assert run_cli(parser.parse_args(["share-suggest"]), _Service(_items(12))) == 0
     out = capsys.readouterr().out
     assert "Your top skills (page 1 of 2, 12 skills)" in out
-    assert "2. skill-01 | 99 uses | 1 edits | last used 2026-10-01 | Shared" in out
+    assert ["2", "skill-01", "99", "1", "2026-10-01", "Yes"] in [
+        line.split() for line in out.splitlines()]
     assert chat_pointer() in out
     assert run_cli(parser.parse_args(["share-suggest", "--json"]), _Service(_items(3))) == 0
     data = json.loads(capsys.readouterr().out)

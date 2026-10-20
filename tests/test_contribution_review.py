@@ -70,8 +70,9 @@ class Host:
 class RecordingLlm:
     """Recording host transport; never reaches a provider."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, share_copy: dict | None = None) -> None:
         self.fail = fail
+        self.share_copy = share_copy
         self.calls: list[dict[str, object]] = []
 
     def complete(self, messages, **kwargs):
@@ -88,7 +89,15 @@ class RecordingLlm:
         self.calls.append(kwargs)
         if self.fail:
             raise RuntimeError("offline")
-        if kwargs["schema_name"] == "wisdom_editorial_metadata":
+        if kwargs["schema_name"] == "wisdom_share_copy":
+            # A conforming model answers exactly the fields its schema requests.
+            parsed = self.share_copy if self.share_copy is not None else {
+                key: value for key, value in {
+                    "editorial_name": "Incident Review",
+                    "editorial_description": "Review incident notes with a consistent checklist.",
+                }.items() if key in kwargs["json_schema"]["properties"]
+            }
+        elif kwargs["schema_name"] == "wisdom_editorial_metadata":
             parsed = {
                 "editorial_name": "Incident Review",
                 "editorial_description": "Review incident notes with a consistent checklist.",
@@ -456,6 +465,7 @@ def test_blocked_host_scan_prepares_warning_but_does_not_authorize_upload(tmp_pa
     assert result["network_submission"] is False
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_generated_author_copy_explains_teammate_usefulness_without_unsupported_claims(
     tmp_path: Path,
 ):
@@ -1141,6 +1151,7 @@ def test_existing_editorial_description_precedes_canonical_author_copy(tmp_path:
     assert not llm.calls
 
 
+@pytest.mark.usefixtures("full_release_scope")
 def test_missing_author_copy_uses_authorized_model_fallback(tmp_path: Path):
     llm = RecordingLlm()
     value, _source, _binding = reviewer(tmp_path, llm=llm)

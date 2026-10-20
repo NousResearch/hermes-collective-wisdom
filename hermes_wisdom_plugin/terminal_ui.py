@@ -123,6 +123,41 @@ def render_findings(value: object) -> str:
     return "\n".join(lines)
 
 
+def gateway_findings(value: object) -> list[dict[str, Any]]:
+    """Safe projection of the Gateway's stored scan findings (path/detail shape)."""
+
+    data = value if isinstance(value, dict) else {}
+    server = data.get("server_checks")
+    check = server.get("security_check") if isinstance(server, dict) else None
+    findings = check.get("findings") if isinstance(check, dict) else None
+    if not isinstance(findings, list):
+        return []
+    return safe_scan_details({"findings": [
+        {**finding, "description": finding.get("description") or finding.get("detail")
+         or finding.get("message")}
+        for finding in findings if isinstance(finding, dict)
+    ]})
+
+
+def render_gateway_findings(value: object, *, limit: int | None = None) -> str:
+    """Render Gateway findings; ``limit`` bounds a summary, never the full list."""
+
+    details = gateway_findings(value)
+    shown = details if limit is None else details[:limit]
+    lines = []
+    for finding in shown:
+        location = text(finding.get("file") or "package")
+        if finding.get("line"):
+            location += f":{finding['line']}"
+        label = text(finding.get("category") or "finding")
+        severity = text(finding.get("severity") or "advisory")
+        description = text(finding.get("description") or "No description", limit=300)
+        lines.append(f"• {label} ({severity}) in {location}: {description}")
+    if len(details) > len(shown):
+        lines.append(f"…and {len(details) - len(shown)} more. View details lists every finding.")
+    return "\n".join(lines)
+
+
 def render_inventory(value: object) -> str:
     """Render every reviewed file without dumping file bodies."""
 
@@ -707,6 +742,8 @@ def review_identity(value: object) -> str:
             ).encode("ascii")
         ).hexdigest(),
         "warning_required": has_reviewable_warnings(data),
+        # Exact Gateway scan evidence for a retained operation (None for local drafts).
+        "gateway_evidence": data.get("gateway_evidence_hash"),
     }
     return json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 

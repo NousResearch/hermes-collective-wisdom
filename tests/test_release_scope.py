@@ -279,13 +279,16 @@ def test_manual_preparation_uses_the_skills_own_name_and_description(tmp_path) -
 
 def test_manual_preparation_rejects_an_overlong_description(tmp_path) -> None:
     import test_contribution_review as review
+    from hermes_wisdom_plugin.errors import ShareCopyError
     value, _source, _binding = review.reviewer(tmp_path)
     value.host.frontmatter = {"name": "reviewed-skill", "description": "x" * 321}
     (_source / "SKILL.md").write_text(
         "---\nname: reviewed-skill\ndescription: " + "x" * 321 + "\n---\n# Review\n",
         encoding="utf-8")
-    assert value.prepare("reviewed-skill", allow_model_review=False)[
-        "editorial_status"] == "incomplete"
+    # Without a host model Hermes cannot propose copy; nothing is prepared.
+    with pytest.raises(ShareCopyError, match="Description is 321 characters; the limit is 320"):
+        value.prepare("reviewed-skill", allow_model_review=False)
+    assert not value.store.prepared_drafts(_binding)
 
 
 def test_incomplete_private_share_explains_the_local_fix() -> None:
@@ -307,16 +310,16 @@ def test_full_release_still_requires_complete_model_copy(tmp_path, full_release_
 
 def test_missing_description_asks_for_one_in_the_skill_file(tmp_path) -> None:
     import test_contribution_review as review
-    from hermes_wisdom_plugin.package import PackagePolicyError
+    from hermes_wisdom_plugin.errors import ShareCopyError
     value, source, _binding = review.reviewer(tmp_path)
     (source / "SKILL.md").write_text(
         "---\nname: reviewed-skill\n---\n# Incident review\n", encoding="utf-8")
     value.host.frontmatter = {"name": "reviewed-skill"}
-    with pytest.raises(PackagePolicyError) as raised:
+    with pytest.raises(ShareCopyError) as raised:
         value.prepare("reviewed-skill", allow_model_review=False)
-    message = str(raised.value)
-    assert "description" in message and "SKILL.md" in message
-    assert "model" not in message
+    assert str(raised.value) == (
+        "Description is missing. Hermes has no model available to propose it. "
+        "Edit the skill's SKILL.md frontmatter, then retry.")
 
 
 def test_private_share_review_is_ready_without_a_model_written_benefit() -> None:
