@@ -785,3 +785,43 @@ def test_host_security_guard_receives_final_exact_overlay(tmp_path: Path):
         "refs/notes.txt",
         "skill.manifest.json",
     }
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_after_install_note_names_setup_as_the_next_step():
+    """Core shows the plugin-root after-install.md once ``plugins install`` finishes."""
+
+    note = (PROJECT_ROOT / "after-install.md").read_text(encoding="utf-8")
+    assert note.startswith("# Collective Wisdom\n")
+    assert "hermes wisdom setup" in note
+    assert "enrolls this profile" in note
+    assert "uploads nothing" in note
+
+
+def test_after_install_and_readme_name_the_same_setup_exemptions():  # (Salt R1 S3)
+    """Both install surfaces name every command that answers before setup."""
+    import re  # pylint: disable=import-outside-toplevel
+
+    from hermes_wisdom_plugin.commands import (  # pylint: disable=import-outside-toplevel
+        SETUP_EXEMPT_COMMANDS,
+    )
+
+    def exemptions(text):
+        found = re.search(r"\(except ([^)]*)\)", " ".join(text.split()))
+        assert found is not None
+        return set(re.findall(r"`([a-z-]+)`", found.group(1)))
+
+    expected = set(SETUP_EXEMPT_COMMANDS) - {"setup"}
+    note = (PROJECT_ROOT / "after-install.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    assert exemptions(note) == exemptions(readme) == expected
+    assert "every Collective Wisdom command replies" not in note
+
+
+def test_source_distribution_manifest_ships_the_after_install_note():
+    """The sdist is the native install source, so the note must be in MANIFEST.in."""
+
+    lines = (PROJECT_ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+    assert "include after-install.md" in lines

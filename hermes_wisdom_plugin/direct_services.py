@@ -21,9 +21,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .contribution_review import exact_review_files
 from .credential_scan import scan_credentials
+from .editorial import (
+    MAX_EDITORIAL_DESCRIPTION_LENGTH, MAX_EDITORIAL_NAME_LENGTH, load_skill_editorial_metadata,
+)
 from .contract import author_description_hash, parse_manifest_bytes, sha256_address
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .installed_setup import inspect_installed_setup
+from .release_scope import active as release_scope
 from .package import (
     MAX_METADATA_BYTES, MAX_TREE_BYTES, PackagePolicyError,
     read_validated_package_files, source_fingerprint, verify_content_files,
@@ -1264,7 +1268,8 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "expires_at": expires_at,
         })
         return {
-            **prepared, "state": "policy_review_required",
+            **prepared, **self._operation_editorial(operation),
+            "state": "policy_review_required",
             "draft_id": operation["local_draft_id"], "operation_id": operation["id"],
             "hashes": copy.deepcopy(operation["hashes"]), "receipt": receipt,
             "publication_mode": policy["publication_mode"], "policy_version": policy["version"],
@@ -1275,6 +1280,27 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "network_submission": False,
             "authorization_expires_at": expires_at,
         }
+
+    def _operation_editorial(self, operation: dict[str, Any]) -> dict[str, Any]:
+        """Display copy from the operation's frozen package; never authority."""
+        package = operation.get("prepared_package")
+        overlay = package.get("overlay_path") if isinstance(package, dict) else None
+        if not isinstance(overlay, str) or not overlay:
+            return {}
+        try:
+            editorial = load_skill_editorial_metadata(Path(overlay))
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Missing copy leaves the review incomplete instead of inventing it.
+            return {}
+        draft = self.state.draft(str(operation.get("local_draft_id") or "")) or {}
+        complete = draft.get("editorial_complete_hash") == operation["hashes"]["content"]
+        if not complete and not release_scope().model_editorial:
+            # Same rule as local preparation: the skill's own copy is shared as written.
+            name = " ".join(editorial["editorial_name"].split())
+            description = " ".join(editorial["editorial_description"].split())
+            complete = (0 < len(name) <= MAX_EDITORIAL_NAME_LENGTH
+                        and 0 < len(description) <= MAX_EDITORIAL_DESCRIPTION_LENGTH)
+        return {**editorial, "editorial_status": "complete" if complete else "incomplete"}
 
     @staticmethod
     def _slug(value: str) -> str:

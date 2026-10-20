@@ -186,6 +186,7 @@ def test_admitted_private_slash_never_opens_hidden_reviews(tmp_path, monkeypatch
         runtime.native.close()
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 def test_admitted_private_share_still_opens_the_owner_review(tmp_path, monkeypatch):
     runtime = CommandRuntime(
         tmp_path, ("default", tmp_path), state=JsonState(tmp_path),

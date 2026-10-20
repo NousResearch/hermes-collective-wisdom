@@ -6,10 +6,16 @@ import re
 from typing import Any, Iterable
 
 from .native_context import NativeInvocation, adapter_profile
-from .native_review import NativeView, callback_value, slack_section_text
+from .native_review import NativeView, action_label, callback_value, slack_section_text
 
 _MAX_ITEMS = 5
-_MAX_BUTTON_LABEL = 75
+_MAX_FIELDS = 10
+_MAX_FIELD_TEXT = 2000
+
+
+def is_link_button(action: dict[str, Any]) -> bool:
+    """True for a Slack link-button click, which carries a URL and no callback value."""
+    return bool(action.get("url")) and not action.get("value")
 
 
 def _action_id(action: str, index: int) -> str:
@@ -37,11 +43,7 @@ def _action_blocks(
             continue
         button: dict[str, Any] = {
             "type": "button",
-            "text": {
-                "type": "plain_text",
-                "text": _trim(action.label, _MAX_BUTTON_LABEL),
-                "emoji": True,
-            },
+            "text": {"type": "plain_text", "text": action_label(action.label), "emoji": True},
         }
         if action.url:
             button["url"] = action.url
@@ -65,9 +67,20 @@ def _section_is_lossless(value: object) -> bool:
     return slack_section_text(value) == escaped
 
 
-def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
-    """Transplanted presentation-neutral WisdomView Block Kit shape."""
-    item_bodies = []
+def _field_text(label: str, value: str) -> str:
+    return f"*{slack_section_text(label)}*\n{slack_section_text(value)}"
+
+
+def _fields_are_lossless(view: NativeView) -> bool:
+    return len(view.fields) <= _MAX_FIELDS and all(
+        _section_is_lossless(fact.label) and _section_is_lossless(fact.value)
+        and len(_field_text(fact.label, fact.value)) <= _MAX_FIELD_TEXT
+        for fact in view.fields
+    )
+
+
+def _item_bodies(view: NativeView) -> list[str]:
+    bodies = []
     for item in view.items:
         body = item.preamble + "\n\n" if item.preamble else ""
         body += f"*{item.title}*"
@@ -76,12 +89,34 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
                 (f"*{label}*" if label else "") + rest
                 for label, rest in item.detail_parts()
             )
-        item_bodies.append(body)
+        bodies.append(body)
+    return bodies
+
+
+def _lead_blocks(view: NativeView) -> list[dict[str, Any]]:
+    """Description and label/value facts share one section, as Block Kit intends."""
+    if not view.fields:
+        return ([{"type": "section", "text": {
+            "type": "mrkdwn", "text": slack_section_text(view.summary),
+        }}] if view.summary else [])
+    section: dict[str, Any] = {"type": "section", "fields": [
+        {"type": "mrkdwn", "text": _trim(_field_text(fact.label, fact.value), _MAX_FIELD_TEXT)}
+        for fact in view.fields[:_MAX_FIELDS]
+    ]}
+    if view.summary:
+        section["text"] = {"type": "mrkdwn", "text": slack_section_text(view.summary)}
+    return [section]
+
+
+def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
+    """Header, facts, items, context line, divider, actions."""
+    item_bodies = _item_bodies(view)
     approval_is_lossless = (
         len(view.items) <= _MAX_ITEMS
         and (not view.summary or _section_is_lossless(view.summary))
+        and _fields_are_lossless(view)
         and all(_section_is_lossless(body) for body in item_bodies)
-        and (not view.notice or _section_is_lossless(f"_{view.notice}_"))
+        and (not view.notice or _section_is_lossless(view.notice))
     )
     rendered: list[dict[str, Any]] = [{
         "type": "header",
@@ -93,10 +128,7 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
             allow_primary=approval_is_lossless,
         )
     )
-    if view.summary:
-        rendered.append({"type": "section", "text": {
-            "type": "mrkdwn", "text": slack_section_text(view.summary),
-        }})
+    rendered.extend(_lead_blocks(view))
     for item_index, (item, body) in enumerate(zip(view.items[:_MAX_ITEMS], item_bodies)):
         if item.literal:
             body = item.preamble + "\n\n" if item.preamble else ""
@@ -115,10 +147,13 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
         ))
     if view.notice:
         rendered.append({"type": "context", "elements": [{"type": "mrkdwn",
-            "text": slack_section_text(f"_{view.notice}_")}]})
-    rendered.extend(_action_blocks(
+            "text": slack_section_text(view.notice)}]})
+    actions = _action_blocks(
         view.actions, record_id, row="global", allow_primary=approval_is_lossless,
-    ))
+    )
+    if actions and len(rendered) > 1:
+        rendered.append({"type": "divider"})
+    rendered.extend(actions)
     return rendered[:50]
 
 

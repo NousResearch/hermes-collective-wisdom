@@ -29,10 +29,8 @@ class NamedService(Service):
 async def sharing_card(ui):
     identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
     await ui.flush()
-    await ui.click(identity, "share")
-    while await ui.next_page(identity):
-        pass
-    assert any(action.label == "Share My Skill" for action in ui.view(identity).actions)
+    assert [action.label for action in ui.view(identity).actions] == [
+        "Share", "Cancel", "View details"]
     return identity
 
 
@@ -54,7 +52,7 @@ def test_share_progress_precedes_publication_and_removes_action(tmp_path, harnes
                 observed.append(True)
                 assert not service.applied
                 assert ui.record(identity)["state"] == "applying"
-                assert "Share My Skill" not in str(payload)
+                assert "wi:agent:confirm" not in str(payload)
                 assert not any(block.get("elements") for block in payload.get("blocks", []))
                 assert "wi:agent:" not in str(payload.get("reply_markup", ""))
                 await ui.click(identity, "confirm")
@@ -98,8 +96,9 @@ def test_share_progress_failure_and_publication_outcome(tmp_path, harness, failu
         assert ui.record(identity)["state"] == expected[failure]
         if failure != "edit":
             assert len(ui.edits) == before + 2
-            assert ("Uncertain" if failure == "uncertain" else "Failed") in ui.edits[-1]["text"]
-            assert "Share My Skill" not in str(ui.edits[-1])
+            outcome = "Uncertain" if failure == "uncertain" else "❌ Not shared"
+            assert outcome in ui.edits[-1]["text"]
+            assert "wi:agent:confirm" not in str(ui.edits[-1])
         await ui.click(identity, "confirm")
         assert service.applied == ([] if failure == "edit" else ["publication-receipt"])
     asyncio.run(scenario())

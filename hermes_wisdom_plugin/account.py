@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from .errors import WisdomAuthError
 from .gateway_endpoint import host_config_loader, resolve_gateway_base_url
 
 _UNAVAILABLE = "Collective Wisdom credentials are unavailable"
+_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +76,10 @@ class HermesAccountAdapter:
         )
         self._read_snapshot = read_snapshot
         self._clock = clock
+        # Verified slugs keyed by the owning (profile, account, organisation); a
+        # cached entry is served only after the current host snapshot is
+        # revalidated against the binding, so an account switch fails closed.
+        self._slug_cache: dict[tuple[str, str, str], str] = {}
 
     @classmethod
     def current(
@@ -131,8 +137,8 @@ class HermesAccountAdapter:
         except Exception:  # pylint: disable=broad-exception-caught
             raise WisdomAuthError(_UNAVAILABLE) from None
 
-    def team_name(self) -> str | None:
-        """Read the authenticated Portal name for this bound destination, never an ID fallback."""
+    def _organisation(self) -> dict[str, object] | None:
+        """Read the authenticated Portal organisation only when it is the bound one."""
         try:
             snapshot = self._current_bound_snapshot()
             account_module = import_module("hermes_cli.nous_account")
@@ -143,14 +149,47 @@ class HermesAccountAdapter:
             if (not isinstance(organisation, dict)
                     or organisation.get("id") != snapshot.organization_id):
                 return None
-            name = organisation.get("name")
-            if (not isinstance(name, str) or not name.strip()
-                    or name.strip() == snapshot.organization_id
-                    or any(ord(char) < 32 for char in name)):
-                return None
-            return name.strip()[:200]
+            return organisation
         except Exception:  # pylint: disable=broad-exception-caught
             return None
+
+    def team_name(self) -> str | None:
+        """Read the authenticated Portal name for this bound destination, never an ID fallback."""
+        organisation = self._organisation()
+        name = organisation.get("name") if organisation is not None else None
+        if (not isinstance(name, str) or not name.strip()
+                or name.strip() == self._binding.organization_id
+                or any(ord(char) < 32 for char in name)):
+            return None
+        return name.strip()[:200]
+
+    def organization_slug(self) -> str | None:
+        """Read the bound organisation's Portal route slug; None selects the redirect route.
+
+        The current host snapshot is revalidated before any cached value is
+        returned, so a profile/account/organisation switch never serves the
+        previous organisation's slug.
+        """
+        try:
+            snapshot = self._current_bound_snapshot()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        key = (snapshot.profile_home, snapshot.account_id, snapshot.organization_id)
+        cached = self._slug_cache.get(key)
+        if cached is not None:
+            return cached
+        organisation = self._organisation()
+        slug = organisation.get("slug") if organisation is not None else None
+        if not isinstance(slug, str) or _SLUG.fullmatch(slug) is None:
+            return None
+        try:
+            current = self._current_bound_snapshot()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        if (current.profile_home, current.account_id, current.organization_id) != key:
+            return None
+        self._slug_cache[key] = slug
+        return slug
 
     def _current_bound_snapshot(self) -> _HostAccountSnapshot:
         snapshot = self._read_snapshot()

@@ -24,6 +24,7 @@ from .client import AgentLedPolicyResponse, WisdomClient
 from .commands import PRIVATE_RANKING_COMMANDS, read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
+    describe_exception,
 )
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError
@@ -1634,6 +1635,17 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             )
         self._open().require_setup()
 
+    def setup_pending(self) -> bool:
+        """Report a never-enrolled profile from local state alone.
+
+        Reads no credentials and sends no request, so a command can answer with
+        the setup step before any owner, account or network work. False is not
+        authorization: every effect still runs ``require_setup`` and owner checks.
+        """
+        if self._closed:
+            raise WisdomError("Collective Wisdom plugin is unloaded")
+        return self._local_identity() is None
+
     def _discovery(self):
         from .catalog_status import (  # pylint: disable=import-outside-toplevel
             CatalogInstallationStatus,
@@ -1648,6 +1660,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             portal_base_url=self.account.portal_base_url,
             organization_id=self.account.organization_id,
             installation_status=local_status.for_skill,
+            org_slug=getattr(self.account, "organization_slug", None),
         )
 
     def list_skills(self):
@@ -1766,7 +1779,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 )
                 view = await task
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning("Collective Wisdom install failed (%s)", type(exc).__name__)
+                logger.warning("Collective Wisdom install failed (%s)", describe_exception(exc))
                 return _INSTALL_UNCERTAIN
             if isinstance(view, dict):
                 return _native_review_reply(view)
@@ -1795,6 +1808,11 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             from .commands import run_slash  # pylint: disable=import-outside-toplevel
             # Dormant reviews (settings, suggestions, recommendations) never open.
             return run_slash(parsed, object())
+        if self._setup_prompt_needed(command):
+            from .commands import SETUP_PROMPT  # pylint: disable=import-outside-toplevel
+            # Native chats point to the terminal: enrollment binds this profile's
+            # account and is accepted only in its owner's terminal (see setup).
+            return SETUP_PROMPT
         if command in PRIVATE_RANKING_COMMANDS:
             return self._slash_private_ranking(command, args, invocation, gateway_command)
         if invocation is not None:
@@ -1805,7 +1823,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 if reply is not None:
                     return reply
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning("Collective Wisdom review failed (%s)", type(exc).__name__)
+                logger.warning("Collective Wisdom review failed (%s)", describe_exception(exc))
                 return _REVIEW_UNAVAILABLE
         # Capture the calling profile before the host moves an awaitable to a thread.
         context = contextvars.copy_context()
@@ -1815,6 +1833,19 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             return await task
 
         return resolve()
+
+    def _setup_prompt_needed(self, command: str) -> bool:
+        """Check local enrollment only; no credentials, request or review state."""
+        from .commands import setup_prompt_needed  # pylint: disable=import-outside-toplevel
+
+        try:
+            service = self._service()
+        except WisdomError:
+            return False
+        try:
+            return setup_prompt_needed(command, service)
+        finally:
+            self._close_service(service)
 
     def _slash_private_ranking(self, command, args, invocation, gateway_command):
         """Answer owner-private usage rankings only in a private or local session."""
@@ -1834,7 +1865,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 profile=self.profile[0],
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning("Collective Wisdom top skills failed (%s)", type(exc).__name__)
+            logger.warning("Collective Wisdom top skills failed (%s)", describe_exception(exc))
             return _REVIEW_UNAVAILABLE
         finally:
             self._close_service(service)

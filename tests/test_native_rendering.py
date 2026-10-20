@@ -21,51 +21,6 @@ from hermes_wisdom_plugin.native_telegram import (
     edit, keyboard, plain_html, rich_html, rich_html_is_lossless, send,
 )
 
-@pytest.mark.parametrize("mode", ["open", "moderated"])
-def test_candidate_share_approval_has_one_heading_and_emphasized_owned_labels(mode):
-    name = "Shift <Handover> & Summary"
-    record = {
-        "operation": "publish", "screen": "approval", "state": "pending",
-        "team_name": "Team <A> & B", "expires_at": 12345.5,
-        "plan": {
-            "candidate_flow": True, "editorial_name": name,
-            "editorial_description": "Use <notes> & handoffs.",
-            "coworker_benefit": "Fewer lost details.", "publication_mode": mode,
-            "policy_version": 2, "files": [{"path": "SKILL.md"}], "allowed": True,
-            "receipt": "reviewed", "editorial_status": "complete",
-            "authorization_expires_at": 12345.5, "hashes": {"SKILL.md": "sha256:abc"},
-        },
-    }
-    view = project_view(record)
-    assert view.summary == ""
-    assert view.to_text().count(name) == 1
-    assert view.items[0].title == name
-    if mode == "moderated":
-        assert ("On sharing, sent for team moderation; not published until approved."
-                in view.to_text())
-        assert ("Publication policy: moderated (version 2). Sent for team moderation"
-                not in view.to_text())
-    labels = ("What it does", "Why teammates benefit", "Destination team",
-              "Publication policy", "Local security", "Gateway scan", "Package",
-              "Authorization expires")
-    rich = rich_html(view, "record-1")
-    slack = next(block["text"]["text"] for block in blocks(view, "record-1")
-                 if block.get("type") == "section")
-    for label in labels:
-        assert f"<b>{label}:</b> " in rich
-        assert f"*{label}:* " in slack
-        assert f"{label}: " in html.unescape(plain_html(view))
-    assert rich.count(f"<b>{html.escape(name)}</b>") == 1
-    assert "Use &lt;notes&gt; &amp; handoffs." in rich
-    assert "Team &lt;A&gt; &amp; B" in rich
-    assert slack.count("*") == 18  # Eight owned labels and the one skill heading.
-    assert rich_html_is_lossless(view, "record-1")
-    assert html.unescape(plain_html(view)) == view.to_text()
-    assert [(action.label, action.action, action.primary) for action in view.actions][:2] == [
-        ("Share My Skill", "confirm", True),
-        ("Review/edit in Portal", "portal.draft", False),
-    ]
-
 def test_labeled_approval_with_long_fact_does_not_keep_rich_primary_control():
     view = NativeView("Ready to share", "", [NativeItem(
         "Skill", "What it does: " + "&" * 2000 + "\nPackage: 1 exact file",

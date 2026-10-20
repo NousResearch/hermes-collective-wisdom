@@ -100,12 +100,14 @@ def test_real_sdk_response_binds_exact_message_for_registered_callbacks(tmp_path
         await ui.runtime._send_notice(ui.caller, [{
             "category": "skill_ready_to_share", "event_id": "candidate-1",
         }])
-        candidate_id = _record_id(ui.posts[-1], "Snooze Collective Wisdom")
+        candidate_id = _record_id(ui.posts[-1], "View details")
         assert ui.record(candidate_id)["message_id"] == "card-2"
         assert ui.record(candidate_id)["display_ready"] is True
 
-        await ui.click(candidate_id, "settings")
-        assert ui.record(candidate_id)["operation"] == "settings"
+        await ui.click(candidate_id, "details")
+        assert ui.record(candidate_id)["screen"] == "details"
+        assert ui.edits[-1]["ts"] == "card-2"
+        await ui.click(candidate_id, "back")
         assert ui.edits[-1]["ts"] == "card-2"
         await ui.click(candidate_id, "cancel")
         assert ui.record(candidate_id)["state"] == "cancelled"
@@ -138,7 +140,7 @@ def test_uncertain_sdk_ack_fails_closed_without_second_send(tmp_path, caplog, da
     asyncio.run(scenario())
 
 
-def test_callback_failure_logs_only_exception_class_after_completed_effect(
+def test_callback_failure_logs_class_and_message_after_completed_effect(
     tmp_path, monkeypatch, caplog,
 ):
     async def scenario():
@@ -163,7 +165,7 @@ def test_callback_failure_logs_only_exception_class_after_completed_effect(
             await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
         assert ui.record(identity)["state"] == "completed"
-        assert "ConnectionError" in caplog.text
+        assert "ConnectionError: «redacted:xox…» callback body" in caplog.text
         assert "xoxb-super-secret" not in caplog.text
 
     asyncio.run(scenario())

@@ -21,3 +21,18 @@ def full_release_scope(monkeypatch):
 
     widen()
     return widen
+
+
+@pytest.fixture
+def enrolled_profile(monkeypatch):
+    """Treat the profile as set up, for routing tests that stub enrolled services.
+
+    Without it, an empty fixture state is a never-enrolled profile and every
+    ``/wisdom`` command answers with the setup step before routing.
+    """
+
+    from hermes_wisdom_plugin.runtime import (  # pylint: disable=import-outside-toplevel
+        InvocationService,
+    )
+
+    monkeypatch.setattr(InvocationService, "setup_pending", lambda _self: False)

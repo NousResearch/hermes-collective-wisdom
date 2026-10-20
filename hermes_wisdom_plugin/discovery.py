@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, cast
-from urllib.parse import quote, urlencode
 
 from .errors import WisdomNotFound, WisdomValidationError
+from .portal_urls import portal_skill_url
 
 
 MAX_DISCOVERY_PAGES = 100
@@ -21,13 +21,15 @@ MAX_DISCOVERY_PAGES = 100
 class Discovery:
     """Read the organization catalog while continuously checking ownership."""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         client: object,
         check_owner: Callable[[], object],
         portal_base_url: str,
         organization_id: str,
         installation_status: Callable[[object, object, object], dict[str, Any]] | None = None,
+        *,
+        org_slug: Callable[[], str | None] | None = None,
     ) -> None:
         required_client_methods = ("list_skills", "skill", "version")
         if any(not callable(getattr(client, name, None)) for name in required_client_methods):
@@ -43,6 +45,7 @@ class Discovery:
         self.portal_base_url = portal_base_url.rstrip("/")
         self.organization_id = organization_id
         self._installation_status = installation_status
+        self._org_slug = org_slug
 
     def _enrich(
         self, item: dict[str, Any], *, latest_version: object = None,
@@ -166,7 +169,9 @@ class Discovery:
             result["installation_status"] = self._installation_status(
                 skill.get("id"), skill.get("slug"), max(versions) if versions else None,
             )
-        result["portal_url"] = self._portal_skill_url(skill_id)
+        # The slug is read inside the owner-checked path: the owner is checked
+        # immediately before and after the read, so a switch fails closed.
+        result["portal_url"] = self._response(lambda: self._portal_skill_url(skill_id))
         return result
 
     def versions(self, skill_id: str) -> list[dict[str, Any]]:
@@ -205,9 +210,16 @@ class Discovery:
         return result
 
     def _portal_skill_url(self, skill_id: str) -> str:
-        return (
-            f"{self.portal_base_url}/wisdom/skills/{quote(skill_id, safe='')}?"
-            f"{urlencode({'org_id': self.organization_id})}"
+        slug = None
+        if self._org_slug is not None:
+            try:
+                slug = self._org_slug()
+            except Exception:  # pylint: disable=broad-exception-caught
+                # The redirect route resolves the slug server-side.
+                slug = None
+        return portal_skill_url(
+            self.portal_base_url, skill_id, org_slug=slug,
+            organization_id=self.organization_id,
         )
 
 

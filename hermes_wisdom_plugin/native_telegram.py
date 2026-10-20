@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import replace
 from importlib import import_module
 from typing import Any
 
 from .native_context import NativeInvocation, adapter_profile
-from .native_review import NativeItem, NativeView, callback_value, telegram_view_text
+from .native_review import (
+    NativeItem, NativeView, action_label, callback_value, telegram_view_text,
+)
 
 
 def text(view: NativeView) -> str:
@@ -17,6 +20,7 @@ def text(view: NativeView) -> str:
 
 
 RICH_TEXT_LIMIT = 32_768
+PLAIN_HTML_LIMIT = 4_000
 
 
 class RichProjectionUnsupported(ValueError):
@@ -41,14 +45,66 @@ def _escaped(value: object, limit: int) -> str:
     return html.escape(source[:low]).replace("\n", "<br/>").rstrip() + "…"
 
 
+def _compact_receipt(view: NativeView) -> bool:
+    """A dismissed one-line receipt renders as plain text on every Telegram path."""
+    return view.dismissed and not any((
+        view.summary, view.items, view.actions, view.navigation_actions, view.notice,
+        view.fields,
+    ))
+
+
+def _plain_detail(item: NativeItem) -> str:
+    if item.literal:
+        return html.escape(item.detail)
+    return "".join(
+        (f"<b>{html.escape(label)}</b>" if label else "") + html.escape(rest)
+        for label, rest in item.detail_parts()
+    )
+
+
+def _structured_html(view: NativeView) -> str:
+    """Bold title and labels, one fact per line; same lines as ``view.to_text()``."""
+    if _compact_receipt(view):
+        return html.escape(view.title)
+    lines = [f"<b>{html.escape(view.title)}</b>"]
+    if view.summary:
+        lines.extend(("", html.escape(view.summary)))
+    if view.fields:
+        lines.append("")
+        lines.extend(f"<b>{html.escape(fact.label)}:</b> {html.escape(fact.value)}"
+                     for fact in view.fields)
+    for item in view.items:
+        if item.preamble:
+            lines.extend(("", f"<i>{html.escape(item.preamble)}</i>"))
+        lines.extend(("", html.escape(item.title) if item.literal
+                      else f"<b>{html.escape(item.title)}</b>"))
+        if item.detail:
+            lines.append(_plain_detail(item))
+        lines.extend(f"{html.escape(action.label)}: {html.escape(action.url)}"
+                     for action in item.actions if action.url)
+    if view.notice:
+        lines.extend(("", f"<i>{html.escape(view.notice)}</i>"))
+    lines.extend(f"{html.escape(action.label)}: {html.escape(action.url)}"
+                 for action in view.actions if action.url)
+    return "\n".join(lines)
+
+
+def _markup_text(rendered: str) -> str:
+    """Remove only the owned formatting tags; dynamic text is always escaped."""
+    return html.unescape(re.sub(r"</?[bi]>", "", rendered))
+
+
 def plain_html(view: NativeView) -> str:
-    """Render bounded legacy HTML with literal newlines, not rich-only tags."""
-    return _escaped(text(view), 4_000).replace("<br/>", "\n")
+    """Render bounded HTML-parse-mode text with bold labels and literal newlines."""
+    rendered = _structured_html(view)
+    if len(rendered) <= PLAIN_HTML_LIMIT:
+        return rendered
+    return _escaped(text(view), PLAIN_HTML_LIMIT).replace("<br/>", "\n")
 
 
 def plain_html_is_lossless(view: NativeView) -> bool:
     """Require complete approval facts even after a rich-format fallback."""
-    return html.unescape(plain_html(view)) == view.to_text()
+    return _markup_text(plain_html(view)) == view.to_text()
 
 
 def _plain_fallback_view(view: NativeView) -> NativeView:
@@ -70,7 +126,7 @@ def _plain_fallback_view(view: NativeView) -> NativeView:
 
 
 def _rich_button(action: Any, record_id: str) -> str:
-    label = _escaped(str(action.label)[:48], 300)
+    label = _escaped(action_label(action.label), 300)
     if action.url:
         return (
             '<tg-button type="url" url="'
@@ -99,6 +155,27 @@ def _rich_row(actions: list[Any], record_id: str) -> str:
     )
 
 
+def _rows(actions: list[Any]) -> list[list[Any]]:
+    """Group global controls by their declared row, preserving declaration order."""
+    grouped: dict[int, list[Any]] = {}
+    for action in actions:
+        grouped.setdefault(action.row, []).append(action)
+    return [grouped[row] for row in sorted(grouped)]
+
+
+def _rich_rows(actions: list[Any], record_id: str) -> str:
+    return "".join(_rich_row(row, record_id) for row in _rows(actions))
+
+
+def _rich_fields(view: NativeView) -> str:
+    if not view.fields:
+        return ""
+    return "<p>" + "<br/>".join(
+        f"<b>{_escaped(fact.label, 200)}:</b> {_escaped(fact.value, 1_000)}"
+        for fact in view.fields
+    ) + "</p>"
+
+
 def _rich_detail(item: NativeItem) -> str:
     """Style owned prefixes only, after escaping every source fragment."""
     rendered = "".join(
@@ -111,10 +188,7 @@ def _rich_detail(item: NativeItem) -> str:
 def rich_html(view: NativeView, record_id: str) -> str:
     """Render a bounded Bot API rich-message card with embedded controls."""
 
-    compact_receipt = view.dismissed and not any((
-        view.summary, view.items, view.actions, view.navigation_actions, view.notice,
-    ))
-    heading_tag = "p" if compact_receipt else "h5"
+    heading_tag = "p" if _compact_receipt(view) else "h5"
     heading = f"<{heading_tag}>{_escaped(view.title, 1_000)}</{heading_tag}>"
     parts = [heading]
     navigation = _rich_row(view.navigation_actions, record_id)
@@ -122,6 +196,9 @@ def rich_html(view: NativeView, record_id: str) -> str:
         parts.append(navigation)
     if view.summary:
         parts.append(f"<p>{_escaped(view.summary, 2_000)}</p>")
+    fields = _rich_fields(view)
+    if fields:
+        parts.append(fields)
     for item in view.items[:5]:
         body = _rich_detail(item)
         if len(body) > 5_000:
@@ -138,7 +215,7 @@ def rich_html(view: NativeView, record_id: str) -> str:
         )
     if view.notice:
         parts.append(f"<p><i>{_escaped(view.notice, 2_000)}</i></p>")
-    actions = _rich_row(view.actions, record_id)
+    actions = _rich_rows(view.actions, record_id)
     if actions:
         parts.append(actions)
     rendered = "".join(parts)
@@ -167,6 +244,12 @@ def rich_html_is_lossless(view: NativeView, record_id: str) -> bool:
     controls.extend(action for item in view.items for action in item.actions)
     return (
         len(view.items) <= 5
+        and _rich_fields(view) in rendered
+        and all(
+            _escaped(fact.label, 200) == html.escape(fact.label).replace("\n", "<br/>")
+            and _escaped(fact.value, 1_000) == html.escape(fact.value).replace("\n", "<br/>")
+            for fact in view.fields
+        )
         and all(
             html.escape(str(value)).replace("\n", "<br/>") in rendered
             for value in values if value
@@ -195,16 +278,17 @@ def _button(button_type: Any, action: Any, record_id: str) -> Any:
         else {"callback_data": callback_value(record_id, action.action or "")}
     )
     style = "danger" if action.destructive else "primary" if action.primary else None
+    label = action_label(action.label)
     if style:
         try:
-            return button_type(action.label, style=style, **values)
+            return button_type(label, style=style, **values)
         except TypeError:
             pass
-    return button_type(action.label, **values)
+    return button_type(label, **values)
 
 
 def keyboard(view: NativeView, record_id: str) -> Any:
-    """Preserve reference navigation, item, and global action rows."""
+    """Navigation, item, then global action rows (globals grouped by declared row)."""
     telegram = import_module("telegram")
     button_type = telegram.InlineKeyboardButton
     markup_type = telegram.InlineKeyboardMarkup
@@ -213,7 +297,7 @@ def keyboard(view: NativeView, record_id: str) -> Any:
     groups = [
         view.navigation_actions,
         *(item.actions for item in view.items),
-        view.actions,
+        *_rows(view.actions),
     ]
     for actions in groups:
         controls = [

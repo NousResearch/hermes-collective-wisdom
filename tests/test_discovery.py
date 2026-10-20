@@ -265,3 +265,49 @@ def test_constructor_rejects_malformed_dependencies(arguments):
 def test_public_reads_reject_malformed_references(value):
     with pytest.raises(WisdomValidationError, match="reference"):
         _discovery().show(value)
+
+
+def test_show_uses_canonical_org_route_when_slug_is_verified():
+    discovery = Discovery(
+        _Client(), lambda: None, "https://portal.example/", "org-1",
+        org_slug=lambda: "incident-team",
+    )
+    assert discovery.show("skill/a")["portal_url"] == (
+        "https://portal.example/orgs/incident-team/wisdom/skills/skill%2Fa"
+    )
+
+
+@pytest.mark.parametrize("slug", [lambda: None, lambda: (_ for _ in ()).throw(OSError())])
+def test_show_falls_back_to_slug_resolving_redirect_route(slug):
+    discovery = Discovery(
+        _Client(), lambda: None, "https://portal.example", "org-1", org_slug=slug,
+    )
+    assert discovery.show("skill-1")["portal_url"] == (
+        "https://portal.example/wisdom/skills/skill-1?org_id=org-1"
+    )
+
+
+def test_show_reads_the_org_slug_inside_the_owner_checked_path():  # (Salt R1 #1)
+    """A switch observed around the slug read fails closed instead of linking."""
+    state = {"switched": False}
+    def check_owner():
+        if state["switched"]:
+            raise WisdomValidationError("owner changed")
+    def org_slug():
+        state["switched"] = True
+        return "team-one"
+    discovery = Discovery(
+        _Client(), check_owner, "https://portal.example", "org-1", org_slug=org_slug,
+    )
+    with pytest.raises(WisdomValidationError, match="owner changed"):
+        discovery.show("skill-1")
+
+
+def test_portal_skill_url_carries_version_on_both_routes():
+    from hermes_wisdom_plugin.portal_urls import portal_skill_url  # pylint: disable=import-outside-toplevel
+    assert portal_skill_url("https://p.example/", "s 1", org_slug="team",
+                            organization_id="org-1", version=3) == (
+        "https://p.example/orgs/team/wisdom/skills/s%201?version=3")
+    assert portal_skill_url("https://p.example", "s1", org_slug=None,
+                            organization_id="org 1", version=2) == (
+        "https://p.example/wisdom/skills/s1?org_id=org+1&version=2")
