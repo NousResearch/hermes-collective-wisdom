@@ -60,7 +60,9 @@ hermes wisdom setup
 
 Setup shows what data leaves your machine (see [Privacy and data use](#privacy-and-data-use)) and
 registers the profile with your team after you accept. Changing account or team means running setup
-again.
+again. Until a profile is set up, every other `hermes wisdom` and `/wisdom` command (except `status`,
+`help`, `top` and `share-suggest`) replies with this step and changes nothing. In Telegram and Slack
+the reply names the terminal command: setup is accepted only in the terminal.
 
 ## Verify
 
