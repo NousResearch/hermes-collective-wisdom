@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from .errors import WisdomUnavailable, WisdomValidationError
+from .errors import WisdomUnavailable, WisdomValidationError, describe_exception
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_context import message_id as posted_message_id
 from .native_review import NativeItem, NativeReviewController, NativeView, parse_callback
@@ -401,7 +401,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(
-                    "Collective Wisdom native notice failed (%s)", type(exc).__name__,
+                    "Collective Wisdom native notice failed (%s)", describe_exception(exc),
                 )
                 continue  # A missed notice must not fail the owning turn.
 
@@ -663,7 +663,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                         )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(
-                    "Collective Wisdom Slack callback failed (%s)", type(exc).__name__,
+                    "Collective Wisdom Slack callback failed (%s)", describe_exception(exc),
                 )
                 return
 
@@ -713,7 +713,10 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 await self._telegram_unavailable(
                     query, read_failed, invocation, record, adapter, token, acknowledged,
                 )
-            except Exception:  # pylint: disable=broad-exception-caught
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Collective Wisdom Telegram callback failed (%s)", describe_exception(exc),
+                )
                 if not acknowledged:
                     await query.answer()
             raise ApplicationHandlerStop
@@ -866,7 +869,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             self.spawn_task(coroutine, name=f"wisdom-review:{invocation.session_key}")
         except Exception as exc:  # pylint: disable=broad-exception-caught
             coroutine.close()
-            logger.warning("Collective Wisdom review dispatch failed (%s)", type(exc).__name__)
+            logger.warning("Collective Wisdom review dispatch failed (%s)", describe_exception(exc))
 
     def _begin(
         self, invocation: NativeInvocation, build: Callable[[Any], dict[str, Any]], *,

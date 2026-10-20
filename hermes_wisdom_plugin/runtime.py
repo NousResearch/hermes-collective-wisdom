@@ -24,6 +24,7 @@ from .client import AgentLedPolicyResponse, WisdomClient
 from .commands import PRIVATE_RANKING_COMMANDS, read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
+    describe_exception,
 )
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError
@@ -1767,7 +1768,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 )
                 view = await task
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning("Collective Wisdom install failed (%s)", type(exc).__name__)
+                logger.warning("Collective Wisdom install failed (%s)", describe_exception(exc))
                 return _INSTALL_UNCERTAIN
             if isinstance(view, dict):
                 return _native_review_reply(view)
@@ -1806,7 +1807,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 if reply is not None:
                     return reply
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning("Collective Wisdom review failed (%s)", type(exc).__name__)
+                logger.warning("Collective Wisdom review failed (%s)", describe_exception(exc))
                 return _REVIEW_UNAVAILABLE
         # Capture the calling profile before the host moves an awaitable to a thread.
         context = contextvars.copy_context()
@@ -1835,7 +1836,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 profile=self.profile[0],
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning("Collective Wisdom top skills failed (%s)", type(exc).__name__)
+            logger.warning("Collective Wisdom top skills failed (%s)", describe_exception(exc))
             return _REVIEW_UNAVAILABLE
         finally:
             self._close_service(service)

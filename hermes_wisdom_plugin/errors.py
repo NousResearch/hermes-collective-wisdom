@@ -53,3 +53,22 @@ class WisdomValidationError(WisdomError):
     """A request or Gateway response violates the Wisdom contract."""
 
     exit_code = 6
+
+
+def describe_exception(exc: BaseException, *, limit: int = 300) -> str:
+    """Return "Class: message" for logs, host-redacted, bounded, without controls."""
+    import importlib  # pylint: disable=import-outside-toplevel
+    import re  # pylint: disable=import-outside-toplevel
+
+    message = str(exc)
+    try:
+        redact = importlib.import_module("agent.redact").redact_sensitive_text
+        message = redact(message, force=True)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Without the host redactor, mask anything shaped like a credential.
+        message = re.sub(r"(?i)(bearer\s+|token[=:]\s*|key[=:]\s*)\S+", r"\1[REDACTED]", message)
+        message = re.sub(r"[A-Za-z0-9_\-]{32,}", "[REDACTED]", message)
+    message = " ".join("".join(
+        char if char.isprintable() else " " for char in message
+    ).split())[:limit]
+    return type(exc).__name__ + (": " + message if message else "")
