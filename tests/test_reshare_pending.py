@@ -119,4 +119,3 @@ def test_terminal_share_parity_finishes_the_pending_operation(tmp_path, capsys):
     assert kernel.client.state.calls == Counter(
         upload=1, submit=1, approve=1, head=1, publish=1,
     )
-

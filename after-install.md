@@ -10,7 +10,8 @@ hermes wisdom setup
 
 Setup shows what data leaves this machine and, after you accept, enrolls this profile with your
 team. Installing or enabling the plugin uploads nothing and enrolls nothing. Until setup is done,
-every Collective Wisdom command replies with this step.
+every other Collective Wisdom command (except `status`, `help`, `top` and `share-suggest`, which
+work without setup) replies with this step and changes nothing.
 
 If you did not enable the plugin just now, run `hermes plugins enable collective-wisdom` first.
 Setup needs a Nous sign-in (`hermes auth status nous`) in a team with Collective Wisdom enabled.
