@@ -680,6 +680,12 @@ def _share_ready(record: dict[str, Any], plan: dict[str, Any]) -> bool:
     )
 
 
+def _copy_note(plan: dict[str, Any]) -> str:
+    """Provenance of Hermes-written share copy; View details shows the original."""
+    line = plan.get("copy_provenance_line")
+    return _safe(line) + " View details shows your original. " if line else ""
+
+
 def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
     """The single /wisdom share confirmation: Share, Cancel, View details."""
     from .native_inspection import _date  # pylint: disable=import-outside-toplevel
@@ -693,7 +699,8 @@ def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
         "📤 Share skill",
         _safe(plan.get("editorial_description"), "Description unavailable"),
         fields=_share_fields(record, plan), actions=actions,
-        notice=f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
+        notice=_copy_note(plan)
+        + f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
         if ready else "Sharing facts are incomplete. Run hermes wisdom share in a terminal.",
     )
     if not _approval_is_lossless(view):

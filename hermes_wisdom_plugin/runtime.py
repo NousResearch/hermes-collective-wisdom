@@ -519,12 +519,16 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
                           if self._get_config is not None else None)
         except Exception:  # pylint: disable=broad-exception-caught
             configured = False
+        # The same explicit refusal also stops manual sharing from asking the
+        # model to propose a name/description the skill's own copy cannot share.
+        allow_model_copy = False if configured is False else None
         if configured is False or not release_scope().model_editorial:
             allow_model_review = False
         result = self._contribution_reviewer().prepare(
             skill_name,
             allow_model_review=allow_model_review,
             may_apply=may_apply,
+            allow_model_copy=allow_model_copy,
         )
         self.check_owner()
         _require_current(may_apply)

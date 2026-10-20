@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .contribution_review import exact_review_files
+from .contribution_review import exact_review_files, shown_copy_provenance
 from .credential_scan import scan_credentials
 from .editorial import (
     copy_problem_message, load_skill_editorial_metadata, overlay_copy_problem,
@@ -1305,7 +1305,8 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             problem = overlay_copy_problem(Path(overlay))
             complete = problem is None
         return {**editorial, "editorial_status": "complete" if complete else "incomplete",
-                **({"editorial_problem": copy_problem_message(problem)} if problem else {})}
+                **({"editorial_problem": copy_problem_message(problem)} if problem else {}),
+                **shown_copy_provenance(draft, editorial)}
 
     @staticmethod
     def _slug(value: str) -> str:
