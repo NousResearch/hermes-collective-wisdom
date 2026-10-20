@@ -35,7 +35,8 @@ To install one exact commit from the repository instead:
 hermes plugins install NousResearch/hermes-collective-wisdom --ref <40-character-commit-sha> --enable
 ```
 
-Install prepares the plugin's Python dependencies and asks before enabling it. Plugins are installed
+Install prepares the plugin's Python dependencies and asks before enabling it, then shows the next
+step, `hermes wisdom setup`. Installing or enabling the plugin never runs setup. Plugins are installed
 per profile: use `hermes -p <profile> plugins install collective-wisdom` for another profile. Start a
 new Hermes session afterwards. If you use the messaging gateway, also run `hermes gateway restart`.
 

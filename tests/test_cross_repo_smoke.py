@@ -513,7 +513,11 @@ def test_native_artifact_layout_requires_loader_manifest_and_package(tmp_path: P
         harness.verify_native_artifact_layout(root)
     (root / "desktop").mkdir()
     (root / "desktop" / "plugin.js").write_text("export default {};\n")
+    with pytest.raises(harness.AcceptanceError, match="after-install.md"):
+        harness.verify_native_artifact_layout(root)
+    (root / "after-install.md").write_text("Run hermes wisdom setup.\n")
     evidence = harness.verify_native_artifact_layout(root)
+    assert evidence["after_install"] == "after-install.md"
     assert evidence["desktop"] == "desktop/plugin.js"
     assert evidence["native_loader"] == "__init__.py"
     assert evidence["manifest"] == "plugin.yaml"
