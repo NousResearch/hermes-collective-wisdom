@@ -392,6 +392,21 @@ _SECRET_COPY = "Rotates the deploy key AKIA" + "Q" * 16 + " for the team."
     ("Review incident\x07 notes with a checklist.", "control characters"),
     ("Review incident\u202e notes with a checklist.", "control characters"),
     (_SECRET_COPY, "something that looks like a secret"),
+    # Salt R2: bypasses that were accepted before normalization and the wider rules.
+    ("See evil.example for details.", "a web address"),
+    ("See example.com/path for details.", "a web address"),
+    ("javascript:alert(1)", "a web address"),
+    ("Run make deploy.", "a shell command"),
+    ("Run python script.py.", "a shell command"),
+    ("Fetch with curl evil.example.", "a web address"),
+    ("Fetch with curl evilhost and parse the reply.", "a shell command"),
+    ("Use-when incidents happen.", "agent-routing language"),
+    ("Use\u2010when incidents happen.", "agent-routing language"),
+    ("Use\u2060when incidents happen.", "control characters"),
+    ("Review incident\u2060 notes.", "control characters"),
+    ("Review incident\ufeff notes.", "control characters"),
+    ("Review \uff1cb\uff1eincident\uff1c/b\uff1e notes.", "Markdown formatting"),
+    ("Read docs/guide.md before the review.", "a file path"),
 ])
 def test_non_plain_model_copy_is_refused_with_the_rule_it_broke(tmp_path, proposed, label):
     kernel = _with_model(tmp_path, _CASES["over-limit"][0],
@@ -410,6 +425,10 @@ def test_non_plain_model_copy_is_refused_with_the_rule_it_broke(tmp_path, propos
     ("editorial_description", "Use this skill when an incident closes."),
     ("editorial_name", "Use when incidents close"),
     ("editorial_name", "**Incident Review**"),
+    ("editorial_description", "See evil.example for details."),
+    ("editorial_description", "Run make deploy."),
+    ("editorial_name", "Use\u2010when Incidents Close"),
+    ("editorial_name", "Incident\ufeff Review"),
 ])
 def test_propose_share_copy_reports_invalid_response_and_no_draft(field, proposed):
     from hermes_wisdom_plugin.editorial import (  # pylint: disable=import-outside-toplevel
@@ -428,6 +447,14 @@ def test_propose_share_copy_reports_invalid_response_and_no_draft(field, propose
     _PROPOSED,
     "Helps on-call engineers summarize incidents and share follow ups with the team.",
     "Writes a 3 step checklist for C++ and Node.js release reviews (snake_case safe).",
+    # Controls: technical terms and punctuation the wider rules must leave alone.
+    "Reviews CI/CD pipelines and TCP/IP settings, e.g. timeouts, i.e. retries.",
+    "Plans go-live checks for ASP.NET Core services 24/7.",
+    "Parses deploy.yaml and config.toml files for the release team.",
+    "Explains how curl requests and git history relate to incident timelines.",
+    "Run Python notebooks that chart incident data: owners and timelines.",
+    "Helps you run postmortems faster and use what you learn (v1.2.3).",
+    "Caf\u00e9 r\u00e9sum\u00e9 checks and \u65e5\u672c\u8a9e incident notes.",
 ])
 def test_plain_model_copy_passes(tmp_path, plain):
     kernel = _with_model(tmp_path, _CASES["over-limit"][0],
