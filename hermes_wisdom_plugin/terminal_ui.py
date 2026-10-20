@@ -252,6 +252,7 @@ def _compatibility_lines(data: dict[str, Any]) -> list[str]:
             ("setup_actions", "Required setup actions"),
             ("limitations", "Known limitations"),
             ("blocked", "Needs attention"),
+            ("notes", "Notes"),
         ):
             lines.extend(_list_lines(label, compatibility.get(key)))
     requirements = data.get("system_specification")
@@ -396,7 +397,8 @@ def _compact_compat_lines(data: dict[str, Any]) -> list[str]:
         lines.append("Compatibility: " + text(compatibility.get("outcome") or "unknown"))
         for key, label in (("blocked", "Needs attention"),
                            ("setup_actions", "Required setup actions"),
-                           ("limitations", "Known limitations")):
+                           ("limitations", "Known limitations"),
+                           ("notes", "Notes")):
             actions = compatibility.get(key)
             if isinstance(actions, list) and actions:
                 lines.extend(_list_lines(label, actions[:2]))

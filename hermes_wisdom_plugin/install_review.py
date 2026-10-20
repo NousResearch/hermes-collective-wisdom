@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
 
-from .compatibility import evaluate
+from .compatibility import evaluate, skill_declarations
 from .contract import (
     SystemSpecification,
     org_directory_name,
@@ -33,8 +33,8 @@ from .local_security import prepared_security_check
 from .setup_document import SETUP_PATH, parse_setup_document
 
 
-def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
-    """Read only bounded frontmatter in the already verified package, without a fetch."""
+def skill_frontmatter(files: list[tuple[str, str, bytes]]) -> dict[str, Any]:
+    """Bounded safe parse of the verified package's SKILL.md frontmatter, without a fetch."""
     body = next((body for path, _mode, body in files if path == "SKILL.md"), b"")
     try:
         text = body[:24_100].decode("utf-8-sig")
@@ -47,10 +47,14 @@ def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
         from ruamel.yaml import YAML  # pylint: disable=import-outside-toplevel
         data = YAML(typ="safe").load(text[opening.end():opening.end() + closing.start()])
     except Exception:  # pylint: disable=broad-exception-caught
-        # Invalid/unavailable presentation metadata does not bypass package checks.
+        # Invalid/unavailable metadata declares nothing; package checks still apply.
         return {}
-    if not isinstance(data, dict):
-        return {}
+    return {str(key): value for key, value in data.items()} if isinstance(data, dict) else {}
+
+
+def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
+    """Read only bounded frontmatter in the already verified package, without a fetch."""
+    data = skill_frontmatter(files)
     metadata = data.get("metadata")
     hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
     hermes = hermes if isinstance(hermes, dict) else {}
@@ -489,13 +493,16 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
                 "version metadata does not match the exact package manifest"
             )
         local = self.host.capabilities(manifest.requirements)
-        evaluated = evaluate(manifest.requirements, local)
+        evaluated = evaluate(
+            manifest.requirements, local, skill_declarations(skill_frontmatter(files)),
+        )
         compatibility = {
             "outcome": evaluated.outcome,
             "satisfied": list(evaluated.satisfied),
             "setup_actions": list(evaluated.setup_actions),
             "limitations": list(evaluated.limitations),
             "blocked": list(evaluated.blocked),
+            "notes": list(evaluated.notes),
         }
         local_scan = self._stage_and_scan(files)
         scan_allowed = local_scan["allowed"]

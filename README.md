@@ -146,7 +146,9 @@ hermes wisdom install <skill> --plan      # review without installing
 
 `<skill>` is the skill's name or its ID, both shown in the Portal. A clean package installs straight
 away into your profile's skills. If the Hermes skills scanner reports warnings, the install shows them
-and waits for your acknowledgement. Commands a skill declares for setup never run during install;
+and waits for your acknowledgement. A skill is blocked only by what its own `SKILL.md` declares
+(`platforms`, or a minimum Hermes version); a recorded CPU architecture is informational and shows as
+a note. Commands a skill declares for setup never run during install;
 review and approve them separately with `hermes wisdom installed-setup`.
 
 In a private Telegram chat or Slack DM, `/wisdom install <skill>` installs from the chat. In Hermes

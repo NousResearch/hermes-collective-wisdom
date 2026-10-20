@@ -10,8 +10,9 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .compatibility import evaluate
+from .compatibility import evaluate, skill_declarations
 from .contract import parse_manifest_bytes
+from .install_review import skill_frontmatter
 from .managed_target import validate_managed_target
 from .package import (
     MAX_METADATA_BYTES,
@@ -170,9 +171,12 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
         ) from exc
     if manifest.name != installation["slug"]:
         raise PackagePolicyError("installed manifest does not match the managed skill")
-    compatibility = asdict(
-        evaluate(manifest.requirements, host.capabilities(manifest.requirements))
-    )
+    compatibility = asdict(evaluate(
+        manifest.requirements, host.capabilities(manifest.requirements),
+        skill_declarations(skill_frontmatter([
+            ("SKILL.md", "file", files["SKILL.md"]),
+        ] if "SKILL.md" in files else [])),
+    ))
     result: dict[str, Any] = {
         "kind": "installed_setup",
         "skill_id": skill_id,
