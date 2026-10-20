@@ -138,7 +138,7 @@ def test_uncertain_sdk_ack_fails_closed_without_second_send(tmp_path, caplog, da
     asyncio.run(scenario())
 
 
-def test_callback_failure_logs_only_exception_class_after_completed_effect(
+def test_callback_failure_logs_class_and_message_after_completed_effect(
     tmp_path, monkeypatch, caplog,
 ):
     async def scenario():
@@ -163,7 +163,7 @@ def test_callback_failure_logs_only_exception_class_after_completed_effect(
             await ui.click(identity, "install")
         assert service.applied == ["exact-receipt"]
         assert ui.record(identity)["state"] == "completed"
-        assert "ConnectionError" in caplog.text
+        assert "ConnectionError: «redacted:xox…» callback body" in caplog.text
         assert "xoxb-super-secret" not in caplog.text
 
     asyncio.run(scenario())
