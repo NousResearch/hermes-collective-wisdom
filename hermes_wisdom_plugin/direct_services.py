@@ -39,7 +39,11 @@ from .wire import ObjectSet, build_commit, build_tree_from_snapshot
 
 WISDOM_DISCLOSURE = (
     "Candidate signals stay on this profile. Only owner-approved private draft bytes, "
-    "author copy, manifest metadata, and managed-install state reach the Gateway."
+    "author copy, manifest metadata, and managed-install state reach the Gateway. "
+    "When a skill you share has a name or description that cannot be shared as written, "
+    "its SKILL.md is sent to your configured model provider to propose them; turn this off "
+    "with: hermes config set "
+    "plugins.entries.collective-wisdom.settings.qualification.allow_model_review false"
 )
 
 _KEY = "wisdom-core"

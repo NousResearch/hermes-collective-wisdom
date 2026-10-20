@@ -293,3 +293,10 @@ def test_native_model_failure_shows_the_exact_message_with_retry(tmp_path, surfa
         assert not kernel.client.state.calls
         ui.runtime.close()
     asyncio.run(scenario())
+
+
+def test_setup_disclosure_names_the_model_send_and_the_off_switch():
+    from hermes_wisdom_plugin.direct_services import WISDOM_DISCLOSURE  # pylint: disable=import-outside-toplevel
+    assert "SKILL.md is sent to your configured model provider" in WISDOM_DISCLOSURE
+    assert ("hermes config set plugins.entries.collective-wisdom.settings."
+            "qualification.allow_model_review false") in WISDOM_DISCLOSURE
