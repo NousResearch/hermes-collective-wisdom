@@ -2143,6 +2143,7 @@ class NativeReviewController:
                    if key not in {"receipt", "authorization_expires_at", "warning_acceptance"}}
         display.update(operation_id=outcome["operation_id"],
                        server_checks=copy.deepcopy(outcome.get("server_checks")),
+                       gateway_evidence_hash=outcome.get("gateway_evidence_hash"),
                        review_required="gateway_advisory")
         pending = {
             **claimed, "state": "pending", "plan": display, "screen": "gateway_advisory",
@@ -2169,8 +2170,10 @@ class NativeReviewController:
             raise WisdomConflict("The publication changed; open it again")
         if not authority() or not _owner_matches(record, service, invocation):
             raise WisdomAuthError("Collective Wisdom review owner changed")
-        if gateway_findings(review) != gateway_findings(plan):
-            # New evidence: show it on the same card and ask again.
+        rendered = plan.get("gateway_evidence_hash")
+        if not (isinstance(rendered, str) and rendered
+                and review.get("gateway_evidence_hash") == rendered):
+            # Not exactly the evidence this card rendered: show it here and ask again.
             updated = {**record, "plan": {
                 **{key: value for key, value in review.items()
                    if key not in {"receipt", "authorization_expires_at", "warning_acceptance"}},

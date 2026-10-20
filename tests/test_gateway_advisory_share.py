@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import logging
 from collections import Counter
@@ -47,6 +48,9 @@ class AdvisoryKernel(Kernel):
 
     def publication_gateway_review(self, operation_id, *, may_apply=None):
         return self.publication.gateway_review(operation_id, may_apply=may_apply)
+
+    def publication_gateway_shown(self, operation_id, evidence_hash):
+        return self.publication.mark_gateway_shown(operation_id, evidence_hash)
 
     def publication_review(self, draft, *, accept_warnings=False, may_apply=None):
         del may_apply
@@ -199,6 +203,73 @@ def test_terminal_accept_warnings_finishes_gateway_advisory_once(tmp_path, capsy
     output = capsys.readouterr().out
     assert code == 0 and "Gateway findings (2)" in output and "Shared with" in output
     assert kernel.client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
+
+
+def _mutate_gateway_finding(kernel, **changes):
+    draft = kernel.client.state.drafts["draft-1"]
+    draft.scan = {**draft.scan, **changes.pop("scan", {})}
+    draft.scan["findings"] = [{**draft.scan["findings"][0], **changes},
+                              *draft.scan["findings"][1:]]
+
+
+
+
+@pytest.mark.parametrize("change", [
+    {"scan": {"summary": "Detector revision 2 found new evidence"}},
+    {"scan": {"detector_revision": "2026-10-21"}},
+    {"detail": "Looks like an API key assignment." + " " * 400 + "and also a NEW secret."},
+    {"unrecognized_metadata": "hash-covered but never projected"},
+])
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_acknowledge_requires_the_exact_rendered_gateway_evidence(tmp_path, surface, change):
+    """Salt R1 B2: evidence outside the displayed projection still changes the hash."""
+    async def scenario():
+        kernel = AdvisoryKernel(tmp_path)
+        ui = surface(tmp_path, kernel)
+        identity = ui.runtime.begin_suggest(ui.caller, "reviewed-skill")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "confirm")
+        assert ui.view(identity).title == "⚠️ Gateway checks"
+        rendered = ui.record(identity)["plan"]["gateway_evidence_hash"]
+        assert rendered
+
+        _mutate_gateway_finding(kernel, **copy.deepcopy(change))
+        await ui.click(identity, "publish.ack")
+
+        record = ui.record(identity)
+        assert record["screen"] == "gateway_advisory" and ui.view(identity).title == (
+            "⚠️ Gateway checks")
+        assert "confirm" not in [action.action for action in ui.view(identity).actions]
+        assert record["plan"]["gateway_evidence_hash"] not in {None, rendered}
+        assert kernel.client.state.calls == Counter(upload=1, submit=1)
+
+        # The card now renders the new evidence; acknowledging it reaches Share.
+        await ui.click(identity, "publish.ack")
+        assert ui.view(identity).title == "📤 Share skill"
+        await ui.click(identity, "confirm")
+        assert ui.record(identity)["result"]["publication_state"] == "published"
+        assert kernel.client.state.calls == Counter(
+            upload=1, submit=1, approve=1, head=1, publish=1)
+        ui.runtime.close()
+    asyncio.run(scenario())
+
+
+def test_acknowledge_on_a_card_without_a_rendered_hash_shows_checks_again(tmp_path):
+    async def scenario():
+        kernel = AdvisoryKernel(tmp_path)
+        ui = SlackHarness(tmp_path, kernel)
+        identity = ui.runtime.begin_suggest(ui.caller, "reviewed-skill")["review_id"]
+        await ui.flush()
+        await ui.click(identity, "confirm")
+        record = ui.record(identity)
+        legacy = {**record, "plan": {key: value for key, value in record["plan"].items()
+                                     if key != "gateway_evidence_hash"}}
+        assert ui.runtime.reviews.state.compare_replace(record, legacy)
+        await ui.click(identity, "publish.ack")
+        assert ui.record(identity)["screen"] == "gateway_advisory"
+        assert kernel.client.state.calls == Counter(upload=1, submit=1)
+        ui.runtime.close()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
