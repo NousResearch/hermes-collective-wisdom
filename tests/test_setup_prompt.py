@@ -29,6 +29,7 @@ class _Unenrolled:
         self.calls = []
 
     def setup_pending(self):
+        """Return the fixture's local enrollment answer."""
         return self.pending
 
     def __getattr__(self, name):
@@ -67,6 +68,7 @@ def _resolve(value):
 
 
 def test_prompt_names_the_terminal_setup_command():
+    """The prompt names the terminal command and changes nothing."""
     assert "hermes wisdom setup" in SETUP_PROMPT
     assert "enrolls this profile" in SETUP_PROMPT
     assert "Nothing has been changed" in SETUP_PROMPT
@@ -77,6 +79,7 @@ def test_prompt_names_the_terminal_setup_command():
     ("installed",), ("update", "skill"), ("publication", "status", "op"),
 ])
 def test_cli_commands_on_unenrolled_profile_answer_with_setup(argv, capsys):
+    """Terminal commands answer with setup before any service call."""
     service = _Unenrolled()
 
     assert run_cli(_args(*argv), service) == 6
@@ -88,6 +91,7 @@ def test_cli_commands_on_unenrolled_profile_answer_with_setup(argv, capsys):
 
 
 def test_cli_json_envelope_carries_setup_required_code(capsys):
+    """Scripts get a stable setup_required envelope."""
     service = _Unenrolled()
 
     assert run_cli(_args("browse", "--json"), service) == 6
@@ -101,21 +105,27 @@ def test_cli_json_envelope_carries_setup_required_code(capsys):
 
 @pytest.mark.parametrize("command", ["setup", "status", "help", "top", "share-suggest"])
 def test_setup_status_help_and_local_rankings_are_never_redirected(command):
+    """Setup, status, help and local rankings keep their own answers."""
     assert setup_prompt_needed(command, _Unenrolled()) is False
 
 
 def test_enrolled_or_unknown_state_falls_through_to_command_checks():
+    """Only a definite never-enrolled answer redirects."""
     assert setup_prompt_needed("browse", _Unenrolled(pending=False)) is False
     assert setup_prompt_needed("browse", object()) is False
 
-    class Broken:
+    class Broken:  # pylint: disable=too-few-public-methods
+        """Service whose local state cannot be read."""
+
         def setup_pending(self):
+            """Fail the way an unreadable state file would."""
             raise RuntimeError("state unreadable")
 
     assert setup_prompt_needed("browse", Broken()) is False
 
 
 def test_cli_status_still_reports_setup_required(capsys):
+    """Status reports the profile state instead of redirecting."""
     service = _Unenrolled()
 
     assert run_cli(_args("status"), service) == 0
@@ -125,6 +135,7 @@ def test_cli_status_still_reports_setup_required(capsys):
 
 
 def test_setup_pending_reads_local_enrollment_without_credentials(tmp_path, monkeypatch):
+    """The check reads local state only and creates none."""
     service = InvocationService(tmp_path, ("default", tmp_path), state=JsonState(tmp_path))
 
     def no_account(*_args, **_kwargs):
@@ -179,6 +190,7 @@ def test_gateway_private_chat_answers_with_terminal_setup_not_a_card(
 
 
 def test_gateway_setup_and_status_keep_their_own_answers(tmp_path, monkeypatch):
+    """Native setup and status reach their own handlers, never the prompt."""
     runtime = _runtime(tmp_path)
     monkeypatch.setattr(
         runtime.native, "consume_request", lambda _raw: _native_invocation("telegram"),

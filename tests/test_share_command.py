@@ -411,3 +411,16 @@ def test_repeat_success_is_already_shared_without_upload(tmp_path, capsys):
     assert run(service, "--yes", "--json") == 0
     assert json.loads(capsys.readouterr().out)["outcome"] == "already_shared"
     assert service.client.state.calls["upload"] == 1
+
+
+def test_terminal_review_offers_share_cancel_and_details_only(tmp_path, capsys, monkeypatch):
+    """v0 has no Portal draft path: the one review menu never offers one."""
+    service = ShareCli(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "q")
+    assert run(service) == 0
+    menu = prompts[-1]
+    assert "[s] Share" in menu and "[q] Cancel" in menu and "[v] View a file" in menu
+    assert "portal" not in (menu + capsys.readouterr().out).casefold()
+    assert not service.client.state.calls["upload"]
