@@ -81,14 +81,15 @@ _MASKS = (
     (re.compile(r"(?i)(\b[a-z][a-z0-9+.\-]*://|//)[^/\s@?#]+@"), r"\1***:***@"),
     # Credential-named query/fragment parameters, any value length.
     (re.compile(r"(?i)([?&#;])(" + _CREDENTIAL_PARAMS + r")=[^&#\s]*"), r"\1\2=***"),
-    # Receipt fields in any key/value form, any value length.
-    (re.compile(r"(?i)\b(receipt[\w\-]*)(['\"]?\s*[=:]\s*)(['\"]?)[^\s'\",;&]+"), r"\1\2\3***"),
-    # Bearer authorisation values, any length.
-    (re.compile(r"(?i)\b(bearer)(\s+)[^\s'\",;]+"), r"\1\2***"),
-    # Generic credential assignments (token=..., api_key: ..., password=...).
-    (re.compile(r"(?i)\b(access_token|api_key|apikey|token|key|secret|password|passwd|signature"
-                r"|authorization)(['\"]?\s*[=:]\s*)(['\"]?)[^\s'\",;&]+"),
-     r"\1\2\3***"),
+    # Credential fields outside a URL query (receipt, Authorization, token=, api_key:, ...):
+    # a value can carry a scheme, spaces or line breaks, so the field value AND everything
+    # after it is masked. Query parameters were already masked above, hence the lookbehind.
+    (re.compile(r"(?i)(?<![?&#;\w])(receipt[\w\-]*|authorization|proxy-authorization"
+                r"|access_token|api_key|apikey|token|key|secret|password|passwd|signature)"
+                r"(['\"]?\s*[=:])[\s\S]*"),
+     r"\1\2 ***"),
+    # Bearer credentials outside a header field: mask the value and the rest of the text.
+    (re.compile(r"(?i)\b(bearer)\s+[\s\S]*"), r"\1 ***"),
     # Long opaque strings are treated as credentials.
     (re.compile(r"[A-Za-z0-9_\-]{32,}"), "***"),
 )

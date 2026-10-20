@@ -30,7 +30,14 @@ CASES = [
     ("url code", "https://example.com/cb?code=oauth123&state=s", ["oauth123"]),
     ("url access_token", "https://example.com/cb#access_token=at123", ["at123"]),
     ("short bearer", "Bearer abc123", ["abc123"]),
-    ("authorization header", "Authorization: Bearer abc123", ["abc123"]),
+    ("authorization bearer", "Authorization: Bearer abc123", ["abc123"]),
+    ("authorization basic", "Authorization: Basic BASIC_SENTINEL_123", ["BASIC_SENTINEL_123"]),
+    ("authorization custom scheme", "authorization=Token tkn SCHEME_SENTINEL_9",
+     ["tkn", "SCHEME_SENTINEL_9"]),
+    ("token value with spaces", "token=first SECOND_SENTINEL_123",
+     ["first", "SECOND_SENTINEL_123"]),
+    ("receipt across lines", "receipt=first\nTHIRD_SENTINEL_123", ["first", "THIRD_SENTINEL_123"]),
+    ("json password", '{"password": "pw word", "x": 1}', ["pw word", "pw"]),
     ("prefixed key", "bad token=sk-" + "a" * 40, ["sk-" + "a" * 40]),
 ]
 

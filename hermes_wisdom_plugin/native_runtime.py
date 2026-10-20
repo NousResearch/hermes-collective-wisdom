@@ -728,16 +728,17 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     invocation = callback_invocation(adapter, query, record)
                     raise StaleControlError()
                 if selected not in {"details", "review"} or record.get("operation") not in {"install", "update"}:
-                    await query.answer()
+                    # Mark before awaiting: a failed answer must not be retried by a handler.
                     acknowledged = True
+                    await query.answer()
                 invocation = callback_invocation(adapter, query, record)
                 updated, display = await self._telegram_action(
                     query, record, record_id, selected, adapter, token, invocation, edit,
                 )
                 action_completed = True
                 if not acknowledged:
-                    await query.answer()
                     acknowledged = True
+                    await query.answer()
                 if display:
                     with self.reviews.displaying(updated):
                         await edit(query, self.reviews.view(updated), record_id)

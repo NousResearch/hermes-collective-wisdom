@@ -317,3 +317,89 @@ def test_two_simultaneous_slack_share_callbacks_publish_once(tmp_path, caplog): 
     assert kernel.client.state.calls["upload"] == 1
     assert "Traceback" not in caplog.text
     ui.runtime.close()
+
+
+def _overlap_gate(parties):
+    """Wrap a callable so every thread waits at it once, proving real overlap at that seam."""
+    barrier = threading.Barrier(parties, timeout=10)
+    seen = set()
+    lock = threading.Lock()
+    met = []
+
+    def wrap(func):
+        def gated(*args, **kwargs):
+            me = threading.get_ident()
+            with lock:
+                first = me not in seen
+                seen.add(me)
+            if first:
+                barrier.wait()
+                met.append(me)
+            return func(*args, **kwargs)
+        return gated
+    return wrap, met
+
+
+def test_same_card_share_clicks_overlap_at_the_claim_and_publish_once(tmp_path):
+    """Both clicks have read the pending card before either claims it (deterministic)."""
+    kernel = Kernel(tmp_path)
+    _abandoned_private_draft(kernel)
+    state = ReviewState(JsonState(tmp_path), tmp_path)
+    controller = NativeReviewController(state)
+    caller = _native_invocation()
+    record = controller.request_suggest(kernel, caller, "reviewed-skill")
+    controller.bind_message(record["id"], caller, "card-1")
+    clicked = replace(caller, message_id="card-1")
+    wrap, met = _overlap_gate(2)
+    state.compare_replace = wrap(state.compare_replace)
+
+    results = _concurrent(2, lambda _i: controller.act(record["id"], "confirm", kernel, clicked))
+
+    assert len(met) == 2, "both clicks reached the claim together"
+    completed = [value for kind, value in results if kind == "ok" and value["state"] == "completed"]
+    assert len(completed) == 1, results
+    assert kernel.client.state.calls["publish"] == 1
+    assert kernel.client.state.calls["upload"] == 1
+
+
+def test_resumed_cards_overlap_inside_publication_submit_and_publish_once(tmp_path):
+    """Two resumed cards both enter the publication submit before either takes its lock."""
+    kernel = Kernel(tmp_path)
+    operation_id = _abandoned_private_draft(kernel)
+    controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
+    caller = _native_invocation()
+    cards = []
+    for index in range(2):
+        record = controller.request_suggest(kernel, caller, "reviewed-skill")
+        controller.bind_message(record["id"], caller, f"card-{index}")
+        cards.append((record["id"], replace(caller, message_id=f"card-{index}")))
+    wrap, met = _overlap_gate(2)
+    kernel.publication._submit = wrap(kernel.publication._submit)  # pylint: disable=protected-access
+
+    results = _concurrent(
+        2, lambda i: controller.act(cards[i][0], "confirm", kernel, cards[i][1]))
+
+    assert len(met) == 2, "both submits overlapped before the publication lock"
+    assert kernel.client.state.calls["publish"] == 1, results
+    assert kernel.client.state.calls["upload"] == 1
+    assert kernel.publication.state.publication(operation_id)["status"] == "done"
+
+
+def test_telegram_failed_answer_is_not_answered_twice(tmp_path, caplog):
+    """If the first answer_callback_query raises, the error handler must not answer again."""
+    async def scenario():
+        service = Service()
+        ui, identity = await _candidate_card(TelegramHarness(tmp_path, service))
+        calls = []
+
+        async def failing_answer(**kwargs):
+            calls.append(kwargs)
+            raise RuntimeError("telegram answer failed")
+
+        ui._answer = failing_answer  # pylint: disable=protected-access
+        with caplog.at_level(logging.WARNING):
+            await ui.click(identity, "confirm")
+        assert len(calls) == 1, calls
+        assert "Traceback" not in caplog.text
+        ui.runtime.close()
+    asyncio.run(scenario())
