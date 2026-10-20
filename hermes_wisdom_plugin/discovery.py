@@ -169,7 +169,9 @@ class Discovery:
             result["installation_status"] = self._installation_status(
                 skill.get("id"), skill.get("slug"), max(versions) if versions else None,
             )
-        result["portal_url"] = self._portal_skill_url(skill_id)
+        # The slug is read inside the owner-checked path: the owner is checked
+        # immediately before and after the read, so a switch fails closed.
+        result["portal_url"] = self._response(lambda: self._portal_skill_url(skill_id))
         return result
 
     def versions(self, skill_id: str) -> list[dict[str, Any]]:

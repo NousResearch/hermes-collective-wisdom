@@ -76,8 +76,10 @@ class HermesAccountAdapter:
         )
         self._read_snapshot = read_snapshot
         self._clock = clock
-        # A verified slug is fixed for the bound organisation; misses are retried.
-        self._slug_cache: str | None = None
+        # Verified slugs keyed by the owning (profile, account, organisation); a
+        # cached entry is served only after the current host snapshot is
+        # revalidated against the binding, so an account switch fails closed.
+        self._slug_cache: dict[tuple[str, str, str], str] = {}
 
     @classmethod
     def current(
@@ -162,14 +164,31 @@ class HermesAccountAdapter:
         return name.strip()[:200]
 
     def organization_slug(self) -> str | None:
-        """Read the bound organisation's Portal route slug; None selects the redirect route."""
-        if self._slug_cache:
-            return self._slug_cache
+        """Read the bound organisation's Portal route slug; None selects the redirect route.
+
+        The current host snapshot is revalidated before any cached value is
+        returned, so a profile/account/organisation switch never serves the
+        previous organisation's slug.
+        """
+        try:
+            snapshot = self._current_bound_snapshot()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        key = (snapshot.profile_home, snapshot.account_id, snapshot.organization_id)
+        cached = self._slug_cache.get(key)
+        if cached is not None:
+            return cached
         organisation = self._organisation()
         slug = organisation.get("slug") if organisation is not None else None
         if not isinstance(slug, str) or _SLUG.fullmatch(slug) is None:
             return None
-        self._slug_cache = slug
+        try:
+            current = self._current_bound_snapshot()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        if (current.profile_home, current.account_id, current.organization_id) != key:
+            return None
+        self._slug_cache[key] = slug
         return slug
 
     def _current_bound_snapshot(self) -> _HostAccountSnapshot:

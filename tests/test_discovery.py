@@ -287,6 +287,22 @@ def test_show_falls_back_to_slug_resolving_redirect_route(slug):
     )
 
 
+def test_show_reads_the_org_slug_inside_the_owner_checked_path():  # (Salt R1 #1)
+    """A switch observed around the slug read fails closed instead of linking."""
+    state = {"switched": False}
+    def check_owner():
+        if state["switched"]:
+            raise WisdomValidationError("owner changed")
+    def org_slug():
+        state["switched"] = True
+        return "team-one"
+    discovery = Discovery(
+        _Client(), check_owner, "https://portal.example", "org-1", org_slug=org_slug,
+    )
+    with pytest.raises(WisdomValidationError, match="owner changed"):
+        discovery.show("skill-1")
+
+
 def test_portal_skill_url_carries_version_on_both_routes():
     from hermes_wisdom_plugin.portal_urls import portal_skill_url  # pylint: disable=import-outside-toplevel
     assert portal_skill_url("https://p.example/", "s 1", org_slug="team",

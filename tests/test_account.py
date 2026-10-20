@@ -99,6 +99,49 @@ def test_organization_slug_requires_the_bound_organisation(monkeypatch, organisa
     assert len(calls) == (1 if expected else 2)
 
 
+def test_cached_slug_is_not_served_after_account_switch(monkeypatch):  # (Salt R1 #1)
+    """A cached slug is revalidated against the bound owner; a switch fails closed."""
+    reader = Reader(snapshot())
+    adapter = HermesAccountAdapter.current(_read_snapshot=reader, _clock=lambda: NOW)
+    calls = []
+    def fetch(token, base):
+        calls.append((token, base))
+        return {"organisation": {"id": "org-1", "slug": "team-one"}}
+    monkeypatch.setitem(sys.modules, "hermes_cli.nous_account", SimpleNamespace(
+        _fetch_nous_account_info=fetch,
+    ))
+    assert adapter.organization_slug() == "team-one"
+    assert adapter.organization_slug() == "team-one"
+    assert len(calls) == 1
+    reader.value = replace(reader.value, account_id="user-2", organization_id="org-2")
+    assert adapter.organization_slug() is None
+    assert adapter.entitlement_claims() is None
+    assert len(calls) == 1
+    reader.value = replace(reader.value, profile_home="/profiles/other",
+                           account_id="user-1", organization_id="org-1")
+    assert adapter.organization_slug() is None
+    reader.value = snapshot()
+    assert adapter.organization_slug() == "team-one"
+
+
+def test_slug_is_dropped_when_the_account_switches_during_the_fetch(monkeypatch):
+    """A switch between the Portal read and caching never stores or returns the slug."""
+    reader = Reader(snapshot())
+    adapter = HermesAccountAdapter.current(_read_snapshot=reader, _clock=lambda: NOW)
+    def fetch(_token, _base):
+        reader.value = replace(reader.value, account_id="user-2")
+        return {"organisation": {"id": "org-1", "slug": "team-one"}}
+    monkeypatch.setitem(sys.modules, "hermes_cli.nous_account", SimpleNamespace(
+        _fetch_nous_account_info=fetch,
+    ))
+    assert adapter.organization_slug() is None
+    reader.value = snapshot()
+    monkeypatch.setitem(sys.modules, "hermes_cli.nous_account", SimpleNamespace(
+        _fetch_nous_account_info=lambda _t, _b: {"organisation": {"id": "org-1"}},
+    ))
+    assert adapter.organization_slug() is None
+
+
 def test_current_binds_profile_account_and_supplies_client_contract() -> None:
     """One valid snapshot binds identity and later reads supply current data."""
 
