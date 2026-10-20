@@ -561,16 +561,20 @@ def _requires_partial_acknowledgement(plan: dict[str, Any]) -> bool:
     )
 
 
-def _fresh_package_plan(record: dict[str, Any], action: str, service: Any) -> dict:
+def _fresh_package_plan(record: dict[str, Any], action: str, service: Any, *,
+                        accept_warnings: bool = False) -> dict:
     """Refresh the displayed package exactly and retain its owner/version binding."""
     old = record["plan"]
     if action == "install":
         skill_id = str(old.get("skill_id") or "")
         version = old.get("version")
         reference = f"{skill_id}@v{version}" if skill_id and isinstance(version, int) else skill_id
-        fresh = service.install_plan(reference)
+        fresh = (service.install_plan(reference, accept_warnings=True) if accept_warnings
+                 else service.install_plan(reference))
     else:
-        fresh = service.update_plan(str(old.get("skill_id") or ""))
+        skill_id = str(old.get("skill_id") or "")
+        fresh = (service.update_plan(skill_id, accept_warnings=True) if accept_warnings
+                 else service.update_plan(skill_id))
     if not isinstance(fresh, dict) or fresh.get("operation") != action:
         raise WisdomValidationError(f"native {action} review is invalid")
     for key in ("skill_id", "version", "content_hash", "manifest_hash"):
@@ -581,12 +585,32 @@ def _fresh_package_plan(record: dict[str, Any], action: str, service: Any) -> di
     return fresh
 
 
-def _package_needs_acknowledgement(plan: dict[str, Any]) -> bool:
-    return (
-        plan.get("allowed") is not True
-        or has_reviewable_warnings(plan)
-        or _requires_partial_acknowledgement(plan)
-    )
+def _compatibility_blocks(plan: dict[str, Any]) -> list[str]:
+    """Declared requirements this machine does not meet, as plugin-authored reasons."""
+    compatibility = plan.get("compatibility")
+    blocked = compatibility.get("blocked") if isinstance(compatibility, dict) else None
+    if not isinstance(blocked, list):
+        return []
+    return [_safe(reason, "an unmet requirement") for reason in blocked if reason]
+
+
+def _install_display_plan(fresh: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """A warning-card plan: findings to show, never a spendable receipt."""
+    display = {key: copy.deepcopy(value) for key, value in fresh.items() if key != "receipt"}
+    display["installation_status"] = record["plan"].get("installation_status")
+    return display
+
+
+def _failure_category(exc: BaseException) -> str:
+    if isinstance(exc, PackagePolicyError):
+        return "policy_blocked"
+    if isinstance(exc, WisdomAuthError):
+        return "authorization"
+    if isinstance(exc, WisdomConflict):
+        return "changed"
+    if isinstance(exc, (WisdomValidationError, WisdomNotFound)):
+        return "invalid_review"
+    return "unavailable"
 
 
 def _validate_review_action(record: dict[str, Any], action: str) -> None:
@@ -1056,6 +1080,60 @@ def _authority_projection(
     return enriched, lines
 
 
+def _install_warnings_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """Scanner findings on a shared package: Acknowledge binds to exactly these findings."""
+    details = render_findings(plan)
+    count = len(safe_scan_details(plan.get("local_scan")))
+    noun = "finding" + ("" if count == 1 else "s")
+    updating = record.get("operation") == "update"
+    complete = len(details) <= 2200
+    shown = details if complete else details[:2199].rstrip() + "…"
+    actions = [NativeAction("Acknowledge", "package.ack", primary=True),
+               NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
+    view = NativeView(
+        "⚠️ Review warnings",
+        f"The scanner found {count} {noun} in {_skill_name(plan)}. Acknowledge them to "
+        f"{'update' if updating else 'install'} this exact version.",
+        [NativeItem("Scanner warnings", shown)],
+        fields=[NativeField("Skill", _skill_name(plan)),
+                NativeField("Files", _file_summary(plan.get("files")))],
+        actions=actions,
+        notice="Nothing has been installed. View details lists every finding. If the findings "
+        "change before installing, they are shown again.",
+    )
+    if complete and _approval_is_lossless(view):
+        return view
+    return replace(
+        view, actions=[action for action in actions if not action.primary],
+        notice="Warnings cannot be acknowledged here; review them with hermes wisdom "
+        f"{'update' if updating else 'install'} in the terminal. Nothing has been installed.",
+    )
+
+
+def _install_warning_details_view(plan: dict[str, Any]) -> NativeView:
+    details = render_findings(plan)
+    if len(details) > TELEGRAM_TEXT_LIMIT - 400:
+        details = details[:TELEGRAM_TEXT_LIMIT - 401].rstrip() + "…"
+    return NativeView(
+        "Scanner findings", _skill_name(plan), [NativeItem("Findings", details, literal=True)],
+        actions=[NativeAction("Back", "back")], notice="Viewing findings installs nothing.",
+    )
+
+
+def _install_blocked_view(name: str, result: dict[str, Any]) -> NativeView:
+    reasons = result.get("reasons")
+    if isinstance(reasons, list) and reasons:
+        return NativeView(
+            f"⚠️ {name} unchanged",
+            "Can't install here: " + "; ".join(_safe(reason, "an unmet requirement")
+                                               for reason in reasons),
+            notice="The skill declares this requirement. No changes were made.",
+            dismissed=True,
+        )
+    return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
+                      dismissed=True)
+
+
 def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     result = record.get("result")
     if not isinstance(result, dict):
@@ -1063,8 +1141,7 @@ def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     plan = record.get("plan")
     name = _skill_name(plan if isinstance(plan, dict) else {})
     if record.get("state") == "failed" and result.get("install_blocked") is True:
-        return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
-                          dismissed=True)
+        return _install_blocked_view(name, result)
     if record.get("operation") == "publish":
         return None
     from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
@@ -1241,6 +1318,10 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     state = str(record.get("state") or "pending")
     if state == "pending" and record.get("screen") == "gateway_advisory":
         return _gateway_advisory_view(record, plan)
+    if state == "pending" and record.get("screen") in {"install_warnings",
+                                                         "install_warning_details"}:
+        return (_install_warnings_view(record, plan) if record["screen"] == "install_warnings"
+                else _install_warning_details_view(plan))
     if state == "pending" and record.get("screen") == "checks":
         safe, checks = sharing_checks({**plan, "candidate_flow": True})
         return NativeView(
@@ -1917,6 +1998,20 @@ class NativeReviewController:
             return self._one_click_package(
                 record, action, service, invocation, authority, progress=progress,
             )
+        if (action == "package.ack" and record.get("screen") == "install_warnings"
+                and record.get("operation") in {"install", "update"}):
+            return self._one_click_package(
+                record, record["operation"], service, invocation, authority,
+                progress=progress, acknowledged=True,
+            )
+        if (action in {"details", "back"} and record.get("operation") in {"install", "update"}
+                and record.get("screen") in {"install_warnings", "install_warning_details"}):
+            shown = {**record, "screen": ("install_warning_details" if action == "details"
+                                          else "install_warnings"),
+                     "display_ready": False, "updated_at": self.clock()}
+            if not self.state.compare_replace(record, shown):
+                raise WisdomConflict("Collective Wisdom review changed; open it again")
+            return copy.deepcopy(shown)
         if action == "publish.ack" and record.get("operation") == "publish":
             return self._acknowledge_gateway(record, service, invocation, authority)
         if (record.get("operation") in {"install", "update"}
@@ -2018,6 +2113,7 @@ class NativeReviewController:
         self, record: dict[str, Any], action: str, service: Any,
         invocation: NativeInvocation, authority: Callable[[], bool], *,
         progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
+        acknowledged: bool = False,
     ) -> dict[str, Any]:
         """Prepare and spend a fresh exact receipt inside the explicit click."""
         plan = record["plan"]
@@ -2041,8 +2137,15 @@ class NativeReviewController:
                 })
                 raise
         try:
-            return self._prepare_one_click(record, claimed, action, service, invocation, authority)
-        except Exception:
+            prepared, apply_now = self._prepare_one_click(
+                record, claimed, action, service, invocation, authority,
+                acknowledged=acknowledged,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Collective Wisdom %s preparation failed category=%s review=%s (%s)",
+                action, _failure_category(exc), record.get("id"), describe_exception(exc),
+            )
             if progress is None:
                 self.state.compare_replace(claimed, record)
             else:
@@ -2052,46 +2155,84 @@ class NativeReviewController:
                 if self.state.compare_replace(claimed, failed):
                     return copy.deepcopy(failed)
             raise
+        # The effect logs its own outcome; it is never reported as a preparation failure.
+        return self._apply(prepared, "confirm", service, invocation, authority) if apply_now \
+            else prepared
+
+    def _finish_blocked(self, record, claimed, action, reasons=None):
+        """Record an install the skill's own declarations (or policy) rule out here."""
+        logger.warning(
+            "Collective Wisdom %s blocked category=%s review=%s", action,
+            "declared_requirement" if reasons else "policy_blocked", record.get("id"),
+        )
+        blocked = {
+            **record, "state": "failed", "display_ready": False,
+            "result": {"install_blocked": True, **({"reasons": reasons} if reasons else {})},
+            "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(claimed, blocked):
+            raise WisdomConflict("Collective Wisdom review changed; open it again") from None
+        return copy.deepcopy(blocked)
+
+    def _show_install_warnings(self, record, claimed, fresh):
+        """Show exactly these findings; Acknowledge is bound to their identity."""
+        if not safe_scan_details(fresh.get("local_scan")):
+            raise PackagePolicyError("scanner warning details are unavailable")
+        shown = {
+            **record, "state": "pending", "plan": _install_display_plan(fresh, record),
+            "screen": "install_warnings", "acknowledged_findings": review_identity(fresh),
+            "display_ready": False, "updated_at": self.clock(),
+        }
+        for key in ("package_files", "inspection_receipt", "page", "inspected_through"):
+            shown.pop(key, None)
+        if not self.state.compare_replace(claimed, shown):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(shown)
 
     def _prepare_one_click(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self, record, claimed, action, service, invocation, authority,
-    ):
+        self, record, claimed, action, service, invocation, authority, *, acknowledged=False,
+    ) -> tuple[dict[str, Any], bool]:
+        """Return the stored record and whether its exact receipt may be spent now."""
         plan = record["plan"]
         try:
-            fresh = _fresh_package_plan(record, action, service)
+            fresh = _fresh_package_plan(record, action, service, accept_warnings=acknowledged)
         except PackagePolicyError:
-            if action != "install" or plan.get("receipt"):
+            if action != "install" or plan.get("receipt") or acknowledged:
                 raise
             if not authority() or not _owner_matches(record, service, invocation):
                 raise WisdomAuthError("Collective Wisdom review owner changed") from None
-            blocked = {
-                **record, "state": "failed", "display_ready": False,
-                "result": {"install_blocked": True},
-                "updated_at": self.clock(),
-            }
-            if not self.state.compare_replace(claimed, blocked):
-                raise WisdomConflict("Collective Wisdom review changed; open it again") from None
-            return blocked
+            return self._finish_blocked(record, claimed, action), False
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        reasons = _compatibility_blocks(fresh)
+        if reasons and fresh.get("allowed") is not True:
+            return self._finish_blocked(record, claimed, action, reasons), False
+        if has_reviewable_warnings(fresh) and (
+                not acknowledged
+                or review_identity(fresh) != record.get("acknowledged_findings")):
+            # Unacknowledged, or the findings changed since they were shown: show them again.
+            return self._show_install_warnings(record, claimed, fresh), False
         inspect = getattr(service, f"native_{action}_inspect")
         files = inspect(fresh["receipt"])
         ready = {
             **record, "plan": copy.deepcopy({
-                **fresh, "installation_status": record["plan"].get("installation_status"),
+                **fresh, "installation_status": plan.get("installation_status"),
             }),
             "package_files": copy.deepcopy(files),
             "inspection_receipt": fresh.get("receipt"),
             "updated_at": self.clock(), "display_ready": False,
         }
-        if _package_needs_acknowledgement(fresh):
+        ready.pop("acknowledged_findings", None)
+        if fresh.get("allowed") is not True or _requires_partial_acknowledgement(fresh):
             ready.update(screen="approval", page=0, inspected_through=0)
             if not self.state.compare_replace(claimed, ready):
                 raise WisdomConflict("Collective Wisdom review changed; open it again")
-            return copy.deepcopy(ready)
+            return copy.deepcopy(ready), False
         if not authority() or not _owner_matches(record, service, invocation):
             raise WisdomAuthError("Collective Wisdom review owner changed")
         if not self.state.compare_replace(claimed, ready):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
-        return self._apply(ready, "confirm", service, invocation, authority)
+        return ready, True
 
     def _publish_progress(self, claimed, progress, label="⏳ Sharing…"):
         """A lost progress acknowledgement cannot authorize publication."""
