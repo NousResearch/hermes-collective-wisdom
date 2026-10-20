@@ -13,9 +13,10 @@ from datetime import datetime
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
-from urllib.parse import quote, urlsplit
 
-from .errors import SharePackagingError, WisdomAuthError, WisdomConflict, WisdomValidationError
+from .errors import (
+    SharePackagingError, WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+)
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
 from .package import PackagePolicyError
@@ -29,7 +30,11 @@ from .terminal_ui import (
 )
 
 SLACK_SECTION_LIMIT = 2900
+SLACK_FIELD_LIMIT = 1900
+SLACK_FIELD_COUNT = 10
 TELEGRAM_TEXT_LIMIT = 3500
+# Card buttons stay short enough to render whole on Slack and Telegram phones.
+MAX_ACTION_LABEL = 20
 _UNHANDLED = object()
 
 
@@ -41,6 +46,15 @@ class NativeAction:
     primary: bool = False
     url: str | None = None
     destructive: bool = False
+    # Global controls sharing a row render side by side; rows render in order.
+    row: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class NativeField:
+    """One calm label/value fact rendered as a Slack field or a bold Telegram label."""
+    label: str
+    value: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +79,7 @@ class NativeItem:
 
 
 @dataclass(frozen=True, slots=True)
-class NativeView:
+class NativeView:  # pylint: disable=too-many-instance-attributes
     title: str
     summary: str
     items: list[NativeItem] = field(default_factory=list)
@@ -73,11 +87,15 @@ class NativeView:
     notice: str = ""
     navigation_actions: list[NativeAction] = field(default_factory=list)
     dismissed: bool = False
+    fields: list[NativeField] = field(default_factory=list)
 
     def to_text(self) -> str:
         lines = [self.title]
         if self.summary:
             lines.extend(("", self.summary))
+        if self.fields:
+            lines.append("")
+            lines.extend(f"{fact.label}: {fact.value}" for fact in self.fields)
         for item in self.items:
             if item.preamble:
                 lines.extend(("", item.preamble))
@@ -151,7 +169,10 @@ def _approval_is_lossless(view: NativeView) -> bool:
     ]
     return (len(view.to_text()) <= TELEGRAM_TEXT_LIMIT and len(view.items) <= 5
             and len(encoded(view.summary)) <= SLACK_SECTION_LIMIT
-            and len(encoded(f"_{view.notice}_")) <= SLACK_SECTION_LIMIT
+            and len(encoded(view.notice)) <= SLACK_SECTION_LIMIT
+            and len(view.fields) <= SLACK_FIELD_COUNT
+            and all(len(encoded(f"*{fact.label}*\n{fact.value}")) <= SLACK_FIELD_LIMIT
+                    for fact in view.fields)
             and all(item.detail for item in view.items)
             and all(len(encoded(detail)) <= SLACK_SECTION_LIMIT for detail in details))
 
@@ -283,22 +304,100 @@ def _benefit_shown(value: Any) -> bool:
     return bool(value) or release_scope().model_editorial
 
 
-def _confirmed_private_url(record: dict[str, Any]) -> str | None:
-    result = record.get("result")
-    if not isinstance(result, dict) or not (
-        result.get("state") == "pending" and result.get("phase") == "policy_review_required"
-    ):
+def action_label(label: object) -> str:
+    """Bound a control label so no native button ever overflows."""
+    text = " ".join(str(label or "").split())
+    return text if len(text) <= MAX_ACTION_LABEL else text[:MAX_ACTION_LABEL - 1].rstrip() + "…"
+
+
+def _catalog_version(service: Any, plan: dict[str, Any]) -> int | None:
+    """Best-effort latest published version: 0 for a new skill, None when unknown."""
+    name = plan.get("slug") or plan.get("editorial_name")
+    show = getattr(service, "show", None)
+    if not isinstance(name, str) or not name or not callable(show):
         return None
-    remote_id = result.get("remote_draft_id")
-    url = result.get("portal_url")
-    if (not isinstance(remote_id, str) or not remote_id or not isinstance(url, str)
-            or safe_portal_url(url) != url):
+    try:
+        detail = show(name)
+    except WisdomNotFound:
+        return 0
+    except Exception:  # pylint: disable=broad-exception-caught
+        # The version line is advisory; the Gateway assigns the real version.
         return None
-    parsed = urlsplit(url)
-    if (parsed.scheme != "https" or parsed.query or parsed.fragment
-            or not parsed.path.endswith("/wisdom/review/" + quote(remote_id, safe=""))):
+    latest = detail.get("latest_version_detail") if isinstance(detail, dict) else None
+    row = latest.get("version") if isinstance(latest, dict) else None
+    version = row.get("version") if isinstance(row, dict) else None
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def _shared_portal_url(service: Any, outcome: Any) -> str | None:
+    """Link the published skill through the catalog's own Portal URL helper."""
+    publication = outcome.get("publication_result") if isinstance(outcome, dict) else None
+    skill_id = publication.get("skill_id") if isinstance(publication, dict) else None
+    show = getattr(service, "show", None)
+    if not isinstance(skill_id, str) or not skill_id or not callable(show):
         return None
-    return url
+    try:
+        detail = show(skill_id)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Publication is already authoritative; the link is best effort.
+        return None
+    url = safe_portal_url(detail.get("portal_url")) if isinstance(detail, dict) else None
+    return url if url and url.startswith("https://") else None
+
+
+def _file_summary(files: Any) -> str:
+    if not isinstance(files, list):
+        return "Unavailable"
+    size = 0
+    for item in files:
+        if isinstance(item, dict) and isinstance(item.get("content_utf8"), str):
+            size += len(item["content_utf8"].encode("utf-8"))
+        elif isinstance(item, dict) and isinstance(item.get("content_base64"), str):
+            size += len(item["content_base64"]) * 3 // 4
+    count = f"{len(files)} file" + ("" if len(files) == 1 else "s")
+    if not size:
+        return count
+    return f"{count} · {size / 1024:.0f} KB" if size >= 1024 else f"{count} · {size} B"
+
+
+def _checks_summary(plan: dict[str, Any]) -> str:
+    """One calm verdict over the local checks; the server scans again on Share."""
+    security = plan.get("security_check") or {}
+    rows = [row for row in security.get("checks") or [] if isinstance(row, dict)]
+    statuses = [row.get("status") for row in rows]
+    if "blocked" in statuses or security.get("local_status") == "blocked":
+        return "❌ Blocked"
+    if has_reviewable_warnings(plan) or plan.get("warning_acceptance"):
+        return "⚠️ Warnings acknowledged"
+    professional = plan.get("professionalism_check") or {}
+    if release_scope().model_editorial and professional.get("status") not in {None, "pass"}:
+        return "⚠️ Needs review"
+    notes = statuses.count("advisory")
+    if not rows or any(status not in {"pass", "pending", "advisory"} for status in statuses):
+        return "⚠️ Incomplete"
+    return "🔒 Passed" + (f" · {notes} note" + ("" if notes == 1 else "s") if notes else "")
+
+
+def _version_label(record: dict[str, Any]) -> str | None:
+    version = record.get("catalog_version")
+    if version == 0:
+        return "New skill · v1"
+    if isinstance(version, int) and not isinstance(version, bool) and version > 0:
+        return f"v{version} → v{version + 1}"
+    return None
+
+
+def _share_fields(record: dict[str, Any], plan: dict[str, Any]) -> list[NativeField]:
+    fields = [
+        NativeField("Team", _safe(record.get("team_name"), "Team name unavailable")),
+        NativeField("Skill", _safe(plan.get("slug") or _skill_name(plan))),
+    ]
+    version = _version_label(record)
+    if version:
+        fields.append(NativeField("Version", version))
+    fields.extend((NativeField("Files", _file_summary(plan.get("files"))),
+                   NativeField("Checks", _checks_summary(plan))))
+    return fields
 
 
 def _authorization_expired(plan: dict[str, Any], now: float) -> bool:
@@ -467,8 +566,7 @@ def _validate_review_action(record: dict[str, Any], action: str) -> None:
 
 def _publication_effect(action: str, service: Any, receipt: str,
                         may_apply: Callable[[], bool]) -> Any:
-    if action == "portal.draft":
-        return service.publication_submit_private(receipt, may_apply=may_apply)
+    del action
     return service.publication_submit(receipt, may_apply=may_apply)
 
 def _apply_review_action(  # pylint: disable=too-many-return-statements
@@ -550,12 +648,12 @@ def _settings_view(record: dict[str, Any]) -> NativeView:
     if plan.get("mode_writable") is True:
         mode = str(plan.get("delivery_mode") or "fixed")
         if mode == "agent":
-            actions.insert(0, NativeAction("Turn off automatic suggestions", "settings.mode.fixed"))
+            actions.insert(0, NativeAction("Auto-suggest off", "settings.mode.fixed"))
         else:
-            actions.insert(0, NativeAction("Turn on automatic suggestions", "settings.mode.agent"))
+            actions.insert(0, NativeAction("Auto-suggest on", "settings.mode.agent"))
     if isinstance(control, dict) and control.get("revision") is not None:
         actions.insert(0, NativeAction(
-            "Unmute recommendations" if muted else "Mute one week",
+            "Unmute" if muted else "Mute one week",
             "settings.mute.off" if muted else "settings.mute.1w",
         ))
     return NativeView(
@@ -565,82 +663,54 @@ def _settings_view(record: dict[str, Any]) -> NativeView:
     )
 
 
-def _sharing_actions(record: dict[str, Any], plan: dict[str, Any], private: str | None) -> list[NativeAction]:
-    actions = [NativeAction("View More Details", "details"),
-               NativeAction("Snooze Collective Wisdom", "settings"),
-               NativeAction("Maybe Later", "cancel")]
-    if private:
-        actions.insert(0, NativeAction("Open in Portal", url=private))
-    if (_candidate_review_ready(plan) and isinstance(record.get("team_name"), str)
-            and record["team_name"].strip()
-            and record["team_name"] != (record.get("owner") or {}).get("organization_id")
-            and plan.get("allowed", True)):
-        if not private or plan.get("operation_id") == (record.get("result") or {}).get("operation_id"):
-            actions.insert(0, NativeAction("Share My Skill", "confirm", primary=True))
-        if not private:
-            actions.insert(1, NativeAction("Review/edit in Portal", "portal.draft"))
-    return actions
+_SHARE_HANDLING = {
+    "open": "Shared with your team right away. The server scans it again before publishing.",
+    "moderated": "A team reviewer approves it before it is available.",
+    "managed": "Your team's policy decides how it is published.",
+}
 
 
-def _inspection_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-locals
+def _share_ready(record: dict[str, Any], plan: dict[str, Any]) -> bool:
+    return bool(
+        _candidate_review_ready(plan) and isinstance(record.get("team_name"), str)
+        and record["team_name"].strip()
+        and record["team_name"] != (record.get("owner") or {}).get("organization_id")
+        and plan.get("allowed", True)
+    )
+
+
+def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """The single /wisdom share confirmation: Share, Cancel, View details."""
+    from .native_inspection import _date  # pylint: disable=import-outside-toplevel
+    ready = _share_ready(record, plan)
+    actions = [NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
+    if ready:
+        actions.insert(0, NativeAction("Share", "confirm", primary=True))
+    handling = _SHARE_HANDLING.get(str(plan.get("publication_mode") or ""),
+                                   "Publication policy unavailable.")
+    view = NativeView(
+        "📤 Share skill",
+        _safe(plan.get("editorial_description"), "Description unavailable"),
+        fields=_share_fields(record, plan), actions=actions,
+        notice=f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
+        if ready else "Sharing facts are incomplete. Run hermes wisdom share in a terminal.",
+    )
+    if not _approval_is_lossless(view):
+        return replace(view, actions=[action for action in actions if not action.primary],
+                       notice="This review is too large to show here. "
+                       "Run hermes wisdom share in a terminal. Nothing was uploaded.")
+    return view
+
+
+def _inspection_view(record: dict[str, Any]) -> NativeView:
     plan = record["plan"]
-    private = _confirmed_private_url(record)
     if (record.get("screen") == "approval" and record.get("operation") == "publish"
             and plan.get("candidate_flow") is True):
-        from .native_inspection import _date  # pylint: disable=import-outside-toplevel
-        mode = plan.get("publication_mode")
-        handling = {
-            "open": "Gateway may publish directly after its scan.",
-            "moderated": "On sharing, sent for team moderation; not published until approved.",
-            "managed": "Gateway determines the team publication outcome.",
-        }.get(mode, "Publication policy unavailable.")
-        security = plan.get("security_check") or {}
-        professional = plan.get("professionalism_check") or {}
-        gateway = (plan.get("server_checks") or {}).get("security_check")
-        scan = (gateway or {}).get("status") if isinstance(gateway, dict) else None
-        facts = "\n".join((
-            f"What it does: {_safe(plan.get('editorial_description'), 'Description incomplete')}",
-            *([f"Why teammates benefit: {_safe(plan.get('coworker_benefit'), 'Benefit incomplete')}"]
-              if _benefit_shown(plan.get("coworker_benefit")) else []),
-            f"Destination team: {_safe(record.get('team_name'), 'Team name unavailable')}",
-            f"Publication policy: {_safe(mode, 'Unavailable')} (version {_safe(plan.get('policy_version'), 'unavailable')}). {handling}",
-            f"Local security: {_safe(security.get('status'), 'unavailable')}; professionalism: {_safe(professional.get('status'), 'unavailable')}.",
-            f"Gateway scan: {_safe(scan, 'pending until authorized upload')}. The Gateway checks before publication; local checks do not certify its verdict.",
-            f"Package: {len(plan.get('files') or [])} exact files; inspect files and findings in View More Details.",
-            f"Authorization expires: {_date(plan.get('authorization_expires_at'))}; review expires: {_date(record.get('expires_at'))}.",
-        ))
-        actions = _sharing_actions(record, plan, private)
-        view = NativeView(
-            "Ready for review" if private else "Ready to share", "", [NativeItem(
-                _skill_name(plan),
-                ("Your private draft is ready to review and edit in Portal. "
-                 "Share it with your team whenever you are ready.\n" if private else
-                 "You created a skill that could help your team.\n") + facts,
-                emphasis_labels=(
-                    "What it does", "Why teammates benefit", "Destination team",
-                    "Publication policy", "Local security", "Gateway scan", "Package",
-                    "Authorization expires",
-                ),
-            )],
-            actions=actions,
-            notice=("Uploaded privately; not published or submitted for moderation. "
-                    "Share My Skill shares the version shown here. If you edit it in Portal, "
-                    "review and share the edited version there."
-                    if private else
-                    "Share My Skill uploads the exact package for the displayed policy. "
-                    "Review/edit in Portal instead uploads a PRIVATE draft for editing; it does not "
-                    "publish or submit for team moderation. Viewing details does not upload anything."),
-        )
-        if not _approval_is_lossless(view):
-            return replace(view, actions=[a for a in actions if a.action not in {"confirm", "portal.draft"}],
-                           notice="Sharing facts exceed provider limits; use terminal review. " +
-                           ("The private draft remains in Portal." if private else "No upload occurred."))
-        return view
+        return _share_card(record, plan)
     pages = _inspection_pages(record)
     page = int(record.get("page", 0))
-    pages = [text.replace("Nothing has been uploaded", "A private draft has been uploaded")
-             if private else text for text in pages]
     approving = record.get("screen") == "approval"
+    sharing = plan.get("candidate_flow") is True
     _projected, authority = _authority_projection(record, plan)
     actions = []
     if page:
@@ -648,39 +718,29 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=t
     if page + 1 < len(pages):
         actions.append(NativeAction("Next", f"page.{page + 1}"))
     elif approving and plan.get("allowed", True) and (
-        plan.get("candidate_flow") is not True or _candidate_review_ready(plan)
+        not sharing or _candidate_review_ready(plan)
     ):
         partial = _requires_partial_acknowledgement(plan)
         actions.append(NativeAction(
-            "Acknowledge partial compatibility and confirm" if partial else
-            "Share My Skill" if plan.get("candidate_flow") is True else "Confirm",
+            "Accept partial" if partial else "Share" if sharing else "Confirm",
             "confirm.partial" if partial else "confirm", primary=True,
         ))
-    if approving and plan.get("candidate_flow") is True:
-        actions.append(NativeAction("View More Details", "details"))
-    if private and not approving and not record.get("portal_changed"):
-        actions.append(NativeAction("Refresh review", "refresh.review"))
-    actions.append(NativeAction("Back" if approving else
-                                "Return to proposal" if plan.get("candidate_flow") is True
-                                else "Looks good.", "back"))
+    actions.append(NativeAction("Back" if approving or sharing else "Looks good.", "back"))
     candidate = record.get("operation") == "candidate"
     view = NativeView(
-        "Sharing proposal" if approving and plan.get("candidate_flow") is True else
         "Exact package review" if approving else
-        "Candidate details" if candidate else "Private package details",
+        "Candidate details" if candidate else
+        "Skill details" if sharing else "Private package details",
         f"Page {page + 1} of {len(pages)}. " + (
-            "Review the complete proposal before sharing. Detailed file inventory is optional."
-            if approving and plan.get("candidate_flow") is True else
             "Confirm only after inspecting the complete exact plan."
             if approving else "Candidate details are not the prepared package. Review proposal first."
-            if candidate else "Inspection does not authorize sharing, installation or setup."
-        ) + (("\n" + "\n".join(authority)) if authority and not (
-            approving and plan.get("candidate_flow") is True) else ""),
-        [NativeItem("Sharing proposal" if approving and plan.get("candidate_flow") is True
-                    else "Review details and files", pages[page],
-                    literal=record.get("operation") != "candidate")], actions=actions,
+            if candidate else "Viewing details does not share anything."
+            if sharing else "Inspection does not authorize sharing, installation or setup."
+        ) + (("\n" + "\n".join(authority)) if authority and not sharing else ""),
+        [NativeItem("Files, checks and description" if sharing else "Review details and files",
+                    pages[page], literal=not candidate)], actions=actions,
     )
-    if approving and plan.get("candidate_flow") is True and not _approval_is_lossless(view):
+    if approving and sharing and not _approval_is_lossless(view):
         return replace(view, actions=[action for action in actions if not action.primary],
                        notice="Approval facts cannot be displayed completely here; use terminal review.")
     return view
@@ -711,7 +771,7 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
         f"Destination team: {_safe(team, 'Team name unavailable')}\n\n"
         "Would you like to review a sharing proposal?",
         notice=("Nothing has been uploaded or published. Review proposal opens the "
-                "local package and current policy without sharing. The final Share My Skill "
+                "local package and current policy without sharing. The final Share "
                 "action authorizes that exact proposal." if complete else
                 "Nothing has been uploaded or published. " + _LOCAL_COPY_REQUIRED
                 if not release_scope().model_editorial else
@@ -720,8 +780,8 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
                 "); retry local preparation or edit the private draft before reviewing sharing."),
         actions=[
             NativeAction("✅ Safe To Share" if safe else "Review Checks", "checks"),
-            NativeAction("View More Details", "details"),
-            NativeAction("Snooze Collective Wisdom", "settings"),
+            NativeAction("View details", "details"),
+            NativeAction("Snooze", "settings"),
             NativeAction("Maybe Later", "cancel"),
             NativeAction("Review proposal" if complete else "Retry preparation", "share"),
         ],
@@ -763,7 +823,7 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
         + "Mute changes recommendations for all skills.",
         actions=[
             NativeAction("View Details", "details"), NativeAction("Not Now", "defer"),
-            NativeAction("Mute Skill Recommendations", "settings"),
+            NativeAction("Mute suggestions", "settings"),
             NativeAction("Update Skill" if updating else "Install Skill", verb, primary=True),
         ],
     )
@@ -836,11 +896,11 @@ def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
     detail = (_safe(plan.get("editorial_failure"), "Editorial copy or local checks are incomplete.")
               if release_scope().model_editorial else _LOCAL_COPY_REQUIRED)
     return NativeView(
-        "Sharing draft needs attention", _skill_name(plan),
+        "Skill needs attention", _skill_name(plan),
         [NativeItem("Preparation incomplete", detail)],
-        actions=[NativeAction("Retry local preparation", "suggest.refresh"),
-                 NativeAction("Maybe Later", "suggest.keep")],
-        notice="Nothing has been uploaded. Edit the local draft in the terminal if needed.",
+        actions=[NativeAction("Retry", "suggest.refresh"),
+                 NativeAction("Maybe later", "suggest.keep")],
+        notice="Nothing has been uploaded. Edit the local skill in the terminal if needed.",
     )
 
 def _suggest_checks_view(plan: dict[str, Any]) -> NativeView:
@@ -848,19 +908,20 @@ def _suggest_checks_view(plan: dict[str, Any]) -> NativeView:
     complete = len(details) <= 2200
     shown = details if complete else details[:2199].rstrip() + "…"
 
-    actions = [NativeAction("Maybe Later", "suggest.keep")]
-    actions.insert(0, NativeAction(
-        "Acknowledge displayed warnings and continue", "suggest.ack", primary=True,
-    ))
+    actions = [NativeAction("Acknowledge", "suggest.ack", primary=True),
+               NativeAction("Cancel", "cancel")]
     view = NativeView(
-        "Collective Wisdom warning review", _skill_name(plan),
-        [NativeItem("Scanner warnings for this exact package", shown)], actions=actions,
+        "⚠️ Review warnings", "The scanner flagged this skill. Acknowledge the warnings "
+        "to continue to the Share card.",
+        [NativeItem("Scanner warnings", shown)],
+        fields=[NativeField("Skill", _skill_name(plan)),
+                NativeField("Files", _file_summary(plan.get("files")))],
+        actions=actions, notice="Nothing has been uploaded.",
     )
     if complete and _approval_is_lossless(view):
         return view
-    return NativeView(
-        view.title, view.summary, view.items,
-        actions=[action for action in actions if not action.primary],
+    return replace(
+        view, actions=[action for action in actions if not action.primary],
         notice="Warnings cannot be acknowledged here; inspect the same draft in the terminal.",
     )
 
@@ -914,76 +975,75 @@ def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     if record.get("state") == "failed" and result.get("install_blocked") is True:
         return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
                           dismissed=True)
+    if record.get("operation") == "publish":
+        return None
     from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
     published = publication_copy(result)[0] == "Published"
     if (record.get("state") == "completed" and published
             and isinstance(result.get("detail"), str) and result["detail"]):
-        return NativeView("Published", f"{name}\nAvailable to your team.\n{_safe(result['detail'])}", dismissed=True)
+        return NativeView("✅ Shared", f"{name}\nAvailable to your team.\n{_safe(result['detail'])}",
+                          dismissed=True)
     return None
 
 
-def _private_draft_view(result: Any) -> NativeView:
-    if isinstance(result, dict):
-        remote_id = result.get("remote_draft_id")
-        url = result.get("portal_url")
-        acknowledged = (result.get("state") == "pending"
-                        and result.get("phase") == "policy_review_required"
-                        and isinstance(remote_id, str) and bool(remote_id))
-        if acknowledged and isinstance(url, str) and isinstance(remote_id, str):
-            target = "/wisdom/review/" + quote(remote_id, safe="")
-            valid_url = safe_portal_url(url) == url and url.startswith("https://")
-            if valid_url and urlsplit(url).path.endswith(target):
-                return NativeView("Private draft in Portal", "Uploaded for your editing; not published "
-                                  "or submitted for team moderation.",
-                                  actions=[NativeAction("Review/edit in Portal", url=url)], dismissed=True)
-    return NativeView("Private draft outcome uncertain", "Check publication status before "
-                      "another action; do not retry this upload blindly. Not confirmed published.",
-                      dismissed=True)
+def _publication_version(result: dict[str, Any]) -> int | None:
+    publication = result.get("publication_result")
+    version = publication.get("version") if isinstance(publication, dict) else None
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
 
-def _private_pending_view(record: dict[str, Any]) -> NativeView | None:
-    if record.get("screen") in {"details", "checks"}:
-        return None
-    private = _confirmed_private_url(record)
-    if private and (record.get("screen") == "authorization_expired" or
-                    not record.get("plan", {}).get("receipt") or
-                    record.get("portal_changed")):
-        changed = record.get("portal_changed") is True
-        actions = [NativeAction("Open in Portal", url=private),
-                   NativeAction("View More Details", "details"),
-                   NativeAction("Snooze Collective Wisdom", "settings"),
-                   NativeAction("Maybe Later", "cancel")]
-        if not changed:
-            actions.insert(1, NativeAction("Refresh review", "refresh.review"))
-        return NativeView("Portal draft changed" if changed else "Review expired" if
-                          record.get("screen") == "authorization_expired" else "Ready for review",
-                          ("The Portal draft changed. Review and share the edited version in Portal; "
-                           "native Share only covers the original package and cannot adopt Portal edits."
-                           if changed else "Your private draft is in Portal, not published yet. "
-                           "Refresh the exact original review before native sharing; "
-                           "review and share any Portal edits in Portal."), actions=actions)
-    if record.get("screen") == "authorization_expired":
-        return NativeView("Review expired", "No upload occurred.",
-                          actions=[NativeAction("Refresh review", "refresh.review"),
-                                   NativeAction("Maybe Later", "cancel")])
-    return None
+
+def _publication_result_view(record: dict[str, Any]) -> NativeView:
+    """Shared / blocked / pending result cards on the same layout as the share card."""
+    from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
+    raw_result = record.get("result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+    raw_plan = record.get("plan")
+    plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
+    fields = [NativeField("Team", _safe(record.get("team_name"), "Team name unavailable")),
+              NativeField("Skill", _safe(plan.get("slug") or _skill_name(plan)))]
+    title, detail = publication_copy(result)
+    if record.get("state") == "completed" and title == "Published":
+        version = _publication_version(result)
+        if version is not None:
+            fields.append(NativeField("Version", f"v{version}"))
+        url = safe_portal_url(record.get("portal_url"))
+        recovery = result.get("detail") if isinstance(result.get("detail"), str) else ""
+        return NativeView(
+            "✅ Shared", "Available to your team.", fields=fields, dismissed=True,
+            notice=_safe(recovery, "") if recovery else "",
+            actions=[NativeAction("View in Portal", url=url)] if url else [],
+        )
+    if result.get("state") == "pending" and result.get("phase") == "policy_review_required":
+        return NativeView("Not shared yet", "This skill is uploaded but not shared with your team. "
+                          "Run /wisdom share again to finish sharing.", fields=fields,
+                          dismissed=True)
+    if title in {"Failed", "Rejected"}:
+        return NativeView("❌ Not shared", detail, fields=fields, dismissed=True)
+    return NativeView(title, detail, fields=fields, dismissed=True)
+
+
+def _share_cancelled(record: dict[str, Any]) -> bool:
+    plan = record.get("plan")
+    return record.get("state") == "cancelled" and isinstance(plan, dict) and (
+        record.get("operation") == "suggest"
+        or (record.get("operation") == "publish" and plan.get("candidate_flow") is True)
+    )
 
 
 def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint: disable=too-many-return-statements
-    pending_view = _private_pending_view(record) if (record.get("state") == "pending"
-                                                  and record.get("operation") == "publish") else None
-    if pending_view is not None:
-        return pending_view
+    if (record.get("state") == "pending" and record.get("operation") == "publish"
+            and record.get("screen") == "authorization_expired"):
+        return NativeView("Review expired", "Nothing was uploaded. Refresh to review again.",
+                          actions=[NativeAction("Refresh", "refresh.review", primary=True),
+                                   NativeAction("Cancel", "cancel")])
     outcome = _completed_outcome_view(record)
-    if outcome is not None and record.get("effect_action") != "portal.draft":
+    if outcome is not None:
         return outcome
     result = record.get("result")
-    if (record.get("state") != "pending" and record.get("operation") == "publish"
-            and record.get("effect_action") == "portal.draft"):
-        return _private_draft_view(result if record.get("state") == "completed" else None)
     if record.get("operation") == "publish" and record.get("state") in {"completed", "uncertain"}:
-        from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
-        title, detail = publication_copy(result if isinstance(result, dict) else {})
-        return NativeView(title, detail, dismissed=True)
+        return _publication_result_view(record)
+    if _share_cancelled(record):
+        return NativeView("Share cancelled", "Nothing was uploaded.", dismissed=True)
     if record.get("failure") == "share_packaging_failed":
         return NativeView(
             "Share Packaging failed",
@@ -1129,7 +1189,7 @@ def _effect_view(
     if operation in {"install", "update", "publish", "setup", "uninstall"} and plan.get("allowed", True):
         if _requires_partial_acknowledgement(plan):
             actions.insert(0, NativeAction(
-                "Acknowledge partial compatibility and confirm",
+                "Accept partial",
                 "confirm.partial", primary=True,
             ))
         else:
@@ -1684,33 +1744,17 @@ class NativeReviewController:
         navigated = self._navigation_action(record, action, service, invocation, authority)
         if navigated is not None:
             return navigated
-        if action == "portal.draft" and (record.get("operation") != "publish"
-                                         or record.get("plan", {}).get("candidate_flow") is not True):
-            raise WisdomValidationError("Collective Wisdom action was not recognized")
-        _validate_review_action(record, "confirm" if action == "portal.draft" else action)
+        _validate_review_action(record, action)
 
         return self._apply(record, action, service, invocation, authority, progress=progress)
 
     def _refresh_publication(self, record, service, invocation, authority):
         """Read a new exact receipt without spending it or uploading anything."""
         plan = record["plan"]
-        previous = record.get("result") or {}
-        target = previous.get("operation_id") or plan.get("draft_id") or plan.get("local_draft_id")
+        target = plan.get("operation_id") or plan.get("draft_id") or plan.get("local_draft_id")
         if not isinstance(target, str) or not target:
             raise WisdomConflict("Publication identity is unavailable; open a new review")
-        try:
-            fresh = service.publication_review(target)
-        except WisdomValidationError as exc:
-            if not previous.get("operation_id") or str(exc) != (
-                "Authoritative publication draft no longer matches intent"
-            ):
-                raise
-            changed = {**record, "portal_changed": True,
-                       "plan": {key: value for key, value in plan.items() if key != "receipt"},
-                       "screen": "approval", "display_ready": False, "updated_at": self.clock()}
-            if not self.state.compare_replace(record, changed):
-                raise WisdomConflict("Collective Wisdom review changed; open it again") from exc
-            return copy.deepcopy(changed)
+        fresh = service.publication_review(target)
         if not isinstance(fresh, dict):
             raise WisdomConflict("Publication review is unavailable")
         identities = [fresh[key] for key in ("draft_id", "local_draft_id") if key in fresh]
@@ -1718,19 +1762,16 @@ class NativeReviewController:
         matches = all((
             bool(fresh.get("receipt")), bool(identities),
             all(identity == expected for identity in identities),
-            not previous.get("operation_id") or fresh.get("operation_id") == target,
             _plan_owner_matches({**record, "plan": fresh}),
             authority() is True, _owner_matches(record, service, invocation),
         ))
         if not matches:
             raise WisdomConflict("The publication changed; open it again")
-        if previous.get("operation_id") and fresh.get("hashes") != plan.get("hashes"):
-            raise WisdomConflict("The private draft changed; open it again")
         updated = {**record, "plan": {**fresh, **{
             key: plan[key] for key in ("candidate_flow", "editorial_status", "editorial_name",
                                    "editorial_description", "coworker_benefit") if key in plan
         }}, "screen": "approval", "page": 0, "inspected_through": 0,
-                   "display_ready": False, "portal_changed": False, "updated_at": self.clock()}
+                   "display_ready": False, "updated_at": self.clock()}
         if not self.state.compare_replace(record, updated):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(updated)
@@ -1874,7 +1915,7 @@ class NativeReviewController:
             })
             raise
 
-    def _publication_before_claim(self, record, action, service, invocation, authority):
+    def _publication_before_claim(self, record):
         if record.get("operation") != "publish":
             return None
         if _authorization_expired(record["plan"], self.clock()):
@@ -1885,43 +1926,7 @@ class NativeReviewController:
             if not self.state.compare_replace(record, expired):
                 raise WisdomConflict("Collective Wisdom review changed; open it again")
             return copy.deepcopy(expired)
-        if _confirmed_private_url(record) and action == "confirm":
-            # Check the EXISTING receipt without replacing it or claiming an effect.
-            service.publication_preflight(record["plan"]["receipt"], may_apply=lambda: (
-                authority() is True and _owner_matches(record, service, invocation)
-            ))
         return None
-
-    @staticmethod
-    def _private_continuation(result, plan, record, service, current):
-        """Keep the acknowledged URL but require a new operation-bound receipt."""
-        pending = {**result, "state": "pending", "screen": "approval",
-                   "plan": {key: value for key, value in plan.items() if key != "receipt"}}
-        outcome = result["result"]
-        try:
-            operation_id = outcome.get("operation_id")
-            if not isinstance(operation_id, str) or not operation_id:
-                raise WisdomConflict("Private draft operation is unavailable")
-            fresh = service.publication_review(operation_id)
-            matches = isinstance(fresh, dict) and all((
-                fresh.get("operation_id") == operation_id,
-                fresh.get("draft_id") == plan.get("draft_id"),
-                fresh.get("hashes") == plan.get("hashes"),
-                bool(fresh.get("receipt")),
-                _plan_owner_matches({**record, "plan": fresh}),
-                current(),
-            ))
-            if not matches:
-                raise WisdomConflict("Private draft review changed")
-            pending["plan"] = {**fresh, **{
-                key: plan[key] for key in ("candidate_flow", "editorial_status",
-                                       "editorial_name", "editorial_description",
-                                       "coworker_benefit") if key in plan
-            }}
-        except Exception:  # pylint: disable=broad-exception-caught
-            # Acknowledged upload, but read failed; never reuse consumed authority.
-            pass
-        return pending
 
     @staticmethod
     def _setup_continuation(result, operation, action, plan, outcome):
@@ -1938,7 +1943,7 @@ class NativeReviewController:
         invocation: NativeInvocation, authority: Callable[[], bool],
         *, progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        preflight = self._publication_before_claim(record, action, service, invocation, authority)
+        preflight = self._publication_before_claim(record)
         if preflight is not None:
             return preflight
         claimed = {
@@ -1950,9 +1955,7 @@ class NativeReviewController:
         plan = claimed["plan"]
         operation = claimed["operation"]
         if operation == "publish" and progress is not None:
-            self._publish_progress(claimed, progress, label=(
-                "⏳ Uploading private draft…" if action == "portal.draft" else "⏳ Sharing…"
-            ))
+            self._publish_progress(claimed, progress)
         def current() -> bool:
             return _current_effect(
                 self.load(record["id"]), claimed, service, invocation, authority
@@ -1973,8 +1976,10 @@ class NativeReviewController:
             **claimed, "state": "completed", "result": outcome,
             "updated_at": self.clock(),
         }
-        if operation == "publish" and action == "portal.draft" and _confirmed_private_url(result):
-            result = self._private_continuation(result, plan, record, service, current)
+        if operation == "publish":
+            url = _shared_portal_url(service, outcome)
+            if url:
+                result["portal_url"] = url
         result = self._setup_continuation(result, operation, action, plan, outcome)
         if not self.state.compare_replace(claimed, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
@@ -2022,6 +2027,7 @@ class NativeReviewController:
                 **review, "candidate_flow": True,
             }),
             "screen": "approval", "page": 0, "inspected_through": 0,
+            "catalog_version": _catalog_version(service, review),
             "updated_at": self.clock(),
         }
 

@@ -100,12 +100,14 @@ def test_real_sdk_response_binds_exact_message_for_registered_callbacks(tmp_path
         await ui.runtime._send_notice(ui.caller, [{
             "category": "skill_ready_to_share", "event_id": "candidate-1",
         }])
-        candidate_id = _record_id(ui.posts[-1], "Snooze Collective Wisdom")
+        candidate_id = _record_id(ui.posts[-1], "View details")
         assert ui.record(candidate_id)["message_id"] == "card-2"
         assert ui.record(candidate_id)["display_ready"] is True
 
-        await ui.click(candidate_id, "settings")
-        assert ui.record(candidate_id)["operation"] == "settings"
+        await ui.click(candidate_id, "details")
+        assert ui.record(candidate_id)["screen"] == "details"
+        assert ui.edits[-1]["ts"] == "card-2"
+        await ui.click(candidate_id, "back")
         assert ui.edits[-1]["ts"] == "card-2"
         await ui.click(candidate_id, "cancel")
         assert ui.record(candidate_id)["state"] == "cancelled"

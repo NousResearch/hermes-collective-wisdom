@@ -94,7 +94,7 @@ def test_settings_effect_waits_for_display_ack(tmp_path):
 
     async def scenario():
         ui = SlackHarness(tmp_path, service)
-        identity = ui.runtime.begin_candidate(ui.caller, 'candidate-1')['review_id']
+        identity = ui.runtime.begin(ui.caller, 'incident')['review_id']
         await ui.flush()
         started, release = asyncio.Event(), asyncio.Event()
         original = ui.chat_update

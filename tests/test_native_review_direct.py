@@ -572,7 +572,7 @@ def test_settings_card_applies_an_exact_mode_choice(tmp_path: Path, monkeypatch)
 
     assert "Current: On" in view.to_text()
     assert "Delivery mode" not in view.to_text()
-    assert any(action.label == "Turn off automatic suggestions" for action in view.actions)
+    assert any(action.label == "Auto-suggest off" for action in view.actions)
 
     result = controller.act(
         record["id"], "settings.mode.fixed", service,
