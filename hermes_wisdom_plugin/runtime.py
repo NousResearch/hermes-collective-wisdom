@@ -1648,6 +1648,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             portal_base_url=self.account.portal_base_url,
             organization_id=self.account.organization_id,
             installation_status=local_status.for_skill,
+            org_slug=getattr(self.account, "organization_slug", None),
         )
 
     def list_skills(self):
