@@ -742,6 +742,8 @@ def review_identity(value: object) -> str:
             ).encode("ascii")
         ).hexdigest(),
         "warning_required": has_reviewable_warnings(data),
+        # Exact Gateway scan evidence for a retained operation (None for local drafts).
+        "gateway_evidence": data.get("gateway_evidence_hash"),
     }
     return json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 

@@ -212,6 +212,48 @@ def _mutate_gateway_finding(kernel, **changes):
                               *draft.scan["findings"][1:]]
 
 
+def test_terminal_accept_warnings_never_acknowledges_findings_it_did_not_show(
+    tmp_path, capsys,
+):
+    """Salt R1 B1: evidence changed after the shown JSON result; nothing is submitted."""
+    kernel = AdvisoryKernel(tmp_path)
+    parser = argparse.ArgumentParser(prog="hermes wisdom")
+    build_parser(parser)
+    share = ["share", "reviewed-skill", "--accept-warnings", "--yes", "--json"]
+
+    run_cli(parser.parse_args(["share", "reviewed-skill", "--yes", "--json"]), kernel)
+    first = json.loads(capsys.readouterr().out)
+    assert first["outcome"] == "gateway_review_required"
+    assert "NEW SECRET WARNING" not in first["detail"]
+
+    _mutate_gateway_finding(kernel, category="credential_exposure",
+                            detail="NEW SECRET WARNING")
+    code = run_cli(parser.parse_args(share), kernel)
+    second = json.loads(capsys.readouterr().out)
+    assert (code, second["outcome"]) == (1, "gateway_review_required")
+    assert "NEW SECRET WARNING" in second["detail"], "the new findings are returned"
+    assert kernel.client.state.calls == Counter(upload=1, submit=1), "nothing approved"
+
+    # Those findings have now been shown; acknowledging them finishes the share once.
+    code = run_cli(parser.parse_args(share), kernel)
+    assert json.loads(capsys.readouterr().out)["outcome"] == "shared" and code == 0
+    assert kernel.client.state.calls == Counter(upload=1, submit=1, approve=1, head=1, publish=1)
+
+
+def test_terminal_accept_warnings_without_any_shown_evidence_submits_nothing(tmp_path, capsys):
+    kernel = AdvisoryKernel(tmp_path)
+    prepared = kernel.suggest("reviewed-skill")
+    # The advisory exists, but no terminal has displayed it yet.
+    kernel.publication.submit(kernel.publication_review(prepared["draft_id"])["receipt"])
+    parser = argparse.ArgumentParser(prog="hermes wisdom")
+    build_parser(parser)
+
+    code = run_cli(parser.parse_args(
+        ["share", "reviewed-skill", "--accept-warnings", "--yes", "--json"]), kernel)
+    result = json.loads(capsys.readouterr().out)
+    assert (code, result["outcome"]) == (1, "gateway_review_required")
+    assert "Looks like an API key assignment." in result["detail"]
+    assert kernel.client.state.calls == Counter(upload=1, submit=1)
 
 
 @pytest.mark.parametrize("change", [

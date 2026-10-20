@@ -82,13 +82,19 @@ def _screen(prepared, owner, detail, mode):
 
 
 def _warnings(args, prepared):
+    """Return False (none), True (acknowledged) or None (acknowledgement required).
+
+    For Gateway findings an acknowledgement is a hash: the exact evidence this
+    invocation printed and the owner confirmed, or, for ``--accept-warnings``,
+    the evidence a previous invocation printed (``gateway_evidence_shown``).
+    """
     gateway = prepared.get("review_required") == "gateway_advisory"
     if not has_reviewable_warnings(prepared) and not gateway:
         return False
     if has_reviewable_warnings(prepared) and not safe_scan_details(prepared.get("local_scan")):
         raise WisdomConflict("Scanner warning details are unavailable; sharing is blocked")
     if args.accept_warnings:
-        return True
+        return prepared.get("gateway_evidence_shown") or "" if gateway else True
     if args.json or args.yes or not sys.stdin.isatty():
         return None
     print(render_gateway_findings(prepared) if gateway else render_findings(prepared))
@@ -96,7 +102,17 @@ def _warnings(args, prepared):
                 if gateway else
                 "Acknowledge the displayed scanner warnings for this exact package? [y/N] ")
     answer = input(question)
-    return True if answer.strip().lower() in {"y", "yes", "a"} else None
+    if answer.strip().lower() not in {"y", "yes", "a"}:
+        return None
+    return prepared.get("gateway_evidence_hash") or "" if gateway else True
+
+
+def _mark_shown(service, result):
+    """Record the Gateway evidence just printed, so a later run may acknowledge it."""
+    operation_id, evidence = result.get("operation_id"), result.get("gateway_evidence_hash")
+    record = getattr(service, "publication_gateway_shown", None)
+    if callable(record) and isinstance(operation_id, str) and isinstance(evidence, str):
+        record(operation_id, evidence)
 
 
 def _view_file(prepared):
@@ -125,11 +141,18 @@ def _navigate(action, service, review):
         edit_prepared(service, review["draft_id"])
 
 
+def _gateway_changed(accepted, current):
+    """True when a Gateway acknowledgement does not name exactly the current evidence."""
+    return isinstance(accepted, str) and (not accepted or accepted != current)
+
+
 def _review(args, service, prepared, owner, detail):
     """Warn separately, then present exactly the receipt that Share will consume.
 
     An operation awaiting review is re-reviewed by its id; its submitted local
-    draft is immutable, so only viewing files is offered.
+    draft is immutable, so only viewing files is offered. Gateway findings are
+    acknowledged by evidence hash: when the live evidence is not exactly what was
+    shown, nothing is submitted and the new findings are returned instead.
     """
     draft_id = prepared["draft_id"]
     operation_id = prepared.get("operation_id")
@@ -138,7 +161,11 @@ def _review(args, service, prepared, owner, detail):
         accepted = _warnings(args, prepared)
         if accepted is None:
             return None, "warnings_required"
-        review = service.publication_review(target, accept_warnings=accepted)
+        # An acknowledgement of other evidence than shown never reaches the service.
+        review = (prepared if _gateway_changed(accepted, prepared.get("gateway_evidence_hash"))
+                  else service.publication_review(target, accept_warnings=accepted is not False))
+        if _gateway_changed(accepted, review.get("gateway_evidence_hash")):
+            return review, "gateway_review_required"
         if review_identity(prepared) != review_identity(review):
             raise WisdomConflict("Package or scanner findings changed; review again")
         if not args.json:
@@ -157,7 +184,8 @@ def _review(args, service, prepared, owner, detail):
         if operation_id:
             if action == "v":
                 _view_file(review)
-            prepared = review
+            # The screen above printed exactly this evidence.
+            prepared = {**review, "gateway_evidence_shown": review.get("gateway_evidence_hash")}
             continue
         _navigate(action, service, review)
         # No warning acceptance survives editing or a new review.
@@ -203,6 +231,23 @@ def _submit(service, receipt, skill):
         return {"state": "uncertain", "operation_id": skill}
 
 
+def _stopped(args, service, owner, review, stop):
+    """The result of a review that ended without submitting anything."""
+    if stop == "gateway_review_required" and review is not None:
+        # The live Gateway evidence is not what was shown: show it; submit nothing.
+        result = _outcome({**review, "review_required": "gateway_advisory"},
+                          args.skill, text(owner["organization_id"]))
+        _mark_shown(service, review)
+        return result
+    messages = {
+        "cancelled": "Sharing cancelled. Nothing has been uploaded.",
+        "warnings_required": "Not shared. Review the warnings, then use --accept-warnings.",
+        "confirmation_required": "Nothing shared. To confirm, run: hermes wisdom share "
+                                 + shlex.quote(args.skill) + " --yes",
+    }
+    return _result(stop, args.skill, messages[stop]), 0 if stop == "cancelled" else 1
+
+
 def _share(args, service):
     owner = service.binding()
     pending = service.share_status(args.skill)
@@ -236,25 +281,26 @@ def _share(args, service):
                        version, detail.get("portal_url")), 0
     review, stop = _review(args, service, prepared, owner, detail)
     if stop:
-        messages = {
-            "cancelled": "Sharing cancelled. Nothing has been uploaded.",
-            "warnings_required": "Not shared. Review the warnings, then use --accept-warnings.",
-            "confirmation_required": "Nothing shared. To confirm, run: hermes wisdom share "
-                                     + shlex.quote(args.skill) + " --yes",
-        }
-        return _result(stop, args.skill, messages[stop]), 0 if stop == "cancelled" else 1
+        return _stopped(args, service, owner, review, stop)
     assert review is not None
     result = _submit(service, review["receipt"], args.skill)
     outcome, code = _outcome(result, args.skill, text(owner["organization_id"]))
+    _after_submit(service, args.skill, result, outcome)
+    return outcome, code
+
+
+def _after_submit(service, skill, result, outcome):
+    """Record shown Gateway evidence, or add the best-effort Portal link."""
+    if outcome["outcome"] == "gateway_review_required":
+        _mark_shown(service, result)
     if outcome["outcome"] == "shared":
         # Publication success is independent of optional post-submit link discovery.
         try:
-            published = _catalog(service, args.skill)
+            published = _catalog(service, skill)
             outcome["portal_url"] = safe_portal_url(published.get("portal_url"))
         except Exception:  # pylint: disable=broad-exception-caught
             # Publication is already authoritative; link discovery is best effort.
             pass
-    return outcome, code
 
 
 def _emit_result(args, result):

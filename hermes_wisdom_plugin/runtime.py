@@ -1093,6 +1093,12 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         _require_current(may_apply)
         return result
 
+    def publication_gateway_shown(self, operation_id, evidence_hash):
+        """Record the exact Gateway evidence a terminal printed; grants nothing."""
+
+        self._publication_service().mark_gateway_shown(operation_id, evidence_hash)
+        self.check_owner()
+
     def publication_submit(
         self, receipt, *, may_apply: Callable[[], bool] | None = None,
     ):
