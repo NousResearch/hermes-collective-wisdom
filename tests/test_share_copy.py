@@ -300,3 +300,68 @@ def test_setup_disclosure_names_the_model_send_and_the_off_switch():
     assert "SKILL.md is sent to your configured model provider" in WISDOM_DISCLOSURE
     assert ("hermes config set plugins.entries.collective-wisdom.settings."
             "qualification.allow_model_review false") in WISDOM_DISCLOSURE
+
+
+# Which host scanner findings keep the skill away from the owner's model (live 2026-10-20:
+# an 839-char skill with only medium/low findings was wrongly refused as "may contain a secret").
+
+def _scan_with(kernel, guard):
+    original = kernel.reviewer.host.scan
+
+    def scan(path):
+        if path.name.startswith("model-input-"):
+            if isinstance(guard, Exception):
+                raise guard
+            return guard
+        return original(path)
+
+    kernel.reviewer.host.scan = scan
+
+
+def _finding(severity, category):
+    return {"severity": severity, "category": category, "pattern_id": "p", "file": "SKILL.md",
+            "line": 1, "match": "", "description": ""}
+
+
+def test_non_secret_scanner_findings_still_get_model_copy(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    _scan_with(kernel, {"available": True, "allowed": True, "verdict": "safe", "findings": [
+        _finding("medium", "execution"), _finding("medium", "supply_chain"),
+        _finding("low", "persistence"), _finding("medium", "injection"),
+    ]})
+    prepared = kernel.suggest("reviewed-skill")
+    assert len(kernel.reviewer.llm.calls) == 1
+    assert prepared["copy_written_by_hermes"] == ["editorial_description"]
+    assert prepared["copy_provenance_line"] == _PROVENANCE
+
+
+@pytest.mark.parametrize("guard", [
+    {"available": True, "allowed": True, "findings": [_finding("critical", "credential_exposure")]},
+    {"available": True, "allowed": True, "findings": [_finding("high", "credential_exposure")]},
+    {"available": True, "allowed": True, "findings": [_finding("critical", "exfiltration")]},
+    {"available": True, "allowed": False, "findings": []},
+    {"available": True, "allowed": True, "findings": ["not-a-dict"]},
+    {"available": True, "allowed": True, "findings": None},
+])
+def test_secret_findings_or_a_refused_scan_never_reach_the_model(tmp_path, guard):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    _scan_with(kernel, guard)
+    with pytest.raises(ShareCopyError) as raised:
+        kernel.suggest("reviewed-skill")
+    assert str(raised.value) == f"{_CASES['over-limit'][1]} {_SECRET} {_FIX}"
+    assert not kernel.reviewer.llm.calls
+
+
+@pytest.mark.parametrize("guard", [
+    {"available": False, "allowed": True, "findings": []},
+    RuntimeError("scan unavailable"),
+])
+def test_a_scan_that_did_not_run_says_so_and_never_reaches_the_model(tmp_path, guard):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    _scan_with(kernel, guard)
+    with pytest.raises(ShareCopyError) as raised:
+        kernel.suggest("reviewed-skill")
+    assert str(raised.value) == (
+        f"{_CASES['over-limit'][1]} Hermes did not send this skill to your model because "
+        f"its security scan could not run. {_FIX}")
+    assert not kernel.reviewer.llm.calls

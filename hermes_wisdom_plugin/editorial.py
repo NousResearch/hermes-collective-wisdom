@@ -72,6 +72,10 @@ _COPY_FAILURE_REASONS = {
     "disclosure_blocked": (
         "Hermes did not send this skill to your model because it may contain a secret."
     ),
+    "disclosure_unchecked": (
+        "Hermes did not send this skill to your model because its security scan "
+        "could not run."
+    ),
 }
 _COPY_MODEL_FAILED = "Hermes could not propose it with your model."
 _COPY_FIELD_LABELS = {"editorial_name": "Name", "editorial_description": "Description"}

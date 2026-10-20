@@ -52,6 +52,12 @@ from .professionalism import review_package, unavailable_review
 from .publisher_evidence import evidence_block, publication_description
 from .release_scope import active as release_scope
 
+# Host scanner findings that mean the skill text may carry a secret, so it must not
+# be sent to the owner's model for share copy. Critical findings of any category
+# also block, to stay conservative where the scanner is most certain.
+_SHARE_COPY_DISCLOSURE_CATEGORIES = frozenset({"credential_exposure"})
+_SHARE_COPY_BLOCKING_SEVERITY = "critical"
+
 
 OwnerProvider = Callable[[], dict[str, str]]
 
@@ -694,6 +700,35 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 ready = False
         return ready
 
+    def _share_copy_disclosure_block(self, source_files, description, frontmatter) -> str | None:
+        """Why the skill must not reach the owner's model for share copy, or None.
+
+        The model call only proposes copy the owner reviews before sharing, so the
+        question is disclosure: a credential match from the plugin's preflight or
+        a credential finding from the host scan blocks it, and so does a scan that
+        did not run. Other scanner findings (shell snippets, unpinned installs)
+        are not a disclosure risk; they still gate the share itself.
+        """
+        if not model_disclosure_ready(
+            source_files, str(description or ""), str(frontmatter.get("metadata") or ""),
+        ):
+            return "disclosure_blocked"
+        try:
+            guard = _scan_snapshot(self.host, self.store.root / "model-inputs", source_files)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return "disclosure_unchecked"
+        if guard.get("available") is not True:
+            return "disclosure_unchecked"
+        findings = guard.get("findings")
+        if guard.get("allowed") is not True or not isinstance(findings, list) or any(
+            not isinstance(finding, dict)
+            or finding.get("category") in _SHARE_COPY_DISCLOSURE_CATEGORIES
+            or finding.get("severity") == _SHARE_COPY_BLOCKING_SEVERITY
+            for finding in findings
+        ):
+            return "disclosure_blocked"
+        return None
+
     def _propose_share_copy(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, source, source_hash, frontmatter, source_files, skill_markdown,
         description, allow_model_copy, may_apply,
@@ -711,13 +746,11 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise ShareCopyError(copy_problem_message(problem, "model_copy_disabled"))
         if self.llm is None:
             raise ShareCopyError(copy_problem_message(problem, "model_unavailable"))
-        ready = self._editorial_disclosure_ready(
-            source_files, description, frontmatter, True,
-        )
+        blocked = self._share_copy_disclosure_block(source_files, description, frontmatter)
         if source_fingerprint(source) != source_hash:
             raise WisdomConflict("source changed during local disclosure preflight")
-        if not ready:
-            raise ShareCopyError(copy_problem_message(problem, "disclosure_blocked"))
+        if blocked is not None:
+            raise ShareCopyError(copy_problem_message(problem, blocked))
         self._require_current(may_apply)
         proposal = propose_share_copy(
             frontmatter=frontmatter, skill_markdown=skill_markdown, llm=self.llm,
