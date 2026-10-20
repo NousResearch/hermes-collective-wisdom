@@ -108,11 +108,20 @@ def _warnings(args, prepared):
 
 
 def _mark_shown(service, result):
-    """Record the Gateway evidence just printed, so a later run may acknowledge it."""
+    """Record the Gateway evidence the caller has now received.
+
+    Called only after the output carrying that evidence was written and flushed,
+    so a failed write, kill or emit error leaves nothing recorded and a later
+    ``--accept-warnings`` run shows the findings again instead of acknowledging.
+    """
     operation_id, evidence = result.get("operation_id"), result.get("gateway_evidence_hash")
     record = getattr(service, "publication_gateway_shown", None)
     if callable(record) and isinstance(operation_id, str) and isinstance(evidence, str):
-        record(operation_id, evidence)
+        try:
+            record(operation_id, evidence)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Unrecorded evidence is shown again next time; nothing is acknowledged.
+            pass
 
 
 def _view_file(prepared):
@@ -231,13 +240,13 @@ def _submit(service, receipt, skill):
         return {"state": "uncertain", "operation_id": skill}
 
 
-def _stopped(args, service, owner, review, stop):
+def _stopped(args, owner, review, stop, shown):
     """The result of a review that ended without submitting anything."""
     if stop == "gateway_review_required" and review is not None:
         # The live Gateway evidence is not what was shown: show it; submit nothing.
         result = _outcome({**review, "review_required": "gateway_advisory"},
                           args.skill, text(owner["organization_id"]))
-        _mark_shown(service, review)
+        shown.append(review)
         return result
     messages = {
         "cancelled": "Sharing cancelled. Nothing has been uploaded.",
@@ -248,7 +257,8 @@ def _stopped(args, service, owner, review, stop):
     return _result(stop, args.skill, messages[stop]), 0 if stop == "cancelled" else 1
 
 
-def _share(args, service):
+def _share(args, service, shown):
+    """Run one share; Gateway evidence in the result is appended to ``shown``."""
     owner = service.binding()
     pending = service.share_status(args.skill)
     operation_id = None
@@ -281,18 +291,18 @@ def _share(args, service):
                        version, detail.get("portal_url")), 0
     review, stop = _review(args, service, prepared, owner, detail)
     if stop:
-        return _stopped(args, service, owner, review, stop)
+        return _stopped(args, owner, review, stop, shown)
     assert review is not None
     result = _submit(service, review["receipt"], args.skill)
     outcome, code = _outcome(result, args.skill, text(owner["organization_id"]))
-    _after_submit(service, args.skill, result, outcome)
+    if outcome["outcome"] == "gateway_review_required":
+        shown.append(result)
+    _after_submit(service, args.skill, outcome)
     return outcome, code
 
 
-def _after_submit(service, skill, result, outcome):
-    """Record shown Gateway evidence, or add the best-effort Portal link."""
-    if outcome["outcome"] == "gateway_review_required":
-        _mark_shown(service, result)
+def _after_submit(service, skill, outcome):
+    """Add the best-effort Portal link to a shared outcome."""
     if outcome["outcome"] == "shared":
         # Publication success is independent of optional post-submit link discovery.
         try:
@@ -306,19 +316,22 @@ def _after_submit(service, skill, result, outcome):
 def _emit_result(args, result):
     if args.json:
         print(json.dumps(result, ensure_ascii=True))
-        return
-    print(result["detail"])
-    if result["portal_url"]:
-        print("Portal   " + result["portal_url"])
-    if result["outcome"] == "shared":
-        name = shlex.quote(text(args.skill))
-        print(f"Install  hermes wisdom install {name}")
+    else:
+        print(result["detail"])
+        if result["portal_url"]:
+            print("Portal   " + result["portal_url"])
+        if result["outcome"] == "shared":
+            name = shlex.quote(text(args.skill))
+            print(f"Install  hermes wisdom install {name}")
+    # The caller has the result only once it is flushed; a failure raises here.
+    sys.stdout.flush()
 
 
 def run_share(args, service):
     """Print one stable JSON envelope or the human screen/outcome; never auto-retry."""
+    shown = []
     try:
-        result, code = _share(args, service)
+        result, code = _share(args, service, shown)
     except WisdomAuthError:
         result, code = _result("not_entitled", args.skill,
                               "Collective Wisdom is not enabled for this account and team"), 1
@@ -342,4 +355,8 @@ def run_share(args, service):
             "Sharing could not complete. Inspect hermes wisdom status before trying again.",
         ), 1
     _emit_result(args, result)
+    if result["outcome"] == "gateway_review_required":
+        # Recorded only now that the caller has received exactly this evidence.
+        for evidence in shown:
+            _mark_shown(service, evidence)
     return code
