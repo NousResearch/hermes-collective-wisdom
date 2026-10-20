@@ -1,5 +1,7 @@
 """Shared error contracts for the Collective Wisdom plugin."""
 
+import re
+
 
 class WisdomError(RuntimeError):
     """Base error carrying the legacy CLI status and code contract."""
@@ -55,19 +57,70 @@ class WisdomValidationError(WisdomError):
     exit_code = 6
 
 
-def describe_exception(exc: BaseException, *, limit: int = 300) -> str:
-    """Return "Class: message" for logs, host-redacted, bounded, without controls."""
-    import importlib  # pylint: disable=import-outside-toplevel
-    import re  # pylint: disable=import-outside-toplevel
+class StaleControlError(WisdomValidationError):
+    """A callback names a control the current card projection does not offer.
 
+    Old cards (pre-upgrade controls such as Portal draft, snooze or review
+    checks) and forged callback ids land here. The transports answer with a
+    bounded "no longer available" notice instead of the exception text.
+    """
+
+    def __init__(self, message: str = "Collective Wisdom action is not offered on this screen"):
+        super().__init__(message, code="stale_control")
+
+
+STALE_CONTROL_MESSAGE = "This control is no longer available. Run /wisdom share <skill> again."
+CALLBACK_FAILED_MESSAGE = "Couldn't complete that. Please try again."
+
+
+_CREDENTIAL_PARAMS = (
+    "access_token|api_key|apikey|token|key|secret|password|passwd|signature|receipt|code"
+)
+_MASKS = (
+    # URL userinfo: scheme://user:pass@host -> scheme://***:***@host
+    (re.compile(r"(?i)(\b[a-z][a-z0-9+.\-]*://|//)[^/\s@?#]+@"), r"\1***:***@"),
+    # Credential-named query/fragment parameters, any value length.
+    (re.compile(r"(?i)([?&#;])(" + _CREDENTIAL_PARAMS + r")=[^&#\s]*"), r"\1\2=***"),
+    # Receipt fields in any key/value form, any value length.
+    (re.compile(r"(?i)\b(receipt[\w\-]*)(['\"]?\s*[=:]\s*)(['\"]?)[^\s'\",;&]+"), r"\1\2\3***"),
+    # Bearer authorisation values, any length.
+    (re.compile(r"(?i)\b(bearer)(\s+)[^\s'\",;]+"), r"\1\2***"),
+    # Generic credential assignments (token=..., api_key: ..., password=...).
+    (re.compile(r"(?i)\b(access_token|api_key|apikey|token|key|secret|password|passwd|signature"
+                r"|authorization)(['\"]?\s*[=:]\s*)(['\"]?)[^\s'\",;&]+"),
+     r"\1\2\3***"),
+    # Long opaque strings are treated as credentials.
+    (re.compile(r"[A-Za-z0-9_\-]{32,}"), "***"),
+)
+
+
+def _host_redact(message: str) -> str:
+    """Apply the Hermes redactor in strict URL-credential mode when available."""
+    import importlib  # pylint: disable=import-outside-toplevel
+
+    redact = importlib.import_module("agent.redact").redact_sensitive_text
+    try:
+        return redact(message, force=True, redact_url_credentials=True)
+    except TypeError:
+        # Older hosts lack the strict URL flag; plugin masking still applies.
+        return redact(message, force=True)
+
+
+def mask_credentials(message: str) -> str:
+    """Plugin-side masking that is applied whether or not the host redactor ran."""
+    for pattern, replacement in _MASKS:
+        message = pattern.sub(replacement, message)
+    return message
+
+
+def describe_exception(exc: BaseException, *, limit: int = 300) -> str:
+    """Return "Class: message" for logs, redacted, bounded, without controls."""
     message = str(exc)
     try:
-        redact = importlib.import_module("agent.redact").redact_sensitive_text
-        message = redact(message, force=True)
+        message = _host_redact(message)
     except Exception:  # pylint: disable=broad-exception-caught
-        # Without the host redactor, mask anything shaped like a credential.
-        message = re.sub(r"(?i)(bearer\s+|token[=:]\s*|key[=:]\s*)\S+", r"\1[REDACTED]", message)
-        message = re.sub(r"[A-Za-z0-9_\-]{32,}", "[REDACTED]", message)
+        pass  # Fallback: the plugin masking below is always applied.
+    message = mask_credentials(message)
     message = " ".join("".join(
         char if char.isprintable() else " " for char in message
     ).split())[:limit]

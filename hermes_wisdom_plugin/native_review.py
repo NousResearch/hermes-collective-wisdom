@@ -15,7 +15,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .errors import (
-    SharePackagingError, WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+    SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict, WisdomNotFound,
+    WisdomValidationError,
 )
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
@@ -1211,7 +1212,7 @@ def _validate_offered_action(record: dict[str, Any], action: str) -> None:
     for item in view.items:
         offered.extend(item.actions)
     if not any(control.action == action for control in offered):
-        raise WisdomValidationError("Collective Wisdom action is not offered on this screen")
+        raise StaleControlError()
 
 
 def assessment_view(job: dict[str, Any], advice: dict[str, Any] | None = None) -> NativeView:
@@ -1458,8 +1459,30 @@ class NativeReviewController:
     def load(self, record_id: str) -> dict[str, Any]:
         row = self.state.get(record_id)
         if row is None:
-            raise WisdomValidationError("Collective Wisdom review was not found")
+            # A card whose record is gone (pruned or from another install) is stale.
+            raise StaleControlError("Collective Wisdom review was not found")
         return row
+
+    def stale_control(self, record: dict[str, Any], action: str) -> bool:
+        """True when a callback names a control the record's current card does not offer.
+
+        Mirrors the allowlist in ``act`` without side effects so transports can
+        answer old/forged controls with a bounded notice before acknowledging.
+        In-flight states are excluded: a repeat click there is a conflict, not a
+        stale card.
+        """
+        state = str(record.get("state") or "")
+        if state in {"applying", "preparing"}:
+            return False
+        if action == "cancel" and state in {"pending", "kept"}:
+            return False
+        try:
+            _validate_offered_action(record, action)
+        except StaleControlError:
+            return True
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+        return False
 
     def bind_message(
         self, record_id: str, invocation: NativeInvocation, message_id: str
@@ -1817,7 +1840,7 @@ class NativeReviewController:
     ) -> dict[str, Any]:
         """Resume only the owner- and card-bound draft with a fresh local review."""
         if action != "suggest.resume" or record.get("operation") != "suggest":
-            raise WisdomValidationError("Collective Wisdom action is not offered on this screen")
+            raise StaleControlError()
         refreshed = self._refresh_suggest(record, record["plan"], service)
         result = {**refreshed, "state": "pending", "display_ready": False}
         if not authority() or not _owner_matches(record, service, invocation):

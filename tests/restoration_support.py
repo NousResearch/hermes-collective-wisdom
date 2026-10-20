@@ -19,6 +19,8 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
         self.posts = []
         self.edits = []
         self.deletes = []
+        self.ephemerals = []
+        self.answers = []
         self.tasks = []
         self.handler = None
         self.command_handler: Any = None
@@ -67,6 +69,10 @@ class SlackHarness:  # pylint: disable=too-many-instance-attributes
 
     async def chat_update(self, **payload):
         self.edits.append(payload)
+        return {"ok": True}
+
+    async def chat_postEphemeral(self, **payload):  # pylint: disable=invalid-name
+        self.ephemerals.append(payload)
         return {"ok": True}
 
     async def chat_delete(self, **payload):
@@ -148,8 +154,8 @@ class TelegramHarness(SlackHarness):
             await self.handler(SimpleNamespace(callback_query=query), None)
         return self.record(record_id)
 
-    async def _answer(self):
-        return None
+    async def _answer(self, **kwargs):
+        self.answers.append(kwargs)
 
 
 def switch_owner_after_post(monkeypatch, ui, current_owner):

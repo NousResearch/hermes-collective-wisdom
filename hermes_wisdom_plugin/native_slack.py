@@ -13,6 +13,11 @@ _MAX_FIELDS = 10
 _MAX_FIELD_TEXT = 2000
 
 
+def is_link_button(action: dict[str, Any]) -> bool:
+    """True for a Slack link-button click, which carries a URL and no callback value."""
+    return bool(action.get("url")) and not action.get("value")
+
+
 def _action_id(action: str, index: int) -> str:
     """Return a per-row unique ID while callback values remain authoritative."""
     slug = re.sub(r"[^a-z0-9]+", "_", action.casefold()).strip("_") or "action"

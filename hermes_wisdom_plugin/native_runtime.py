@@ -13,7 +13,10 @@ import threading
 import time
 from typing import Any, Callable
 
-from .errors import WisdomUnavailable, WisdomValidationError, describe_exception
+from .errors import (
+    CALLBACK_FAILED_MESSAGE, STALE_CONTROL_MESSAGE, StaleControlError, WisdomUnavailable,
+    WisdomValidationError, describe_exception,
+)
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_context import message_id as posted_message_id
 from .native_review import NativeItem, NativeReviewController, NativeView, parse_callback
@@ -624,14 +627,29 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
 
         async def callback(ack: Any, body: dict[str, Any], action: dict[str, Any]) -> None:  # pylint: disable=too-many-locals
             await ack()
+            from .native_slack import (  # pylint: disable=import-outside-toplevel
+                blocks, callback_invocation, is_link_button,
+            )
+            if is_link_button(action):
+                # Slack also delivers block_actions for link buttons (View in
+                # Portal); the browser opens the URL, so there is nothing to do.
+                return
+            invocation = None
             try:
                 self._check_lease("slack", adapter, token)
-                record_id, selected = parse_callback(str(action.get("value") or ""))
-                record = self.reviews.load(record_id)
-                from .native_slack import (  # pylint: disable=import-outside-toplevel
-                    blocks, callback_invocation,
-                )
+                try:
+                    record_id, selected = parse_callback(str(action.get("value") or ""))
+                except ValueError as exc:
+                    invocation = callback_invocation(adapter, body, {})
+                    raise StaleControlError() from exc
+                try:
+                    record = self.reviews.load(record_id)
+                except StaleControlError:
+                    invocation = callback_invocation(adapter, body, {})
+                    raise
                 invocation = callback_invocation(adapter, body, record)
+                if self.reviews.stale_control(record, selected):
+                    raise StaleControlError()
                 service = self.service_factory()
                 loop = asyncio.get_running_loop()
                 active = threading.Event()
@@ -661,15 +679,21 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                             channel=invocation.chat_id, ts=invocation.message_id,
                             text=view.to_text(), blocks=blocks(view, record_id),
                         )
+            except StaleControlError as exc:
+                logger.warning(
+                    "Collective Wisdom Slack control is no longer offered (%s)",
+                    describe_exception(exc),
+                )
+                await self._slack_notice(native, adapter, token, invocation, STALE_CONTROL_MESSAGE)
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(
                     "Collective Wisdom Slack callback failed (%s)", describe_exception(exc),
                 )
-                return
+                await self._slack_notice(native, adapter, token, invocation, CALLBACK_FAILED_MESSAGE)
 
         native.action(re.compile(r"^wisdom_native_[a-z0-9_]+_\d+$"))(callback)
 
-    def wire_telegram(self, native: Any, adapter: Any) -> None:
+    def wire_telegram(self, native: Any, adapter: Any) -> None:  # pylint: disable=too-many-statements
         from telegram.ext import (  # pylint: disable=import-outside-toplevel
             ApplicationHandlerStop, CallbackQueryHandler,
         )
@@ -687,14 +711,25 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             selected = ""
             try:
                 self._check_lease("telegram", adapter, token)
-                record_id, selected = parse_callback(str(getattr(query, "data", "") or ""))
-                record = self.reviews.load(record_id)
-                if selected not in {"details", "review"} or record.get("operation") not in {"install", "update"}:
-                    await query.answer()
-                    acknowledged = True
                 from .native_telegram import (  # pylint: disable=import-outside-toplevel
                     callback_invocation, edit,
                 )
+                try:
+                    record_id, selected = parse_callback(str(getattr(query, "data", "") or ""))
+                except ValueError as exc:
+                    invocation = callback_invocation(adapter, query, {})
+                    raise StaleControlError() from exc
+                try:
+                    record = self.reviews.load(record_id)
+                except StaleControlError:
+                    invocation = callback_invocation(adapter, query, {})
+                    raise
+                if self.reviews.stale_control(record, selected):
+                    invocation = callback_invocation(adapter, query, record)
+                    raise StaleControlError()
+                if selected not in {"details", "review"} or record.get("operation") not in {"install", "update"}:
+                    await query.answer()
+                    acknowledged = True
                 invocation = callback_invocation(adapter, query, record)
                 updated, display = await self._telegram_action(
                     query, record, record_id, selected, adapter, token, invocation, edit,
@@ -713,15 +748,59 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                 await self._telegram_unavailable(
                     query, read_failed, invocation, record, adapter, token, acknowledged,
                 )
+            except StaleControlError as exc:
+                logger.warning(
+                    "Collective Wisdom Telegram control is no longer offered (%s)",
+                    describe_exception(exc),
+                )
+                await self._telegram_notice(
+                    query, adapter, token, invocation, acknowledged, STALE_CONTROL_MESSAGE,
+                )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(
                     "Collective Wisdom Telegram callback failed (%s)", describe_exception(exc),
                 )
-                if not acknowledged:
-                    await query.answer()
+                await self._telegram_notice(
+                    query, adapter, token, invocation, acknowledged, CALLBACK_FAILED_MESSAGE,
+                )
             raise ApplicationHandlerStop
 
         native.add_handler(CallbackQueryHandler(callback, pattern=r"^wi:agent:", block=True), group=-10)
+
+    async def _slack_notice(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, native: Any, adapter: Any, token: object,
+        invocation: NativeInvocation | None, message: str,
+    ) -> None:
+        """Tell only the authorized clicker, privately; never echo exception text."""
+        if invocation is None or not self._lease_current("slack", adapter, token):
+            return
+        post = getattr(native.client, "chat_postEphemeral", None)
+        if not callable(post):
+            return
+        payload: dict[str, Any] = {
+            "channel": invocation.chat_id, "user": invocation.actor_id, "text": message,
+        }
+        if invocation.thread_id:
+            payload["thread_ts"] = invocation.thread_id
+        try:
+            await post(**payload)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Collective Wisdom Slack notice failed (%s)", describe_exception(exc))
+
+    async def _telegram_notice(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, query: Any, adapter: Any, token: object,
+        invocation: NativeInvocation | None, acknowledged: bool, message: str,
+    ) -> None:
+        """Answer the callback once; text only for an authorized clicker."""
+        if acknowledged:
+            return
+        try:
+            if invocation is not None and self._lease_current("telegram", adapter, token):
+                await query.answer(text=message, show_alert=True)
+            else:
+                await query.answer()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Collective Wisdom Telegram notice failed (%s)", describe_exception(exc))
 
     async def _telegram_action(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, query, record, record_id, selected, adapter, token, invocation, edit,
