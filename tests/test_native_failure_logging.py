@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from installed_test_support import JsonState
 from test_commands import _native_invocation
 
@@ -11,6 +12,7 @@ from hermes_wisdom_plugin.errors import WisdomConflict, describe_exception
 from hermes_wisdom_plugin.runtime import CommandRuntime
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 def test_native_review_failure_logs_class_and_message(tmp_path, monkeypatch, caplog):
     runtime = CommandRuntime(
         tmp_path, ("default", tmp_path), state=JsonState(tmp_path), llm=None,

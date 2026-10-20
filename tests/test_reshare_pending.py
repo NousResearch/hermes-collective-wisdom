@@ -65,8 +65,10 @@ def test_second_native_share_offers_the_pending_operation_and_share_publishes(tm
     controller.bind_message(record["id"], caller, "card-1")
     clicked = replace(caller, message_id="card-1")
     view = controller.view(controller.load(record["id"]))
-    assert view.title == "Ready to share"
+    # The pending operation resumes on the same one-click Share card.
+    assert view.title == "📤 Share skill"
     assert [a.action for a in view.actions if a.primary] == ["confirm"]
+    assert {a.action for a in view.actions} >= {"confirm", "cancel", "details"}
     assert "reviewed-skill" in view.to_text()
     assert kernel.client.state.calls == Counter(upload=1, submit=1)
 
