@@ -83,7 +83,7 @@ def test_one_click_share_publishes_the_exact_package_once(tmp_path, monkeypatch)
         tmp_path, monkeypatch)
     view = controller.view(record)
     assert [(a.label, a.action) for a in view.actions] == [
-        ("Share My Skill", "confirm"), ("View More Details", "details"), ("Cancel", "cancel")]
+        ("Share", "confirm"), ("Cancel", "cancel"), ("View details", "details")]
     assert client.state.calls == Counter()
     finished = controller.act(record["id"], "confirm", service, clicked)
     assert finished["state"] == "completed"
@@ -92,7 +92,7 @@ def test_one_click_share_publishes_the_exact_package_once(tmp_path, monkeypatch)
     remote = client.state.drafts[finished["result"]["remote_draft_id"]]
     assert remote.slug == record["plan"]["slug"] == "reviewed-skill"
     assert remote.authorDescription == record["plan"]["editorial_description"]
-    assert controller.view(finished).title == "Published"
+    assert controller.view(finished).title == "✅ Shared"
     with pytest.raises(WisdomAuthError):
         controller.act(record["id"], "confirm", service, clicked)
     assert client.state.calls["upload"] == 1
@@ -407,7 +407,7 @@ def test_candidate_warning_ack_leads_to_readable_proposal(tmp_path):
     proposal = _act_and_display(controller, record["id"], "suggest.ack", service, clicked)
     assert proposal["operation"] == "publish"
     assert proposal["plan"]["candidate_flow"] is True
-    assert project_view(proposal).title == "Ready to share"
+    assert project_view(proposal).title == "📤 Share skill"
 
 def test_existing_candidate_enriches_display_on_authenticated_navigation(tmp_path):
     service = CandidateWarningService()

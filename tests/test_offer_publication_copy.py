@@ -50,7 +50,7 @@ metadata:
     assert 'original-creator' not in rendered and 'version-publisher-42' not in rendered
     assert 'Publisher name unavailable' in rendered
     assert [action.label for action in view.actions] == [
-        'View Details', 'Not Now', 'Mute Skill Recommendations',
+        'View Details', 'Not Now', 'Mute suggestions',
         'Update Skill' if updating else 'Install Skill',
     ]
     assert 'version-publisher-42' in str(plan)

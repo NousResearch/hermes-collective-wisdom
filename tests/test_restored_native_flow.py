@@ -439,14 +439,13 @@ def test_candidate_invitation_has_actionable_ordered_controls(tmp_path, surface)
         else:
             labels = [button.text for row in ui.posts[0]["reply_markup"].inline_keyboard
                       for button in row]
-        assert labels == ["Share My Skill", "View More Details", "Cancel"]
+        assert labels == ["Share", "Cancel", "View details"]
         assert "Portal" not in str(ui.posts[0])
         assert not service.applied
-        assert view.title == "Ready to share"
-        assert [action.label for action in view.actions] == [
-            "Share My Skill", "View More Details", "Cancel"]
+        assert view.title == "📤 Share skill"
+        assert [action.label for action in view.actions] == ["Share", "Cancel", "View details"]
         assert "Safe To Share" not in view.to_text()
-        assert "Destination team: Incident Response" in view.to_text()
+        assert "Team: Incident Response" in view.to_text()
         assert "organization ID" not in view.to_text()
         assert ui.record(identity)["operation"] == "publish"
         assert ui.record(identity)["plan"]["receipt"] == "publication-receipt"
@@ -477,7 +476,7 @@ def test_candidate_first_card_keeps_flat_scan_findings_and_requires_ack(tmp_path
         await ui.flush()
         view = ui.view(identity)
         assert "Review this command" in view.to_text()
-        assert "Share My Skill" not in [action.label for action in view.actions]
+        assert "Share" not in [action.label for action in view.actions]
         assert "Review this command" in str(ui.posts[0])
         assert "receipt" not in ui.record(identity)["plan"]
         assert not service.applied
@@ -503,7 +502,7 @@ def test_candidate_transport_details_are_readable_and_do_not_expose_ids(tmp_path
         assert "organization ID" not in view.to_text()
         assert "org" not in view.to_text()
         assert "{" not in view.items[0].detail
-        assert "Review details and files" in str(blocks(view, identity))
+        assert "Files, checks and description" in str(blocks(view, identity))
     asyncio.run(scenario())
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
@@ -516,12 +515,12 @@ def test_missing_team_name_never_falls_back_to_owner_id(tmp_path, surface):
         ui = surface(tmp_path, service)
         identity = ui.runtime.begin_candidate(ui.caller, "candidate-1")["review_id"]
         await ui.flush()
-        assert "Destination team: Team name unavailable" in ui.view(identity).to_text()
-        assert "Destination team: org" not in ui.view(identity).to_text()
-        assert "Share My Skill" not in [action.label for action in ui.view(identity).actions]
+        assert "Team: Team name unavailable" in ui.view(identity).to_text()
+        assert "Team: org" not in ui.view(identity).to_text()
+        assert "Share" not in [action.label for action in ui.view(identity).actions]
         await ui.click(identity, "confirm")
         assert not service.applied
-        assert "Destination team: org" not in ui.view(identity).to_text()
+        assert "Team: org" not in ui.view(identity).to_text()
     asyncio.run(scenario())
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
@@ -534,13 +533,13 @@ def test_candidate_final_share_spends_only_inspected_receipt_once(tmp_path, surf
         assert ui.record(identity)["plan"]["candidate_flow"] is True
         assert "Exact review data (JSON)" not in [item.title for item in ui.view(identity).items]
         assert "publication-receipt" not in ui.view(identity).to_text()
-        assert "Destination team: Incident Response" in ui.view(identity).to_text()
-        assert "Incident Review" in ui.view(identity).to_text()
+        assert "Team: Incident Response" in ui.view(identity).to_text()
+        assert "Skill: incident-review" in ui.view(identity).to_text()
         assert not service.applied
         await ui.click(identity, "details")
         assert not service.applied
         await ui.click(identity, "back")
-        assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
+        assert "Share" in [a.label for a in ui.view(identity).actions]
         await ui.click(identity, "confirm")
         assert service.applied == ["publication-receipt"]
         await ui.click(identity, "confirm")
@@ -549,8 +548,8 @@ def test_candidate_final_share_spends_only_inspected_receipt_once(tmp_path, surf
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 @pytest.mark.parametrize("policy,handling", [
-    ("open", "Gateway may publish directly after its scan."),
-    ("moderated", "On sharing, sent for team moderation; not published until approved."),
+    ("open", "Shared with your team right away."),
+    ("moderated", "A team reviewer approves it before it is available."),
 ])
 def test_ready_proposal_offers_one_share_and_states_policy(tmp_path, surface, policy, handling):
     class PolicyService(Service):
@@ -565,8 +564,8 @@ def test_ready_proposal_offers_one_share_and_states_policy(tmp_path, surface, po
         await ui.flush()
         view = ui.view(identity)
         assert handling in str(ui.posts[0])
-        assert [a.label for a in view.actions] == ["Share My Skill", "View More Details", "Cancel"]
-        assert "Destination team: Incident Response" in view.to_text()
+        assert [a.label for a in view.actions] == ["Share", "Cancel", "View details"]
+        assert "Team: Incident Response" in view.to_text()
         assert "Review incident notes." in view.to_text()
         assert "Portal" not in view.to_text()
         await ui.click(identity, "details")
@@ -596,7 +595,7 @@ def test_manual_suggest_arrives_at_ready_proposal_without_review_ladder(tmp_path
         identity = ui.runtime.begin_suggest(ui.caller, "incident")["review_id"]
         await ui.flush()
         view = ui.view(identity)
-        assert [a.label for a in view.actions] == ["Share My Skill", "View More Details", "Cancel"]
+        assert [a.label for a in view.actions] == ["Share", "Cancel", "View details"]
         assert not service.applied
         await ui.click(identity, "confirm")
         assert service.applied == ["publication-receipt"]
@@ -648,7 +647,7 @@ def test_manual_warning_requires_exact_ack_and_never_uploads_on_review(tmp_path,
         await ui.flush()
         view = ui.view(identity)
         assert "Review this command" in view.to_text()
-        assert "Share My Skill" not in [a.label for a in view.actions]
+        assert "Share" not in [a.label for a in view.actions]
         assert ui.record(identity)["plan"]["local_scan"]["findings"][0]["file"] == "SKILL.md"
         assert "receipt" not in ui.record(identity)["plan"]
         before = ui.record(identity)
@@ -657,7 +656,7 @@ def test_manual_warning_requires_exact_ack_and_never_uploads_on_review(tmp_path,
         assert ui.record(identity) == before
         assert not service.applied
         await ui.click(identity, "suggest.ack")
-        assert "Share My Skill" in [a.label for a in ui.view(identity).actions]
+        assert "Share" in [a.label for a in ui.view(identity).actions]
         assert ui.record(identity)["plan"]["warning_acceptance"]["accepted"] is True
         assert ui.record(identity)["plan"]["receipt"] == "publication-receipt"
         assert not service.applied
@@ -689,7 +688,7 @@ def test_candidate_optional_details_roundtrip_has_no_effect(tmp_path, surface):
         assert "{\n" not in ui.view(identity).items[0].detail
         assert not service.applied
         await ui.click(identity, "back")
-        assert ui.view(identity).title == "Ready to share"
+        assert ui.view(identity).title == "📤 Share skill"
         assert not service.applied
         while next((a for a in ui.view(identity).actions if a.label == "Next"), None):
             following = next(a.action for a in ui.view(identity).actions if a.label == "Next")
@@ -714,7 +713,7 @@ def test_candidate_proposal_overflow_preserves_approval_facts(tmp_path, surface,
         await ui.flush()
         view = ui.view(identity)
         assert len(view.to_text()) <= 3500
-        assert "Share My Skill" in [action.label for action in view.actions]
+        assert "Share" in [action.label for action in view.actions]
         await ui.click(identity, "details")
         pages = [ui.view(identity).items[0].detail]
         while next((a for a in ui.view(identity).actions if a.label == "Next"), None):
@@ -773,7 +772,7 @@ def test_candidate_missing_receipt_cannot_offer_final_share(tmp_path, surface):
         await ui.flush()
         await ui.click(identity, "share")
         assert not service.applied
-        assert not any(a.label == "Share My Skill" for a in ui.view(identity).actions)
+        assert not any(a.label == "Share" for a in ui.view(identity).actions)
         await ui.click(identity, "confirm")
         assert not service.applied
     asyncio.run(scenario())
@@ -891,7 +890,7 @@ def test_settings_command_opens_disclosed_settings_without_muting(tmp_path, monk
         assert "Current: On" in text
         assert not any(word in text for word in ("Gateway", "Revision", "None", "agent", "Org id"))
         assert [action.label for action in view.actions] == [
-            "Mute one week", "Turn off automatic suggestions", "Cancel",
+            "Mute one week", "Auto-suggest off", "Cancel",
         ]
         assert not changed
         assert not service.applied
@@ -1096,7 +1095,7 @@ def test_install_invitation_is_one_click_and_details_remain_read_only(tmp_path):
         assert "your organization" in view.title
         assert "Would you like to install this skill?" in view.to_text()
         assert [a.label for a in view.actions] == [
-            "View Details", "Not Now", "Mute Skill Recommendations", "Install Skill",
+            "View Details", "Not Now", "Mute suggestions", "Install Skill",
         ]
         assert "Triage incidents" in view.to_text()
         await ui.click(identity, "confirm")
@@ -1241,7 +1240,7 @@ def test_failed_result_edit_does_not_erase_a_completed_effect(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("category,label", [
-    ("skill_ready_to_share", "Share My Skill"),
+    ("skill_ready_to_share", "Share"),
     ("new_skill", "Install Skill"),
     ("update_available", "Update Skill"),
 ])
