@@ -26,6 +26,7 @@ from .editorial import (
     overlay_copy_problem,
     propose_share_copy,
     resolve_editorial_metadata,
+    share_copy_model_input,
     share_copy_values,
 )
 from .errors import (
@@ -700,21 +701,24 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 ready = False
         return ready
 
-    def _share_copy_disclosure_block(self, source_files, description, frontmatter) -> str | None:
+    def _share_copy_disclosure_block(self, frontmatter, skill_markdown) -> str | None:
         """Why the skill must not reach the owner's model for share copy, or None.
 
+        Both checks run over exactly the bytes the model call would disclose
+        (the SKILL.md prefix plus the shareable name and description), staged as
+        a SKILL.md for the host scanner; other package files are never sent, so
+        they do not decide this. The share itself still scans the whole package.
         The model call only proposes copy the owner reviews before sharing, so the
         question is disclosure: a credential match from the plugin's preflight or
         a credential finding from the host scan blocks it, and so does a scan that
         did not run. Other scanner findings (shell snippets, unpinned installs)
         are not a disclosure risk; they still gate the share itself.
         """
-        if not model_disclosure_ready(
-            source_files, str(description or ""), str(frontmatter.get("metadata") or ""),
-        ):
+        payload = [("SKILL.md", "file", share_copy_model_input(frontmatter, skill_markdown))]
+        if not model_disclosure_ready(payload):
             return "disclosure_blocked"
         try:
-            guard = _scan_snapshot(self.host, self.store.root / "model-inputs", source_files)
+            guard = _scan_snapshot(self.host, self.store.root / "model-inputs", payload)
         except Exception:  # pylint: disable=broad-exception-caught
             return "disclosure_unchecked"
         if guard.get("available") is not True:
@@ -730,8 +734,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         return None
 
     def _propose_share_copy(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self, source, source_hash, frontmatter, source_files, skill_markdown,
-        description, allow_model_copy, may_apply,
+        self, source, source_hash, frontmatter, skill_markdown, allow_model_copy, may_apply,
     ):
         """Manual sharing: the skill's own copy, or model-proposed copy when it cannot share.
 
@@ -746,7 +749,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise ShareCopyError(copy_problem_message(problem, "model_copy_disabled"))
         if self.llm is None:
             raise ShareCopyError(copy_problem_message(problem, "model_unavailable"))
-        blocked = self._share_copy_disclosure_block(source_files, description, frontmatter)
+        blocked = self._share_copy_disclosure_block(frontmatter, skill_markdown)
         if source_fingerprint(source) != source_hash:
             raise WisdomConflict("source changed during local disclosure preflight")
         if blocked is not None:
@@ -758,7 +761,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         self._require_current(may_apply)
         if proposal.get("failure") or not proposal["provenance"]:
             raise ShareCopyError(copy_problem_message(
-                problem, proposal.get("failure") or "model_error"))
+                problem, proposal.get("failure") or "model_error", proposal.get("rejected")))
         original = dict(zip(("editorial_name", "editorial_description"),
                             share_copy_values(frontmatter)))
         written = list(proposal["written_by_hermes"])
@@ -793,8 +796,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         description = _existing_author_description(frontmatter)
         if not release_scope().model_editorial and release_scope().model_copy:
             proposed = self._propose_share_copy(
-                source, source_hash, frontmatter, source_files, skill_markdown,
-                description, allow_model_copy, may_apply,
+                source, source_hash, frontmatter, skill_markdown, allow_model_copy, may_apply,
             )
             if proposed is not None:
                 return frontmatter, self._share_description(

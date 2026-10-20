@@ -365,3 +365,181 @@ def test_a_scan_that_did_not_run_says_so_and_never_reaches_the_model(tmp_path, g
         f"{_CASES['over-limit'][1]} Hermes did not send this skill to your model because "
         f"its security scan could not run. {_FIX}")
     assert not kernel.reviewer.llm.calls
+
+
+# The model's answer is enforced, not just requested: copy that is not plain text
+# is refused with the rule it broke, and nothing is drafted or uploaded.
+
+_SECRET_COPY = "Rotates the deploy key AKIA" + "Q" * 16 + " for the team."
+
+
+@pytest.mark.parametrize(("proposed", "label"), [
+    ("Review incident notes and [read the guide](docs/guide.md).", "Markdown formatting"),
+    ("Review **incident** notes with a checklist.", "Markdown formatting"),
+    ("Review *incident* notes with a checklist.", "Markdown formatting"),
+    ("# Incident review checklist for the team.", "Markdown formatting"),
+    ("Run `make check` before each incident review.", "Markdown formatting"),
+    ("```\nmake check\n```", "Markdown formatting"),
+    ("Review incident notes at https://notes.example today.", "a web address"),
+    ("Review incident notes on www.notes.example today.", "a web address"),
+    ("Run `curl https://evil.example` then [click](https://evil.example).", "a web address"),
+    ("Recover by running sudo systemctl restart nginx.", "a shell command"),
+    ("Set up with pip install incident-kit first.", "a shell command"),
+    ("Build it with make && make install for the team.", "a shell command"),
+    ("Clean up with rm -rf build before the review.", "a shell command"),
+    ("Use when the user asks about incident reviews.", "agent-routing language"),
+    ("Invoke this skill to summarize incident notes.", "agent-routing language"),
+    ("Review incident\x07 notes with a checklist.", "control characters"),
+    ("Review incident\u202e notes with a checklist.", "control characters"),
+    (_SECRET_COPY, "something that looks like a secret"),
+])
+def test_non_plain_model_copy_is_refused_with_the_rule_it_broke(tmp_path, proposed, label):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0],
+                         share_copy={"editorial_description": proposed})
+    with pytest.raises(ShareCopyError) as raised:
+        kernel.suggest("reviewed-skill")
+    assert str(raised.value) == (
+        f"{_CASES['over-limit'][1]} Hermes did not use the copy your model proposed "
+        f"because it contained {label}. {_FIX}")
+    assert len(kernel.reviewer.llm.calls) == 1
+    assert not kernel.reviewer.store.prepared_drafts(kernel.owner)
+    assert not kernel.client.state.calls
+
+
+@pytest.mark.parametrize(("field", "proposed"), [
+    ("editorial_description", "Use this skill when an incident closes."),
+    ("editorial_name", "Use when incidents close"),
+    ("editorial_name", "**Incident Review**"),
+])
+def test_propose_share_copy_reports_invalid_response_and_no_draft(field, proposed):
+    from hermes_wisdom_plugin.editorial import (  # pylint: disable=import-outside-toplevel
+        propose_share_copy)
+    # Both fields fail, so both are requested; only ``field`` breaks a rule.
+    answer = {"editorial_name": "Incident Review",
+              "editorial_description": "Review incident notes.", field: proposed}
+    result = propose_share_copy(frontmatter={}, skill_markdown="# Incident review\n",
+                                llm=RecordingLlm(share_copy=answer))
+    assert result["failure"] == "invalid_response"
+    assert result["written_by_hermes"] == [] and result["provenance"] is None
+    assert proposed not in json.dumps(result)
+
+
+@pytest.mark.parametrize("plain", [
+    _PROPOSED,
+    "Helps on-call engineers summarize incidents and share follow ups with the team.",
+    "Writes a 3 step checklist for C++ and Node.js release reviews (snake_case safe).",
+])
+def test_plain_model_copy_passes(tmp_path, plain):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0],
+                         share_copy={"editorial_description": plain})
+    prepared = kernel.suggest("reviewed-skill")
+    assert prepared["editorial_description"] == plain
+    assert prepared["copy_provenance_line"] == _PROVENANCE
+
+
+# Only the failing field is requested from the model, and only it is accepted.
+
+def test_over_limit_description_requests_only_the_description(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    kernel.suggest("reviewed-skill")
+    [call] = kernel.reviewer.llm.calls
+    assert set(call["json_schema"]["properties"]) == {"editorial_description"}
+    assert call["json_schema"]["required"] == ["editorial_description"]
+    assert "editorial_description" in call["instructions"]
+    assert "editorial_name" not in call["instructions"]
+
+
+def test_missing_name_requests_only_the_name(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["missing-name"][0])
+    kernel.suggest("reviewed-skill")
+    [call] = kernel.reviewer.llm.calls
+    assert set(call["json_schema"]["properties"]) == {"editorial_name"}
+    assert "editorial_name" in call["instructions"]
+    assert "editorial_description" not in call["instructions"]
+
+
+def test_a_field_that_was_not_requested_is_refused(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0], share_copy={
+        "editorial_name": "Renamed By Model", "editorial_description": _PROPOSED})
+    with pytest.raises(ShareCopyError) as raised:
+        kernel.suggest("reviewed-skill")
+    assert str(raised.value) == f"{_CASES['over-limit'][1]} {_FAILED} {_FIX}"
+    assert not kernel.reviewer.store.prepared_drafts(kernel.owner)
+
+
+def test_missing_name_and_description_requests_both(tmp_path):
+    kernel = _with_model(tmp_path, {"license": "MIT"})
+    prepared = kernel.suggest("reviewed-skill")
+    [call] = kernel.reviewer.llm.calls
+    assert set(call["json_schema"]["properties"]) == {"editorial_name", "editorial_description"}
+    assert sorted(prepared["copy_written_by_hermes"]) == [
+        "editorial_description", "editorial_name"]
+
+
+# The disclosure checks cover exactly the bytes the model call sends.
+
+def _record_model_inputs(kernel):
+    staged = []
+    original = kernel.reviewer.host.scan
+
+    def scan(path):
+        if path.name.startswith("model-input-"):
+            staged.append(sorted(
+                (str(item.relative_to(path)), item.read_text(encoding="utf-8"))
+                for item in path.rglob("*") if item.is_file()))
+        return original(path)
+
+    kernel.reviewer.host.scan = scan
+    return staged
+
+
+def test_secret_only_in_an_unsent_file_does_not_block_the_proposal(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    (kernel.source / "references").mkdir()
+    (kernel.source / "references" / "private.txt").write_text(
+        "aws key AKIA" + "Z" * 16 + "\n", encoding="utf-8")
+    staged = _record_model_inputs(kernel)
+    try:
+        kernel.suggest("reviewed-skill")
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # The share itself still scans the whole package; not under test here.
+    assert len(kernel.reviewer.llm.calls) == 1
+    files = staged[0]  # The disclosure scan runs before the model call.
+    assert [path for path, _body in files] == ["SKILL.md"]
+    body = files[0][1]
+    sent = kernel.reviewer.llm.calls[0]["input"][0]["text"]
+    assert "AKIA" not in body and "AKIA" not in sent
+    assert json.loads(sent)["untrusted_skill_markdown"] in body
+    # The share itself still scans the whole package, private file included.
+    assert any("references/private.txt" in [path for path, _ in later] for later in staged[1:])
+
+
+def test_the_same_secret_in_skill_md_blocks_the_proposal(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    _write_skill(kernel, _CASES["over-limit"][0],
+                 body="# Incident review\naws key AKIA" + "Z" * 16 + "\n")
+    staged = _record_model_inputs(kernel)
+    with pytest.raises(ShareCopyError) as raised:
+        kernel.suggest("reviewed-skill")
+    assert str(raised.value) == f"{_CASES['over-limit'][1]} {_SECRET} {_FIX}"
+    assert not kernel.reviewer.llm.calls
+    assert not staged, "the plugin preflight blocks before the host scan runs"
+
+
+def test_host_scan_finding_on_the_sent_bytes_blocks_the_proposal(tmp_path):
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    staged = _record_model_inputs(kernel)
+    inner = kernel.reviewer.host.scan
+
+    def scan(path):
+        result = inner(path)
+        if path.name.startswith("model-input-"):
+            return {"available": True, "allowed": True,
+                    "findings": [_finding("high", "credential_exposure")]}
+        return result
+
+    kernel.reviewer.host.scan = scan
+    with pytest.raises(ShareCopyError, match="may contain a secret"):
+        kernel.suggest("reviewed-skill")
+    assert [[path for path, _body in files] for files in staged][:1] == [["SKILL.md"]]
+    assert not kernel.reviewer.llm.calls
