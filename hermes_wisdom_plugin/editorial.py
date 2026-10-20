@@ -454,15 +454,35 @@ _SHARE_COPY_FIELD_RULES = {
 
 
 def share_copy_model_input(frontmatter: dict[str, Any], skill_markdown: str) -> bytes:
-    """The exact text the share-copy model call discloses, as one SKILL.md body.
+    """The exact bytes the share-copy model call sends, serialized once.
 
     The request carries the SKILL.md prefix and the skill's shareable name and
-    description; disclosure checks scan these bytes and nothing else.
+    description as one JSON document. Disclosure checks scan these bytes and the
+    model call sends these bytes; neither re-serializes them.
     """
 
     name, description = share_copy_values(frontmatter)
-    return "\n".join((skill_markdown[:MAX_SKILL_CONTEXT_CHARS], name, description)).encode(
-        "utf-8")
+    return json.dumps(
+        {
+            "canonical_name": name,
+            "canonical_description": description,
+            "untrusted_skill_markdown": skill_markdown[:MAX_SKILL_CONTEXT_CHARS],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def share_copy_disclosure_ready(model_input: bytes) -> bool:
+    """Credential preflight over the exact model input and its unescaped values.
+
+    The values are read back from ``model_input`` itself, so JSON escaping cannot
+    hide a credential and nothing outside the sent bytes is consulted.
+    """
+
+    from .local_security import model_disclosure_ready  # pylint: disable=import-outside-toplevel
+    values = [str(value) for value in json.loads(model_input).values()]
+    return model_disclosure_ready([("SKILL.md", "file", model_input)], *values)
 
 
 def _rejected_label(exc: Exception) -> str | None:
@@ -507,39 +527,32 @@ def propose_share_copy(
     frontmatter: dict[str, Any],
     skill_markdown: str,
     llm: Any | None,
+    model_input: bytes | None = None,
 ) -> dict[str, Any]:
     """Propose only the name/description fields the skill's own copy cannot share.
 
     The model is asked for, and may return, only the failing fields; valid fields
     stay the skill's own words. Only the host LLM supplied for an explicitly
-    allowed, disclosure-checked preparation may see the content.
+    allowed, disclosure-checked preparation may see the content. ``model_input``
+    is the exact ``share_copy_model_input`` bytes that were disclosure-checked;
+    they are sent unchanged.
     """
 
-    name, description = share_copy_values(frontmatter)
-    replace = tuple(_copy_field_problems(name, description))
-    kept = {"editorial_name": name, "editorial_description": description}
+    kept = dict(zip(("editorial_name", "editorial_description"), share_copy_values(frontmatter)))
+    replace = tuple(_copy_field_problems(*kept.values()))
     if not replace:
         return {**kept, "written_by_hermes": [], "provenance": None}
     if llm is None:
         return {**kept, "written_by_hermes": [], "provenance": None,
                 "failure": "model_unavailable"}
+    if model_input is None:
+        model_input = share_copy_model_input(frontmatter, skill_markdown)
     schema = _SHARE_COPY_MODELS[replace]
     stage = "model_call"
     try:
         result = llm.complete_structured(
             instructions=_share_copy_instructions(replace),
-            input=[{
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "canonical_name": name,
-                        "canonical_description": description,
-                        "untrusted_skill_markdown": skill_markdown[:MAX_SKILL_CONTEXT_CHARS],
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                ),
-            }],
+            input=[{"type": "text", "text": model_input.decode("utf-8")}],
             temperature=0,
             max_tokens=300,
             timeout=45,
