@@ -16,15 +16,18 @@ from typing import Any, Callable
 
 from .contract import author_description_hash, sha256_address
 from .editorial import (
-    MAX_EDITORIAL_DESCRIPTION_LENGTH,
-    MAX_EDITORIAL_NAME_LENGTH,
     apply_editorial_metadata_to_overlay,
+    copy_problem_message,
     editorial_copy_complete,
     explicit_editorial_values,
     load_skill_editorial_metadata,
+    local_copy_problem,
+    overlay_copy_problem,
     resolve_editorial_metadata,
+    share_copy_values,
 )
 from .errors import (
+    ShareCopyError,
     WisdomAuthError,
     WisdomConflict,
     WisdomError,
@@ -315,12 +318,12 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomConflict("prepared package changed during review")
         editorial = load_skill_editorial_metadata(overlay)
         editorial_complete = draft.get("editorial_complete_hash") == content_hash
+        copy_problem = None
         if not editorial_complete and not release_scope().model_editorial:
             # This release shares the skill's own name and description as written.
-            name = " ".join(editorial["editorial_name"].split())
-            description = " ".join(editorial["editorial_description"].split())
-            editorial_complete = (0 < len(name) <= MAX_EDITORIAL_NAME_LENGTH
-                                  and 0 < len(description) <= MAX_EDITORIAL_DESCRIPTION_LENGTH)
+            copy_problem = overlay_copy_problem(overlay)
+            editorial_complete = copy_problem is None
+        failure = None if editorial_complete else draft.get("editorial_failure")
         return {
             "state": "prepared",
             "draft_id": str(draft["id"]),
@@ -333,7 +336,9 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "system_specification": manifest.requirements.model_dump(mode="json"),
             **editorial,
             "editorial_status": "complete" if editorial_complete else "incomplete",
-            "editorial_failure": None if editorial_complete else draft.get("editorial_failure"),
+            "editorial_failure": failure,
+            **({"editorial_problem": copy_problem_message(copy_problem)}
+               if copy_problem else {}),
             "files": files,
             "hashes": {
                 "content": str(draft["content_hash"]),
@@ -666,10 +671,13 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise WisdomConflict("source changed during local disclosure preflight")
         if description is None:
             if not allow_model_review:
+                if not release_scope().model_editorial:
+                    raise ShareCopyError(copy_problem_message(
+                        local_copy_problem(*share_copy_values(frontmatter))
+                        or "Description is missing."
+                    ))
                 raise PackagePolicyError(
                     "local skill requires author copy or explicit model review authorization"
-                    if release_scope().model_editorial else
-                    "add a description to the skill's SKILL.md frontmatter before sharing"
                 )
             if not disclosure_ready:
                 raise PackagePolicyError(

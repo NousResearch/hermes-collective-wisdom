@@ -41,6 +41,69 @@ class _EditorialCopy(BaseModel):
         return normalized
 
 
+# Why Hermes could not propose copy itself, shown after the measured problem.
+_COPY_FAILURE_REASONS = {
+    "model_copy_disabled": (
+        "Hermes is set not to send skills to your model "
+        "(qualification.allow_model_review is false)."
+    ),
+    "model_unavailable": "Hermes has no model available to propose it.",
+    "disclosure_blocked": (
+        "Hermes did not send this skill to your model because it may contain a secret."
+    ),
+}
+_COPY_MODEL_FAILED = "Hermes could not propose it with your model."
+_COPY_FIELD_LABELS = {"editorial_name": "Name", "editorial_description": "Description"}
+
+
+def share_copy_values(frontmatter: dict[str, Any]) -> tuple[str, str]:
+    """Return the name and description sharing would show, without fallbacks."""
+
+    explicit_name, explicit_description = explicit_editorial_values(frontmatter)
+    name = explicit_name or str(frontmatter.get("name") or "")
+    description = explicit_description or str(frontmatter.get("description") or "")
+    return " ".join(name.split()), " ".join(description.split())
+
+
+def _copy_field_problems(name: str, description: str) -> dict[str, str]:
+    problems = {}
+    for key, value, limit in (
+        ("editorial_name", name, MAX_EDITORIAL_NAME_LENGTH),
+        ("editorial_description", description, MAX_EDITORIAL_DESCRIPTION_LENGTH),
+    ):
+        label = _COPY_FIELD_LABELS[key]
+        if not value:
+            problems[key] = f"{label} is missing."
+        elif len(value) > limit:
+            problems[key] = f"{label} is {len(value)} characters; the limit is {limit}."
+    return problems
+
+
+def local_copy_problem(name: str, description: str) -> str | None:
+    """Name the exact reason the skill's own copy cannot be shared, if any."""
+
+    problems = _copy_field_problems(
+        " ".join(str(name or "").split()), " ".join(str(description or "").split())
+    )
+    return " ".join(problems.values()) or None
+
+
+def overlay_copy_problem(skill_path: Path) -> str | None:
+    """Check the exact prepared overlay's shareable name and description."""
+
+    return local_copy_problem(*share_copy_values(_overlay_frontmatter(skill_path)))
+
+
+def copy_problem_message(problem: str, failure: object = None) -> str:
+    """Measured problem, why Hermes could not fix it, and what the owner can do."""
+
+    reason = (_COPY_FAILURE_REASONS.get(failure, _COPY_MODEL_FAILED)
+              if isinstance(failure, str) and failure else "")
+    return " ".join(part for part in (
+        problem, reason, "Edit the skill's SKILL.md frontmatter, then retry.",
+    ) if part)
+
+
 def explicit_editorial_values(
     frontmatter: dict[str, Any],
 ) -> tuple[str | None, str | None]:

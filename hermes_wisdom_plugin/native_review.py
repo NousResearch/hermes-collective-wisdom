@@ -15,8 +15,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .errors import (
-    SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict, WisdomNotFound,
-    WisdomValidationError,
+    ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
+    WisdomNotFound, WisdomValidationError,
 )
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
@@ -774,7 +774,7 @@ def _candidate_view(plan: dict[str, Any], team_name: str | None = None) -> Nativ
         notice=("Nothing has been uploaded or published. Review proposal opens the "
                 "local package and current policy without sharing. The final Share "
                 "action authorizes that exact proposal." if complete else
-                "Nothing has been uploaded or published. " + _LOCAL_COPY_REQUIRED
+                "Nothing has been uploaded or published. " + _copy_problem(facts)
                 if not release_scope().model_editorial else
                 "Nothing has been uploaded or published. Editorial copy is incomplete (" +
                 reason.replace("_", " ") +
@@ -889,13 +889,18 @@ def _suggest_terminal_view(plan: dict[str, Any], state: str, result: Any = None)
     )
 
 
-_LOCAL_COPY_REQUIRED = ("Add a name and a description of up to 320 characters to the "
+_LOCAL_COPY_REQUIRED = ("The skill's name or description cannot be shared as written. Edit the "
                         "skill's SKILL.md frontmatter, then retry.")
+
+
+def _copy_problem(plan: dict[str, Any]) -> str:
+    """The measured copy problem when known, else the unspecific fallback."""
+    return _safe(plan.get("editorial_problem"), _LOCAL_COPY_REQUIRED)
 
 
 def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
     detail = (_safe(plan.get("editorial_failure"), "Editorial copy or local checks are incomplete.")
-              if release_scope().model_editorial else _LOCAL_COPY_REQUIRED)
+              if release_scope().model_editorial else _copy_problem(plan))
     return NativeView(
         "Skill needs attention", _skill_name(plan),
         [NativeItem("Preparation incomplete", detail)],
@@ -1399,7 +1404,14 @@ class NativeReviewController:
         existing = self._existing_share(service, invocation, str(skill_name).strip())
         if existing is not None:
             return existing
-        prepared = service.suggest(str(skill_name).strip())
+        try:
+            prepared = service.suggest(str(skill_name).strip())
+        except ShareCopyError as exc:
+            # Nothing could be prepared; the card names the measured copy problem.
+            return self._insert(service, invocation, "suggest", {
+                "skill_name": str(skill_name).strip(), "native_stage": "prepared",
+                "editorial_status": "incomplete", "editorial_problem": str(exc),
+            })
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):
@@ -2066,18 +2078,55 @@ class NativeReviewController:
     def _refresh_suggest(
         self, record: dict[str, Any], plan: dict[str, Any], service: Any,
     ) -> dict[str, Any]:
+        if plan.get("candidate_flow") is not True and (
+                not (plan.get("draft_id") or plan.get("local_draft_id"))
+                or plan.get("editorial_problem")):
+            # The skill's own copy could not be shared. The owner edits SKILL.md,
+            # so Retry prepares the current source again instead of the old draft.
+            return self._reprepare_suggest(record, plan, service)
         refreshed = _prepared_review(service, plan)
         updated = {**record, "plan": {
             **refreshed, "skill_name": plan.get("skill_name"), "native_stage": "prepared",
             **({"candidate_flow": True} if plan.get("candidate_flow") is True else {}),
         }, "updated_at": self.clock()}
+        return self._advance_prepared(record, updated, refreshed, service)
+
+    def _reprepare_suggest(
+        self, record: dict[str, Any], plan: dict[str, Any], service: Any,
+    ) -> dict[str, Any]:
+        name = str(plan.get("skill_name") or "").strip()
+        if not name:
+            raise WisdomValidationError("Collective Wisdom draft review is unavailable")
+        try:
+            prepared = service.suggest(name)
+        except ShareCopyError as exc:
+            return {**record, "plan": {
+                "skill_name": name, "native_stage": "prepared",
+                "editorial_status": "incomplete", "editorial_problem": str(exc),
+            }, "updated_at": self.clock()}
+        if not isinstance(prepared, dict) or not str(
+            prepared.get("draft_id") or prepared.get("local_draft_id") or ""
+        ):
+            raise WisdomValidationError("prepared draft identity is unavailable")
+        updated = {**record, "plan": {
+            **prepared, "skill_name": name, "native_stage": "prepared",
+        }, "updated_at": self.clock()}
+        if prepared.get("editorial_status") != "complete":
+            return updated
+        displayed = _prepared_review(service, updated["plan"])
+        return self._advance_prepared(record, updated, displayed, service)
+
+    def _advance_prepared(
+        self, record: dict[str, Any], updated: dict[str, Any], refreshed: dict[str, Any],
+        service: Any,
+    ) -> dict[str, Any]:
         if refreshed.get("editorial_status") != "complete":
             return updated
         if has_reviewable_warnings(refreshed):
             if safe_scan_details(refreshed.get("local_scan")):
                 updated["plan"]["native_stage"] = "warnings"
             return updated
-        return self._sharing_review(record, plan, refreshed, service, False)
+        return self._sharing_review(record, updated["plan"], refreshed, service, False)
 
     def _act_suggest(
         self, action: str, record: dict[str, Any], service: Any,

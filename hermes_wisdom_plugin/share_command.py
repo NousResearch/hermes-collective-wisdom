@@ -192,6 +192,10 @@ def _share(args, service):
             raise WisdomConflict("The earlier share changed; check publication status")
     else:
         prepared = service.suggest(args.skill, allow_model_review=False)
+        if prepared.get("editorial_problem"):
+            # The skill's own name or description cannot be shared as written.
+            return _result("copy_incomplete", args.skill,
+                           text(prepared["editorial_problem"], limit=4096)), 1
     prepared = {**prepared, "slug": args.skill}
     detail = _catalog(service, args.skill)
     if operation_id is None and _already_shared(prepared, detail, owner):

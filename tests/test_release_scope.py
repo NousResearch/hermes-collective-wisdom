@@ -307,16 +307,15 @@ def test_full_release_still_requires_complete_model_copy(tmp_path, full_release_
 
 def test_missing_description_asks_for_one_in_the_skill_file(tmp_path) -> None:
     import test_contribution_review as review
-    from hermes_wisdom_plugin.package import PackagePolicyError
+    from hermes_wisdom_plugin.errors import ShareCopyError
     value, source, _binding = review.reviewer(tmp_path)
     (source / "SKILL.md").write_text(
         "---\nname: reviewed-skill\n---\n# Incident review\n", encoding="utf-8")
     value.host.frontmatter = {"name": "reviewed-skill"}
-    with pytest.raises(PackagePolicyError) as raised:
+    with pytest.raises(ShareCopyError) as raised:
         value.prepare("reviewed-skill", allow_model_review=False)
-    message = str(raised.value)
-    assert "description" in message and "SKILL.md" in message
-    assert "model" not in message
+    assert str(raised.value) == (
+        "Description is missing. Edit the skill's SKILL.md frontmatter, then retry.")
 
 
 def test_private_share_review_is_ready_without_a_model_written_benefit() -> None:
