@@ -1651,6 +1651,7 @@ def _act_displayed(controller, record_id, action, service, caller):
     return controller.load(record_id)
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 @pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("command", ["suggest", "share"])
 def test_admitted_native_contribution_dispatches_prepare_review_not_handoff(
@@ -1676,6 +1677,7 @@ def test_admitted_native_contribution_dispatches_prepare_review_not_handoff(
         runtime.close()
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 def test_admitted_slash_install_directly_applies_and_sends_result(tmp_path, monkeypatch):
     async def scenario():
         runtime = CommandRuntime(
@@ -1706,6 +1708,7 @@ def test_admitted_slash_install_directly_applies_and_sends_result(tmp_path, monk
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 @pytest.mark.parametrize("platform", ["telegram", "slack"])
 @pytest.mark.parametrize("command_state", ["passed", "pending"])
 def test_repeat_native_install_distinguishes_setup_execution_from_readiness(
@@ -1790,6 +1793,7 @@ def test_repeat_native_install_distinguishes_setup_execution_from_readiness(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 def test_admitted_install_with_setup_sends_only_the_bound_review(tmp_path, monkeypatch):
     """A queued setup review is the reply, not an extra success card."""
     async def scenario():
@@ -1817,6 +1821,7 @@ def test_admitted_install_with_setup_sends_only_the_bound_review(tmp_path, monke
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 @pytest.mark.parametrize("raw, method", [("browse", "begin_catalog")])
 def test_admitted_native_failure_does_not_fall_through_to_unknown_command(
     tmp_path, monkeypatch, raw, method,
@@ -1839,6 +1844,7 @@ def test_admitted_native_failure_does_not_fall_through_to_unknown_command(
         runtime.close()
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 def test_direct_install_failure_reports_uncertain_outcome_not_unknown_command(
     tmp_path, monkeypatch,
 ):
@@ -1865,6 +1871,7 @@ def test_direct_install_failure_reports_uncertain_outcome_not_unknown_command(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 def test_direct_install_card_failure_reports_uncertain_outcome(tmp_path, monkeypatch):
     async def scenario():
         runtime = CommandRuntime(
@@ -1896,6 +1903,7 @@ def test_direct_install_card_failure_reports_uncertain_outcome(tmp_path, monkeyp
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 @pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("raw", ["suggest", "suggest one two"])
 def test_admitted_native_suggest_rejects_missing_or_ambiguous_name(tmp_path, monkeypatch, raw):

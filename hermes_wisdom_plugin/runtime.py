@@ -1635,6 +1635,17 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             )
         self._open().require_setup()
 
+    def setup_pending(self) -> bool:
+        """Report a never-enrolled profile from local state alone.
+
+        Reads no credentials and sends no request, so a command can answer with
+        the setup step before any owner, account or network work. False is not
+        authorization: every effect still runs ``require_setup`` and owner checks.
+        """
+        if self._closed:
+            raise WisdomError("Collective Wisdom plugin is unloaded")
+        return self._local_identity() is None
+
     def _discovery(self):
         from .catalog_status import (  # pylint: disable=import-outside-toplevel
             CatalogInstallationStatus,
@@ -1797,6 +1808,11 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             from .commands import run_slash  # pylint: disable=import-outside-toplevel
             # Dormant reviews (settings, suggestions, recommendations) never open.
             return run_slash(parsed, object())
+        if self._setup_prompt_needed(command):
+            from .commands import SETUP_PROMPT  # pylint: disable=import-outside-toplevel
+            # Native chats point to the terminal: enrollment binds this profile's
+            # account and is accepted only in its owner's terminal (see setup).
+            return SETUP_PROMPT
         if command in PRIVATE_RANKING_COMMANDS:
             return self._slash_private_ranking(command, args, invocation, gateway_command)
         if invocation is not None:
@@ -1817,6 +1833,19 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             return await task
 
         return resolve()
+
+    def _setup_prompt_needed(self, command: str) -> bool:
+        """Check local enrollment only; no credentials, request or review state."""
+        from .commands import setup_prompt_needed  # pylint: disable=import-outside-toplevel
+
+        try:
+            service = self._service()
+        except WisdomError:
+            return False
+        try:
+            return setup_prompt_needed(command, service)
+        finally:
+            self._close_service(service)
 
     def _slash_private_ranking(self, command, args, invocation, gateway_command):
         """Answer owner-private usage rankings only in a private or local session."""

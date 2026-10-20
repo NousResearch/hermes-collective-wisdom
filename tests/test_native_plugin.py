@@ -256,6 +256,7 @@ def test_registered_end_turn_awareness_is_private_and_owner_bound(
         unload_native_plugin(module_name)
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 @pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("raw, expected", [
     ("update skill", ("begin_update", ("skill",))),
@@ -299,6 +300,7 @@ def test_admitted_slash_routes_only_explicit_native_actions(tmp_path, monkeypatc
         runtime.native.close()
 
 
+@pytest.mark.usefixtures("enrolled_profile")
 @pytest.mark.usefixtures("full_release_scope")
 @pytest.mark.parametrize("raw, method", [
     ("browse incident", "begin_catalog"), ("settings", "begin_settings"),

@@ -70,6 +70,15 @@ PRIVATE_RANKING_COMMANDS = frozenset({"top", "share-suggest"})
 CONTRIBUTION_COMMANDS = frozenset({
     "candidate", "suggest", "share", "prepared", "publish", "publication",
 })
+# Commands that answer correctly on a profile that was never set up: setup
+# itself, help, status (it reports "Setup: required"), and the owner-local
+# usage rankings, which read only this profile's Hermes skill usage.
+SETUP_EXEMPT_COMMANDS = frozenset({"setup", "help", "status"}) | PRIVATE_RANKING_COMMANDS
+SETUP_PROMPT = (
+    "Collective Wisdom isn't set up for this profile yet.\n\n"
+    "Run `hermes wisdom setup` in your terminal. It shows what data leaves this machine "
+    "and, after you accept, enrolls this profile with your team. Nothing has been changed."
+)
 _CHECK_LABELS = (
     ("security_check", "Security check"),
     ("professionalism_check", "Professionalism check"),
@@ -109,6 +118,24 @@ def parse_slash(raw_args: str) -> tuple[str, list[str]] | None:
         return None
     command = parts[0].casefold() if parts else "help"
     return ("help", []) if command in {"--help", "-h"} else (command, parts[1:])
+
+
+def setup_prompt_needed(command: str | None, service: object) -> bool:
+    """Return whether ``command`` should answer with the setup step instead.
+
+    Only a profile that has never been set up qualifies, judged from local state
+    without credentials or a request. Any doubt falls through to the command's
+    own checks, which still refuse every effect on an unenrolled profile.
+    """
+    if command is None or command in SETUP_EXEMPT_COMMANDS:
+        return False
+    pending = getattr(service, "setup_pending", None)
+    if not callable(pending):
+        return False
+    try:
+        return pending() is True
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
 
 
 def _file_identity(value: os.stat_result) -> tuple[int, ...]:
@@ -343,6 +370,13 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
 
     command = getattr(args, "wisdom_command", None)
     as_json = bool(getattr(args, "json", False))
+    if setup_prompt_needed(command, service):
+        if as_json:
+            _emit({"ok": False, "error": SETUP_PROMPT, "code": "setup_required",
+                   "category": 6}, as_json=True, error=True)
+        else:
+            print(SETUP_PROMPT, file=sys.stderr)
+        return 6
     try:
         if command in {"share", "suggest"}:
             return _contribution_cli(args, service)

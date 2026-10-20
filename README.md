@@ -35,7 +35,8 @@ To install one exact commit from the repository instead:
 hermes plugins install NousResearch/hermes-collective-wisdom --ref <40-character-commit-sha> --enable
 ```
 
-Install prepares the plugin's Python dependencies and asks before enabling it. Plugins are installed
+Install prepares the plugin's Python dependencies and asks before enabling it, then shows the next
+step, `hermes wisdom setup`. Installing or enabling the plugin never runs setup. Plugins are installed
 per profile: use `hermes -p <profile> plugins install collective-wisdom` for another profile. Start a
 new Hermes session afterwards. If you use the messaging gateway, also run `hermes gateway restart`.
 
@@ -59,7 +60,9 @@ hermes wisdom setup
 
 Setup shows what data leaves your machine (see [Privacy and data use](#privacy-and-data-use)) and
 registers the profile with your team after you accept. Changing account or team means running setup
-again.
+again. Until a profile is set up, every other `hermes wisdom` and `/wisdom` command (except `status`,
+`help`, `top` and `share-suggest`) replies with this step and changes nothing. In Telegram and Slack
+the reply names the terminal command: setup is accepted only in the terminal.
 
 ## Verify
 

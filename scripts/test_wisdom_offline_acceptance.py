@@ -501,6 +501,7 @@ def verify_native_artifact_layout(extracted_root: Path) -> dict[str, str]:
         "manifest": extracted_root / "plugin.yaml",
         "package": extracted_root / "hermes_wisdom_plugin",
         "desktop": extracted_root / "desktop" / "plugin.js",
+        "after_install": extracted_root / "after-install.md",
     }
     for label, path in required.items():
         if label == "package":
@@ -516,6 +517,7 @@ def verify_native_artifact_layout(extracted_root: Path) -> dict[str, str]:
         "manifest": "plugin.yaml",
         "package": "hermes_wisdom_plugin",
         "desktop": "desktop/plugin.js",
+        "after_install": "after-install.md",
     }
 
 

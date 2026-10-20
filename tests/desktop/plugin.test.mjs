@@ -1902,3 +1902,11 @@ test('update-check Retry repeats only the owner-bound read, never update review 
   assert.equal(loaded.calls.rest.some(([request]) => request.startsWith('/update/review') || request.startsWith('/update/confirm')), false)
   await mounted.cleanup()
 })
+
+test('v0 Desktop offers no Portal draft review path anywhere in the plugin', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+  for (const forbidden of [/portal\.draft/i, /submit[_-]?private/i, /portal_review/i, /review\/edit in portal/i, /open in portal/i, /\/publication\/private/i]) {
+    assert.equal(forbidden.test(source), false, `desktop/plugin.js must not reference ${forbidden}`)
+  }
+})
