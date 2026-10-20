@@ -14,6 +14,8 @@ from .terminal_ui import (
     render_inventory, review_identity, safe_scan_details, text,
 )
 
+_AWAITING_REVIEW = frozenset({"policy_review_required", "approval_rejected"})
+
 
 def _result(outcome, skill, detail, version=None, portal_url=None):
     return {"outcome": outcome, "skill": skill, "version": version,
@@ -106,13 +108,19 @@ def _navigate(action, service, review):
 
 
 def _review(args, service, prepared, owner, detail):
-    """Warn separately, then present exactly the receipt that Share will consume."""
+    """Warn separately, then present exactly the receipt that Share will consume.
+
+    An operation awaiting review is re-reviewed by its id; its submitted local
+    draft is immutable, so only viewing files is offered.
+    """
     draft_id = prepared["draft_id"]
+    operation_id = prepared.get("operation_id")
+    target = operation_id or draft_id
     while True:
         accepted = _warnings(args, prepared)
         if accepted is None:
             return None, "warnings_required"
-        review = service.publication_review(draft_id, accept_warnings=accepted)
+        review = service.publication_review(target, accept_warnings=accepted)
         if review_identity(prepared) != review_identity(review):
             raise WisdomConflict("Package or scanner findings changed; review again")
         if not args.json:
@@ -121,12 +129,18 @@ def _review(args, service, prepared, owner, detail):
             return review, None
         if args.json or not sys.stdin.isatty():
             return None, "confirmation_required"
-        action = input("[v] View a file   [e] Edit description   [f] Edit files   "
-                       "[s] Share   [q] Cancel\n> ").strip().lower()
+        action = input(("[v] View a file   " if operation_id else
+                        "[v] View a file   [e] Edit description   [f] Edit files   ")
+                       + "[s] Share   [q] Cancel\n> ").strip().lower()
         if action in {"", "q"}:
             return None, "cancelled"
         if action == "s":
             return review, None
+        if operation_id:
+            if action == "v":
+                _view_file(review)
+            prepared = review
+            continue
         _navigate(action, service, review)
         # No warning acceptance survives editing or a new review.
         args.accept_warnings = False
@@ -167,12 +181,20 @@ def _submit(service, receipt, skill):
 def _share(args, service):
     owner = service.binding()
     pending = service.share_status(args.skill)
+    operation_id = None
     if pending is not None:
-        return _outcome(pending, args.skill, text(owner["organization_id"]))
-    prepared = service.suggest(args.skill, allow_model_review=False)
+        if pending.get("phase") not in _AWAITING_REVIEW or not pending.get("operation_id"):
+            return _outcome(pending, args.skill, text(owner["organization_id"]))
+        # Finish the earlier share's retained operation; never prepare a duplicate.
+        operation_id = str(pending["operation_id"])
+        prepared = service.publication_review(operation_id)
+        if prepared.get("operation_id") != operation_id:
+            raise WisdomConflict("The earlier share changed; check publication status")
+    else:
+        prepared = service.suggest(args.skill, allow_model_review=False)
     prepared = {**prepared, "slug": args.skill}
     detail = _catalog(service, args.skill)
-    if _already_shared(prepared, detail, owner):
+    if operation_id is None and _already_shared(prepared, detail, owner):
         version = _latest(detail)["version"]
         return _result("already_shared", args.skill,
                        f"Nothing to share: v{version} already matches your local skill",

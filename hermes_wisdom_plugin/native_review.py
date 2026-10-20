@@ -1072,10 +1072,37 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
         return _catalog_view(plan, state)
     if record.get("operation") == "settings":
         return _settings_view(record)
+    if record.get("operation") == "share_status":
+        return _share_status_view(plan, state)
     authority, details = _authority_projection(record, plan)
     if record.get("operation") == "suggest":
         return _suggest_view(authority, state, record.get("result"))
     return _effect_view(record, authority, state, details)
+
+
+_AWAITING_REVIEW = frozenset({"policy_review_required", "approval_rejected"})
+
+
+def _share_status_view(plan: dict[str, Any], state: str) -> NativeView:
+    """Report an earlier unfinished share; it offers no effect of its own."""
+    raw = plan.get("status")
+    status: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    name = _skill_name(plan)
+    if status.get("state") in {"done", "rejected"}:
+        from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
+        title, detail = publication_copy(status)
+    elif status.get("phase") in _AWAITING_REVIEW:
+        title, detail = ("Earlier share needs review", "This skill's earlier share is waiting "
+                         "for review. Finish it in the terminal with hermes wisdom share.")
+    else:
+        title, detail = ("Earlier share still in progress", "An earlier share of this skill "
+                         "hasn't finished. Nothing new was uploaded. Check it with "
+                         "hermes wisdom publication status.")
+    return NativeView(
+        "Hermes Collective Wisdom", name, [NativeItem(title, detail)],
+        actions=[NativeAction("OK", "cancel")] if state == "pending" else [],
+        dismissed=state != "pending",
+    )
 
 
 def _effect_view(
@@ -1308,6 +1335,9 @@ class NativeReviewController:
     ) -> dict[str, Any]:
         if not str(skill_name or "").strip():
             raise WisdomValidationError("Usage: /wisdom suggest <local-skill>")
+        existing = self._existing_share(service, invocation, str(skill_name).strip())
+        if existing is not None:
+            return existing
         prepared = service.suggest(str(skill_name).strip())
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
@@ -1328,6 +1358,42 @@ class NativeReviewController:
         if not self.state.compare_replace(record, updated):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(updated)
+
+    def _existing_share(
+        self, service: Any, invocation: NativeInvocation, skill_name: str,
+    ) -> dict[str, Any] | None:
+        """Resume an unfinished share of the same source instead of re-preparing it.
+
+        A submitted local draft cannot be reopened; its retained operation is the
+        only authority, exactly as the terminal share fences it.
+        """
+        read_status = getattr(service, "share_status", None)
+        pending = read_status(skill_name) if callable(read_status) else None
+        if not isinstance(pending, dict):
+            return None
+        operation_id = str(pending.get("operation_id") or "")
+        if operation_id and pending.get("phase") in _AWAITING_REVIEW:
+            try:
+                review = service.publication_review(operation_id)
+            except WisdomConflict:
+                review = None  # e.g. Gateway advisory needs a terminal acknowledgement
+            if (isinstance(review, dict) and review.get("operation_id") == operation_id
+                    and isinstance(review.get("receipt"), str) and review["receipt"]):
+                record = self._insert(service, invocation, "publish", {
+                    **review, "skill_name": skill_name, "candidate_flow": True,
+                })
+                if not _plan_owner_matches(record):
+                    raise WisdomConflict("The publication owner changed; open it again")
+                updated = {**record, "screen": "approval", "page": 0, "inspected_through": 0}
+                if not self.state.compare_replace(record, updated):
+                    raise WisdomConflict("Collective Wisdom review changed; open it again")
+                return copy.deepcopy(updated)
+        return self._insert(service, invocation, "share_status", {
+            "operation": "share_status", "skill_name": skill_name, "allowed": False,
+            "status": {key: pending.get(key) for key in (
+                "operation_id", "state", "phase", "publication_state", "code",
+            )},
+        })
 
     def load(self, record_id: str) -> dict[str, Any]:
         row = self.state.get(record_id)
