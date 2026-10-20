@@ -96,25 +96,79 @@ def render_rows(data: dict[str, Any]) -> list[str]:
     ]
 
 
-def render_page(data: dict[str, Any], *, next_command: str, previous_command: str) -> str:
-    """Render a page with plain-text Next/Previous hints."""
+_COLUMNS = ("#", "Skill", "Uses", "Edits", "Last used", "Shared")
+_RIGHT = frozenset({"#", "Uses", "Edits"})
+
+
+def _cells(data: dict[str, Any]) -> list[tuple[str, ...]]:
+    start = (data["page"] - 1) * data["per_page"]
+    return [
+        (str(start + index), str(row["name"]), str(row["uses"]), str(row["edits"]),
+         last_used_label(row["last_used"]), "✓" if row["shared"] else "")
+        for index, row in enumerate(data["items"], start=1)
+    ]
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("|", "\\|").replace("`", "'")
+
+
+def render_markdown_table(data: dict[str, Any]) -> list[str]:
+    """Render one page as a GFM pipe table for chat surfaces.
+
+    Slack (Block Kit) and Telegram rich messages render it as a native table;
+    surfaces without table support (Telegram MarkdownV2, Discord) receive the
+    host's own table-to-list rewrite, so the reply stays structured everywhere.
+    """
+    rows = [tuple(_markdown_cell(cell) for cell in row) for row in _cells(data)]
+    rows = [(row[0], f"`{row[1]}`", *row[2:]) for row in rows]
+    return [
+        "| " + " | ".join(_COLUMNS) + " |",
+        "|" + "|".join("---:" if name in _RIGHT else ":---" for name in _COLUMNS) + "|",
+        *("| " + " | ".join(row) + " |" for row in rows),
+    ]
+
+
+def render_aligned_table(data: dict[str, Any]) -> list[str]:
+    """Render one page as aligned columns for the terminal."""
+    rows = [tuple("Yes" if index == 5 and cell else cell for index, cell in enumerate(row))
+            for row in _cells(data)]
+    widths = [max(len(name), *(len(row[index]) for row in rows))
+              for index, name in enumerate(_COLUMNS)]
+
+    def line(values) -> str:
+        return "  ".join(
+            value.rjust(width) if name in _RIGHT else value.ljust(width)
+            for name, value, width in zip(_COLUMNS, values, widths)
+        ).rstrip()
+
+    return [line(_COLUMNS), line("-" * width for width in widths), *(line(row) for row in rows)]
+
+
+def render_page(
+    data: dict[str, Any], *, next_command: str, previous_command: str, markdown: bool = False,
+) -> str:
+    """Render a page as a table with Next/Previous hints (Markdown for chat)."""
     fixed = state_text(data["state"])
     if fixed is not None:
         return fixed
     if not data["items"]:
         return f"No skills on page {data['page']}. There are {data['pages']} pages."
+    heading = f"Your top skills (page {data['page']} of {data['pages']}, {data['total']} skills)"
     lines = [
-        f"Your top skills (page {data['page']} of {data['pages']}, {data['total']} skills)",
+        f"**{heading}**" if markdown else heading,
         "",
-        *render_rows(data),
+        *(render_markdown_table(data) if markdown else render_aligned_table(data)),
     ]
     hints = []
     if data["page"] > 1:
-        hints.append("Previous: " + previous_command.format(page=data["page"] - 1))
+        command = previous_command.format(page=data["page"] - 1)
+        hints.append("Previous: " + (f"`{command}`" if markdown else command))
     if data["page"] < data["pages"]:
-        hints.append("Next: " + next_command.format(page=data["page"] + 1))
+        command = next_command.format(page=data["page"] + 1)
+        hints.append("Next: " + (f"`{command}`" if markdown else command))
     if hints:
-        lines.extend(("", " | ".join(hints)))
+        lines.extend(("", " · ".join(hints) if markdown else " | ".join(hints)))
     return "\n".join(lines)
 
 
@@ -142,6 +196,7 @@ def slash_top(args: list[str], service: Any) -> str:
     return render_page(
         service.top_skills().page(page, DEFAULT_PER_PAGE),
         next_command="/wisdom top {page}", previous_command="/wisdom top {page}",
+        markdown=True,
     )
 
 

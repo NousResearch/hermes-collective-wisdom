@@ -248,7 +248,10 @@ def test_cli_top_human_rows_and_states(capsys) -> None:
     build_parser(parser)
     assert run_cli(parser.parse_args(["top"]), _Service(_items(12))) == 0
     out = capsys.readouterr().out
-    assert "1. skill-0 | 10 uses | 0 edits | last used 2026-10-01 | Shared" in out
+    lines = out.splitlines()
+    assert lines[2].split() == ["#", "Skill", "Uses", "Edits", "Last", "used", "Shared"]
+    assert lines[4].split() == ["1", "skill-0", "10", "0", "2026-10-01", "Yes"]
+    assert "|" not in lines[4]
     assert "Next: hermes wisdom top --page 2" in out
     run_cli(parser.parse_args(["top"]), _Service([], state="unavailable"))
     assert "unavailable on this Hermes version" in capsys.readouterr().out
@@ -373,7 +376,8 @@ def test_private_slash_lists_ranked_skills(tmp_path, monkeypatch, route) -> None
     runtime = _runtime(tmp_path, monkeypatch, **route)
     try:
         reply = _reply(runtime.slash("top"))
-        assert "1. secret-skill | 4 uses | 1 edits | last used never" in reply
+        assert "| # | Skill | Uses | Edits | Last used | Shared |" in reply
+        assert "| 1 | `secret-skill` | 4 | 1 | never |  |" in reply
         assert _reply(runtime.slash("top 0")) == "Usage: /wisdom top [page]"
     finally:
         runtime.native.close()
@@ -393,3 +397,22 @@ def test_pending_command_is_read_before_admission_consumes_it(tmp_path, monkeypa
         assert _reply(runtime.slash("top")) == refusal("top")
     finally:
         runtime.native.close()
+
+
+def test_chat_top_is_a_markdown_table_with_code_hints() -> None:
+    from hermes_wisdom_plugin.top_command import render_page
+
+    items = [{"name": "alpha", "uses": 42, "edits": 3, "last_used": "2026-10-20T10:00:00",
+              "shared": True},
+             {"name": "odd|name`x", "uses": 2, "edits": 0, "last_used": None, "shared": False}]
+    data = {"state": "ok", "page": 2, "per_page": 2, "pages": 3, "total": 6, "items": items}
+    text = render_page(data, next_command="/wisdom top {page}",
+                       previous_command="/wisdom top {page}", markdown=True)
+    lines = text.splitlines()
+    assert lines[0] == "**Your top skills (page 2 of 3, 6 skills)**"
+    assert lines[2] == "| # | Skill | Uses | Edits | Last used | Shared |"
+    assert lines[3] == "|---:|:---|---:|---:|:---|:---|"
+    assert lines[4] == "| 3 | `alpha` | 42 | 3 | 2026-10-20 | ✓ |"
+    # A pipe in a skill name cannot split the row; a backtick cannot end the code span.
+    assert lines[5] == "| 4 | `odd\\|name'x` | 2 | 0 | never |  |"
+    assert lines[-1] == "Previous: `/wisdom top 1` · Next: `/wisdom top 3`"
