@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import re
 import stat
 import unicodedata
@@ -60,6 +59,8 @@ BLOCKED_PATH_SEGMENTS = frozenset({
     "node_modules",
     "venv",
 })
+# plugin.yaml ``requires_hermes``: the floor written when a skill declares none.
+PLUGIN_HERMES_FLOOR = "0.21.5"
 _COMPILED_EXECUTABLE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe")
 
 
@@ -80,10 +81,6 @@ class PackageSecurityDecision:
 
 class PackageHostProvider(Protocol):
     """Supported host capabilities required during package preparation."""
-
-    @property
-    def hermes_version(self) -> str:
-        """Return the current host version used in generated manifests."""
 
     def parse_skill_frontmatter(self, source: Path) -> dict[str, object]:
         """Parse source SKILL.md metadata through the supported host API."""
@@ -244,57 +241,49 @@ def _plugin_requirements(metadata: dict[str, object]) -> list[PluginRequirement]
     return requirements
 
 
-def infer_authoring_system_specification(  # pylint: disable=unused-argument
-    source: Path,
+def declared_minimum_hermes(frontmatter: dict[str, object]) -> str | None:
+    """The skill's own Hermes floor (``metadata.hermes.minimum_version``), if any."""
+    value = _hermes_metadata(frontmatter).get("minimum_version")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(value)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def infer_authoring_system_specification(
+    source: Path,  # pylint: disable=unused-argument
     *,
-    hermes_version: str,
-    system_name: str | None = None,
-    machine: str | None = None,
     frontmatter: dict[str, object] | None = None,
 ) -> SystemSpecification:
-    """Build conservative owner-review defaults without exporting inventory.
+    """Record only what the skill declares; never the sharer's machine or inventory.
 
-    The authoring device establishes one known-good OS/architecture target.
-    Skill-specific tool and plugin requirements come only from explicit
-    frontmatter; the profile's complete enabled inventory is never consulted.
+    Hermes treats a skill without ``platforms:`` as portable and has no
+    architecture gating, so an absent declaration stays absent. The manifest
+    contract requires a Hermes floor: an undeclared one is the plugin's own
+    floor, which every host able to install the package already meets.
+    Tool and plugin requirements come only from explicit frontmatter.
     """
     frontmatter = frontmatter or {}
     metadata = _hermes_metadata(frontmatter)
 
-    if "platforms" in frontmatter:
-        platforms = [
-            _normalized_authoring_platform(item)
-            for item in _declared_strings(frontmatter.get("platforms"))
-        ]
-    else:
-        current_platform = _normalized_authoring_platform(
-            system_name if system_name is not None else platform.system()
-        )
-        platforms = [current_platform] if current_platform else []
-
-    architecture_source: object | None = None
-    architecture_declared = False
-    if "architectures" in frontmatter:
-        architecture_source = frontmatter.get("architectures")
-        architecture_declared = True
-    elif "architectures" in metadata:
-        architecture_source = metadata.get("architectures")
-        architecture_declared = True
-    if architecture_declared:
-        architectures = [
-            _normalized_authoring_architecture(item)
-            for item in _declared_strings(architecture_source)
-        ]
-    else:
-        current_architecture = _normalized_authoring_architecture(
-            machine if machine is not None else platform.machine()
-        )
-        architectures = [current_architecture] if current_architecture else []
+    platforms = [
+        _normalized_authoring_platform(item)
+        for item in _declared_strings(frontmatter.get("platforms"))
+    ]
+    architecture_source = (
+        frontmatter.get("architectures") if "architectures" in frontmatter
+        else metadata.get("architectures")
+    )
+    architectures = [
+        _normalized_authoring_architecture(item)
+        for item in _declared_strings(architecture_source)
+    ]
 
     tools = _tool_requirements(metadata)
     tool_names = {requirement.name for requirement in tools}
     return SystemSpecification(
-        hermes=HermesRequirement(minimum_version=hermes_version),
+        hermes=HermesRequirement(
+            minimum_version=declared_minimum_hermes(frontmatter) or PLUGIN_HERMES_FLOOR,
+        ),
         platforms=platforms,
         architectures=architectures,
         model=ModelRequirement(),
@@ -615,7 +604,6 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
             name=source.name,
             requirements=infer_authoring_system_specification(
                 source,
-                hermes_version=host.hermes_version,
                 frontmatter=_frontmatter(source, host),
             ),
         )

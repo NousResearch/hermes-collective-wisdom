@@ -107,6 +107,9 @@ When Hermes cannot propose copy (no model, the setting below is off, the skill m
 or the model fails), the review names the exact problem, for example "Description is 839
 characters; the limit is 320.", and nothing is uploaded.
 
+The shared requirements come only from what the skill declares (`platforms`, `architectures` and
+`metadata.hermes` in `SKILL.md`), never from the machine that shares it.
+
 The result is one of: shared (with the version, a Portal link and the install command for teammates),
 already shared, blocked by a security check, name already owned by another author, not entitled,
 invalid package, or uncertain. An uncertain result names a status command to check; do not share

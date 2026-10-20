@@ -22,6 +22,7 @@ from hermes_wisdom_plugin.editorial import apply_editorial_metadata_to_overlay
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin.package import (
     MAX_TREE_BYTES,
+    PLUGIN_HERMES_FLOOR,
     PackagePolicyError,
     PackageSecurityDecision,
 )
@@ -30,8 +31,6 @@ from hermes_wisdom_plugin.local_state import QualificationState
 
 class Host:
     """Deterministic host boundary for local preparation."""
-
-    hermes_version = "1.2.3"
 
     def __init__(
         self,
@@ -189,7 +188,8 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     assert result["security_check"]["author_description_hash"] == (
         result["hashes"]["author_description"]
     )
-    assert result["system_specification"]["hermes"]["minimum_version"] == "1.2.3"
+    assert result["system_specification"]["hermes"]["minimum_version"] == PLUGIN_HERMES_FLOOR
+    assert result["system_specification"]["architectures"] == []
     assert result["editorial_name"] == "reviewed-skill"
     assert result["editorial_description"] == "Review incident notes."
     assert result["next_step"] == (
