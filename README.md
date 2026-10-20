@@ -23,25 +23,28 @@ You stay in control at every step:
 
 ## Install
 
-From the Hermes plugin catalog:
-
 ```bash
-hermes plugins install collective-wisdom
+hermes plugins install NousResearch/hermes-collective-wisdom --enable
 ```
 
-To install one exact commit from the repository instead:
-
-```bash
-hermes plugins install NousResearch/hermes-collective-wisdom --ref <40-character-commit-sha> --enable
-```
-
-Install prepares the plugin's Python dependencies and asks before enabling it, then shows the next
-step, `hermes wisdom setup`. Installing or enabling the plugin never runs setup. Plugins are installed
-per profile: use `hermes -p <profile> plugins install collective-wisdom` for another profile. Start a
-new Hermes session afterwards. If you use the messaging gateway, also run `hermes gateway restart`.
+Install clones the repository's default branch, prepares the plugin's Python dependencies, enables
+the plugin and then shows the next step, `hermes wisdom setup`. Installing or enabling the plugin
+never runs setup. Plugins are installed per profile: add `-p <profile>` after `hermes` for another
+profile. Start a new Hermes session afterwards. If you use the messaging gateway, also run
+`hermes gateway restart`.
 
 In Hermes Desktop, enable Collective Wisdom in **Capabilities → Plugins** (also available through the
 command palette).
+
+## Update
+
+```bash
+hermes plugins update collective-wisdom
+```
+
+Update pulls the latest commit of the branch you installed and asks you to approve any new
+capabilities the plugin declares. Then start a new Hermes session, and run `hermes gateway restart`
+if you use the messaging gateway.
 
 ## Sign in and enable
 
@@ -92,7 +95,8 @@ hermes wisdom share <skill>
 Share builds the exact package and shows one review: the team, who will see it, the version, the
 description, every file, and the local security checks. You can open a file, edit the description or
 the files, then choose **Share** or cancel. In a private Telegram chat or Slack DM, `/wisdom share
-<skill>` opens the same review as a card, and only the **Share My Skill** button publishes.
+<skill>` opens the same review as a card with **Share**, **Cancel** and **View details**, and only
+**Share** publishes.
 
 The shared name and description come from the skill's `SKILL.md` frontmatter. A skill needs both,
 with a description of up to 320 characters, before it can be shared.
