@@ -40,6 +40,7 @@ from .catalog_table import installed_cell as _installed_cell
 from .catalog_table import one_line as _one_line
 from .catalog_table import version_cell as _version_cell
 from .top_command import markdown_cell as _markdown_cell
+from .top_command import markdown_code_cell as _markdown_code_cell
 from .top_command import page_size as _page_size
 from .top_command import positive_page as _positive_page
 from .top_command import refusal as _private_refusal
@@ -1375,11 +1376,11 @@ def _render_browse(rows: object, query: str, page: int) -> str:
             "|---:|:---|:---|:---|:---|",
         ))
         for number, item in enumerate(selected, start=start + 1):
-            slug, version, installed, description = (
-                _markdown_cell(cell) for cell in _browse_cells(item)
-            )
+            slug, version, installed, description = _browse_cells(item)
+            # Catalog text is shown as typed: free text is a literal code span.
             lines.append(
-                f"| {number} | `{slug}` | {version} | {installed} | {description} |"
+                f"| {number} | {_markdown_code_cell(slug)} | {_markdown_cell(version)}"
+                f" | {_markdown_cell(installed)} | {_markdown_code_cell(description)} |"
             )
         lines.extend(("", "Details: `/wisdom show <skill>`"))
     navigation = _browse_navigation(query, page, start + PAGE_SIZE < len(skills))

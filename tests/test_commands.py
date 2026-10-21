@@ -1299,12 +1299,13 @@ def test_slash_browse_is_a_markdown_table_with_escaping_trimming_and_paging():
         "| # | Skill | Version | Installed | Description |",
     ]
     assert lines[3] == "|---:|:---|:---|:---|:---|"
-    assert lines[4].startswith("| 1 | `pipe\\|tick'skill` | v1 | No | Line one line \\| two x")
-    assert lines[4].endswith("x… |")
-    assert len(lines[4].split(" | ")[-1].removesuffix(" |")) == 81  # 80 chars + one escape
-    assert lines[5] == "| 2 | `incident-1` | v2 | v1 (update to v2) | Description 1 |"
-    assert lines[6] == "| 3 | `incident-2` | v3 | Yes | Description 2 |"
-    assert lines[7] == "| 4 | `incident-3` | - | Unknown | Description 3 |"
+    assert lines[4].startswith("| 1 | `pipe\\|tick'skill` | v1 | No | `Line one line \\| two x")
+    assert lines[4].endswith("x…` |")
+    # 80 chars + one escape + the code span's two backticks
+    assert len(lines[4].split(" | ")[-1].removesuffix(" |")) == 83
+    assert lines[5] == "| 2 | `incident-1` | v2 | v1 (update to v2) | `Description 1` |"
+    assert lines[6] == "| 3 | `incident-2` | v3 | Yes | `Description 2` |"
+    assert lines[7] == "| 4 | `incident-3` | - | Unknown | `Description 3` |"
     assert lines[-3:] == ["Details: `/wisdom show <skill>`", "", "Next: `/wisdom browse --page 2`"]
     middle = run_slash("browse --page 2", _Service()).splitlines()
     assert middle[-1] == "Back: `/wisdom browse --page 1`"
