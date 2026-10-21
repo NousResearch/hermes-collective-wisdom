@@ -23,7 +23,7 @@ from .errors import (
 )
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
-from .package import PackagePolicyError
+from .package import PackagePolicyError, SkillRefusal
 from .portal_urls import safe_portal_url
 from .release_scope import active as release_scope
 from .review_state import ReviewState
@@ -1635,8 +1635,9 @@ class NativeReviewController:
                 "skill_name": str(skill_name).strip(), "native_stage": "prepared",
                 "editorial_status": "incomplete", "editorial_problem": str(exc),
             })
-        except (PackagePolicyError, WisdomValidationError) as exc:
-            # Definite and fixable by the owner: the card names the exact reason.
+        except SkillRefusal as exc:
+            # The skill's own files break a rule: the card names the exact
+            # reason. Any other failure keeps the generic reply.
             return self._insert(service, invocation, "suggest",
                                 _refused_preparation(str(skill_name).strip(), exc))
         if not isinstance(prepared, dict) or not str(
@@ -2497,7 +2498,7 @@ class NativeReviewController:
                 "skill_name": name, "native_stage": "prepared",
                 "editorial_status": "incomplete", "editorial_problem": str(exc),
             }, "updated_at": self.clock()}
-        except (PackagePolicyError, WisdomValidationError) as exc:
+        except SkillRefusal as exc:
             return {**record, "plan": _refused_preparation(name, exc),
                     "updated_at": self.clock()}
         if not isinstance(prepared, dict) or not str(

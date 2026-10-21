@@ -93,6 +93,16 @@ class PackagePolicyError(ValueError):
     """Package bytes, modes, or paths violate the native package policy."""
 
 
+class SkillRefusal(PackagePolicyError):
+    """The skill's own files or declarations break a package rule.
+
+    Raised only with plugin-authored text naming the rule and the skill's own
+    path, so a chat card may show it: the owner can fix it in the skill's
+    folder. Every other failure, including a plain ``PackagePolicyError`` or
+    any Gateway-supplied text, keeps the generic reply.
+    """
+
+
 @dataclass(frozen=True)
 class PackageSecurityDecision:
     """Host-owned guard result for the exact prepared overlay."""
@@ -334,8 +344,8 @@ def infer_authoring_system_specification(
     )
 
 
-def _refuse(source: str, path: str, rule: str) -> PackagePolicyError:
-    return PackagePolicyError(f"{source} path {path!r} is refused: {rule}")
+def _refuse(source: str, path: str, rule: str) -> SkillRefusal:
+    return SkillRefusal(f"{source} path {path!r} is refused: {rule}")
 
 
 def _check_transport_segment(segment: str, *, path: str, source: str) -> None:
@@ -468,7 +478,7 @@ def check_declared_platform_paths(
 
 def _validate_allowed_file(pure: PurePosixPath, *, path: str) -> None:
     if len(pure.parts) > 1 and pure.name in REQUIRED_ROOT_FILES:
-        raise PackagePolicyError(f"required root file is misplaced: {path}")
+        raise SkillRefusal(f"required root file is misplaced: {path}")
 
 
 def _validate_mode_and_bytes(mode: str, body: bytes, *, path: str) -> None:
@@ -477,7 +487,7 @@ def _validate_mode_and_bytes(mode: str, body: bytes, *, path: str) -> None:
     if mode not in {"file", "exec"}:
         raise PackagePolicyError(f"unknown package mode: {path}")
     if body.startswith(_COMPILED_EXECUTABLE_MAGIC):
-        raise PackagePolicyError(f"compiled executable content is not supported: {path}")
+        raise SkillRefusal(f"compiled executable content is not supported: {path}")
 
 
 def _normalized_mode(metadata: int) -> str:
@@ -514,9 +524,9 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
     try:
         root_metadata = root.lstat()
     except OSError as exc:
-        raise PackagePolicyError("skill root must be a regular directory") from exc
+        raise SkillRefusal("skill root must be a regular directory") from exc
     if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
-        raise PackagePolicyError("skill root must be a regular directory")
+        raise SkillRefusal("skill root must be a regular directory")
     entries: list[_SnapshotEntry] = []
     total = 0
     metadata_total = 0
@@ -525,7 +535,7 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
     while pending:
         directory, depth = pending.pop()
         if depth > MAX_TREE_DEPTH:
-            raise PackagePolicyError(
+            raise SkillRefusal(
                 f"package path exceeds maximum tree depth {MAX_TREE_DEPTH}"
             )
         try:
@@ -538,7 +548,7 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                 rel = path.relative_to(root).as_posix()
                 metadata_total += len(rel.encode("utf-8")) + 128
                 if metadata_total > MAX_METADATA_BYTES:
-                    raise PackagePolicyError(
+                    raise SkillRefusal(
                         f"package path metadata exceeds {MAX_METADATA_BYTES} bytes"
                     )
                 pure, _key = _validate_package_path(rel, source="package", blocked=False)
@@ -553,9 +563,9 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                     omitted.append(rel + "/")
                     continue
                 if stat.S_ISLNK(metadata.st_mode):
-                    raise PackagePolicyError(f"symlinks are not supported: {rel}")
+                    raise SkillRefusal(f"symlinks are not supported: {rel}")
                 if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
-                    raise PackagePolicyError(
+                    raise SkillRefusal(
                         f"special filesystem content is not supported: {rel}"
                     )
                 for part in pure.parts:
@@ -569,9 +579,9 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                     continue
                 _validate_allowed_file(pure, path=rel)
                 if metadata.st_nlink != 1:
-                    raise PackagePolicyError(f"hard-linked content is not supported: {rel}")
+                    raise SkillRefusal(f"hard-linked content is not supported: {rel}")
                 if total + metadata.st_size > MAX_TREE_BYTES:
-                    raise PackagePolicyError(
+                    raise SkillRefusal(
                         f"package exceeds {MAX_TREE_BYTES} total bytes"
                     )
                 body = _read_regular_file(
@@ -590,17 +600,17 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
         source="package",
     )
     if skill_body is None:
-        raise PackagePolicyError("package requires exactly one root SKILL.md")
+        raise SkillRefusal("package requires exactly one root SKILL.md")
     if require_manifest and not any(
         entry.relative == "skill.manifest.json" for entry in entries
     ):
-        raise PackagePolicyError(
+        raise SkillRefusal(
             "package requires exactly one root skill.manifest.json"
         )
     try:
         skill_body.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise PackagePolicyError("SKILL.md must be valid UTF-8") from exc
+        raise SkillRefusal("SKILL.md must be valid UTF-8") from exc
     return entries
 
 
@@ -615,9 +625,9 @@ def _read_regular_file(
 
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode):
-        raise PackagePolicyError(f"special filesystem content is not supported: {display_path}")
+        raise SkillRefusal(f"special filesystem content is not supported: {display_path}")
     if before.st_nlink != 1:
-        raise PackagePolicyError(f"hard-linked content is not supported: {display_path}")
+        raise SkillRefusal(f"hard-linked content is not supported: {display_path}")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -638,11 +648,11 @@ def _read_regular_file(
         if identity(opened) != identity(before):
             raise PackagePolicyError(f"source changed while reading: {display_path}")
         if max_bytes is not None and opened.st_size > max_bytes:
-            raise PackagePolicyError(f"file exceeds {max_bytes} bytes: {display_path}")
+            raise SkillRefusal(f"file exceeds {max_bytes} bytes: {display_path}")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             body = stream.read(max_bytes + 1 if max_bytes is not None else -1)
         if max_bytes is not None and len(body) > max_bytes:
-            raise PackagePolicyError(f"file exceeds {max_bytes} bytes: {display_path}")
+            raise SkillRefusal(f"file exceeds {max_bytes} bytes: {display_path}")
         after = path.lstat()
         if identity(after) != identity(opened):
             raise PackagePolicyError(f"source changed while reading: {display_path}")
@@ -676,7 +686,7 @@ def source_fingerprint(source: Path) -> str:
     """Hash the exact regular source files while rejecting unsafe entries."""
 
     if source.is_symlink() or not source.is_dir():
-        raise PackagePolicyError("skill root must be a regular directory")
+        raise SkillRefusal("skill root must be a regular directory")
     return _source_hash(*_source_snapshot(source))
 
 
@@ -717,7 +727,7 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     """Create a guarded private overlay and its canonical wire objects."""
 
     if source.is_symlink():
-        raise PackagePolicyError("skill root must be a regular directory")
+        raise SkillRefusal("skill root must be a regular directory")
     source = source.resolve()
     source_snapshot, omitted_paths = _source_snapshot(source)
     source_hash = _source_hash(source_snapshot, omitted_paths)
@@ -752,7 +762,7 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
             try:
                 check_shared_setup_document(entry.body)
             except SetupGuidanceError as exc:
-                raise PackagePolicyError(str(exc)) from exc
+                raise SkillRefusal(str(exc)) from exc
     target.mkdir(parents=True, mode=0o700)
     # Copy only validated allowlisted bytes. Validation happens first so an
     # unsupported referenced file never disappears silently from the package;
@@ -779,7 +789,7 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     try:
         manifest, manifest_bytes = load_manifest(target / "skill.manifest.json")
     except (UnicodeDecodeError, ValueError) as exc:
-        raise PackagePolicyError("package manifest is invalid") from exc
+        raise SkillRefusal("package manifest is invalid") from exc
     _require_host_security(host, target)
     description = sanitize_author_description(author_description)
     files = [
@@ -866,5 +876,5 @@ def verify_content_files(
     try:
         skill_body.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise PackagePolicyError("SKILL.md must be valid UTF-8") from exc
+        raise SkillRefusal("SKILL.md must be valid UTF-8") from exc
     return records, derive_content_hash(records)
