@@ -30,7 +30,7 @@ from .discovery import Discovery
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
 from .local_security import prepared_security_check
-from .setup_document import SETUP_PATH, parse_setup_document
+from .setup_document import SETUP_PATH, parse_installed_setup_document
 
 
 def skill_frontmatter(files: list[tuple[str, str, bytes]]) -> dict[str, Any]:
@@ -496,11 +496,12 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         evaluated = evaluate(
             manifest.requirements, local, skill_declarations(skill_frontmatter(files)),
         )
+        setup = _reviewed_setup_commands(files)
         compatibility = {
             "outcome": evaluated.outcome,
             "satisfied": list(evaluated.satisfied),
             "setup_actions": list(evaluated.setup_actions),
-            "limitations": list(evaluated.limitations),
+            "limitations": list(evaluated.limitations) + ([setup[1]] if setup[1] else []),
             "blocked": list(evaluated.blocked),
             "notes": list(evaluated.notes),
         }
@@ -581,7 +582,7 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             "update_mode": update_mode,
             "manifest": manifest.model_dump(mode="json"),
             "files": inventory,
-            "setup_commands": _reviewed_setup_commands(files),
+            "setup_commands": setup[0],
             "compatibility": compatibility,
             "server_checks": server_checks,
             "local_scan": local_scan,
@@ -692,15 +693,22 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         )
 
 
-def _reviewed_setup_commands(files: list[tuple[str, str, bytes]]) -> list[str]:
-    """Extract only structured, hash-covered commands; prose is never shell code."""
+def _reviewed_setup_commands(
+    files: list[tuple[str, str, bytes]],
+) -> tuple[list[str], str | None]:
+    """Extract only structured, hash-covered commands; prose is never shell code.
+
+    Commands over the setup byte budget are dropped with the exact reason
+    instead of rejecting the whole guidance; they are never shown or run.
+    """
     for path, _mode, body in files:
         if path == SETUP_PATH:
             try:
-                return parse_setup_document(body).setup_commands or []
+                document, degraded = parse_installed_setup_document(body)
             except (UnicodeError, ValueError) as exc:
-                raise PackagePolicyError("published setup guidance is invalid") from exc
-    return []
+                raise PackagePolicyError(f"published setup guidance is invalid: {exc}") from exc
+            return document.setup_commands or [], degraded
+    return [], None
 
 
 def _is_utf8(body: bytes) -> bool:

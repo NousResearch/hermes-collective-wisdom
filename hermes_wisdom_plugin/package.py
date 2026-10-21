@@ -28,6 +28,7 @@ from .contract import (
     sanitize_author_description,
     sha256_address,
 )
+from .setup_document import SETUP_PATH, SetupGuidanceError, check_shared_setup_document
 from .wire import ObjectSet, build_commit, build_tree
 
 
@@ -669,6 +670,14 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
         authored_manifest or generated_manifest,
         source="package",
     )
+    # Invalid setup guidance is refused here, naming the field, rather than
+    # breaking every later install review.
+    for entry in source_snapshot:
+        if entry.relative == SETUP_PATH:
+            try:
+                check_shared_setup_document(entry.body)
+            except SetupGuidanceError as exc:
+                raise PackagePolicyError(str(exc)) from exc
     target.mkdir(parents=True, mode=0o700)
     # Copy only validated allowlisted bytes. Validation happens first so an
     # unsupported referenced file never disappears silently from the package.

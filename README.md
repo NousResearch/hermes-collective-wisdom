@@ -149,7 +149,9 @@ away into your profile's skills. If the Hermes skills scanner reports warnings, 
 and waits for your acknowledgement. A skill is blocked only by what its own `SKILL.md` declares
 (`platforms`, or a minimum Hermes version); a recorded CPU architecture is informational and shows as
 a note. Commands a skill declares for setup never run during install;
-review and approve them separately with `hermes wisdom installed-setup`.
+review and approve them separately with `hermes wisdom installed-setup`. A skill can declare any
+number of setup commands, up to 256 characters each and 5,120 bytes in total; sharing refuses a
+setup document over that limit and names the field and its size.
 
 In a private Telegram chat or Slack DM, `/wisdom install <skill>` installs from the chat. In Hermes
 Desktop, install from the Collective Wisdom page or from the dialog that `/wisdom browse` opens.
