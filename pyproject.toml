@@ -1,7 +1,3 @@
-[build-system]
-requires = ["setuptools==80.10.2", "wheel==0.45.1"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "hermes-collective-wisdom"
 version = "0.1.0.dev0"
