@@ -365,10 +365,17 @@ def _check_transport_segment(segment: str, *, path: str, source: str) -> None:
         raise _refuse(source, path, f"a path segment exceeds {MAX_SEGMENT_BYTES} bytes")
 
 
-def _check_blocked_segment(segment: str, *, path: str, source: str) -> None:
-    """Names a Hermes-built package never carries, so installs refuse them."""
+def _check_blocked_segment(
+    segment: str, *, path: str, source: str, kind: str,
+) -> None:
+    """Names a Hermes-built package never carries, so installs refuse them.
+
+    ``kind`` is the real entry type of this segment: "directory" or "file".
+    """
 
     reason = BLOCKED_PATH_SEGMENTS.get(segment.casefold())
+    # The reasons describe directories, so a file only carries the name.
+    entry = f"directory {segment!r}" if kind == "directory" else f"file name {segment!r}"
     if reason is not None and segment != segment.casefold():
         # Hermes itself matches these names exactly, but every Wisdom install
         # refuses any spelling, and a case-folding filesystem would treat this
@@ -376,14 +383,15 @@ def _check_blocked_segment(segment: str, *, path: str, source: str) -> None:
         # leave it out silently.
         raise _refuse(
             source, path,
-            f"directory {segment!r} matches {segment.casefold()!r} ({reason}) except "
+            f"{entry} matches {segment.casefold()!r} ({reason}) except "
             "for letter case; Collective Wisdom installs refuse every spelling, and a "
             f"case-folding filesystem treats it as {segment.casefold()!r}",
         )
     if reason is not None:
+        is_reason = reason if kind == "directory" else "reserved for " + reason
         raise _refuse(
             source, path,
-            f"directory {segment!r} is {reason}; Hermes does not treat it as skill "
+            f"{entry} is {is_reason}; Hermes does not treat it as skill "
             "content, so it would not reach the agents that install this skill",
         )
 
@@ -413,10 +421,14 @@ def _validate_package_path(
     pure = PurePosixPath(raw_path)
     if pure.is_absolute() or not pure.parts:
         raise _refuse(source, raw_path, "absolute path")
-    for part in pure.parts:
+    for index, part in enumerate(pure.parts):
         _check_transport_segment(part, path=raw_path, source=source)
         if blocked:
-            _check_blocked_segment(part, path=raw_path, source=source)
+            # Every caller passes a file path: only its last segment is a file.
+            _check_blocked_segment(
+                part, path=raw_path, source=source,
+                kind="file" if index == len(pure.parts) - 1 else "directory",
+            )
     if len(pure.parts) - 1 > MAX_TREE_DEPTH:
         raise _refuse(source, raw_path, f"deeper than the maximum tree depth {MAX_TREE_DEPTH}")
     return pure, raw_path
@@ -568,8 +580,14 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                     raise SkillRefusal(
                         f"special filesystem content is not supported: {rel}"
                     )
-                for part in pure.parts:
-                    _check_blocked_segment(part, path=rel, source="package")
+                for index, part in enumerate(pure.parts):
+                    # Earlier segments are directories; the last is this entry.
+                    final = index == len(pure.parts) - 1
+                    _check_blocked_segment(
+                        part, path=rel, source="package",
+                        kind="file" if final and stat.S_ISREG(metadata.st_mode)
+                        else "directory",
+                    )
                 if (omitted is not None and stat.S_ISREG(metadata.st_mode)
                         and item.name.endswith(GENERATED_FILE_SUFFIXES)):
                     omitted.append(rel)

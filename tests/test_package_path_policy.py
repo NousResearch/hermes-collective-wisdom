@@ -155,6 +155,28 @@ def test_a_case_variant_of_an_install_refused_name_is_refused_not_left_out(
         _download([relative])
 
 
+@pytest.mark.parametrize("relative", ["Node_Modules", "refs/Node_Modules"])
+def test_a_case_variant_regular_file_is_refused_by_name_not_as_a_directory(
+    tmp_path: Path, relative: str
+):
+    """The refusal names the real entry type: a regular file is not a directory."""
+    if not _case_sensitive(tmp_path):
+        pytest.skip("needs a case-sensitive filesystem")
+    expected = (
+        f"package path {relative!r} is refused: file name 'Node_Modules' matches "
+        f"'node_modules' ({package_module.BLOCKED_PATH_SEGMENTS['node_modules']}) except "
+        "for letter case; Collective Wisdom installs refuse every spelling, and a "
+        "case-folding filesystem treats it as 'node_modules'"
+    )
+    skill = _skill(tmp_path, {relative: b"a regular file\n"})
+    with pytest.raises(PackagePolicyError) as share:
+        _prepare(skill, tmp_path)
+    assert str(share.value) == expected
+    with pytest.raises(PackagePolicyError) as download:
+        _download([relative])
+    assert str(download.value) == expected
+
+
 def test_generated_paths_hermes_does_not_load_are_left_out_and_listed(tmp_path: Path):
     """Share skips what Hermes skill discovery skips, and names every path it left out."""
     files = {**dict.fromkeys(GENERATED, b"generated\n"), "scripts/run.py": b"print(1)\n"}
@@ -254,8 +276,8 @@ def test_a_regular_file_named_like_a_generated_directory_meets_the_normal_rules(
     with pytest.raises(PackagePolicyError) as share:
         _prepare(skill, tmp_path)
     assert str(share.value).startswith(
-        "package path 'node_modules' is refused: directory 'node_modules' is an "
-        "installed dependency tree"
+        "package path 'node_modules' is refused: file name 'node_modules' is reserved "
+        "for an installed dependency tree"
     )
     (tmp_path / "other").mkdir()
     other = _skill(tmp_path / "other", {".pytest_cache": b"a file\n", "refs/.nox": b"x\n"})
