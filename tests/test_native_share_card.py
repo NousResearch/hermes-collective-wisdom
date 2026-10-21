@@ -180,6 +180,54 @@ def test_share_card_too_long_for_one_card_is_paged_to_share(tmp_path, surface):
 
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_share_card_missing_a_fact_names_it_and_refreshes_in_chat(tmp_path, surface):
+    class NoTeamYet(Service):
+        team: str | None = None
+
+        def native_team_name(self):
+            return self.team
+
+        def suggest(self, name):
+            del name
+            return self.prepared_review("local:draft-1")
+
+    async def scenario():
+        service = NoTeamYet()
+        ui = surface(tmp_path, service)
+        identity, view = await _first_card(ui, "begin_suggest", "incident")
+        assert _controls(view) == [("Refresh", "refresh.review"), *SHARE_CONTROLS[1:]]
+        assert "Missing: your team's name. Press Refresh" in view.notice
+        assert "terminal" not in view.to_text().lower()
+        await ui.click(identity, "confirm")
+        await ui.click(identity, "refresh.review")
+        assert _controls(ui.view(identity))[0] == ("Refresh", "refresh.review")
+        assert not service.applied
+        service.team = "Incident Response"
+        await ui.click(identity, "refresh.review")
+        assert _controls(ui.view(identity)) == SHARE_CONTROLS
+        await ui.click(identity, "confirm")
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+        ui.runtime.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("plan", [
+    {"operation": "share_status", "skill_name": "incident", "allowed": False,
+     "status": {"operation_id": "op-1", "state": "pending", "phase": "policy_review_required"}},
+    {"operation": "share_status", "skill_name": "incident", "allowed": False,
+     "status": {"operation_id": "op-1", "state": "pending", "phase": "objects_uploaded"}},
+    {"skill_name": "incident", "native_stage": "retired-stage"},
+])
+def test_unfinished_share_stops_point_to_the_chat_command(plan):
+    operation = plan.get("operation", "suggest")
+    view = project_view({"operation": operation, "state": "pending", "plan": plan})
+    text = view.to_text()
+    assert "/wisdom share incident again" in text
+    assert "terminal" not in text.lower() and "hermes wisdom" not in text
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_portal_draft_is_unreachable_in_manual_sharing(tmp_path, surface):
     assert release_scope.active() == release_scope.MANUAL_SHARING
 

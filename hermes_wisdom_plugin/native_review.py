@@ -792,22 +792,44 @@ def _copy_note(plan: dict[str, Any]) -> str:
     return _safe(line) + " View details shows your original. " if line else ""
 
 
+def _missing_share_facts(record: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    """Name what keeps a share card from offering Share, in the owner's words."""
+    team = record.get("team_name")
+    benefit = ("coworker_benefit",) if release_scope().model_editorial else ()
+    checks = (
+        ("your team's name", isinstance(team, str) and bool(team.strip())
+         and team != (record.get("owner") or {}).get("organization_id")),
+        ("the skill's name and description", plan.get("editorial_status") == "complete" and all(
+            plan.get(key) for key in ("editorial_name", "editorial_description", *benefit))),
+        ("your team's sharing policy", bool(plan.get("publication_mode")
+                                             and plan.get("policy_version"))),
+        ("the review authorization", bool(plan.get("receipt") and plan.get("hashes")
+                                          and plan.get("authorization_expires_at"))),
+        ("permission to share", bool(plan.get("allowed", True))),
+    )
+    return [name for name, present in checks if not present]
+
+
 def _whole_share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
-    """The single /wisdom share confirmation: Share, Cancel, View details."""
+    """The single /wisdom share confirmation: Share, Cancel, View details.
+
+    A card missing a sharing fact names it and offers Refresh in its place."""
     from .native_inspection import _date  # pylint: disable=import-outside-toplevel
     ready = _share_ready(record, plan)
     actions = [NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
-    if ready:
-        actions.insert(0, NativeAction("Share", "confirm", primary=True))
+    actions.insert(0, NativeAction("Share", "confirm", primary=True) if ready
+                   else NativeAction("Refresh", "refresh.review"))
     handling = _SHARE_HANDLING.get(str(plan.get("publication_mode") or ""),
                                    "Publication policy unavailable.")
+    missing = ", ".join(_missing_share_facts(record, plan)) or "a sharing fact"
     return NativeView(
         "📤 Share skill",
         _safe(plan.get("editorial_description"), "Description unavailable"),
         fields=_share_fields(record, plan), actions=actions,
         notice=_copy_note(plan)
         + f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
-        if ready else "Sharing facts are incomplete. Run hermes wisdom share in a terminal.",
+        if ready else f"Not ready to share. Missing: {missing}. Press Refresh to check again. "
+        "Nothing has been uploaded.",
     )
 
 
@@ -877,7 +899,8 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
     )
     if approving and sharing and not _approval_is_lossless(view):
         return replace(view, actions=[action for action in actions if not action.primary],
-                       notice="Approval facts cannot be displayed completely here; use terminal review.")
+                       notice="Approval facts cannot be displayed completely here. Nothing was "
+                       "shared; run /wisdom share again to start a new review.")
     return view
 
 
@@ -1259,10 +1282,12 @@ def _suggest_view(plan: dict[str, Any], state: str, result: Any = None) -> Nativ
         return _suggest_terminal_view(plan, state, result)
     if str(plan.get("native_stage") or "prepared") == "prepared":
         return _suggest_prepared_view(plan)
+    name = _skill_name(plan)
     return NativeView(
-        "Collective Wisdom contribution", _skill_name(plan),
-        [NativeItem("Review unavailable", "Open the same prepared draft in the terminal.")],
-        notice="Open this prepared draft in the terminal to continue.", dismissed=True,
+        "Collective Wisdom contribution", name,
+        [NativeItem("Review unavailable", "This review can't continue on this card.")],
+        notice=f"Nothing has been uploaded. Run /wisdom share {name} again to start a new review.",
+        dismissed=True,
     )
 
 
@@ -1545,11 +1570,12 @@ def _share_status_view(plan: dict[str, Any], state: str) -> NativeView:
         title, detail = publication_copy(status)
     elif status.get("phase") in _AWAITING_REVIEW:
         title, detail = ("Earlier share needs review", "This skill's earlier share is waiting "
-                         "for review. Finish it in the terminal with hermes wisdom share.")
+                         "for review and couldn't be reopened here. Nothing new was uploaded. "
+                         f"Run /wisdom share {name} again to retry.")
     else:
         title, detail = ("Earlier share still in progress", "An earlier share of this skill "
-                         "hasn't finished. Nothing new was uploaded. Check it with "
-                         "hermes wisdom publication status.")
+                         "hasn't finished. Nothing new was uploaded. Run /wisdom share "
+                         f"{name} again to check on it.")
     return NativeView(
         "Hermes Collective Wisdom", name, [NativeItem(title, detail)],
         actions=[NativeAction("OK", "cancel")] if state == "pending" else [],
