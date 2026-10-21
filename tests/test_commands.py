@@ -552,7 +552,7 @@ def test_interactive_suggest_rejected_submission_uses_validation_exit(
     output = capsys.readouterr().out
     assert "State: rejected" in output
     assert "instruction_only_violation" not in output
-    assert "Edit and re-review the local draft" in output
+    assert "Gateway's package rules refused a file in this skill." in output
 
 
 @pytest.mark.parametrize("as_json", [False, True])

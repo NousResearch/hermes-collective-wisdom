@@ -507,10 +507,12 @@ class WisdomClient:
                 code=code,
             )
         if response.status_code == 422:
+            detail = body.get("detail") if isinstance(body, dict) else None
             raise WisdomValidationError(
                 str(code or "Collective Wisdom rejected invalid content"),
                 status=422,
                 code=code,
+                detail=detail if isinstance(detail, str) else None,
             )
         if response.status_code in (502, 503, 504):
             raise WisdomUnavailable(status=response.status_code, code=code)

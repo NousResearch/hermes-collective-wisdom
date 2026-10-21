@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import re
 import shlex
 import time
@@ -26,16 +27,38 @@ from .editorial import (
 )
 from .contract import author_description_hash, parse_manifest_bytes, sha256_address
 from .errors import (
-    ShareCopyError, WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError,
+    ShareCopyError, WisdomAuthError, WisdomConflict, WisdomError, WisdomNotFound,
+    WisdomValidationError, redacted_text,
 )
 from .installed_setup import inspect_installed_setup
 from .release_scope import active as release_scope
 from .package import (
-    MAX_METADATA_BYTES, MAX_TREE_BYTES, PackagePolicyError,
+    MAX_METADATA_BYTES, MAX_TREE_BYTES, PackagePolicyError, SkillRefusal,
     read_validated_package_files, source_fingerprint, verify_content_files,
 )
 from .setup_lock import managed_operation_guard
 from .wire import ObjectSet, build_commit, build_tree_from_snapshot
+
+logger = logging.getLogger(__name__)
+# Gateway ``detail`` kept in a rejected publication record and its log line:
+# masked and bounded (Gateway itself caps package details at 400 characters).
+_GATEWAY_DETAIL_LIMIT = 400
+
+
+def _log_rejection(operation_id: str, stage: str, exc: WisdomError, *, code: str) -> str | None:
+    """Log one Gateway publication rejection; return its masked detail, if any.
+
+    The detail is Gateway text: masked and bounded here, kept for logs and
+    ``publication status``, and never shown on a chat card.
+    """
+    detail = (redacted_text(exc.detail, limit=_GATEWAY_DETAIL_LIMIT)
+              if isinstance(exc.detail, str) else "")
+    logger.warning(
+        "Collective Wisdom Gateway rejected publication %s at %s (HTTP %s, code=%s): %s",
+        operation_id, stage, exc.status, redacted_text(code, limit=128),
+        detail or "no detail",
+    )
+    return detail or None
 
 WISDOM_DISCLOSURE = (
     "Candidate signals stay on this profile. Only owner-approved private draft bytes, "
@@ -1592,11 +1615,18 @@ class PublicationService:  # pylint: disable=too-many-public-methods
 
     def _done(self, operation: dict[str, Any]) -> dict[str, Any]:
         if operation.get("publication_state") == "rejected":
-            return {
+            rejected = {
                 "operation_id": operation["id"], "state": "rejected",
                 "phase": "rejected", "detail": operation["rejection_detail"],
                 "code": operation["rejection_code"], "retry_safe": False,
             }
+            # Plugin-authored reason (card-safe) and Gateway's masked detail
+            # (publication status only), when the rejection recorded them.
+            for key, field in (("reason", "rejection_reason"),
+                               ("gateway_detail", "rejection_gateway_detail")):
+                if isinstance(operation.get(field), str) and operation[field]:
+                    rejected[key] = operation[field]
+            return rejected
         result = {
             "operation_id": operation["id"], "state": "done",
             "publication_state": operation.get("publication_state"),
@@ -1683,11 +1713,40 @@ class PublicationService:  # pylint: disable=too-many-public-methods
         if re.fullmatch(r"[a-z0-9_]{1,128}", code) is None:
             code = "validation_rejected"
         detail = "Gateway rejected the publication draft before creation (HTTP 422)."
+        gateway_detail = _log_rejection(operation_id, "draft submission", exc, code=code)
+        reason = (self._package_refusal(self._operation(operation_id), exc.detail)
+                  if code == "instruction_only_violation" else None)
         operation = self.state.update_publication(
             operation_id, status="done", phase="rejected", publication_state="rejected",
             rejection_code=code, rejection_detail=detail,
+            rejection_gateway_detail=gateway_detail, rejection_reason=reason,
         )
         return self._done(operation)
+
+    @staticmethod
+    def _package_refusal(operation: dict[str, Any], gateway_detail: str | None) -> str | None:
+        """Plugin-authored words for a Gateway package refusal, when they exist.
+
+        The local package rules mirror Gateway's, so re-checking the exact
+        submitted overlay names the refused file and rule. Failing that, a path
+        Gateway quotes is named only when it is exactly one of this package's
+        own files; no other Gateway text is ever repeated.
+        """
+        package = operation.get("prepared_package")
+        overlay = package.get("overlay_path") if isinstance(package, dict) else None
+        if not isinstance(overlay, str) or not overlay:
+            return None
+        try:
+            raw = read_validated_package_files(Path(overlay))
+            verify_content_files(raw)
+        except SkillRefusal as refusal:
+            return str(refusal)
+        except Exception:
+            return None
+        quoted = re.search(r'"([^"]{1,4096})"', gateway_detail or "")
+        if quoted is not None and quoted.group(1) in {path for path, _mode, _body in raw}:
+            return f"The refused file is {quoted.group(1)!r}."
+        return None
 
     def _record_remote(self, operation_id: str, remote: Any) -> dict[str, Any]:
         operation = self._operation(operation_id)
@@ -1942,6 +2001,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             )
         except WisdomValidationError as exc:
             if exc.status == 422 and exc.code == "scan_blocked":
+                _log_rejection(operation_id, "owner approval", exc, code="scan_blocked")
                 self.state.update_publication(
                     operation_id, phase="approval_rejected",
                     rejection_code="scan_blocked",
@@ -2107,6 +2167,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             )
         except WisdomConflict as exc:
             if exc.code == "slug_owned" and exc.status == 409:
+                _log_rejection(operation_id, "publication", exc, code="slug_owned")
                 self.state.update_publication(
                     operation_id, phase="publication_rejected", rejection_code="slug_owned",
                 )
