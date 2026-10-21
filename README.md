@@ -242,7 +242,8 @@ Every share is checked twice before anything is published:
 
 - **On your machine, before upload:** private keys, live credentials and secret-like assignments
   block the share. Warnings from the Hermes skills scanner need your acknowledgement, and editing the
-  package resets it.
+  package resets it. In Slack and Telegram, a list too long for one card is paged: View details
+  lists every finding, and Acknowledge appears once you have reached the last page.
 - **On the service, before publishing:** the package and its description are scanned against the
   built-in checks and your team's content rules, and scanned again at publish time against the
   current rules. A blocked package is not published.

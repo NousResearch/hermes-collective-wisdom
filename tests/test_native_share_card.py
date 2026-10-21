@@ -123,7 +123,8 @@ def test_scanner_warnings_need_acknowledge_before_share(tmp_path, surface):
         ui = surface(tmp_path, service)
         identity, view = await _first_card(ui, "begin_suggest", "incident")
         assert view.title == "⚠️ Review warnings"
-        assert _controls(view) == [("Acknowledge", "suggest.ack"), ("Cancel", "cancel")]
+        assert _controls(view) == [("Acknowledge", "suggest.ack"), ("Cancel", "cancel"),
+                                   ("View details", "paged.0")]
         await ui.click(identity, "confirm")
         assert not service.applied
         await ui.click(identity, "suggest.ack")

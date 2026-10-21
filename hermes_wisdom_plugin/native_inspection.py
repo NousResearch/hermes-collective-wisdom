@@ -139,6 +139,22 @@ def _pages(text, budget=1200):
             current += line
     return pages + [current.rstrip("\n")] if current or not pages else pages
 
+def text_pages(text):
+    """Page reviewed text on the inspection budget; the pages together hold all of it."""
+    return [page.rstrip("\n") for page in _pages(text)]
+
+def finding_pages(text):
+    """Page rendered findings; a page that opens inside a group repeats its heading."""
+    pages, heading = [], ""
+    for page in text_pages(text):
+        if heading and page.startswith("    - ") and len(heading) <= 200:
+            page = f"{heading} (continued)\n{page}"
+        pages.append(page)
+        for line in page.splitlines():
+            if line.startswith("  ") and not line.startswith("   "):
+                heading = line.removesuffix(" (continued)")
+    return pages
+
 def _finding_lines(finding):
     """Render safe scanner facts, never raw matched content or dictionary repr."""
     if not isinstance(finding, dict):

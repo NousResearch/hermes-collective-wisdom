@@ -139,14 +139,15 @@ def test_scanner_findings_need_acknowledge_then_install_exactly_once(tmp_path):
     view = controller.view(record)
     assert record["screen"] == "install_warnings" and record["state"] == "pending"
     assert "receipt" not in record["plan"]
-    assert _actions(controller, record) == ["package.ack", "cancel", "details"]
+    assert _actions(controller, record) == ["package.ack", "cancel", "paged.0"]
     assert "hermes_env_access" in view.to_text() and "SKILL.md:238" in view.to_text()
+    assert "View details lists all 1 finding." in view.notice
     assert not service.inspected and not service.applied
 
-    record = _shown(controller, controller.act(identity, "details", service, clicked))
+    record = _shown(controller, controller.act(identity, "paged.0", service, clicked))
     assert "SKILL.md:238" in controller.view(record).to_text()
-    assert _actions(controller, record) == ["back"]
-    record = _shown(controller, controller.act(identity, "back", service, clicked))
+    assert _actions(controller, record) == ["package.ack", "paged.back"]
+    record = _shown(controller, controller.act(identity, "paged.back", service, clicked))
     assert record["screen"] == "install_warnings"
 
     result = controller.act(identity, "package.ack", service, clicked)

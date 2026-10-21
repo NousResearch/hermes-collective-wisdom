@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import secrets
 import time
@@ -22,7 +23,7 @@ from .errors import (
     WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
 )
 from .native_context import NativeInvocation
-from .native_inspection import inspection_pages, sharing_checks
+from .native_inspection import finding_pages, inspection_pages, sharing_checks
 from .package import PackagePolicyError, SkillRefusal
 from .portal_urls import safe_portal_url
 from .release_scope import active as release_scope
@@ -1040,39 +1041,154 @@ def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
         notice="Nothing has been uploaded. Edit the local skill in the terminal if needed.",
     )
 
-def _suggest_checks_view(plan: dict[str, Any]) -> NativeView:
-    details = render_findings(plan)
-    complete = len(details) <= 2200
-    shown = details if complete else details[:2199].rstrip() + "…"
+FINDINGS_CARD_LIMIT = 2200
+_PAGE_ACTION = "paged."
 
-    actions = [NativeAction("Acknowledge", "suggest.ack", primary=True),
-               NativeAction("Cancel", "cancel")]
-    view = NativeView(
-        "⚠️ Review warnings", "The scanner flagged this skill. Acknowledge the warnings "
-        "to continue to the Share card.",
-        [NativeItem("Scanner warnings", shown)],
-        fields=[NativeField("Skill", _skill_name(plan)),
-                NativeField("Files", _file_summary(plan.get("files")))],
-        actions=actions, notice="Nothing has been uploaded.",
+
+def _digest(kind: str, material: str) -> str:
+    return hashlib.sha256(f"{kind}:{material}".encode("utf-8")).hexdigest()
+
+
+def _warning_review(record: dict[str, Any]) -> bool:
+    """A pending card asking the owner to acknowledge local scanner findings."""
+    raw = record.get("plan")
+    plan: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    operation = record.get("operation")
+    return record.get("state") == "pending" and (
+        (operation == "suggest" and plan.get("native_stage") == "warnings")
+        or (operation in {"install", "update"} and record.get("screen") == "install_warnings")
     )
-    if complete and _approval_is_lossless(view):
+
+
+def _findings_pages(plan: dict[str, Any]) -> tuple[list[str], str]:
+    return finding_pages(render_findings(plan)), _digest("findings", review_identity(plan))
+
+
+def _paged_review(record: dict[str, Any]) -> tuple[list[str], str] | None:
+    """The pages an approval on this card covers, and the identity they are bound to."""
+    raw = record.get("plan")
+    plan: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if _warning_review(record):
+        return _findings_pages(plan)
+    return None
+
+
+def _paging(record: dict[str, Any], identity: str) -> tuple[int | None, set[int]]:
+    """The open page and the pages seen, only while they belong to exactly this content."""
+    state = record.get("paged")
+    if not isinstance(state, dict) or state.get("identity") != identity:
+        return None, set()
+    page = state.get("page")
+    seen = {item for item in state.get("seen") or []
+            if isinstance(item, int) and not isinstance(item, bool)}
+    return (page if isinstance(page, int) and not isinstance(page, bool) else None), seen
+
+
+def _open_page(record: dict[str, Any], pages: list[str], identity: str) -> int | None:
+    page, _seen = _paging(record, identity)
+    return page if page is not None and 0 <= page < len(pages) else None
+
+
+def _all_pages_seen(record: dict[str, Any], pages: list[str], identity: str) -> bool:
+    return set(range(len(pages))) <= _paging(record, identity)[1]
+
+
+def _page_controls(
+    record: dict[str, Any], pages: list[str], identity: str, finish: NativeAction,
+) -> list[NativeAction]:
+    """Previous/Next through every page; the approval appears on the last one once all were seen."""
+    page = _open_page(record, pages, identity) or 0
+    actions = []
+    if page:
+        actions.append(NativeAction("Previous", f"{_PAGE_ACTION}{page - 1}"))
+    if page + 1 < len(pages):
+        actions.append(NativeAction("Next", f"{_PAGE_ACTION}{page + 1}"))
+    elif _all_pages_seen(record, pages, identity):
+        actions.append(finish)
+    actions.append(NativeAction("Back", f"{_PAGE_ACTION}back"))
+    return actions
+
+
+def _without_unrendered_approval(view: NativeView) -> NativeView:
+    """A provider that cannot show every fact on this card never shows its approval."""
+    if _approval_is_lossless(view):
         return view
-    return replace(
-        view, actions=[action for action in actions if not action.primary],
-        notice="Warnings cannot be acknowledged here; inspect the same draft in the terminal.",
+    return replace(view, actions=[action for action in view.actions if not action.primary])
+
+
+def _finding_counts(details: list[dict[str, Any]]) -> str:
+    severities: dict[str, int] = {}
+    categories: dict[str, int] = {}
+    for finding in details:
+        severity = str(finding.get("severity") or "warning").upper()
+        category = str(finding.get("category") or "other")
+        severities[severity] = severities.get(severity, 0) + 1
+        categories[category] = categories.get(category, 0) + 1
+    return ("By severity: " + " · ".join(f"{name} {count}" for name, count in severities.items())
+            + "\nBy category: "
+            + " · ".join(f"{name} {count}" for name, count in categories.items()))
+
+
+@dataclass(frozen=True, slots=True)
+class _FindingsCopy:
+    acknowledge: NativeAction
+    summary: str
+    nothing_done: str
+    viewing: str
+    changed: str = ""
+
+
+def _findings_card(
+    record: dict[str, Any], plan: dict[str, Any], words: _FindingsCopy,
+) -> NativeView:
+    """Every finding on one card when it fits; otherwise a summary, the first page and
+    View details through all of them. Acknowledge needs every finding to have been shown."""
+    details = render_findings(plan)
+    pages, identity = _findings_pages(plan)
+    page = _open_page(record, pages, identity)
+    if page is not None:
+        return _without_unrendered_approval(NativeView(
+            "Scanner findings", f"{_skill_name(plan)} · page {page + 1} of {len(pages)}",
+            [NativeItem("Findings", pages[page], literal=True)],
+            actions=_page_controls(record, pages, identity, words.acknowledge),
+            notice=words.viewing,
+        ))
+    count = len(safe_scan_details(plan.get("local_scan")))
+    listed = f" View details lists all {count} finding" + ("" if count == 1 else "s") + "."
+    fields = [NativeField("Skill", _skill_name(plan)),
+              NativeField("Files", _file_summary(plan.get("files")))]
+    view_details = NativeAction("View details", f"{_PAGE_ACTION}0", row=1)
+    whole = NativeView(
+        "⚠️ Review warnings", words.summary, [NativeItem("Scanner warnings", details)],
+        fields=fields, actions=[words.acknowledge, NativeAction("Cancel", "cancel"), view_details],
+        notice=words.nothing_done + listed + words.changed,
     )
+    if len(details) <= FINDINGS_CARD_LIMIT and _approval_is_lossless(whole):
+        return whole
+    unlocked = _all_pages_seen(record, pages, identity)
+    return _without_unrendered_approval(replace(
+        whole,
+        items=[NativeItem("Summary", _finding_counts(safe_scan_details(plan.get("local_scan")))),
+               NativeItem(f"Findings, page 1 of {len(pages)}", pages[0], literal=True)],
+        actions=[action for action in whole.actions if unlocked or not action.primary],
+        notice=words.nothing_done + listed
+        + ("" if unlocked else " Acknowledge appears once you reach the last page.")
+        + words.changed,
+    ))
+
+
+def _suggest_checks_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    return _findings_card(record, plan, _FindingsCopy(
+        NativeAction("Acknowledge", "suggest.ack", primary=True),
+        "The scanner flagged this skill. Acknowledge the warnings to continue to the Share card.",
+        "Nothing has been uploaded.", "Viewing findings shares nothing.",
+    ))
 
 def _suggest_view(plan: dict[str, Any], state: str, result: Any = None) -> NativeView:
     if state != "pending":
         return _suggest_terminal_view(plan, state, result)
-    stage = str(plan.get("native_stage") or "prepared")
-    views = {
-        "prepared": _suggest_prepared_view,
-        "warnings": _suggest_checks_view,
-    }
-    render = views.get(stage)
-    if render is not None:
-        return render(plan)
+    if str(plan.get("native_stage") or "prepared") == "prepared":
+        return _suggest_prepared_view(plan)
     return NativeView(
         "Collective Wisdom contribution", _skill_name(plan),
         [NativeItem("Review unavailable", "Open the same prepared draft in the terminal.")],
@@ -1105,42 +1221,16 @@ def _authority_projection(
 
 def _install_warnings_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
     """Scanner findings on a shared package: Acknowledge binds to exactly these findings."""
-    details = render_findings(plan)
     count = len(safe_scan_details(plan.get("local_scan")))
     noun = "finding" + ("" if count == 1 else "s")
-    updating = record.get("operation") == "update"
-    complete = len(details) <= 2200
-    shown = details if complete else details[:2199].rstrip() + "…"
-    actions = [NativeAction("Acknowledge", "package.ack", primary=True),
-               NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
-    view = NativeView(
-        "⚠️ Review warnings",
+    verb = "update" if record.get("operation") == "update" else "install"
+    return _findings_card(record, plan, _FindingsCopy(
+        NativeAction("Acknowledge", "package.ack", primary=True),
         f"The scanner found {count} {noun} in {_skill_name(plan)}. Acknowledge them to "
-        f"{'update' if updating else 'install'} this exact version.",
-        [NativeItem("Scanner warnings", shown)],
-        fields=[NativeField("Skill", _skill_name(plan)),
-                NativeField("Files", _file_summary(plan.get("files")))],
-        actions=actions,
-        notice="Nothing has been installed. View details lists every finding. If the findings "
-        "change before installing, they are shown again.",
-    )
-    if complete and _approval_is_lossless(view):
-        return view
-    return replace(
-        view, actions=[action for action in actions if not action.primary],
-        notice="Warnings cannot be acknowledged here; review them with hermes wisdom "
-        f"{'update' if updating else 'install'} in the terminal. Nothing has been installed.",
-    )
-
-
-def _install_warning_details_view(plan: dict[str, Any]) -> NativeView:
-    details = render_findings(plan)
-    if len(details) > TELEGRAM_TEXT_LIMIT - 400:
-        details = details[:TELEGRAM_TEXT_LIMIT - 401].rstrip() + "…"
-    return NativeView(
-        "Scanner findings", _skill_name(plan), [NativeItem("Findings", details, literal=True)],
-        actions=[NativeAction("Back", "back")], notice="Viewing findings installs nothing.",
-    )
+        f"{verb} this exact version.",
+        "Nothing has been installed.", "Viewing findings installs nothing.",
+        " If the findings change before installing, they are shown again.",
+    ))
 
 
 def _install_blocked_view(name: str, result: dict[str, Any]) -> NativeView:
@@ -1341,10 +1431,9 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     state = str(record.get("state") or "pending")
     if state == "pending" and record.get("screen") == "gateway_advisory":
         return _gateway_advisory_view(record, plan)
-    if state == "pending" and record.get("screen") in {"install_warnings",
-                                                         "install_warning_details"}:
-        return (_install_warnings_view(record, plan) if record["screen"] == "install_warnings"
-                else _install_warning_details_view(plan))
+    if _warning_review(record):
+        return (_install_warnings_view(record, plan) if record.get("screen") == "install_warnings"
+                else _suggest_checks_view(record, plan))
     if state == "pending" and record.get("screen") == "checks":
         safe, checks = sharing_checks({**plan, "candidate_flow": True})
         return NativeView(
@@ -1885,6 +1974,30 @@ class NativeReviewController:
             raise
         self.state.compare_replace(fenced, {**fenced, "display_ready": True})
 
+    def _turn_page(self, record: dict[str, Any], action: str) -> dict[str, Any]:
+        """Open one offered page, recording it as seen for exactly this content."""
+        paged = _paged_review(record)
+        if paged is None:
+            raise StaleControlError()
+        pages, identity = paged
+        page, seen = _paging(record, identity)
+        target: int | None = None
+        if action != f"{_PAGE_ACTION}back":
+            try:
+                target = int(action[len(_PAGE_ACTION):])
+            except ValueError as exc:
+                raise WisdomValidationError("Invalid review page") from exc
+            if not 0 <= target < len(pages):
+                raise WisdomValidationError("Invalid review page")
+            seen.add(target)
+        # The card shows the first page; a control pressed on a page proves it was displayed.
+        seen.add(page if page is not None and 0 <= page < len(pages) else 0)
+        result = {**record, "paged": {"identity": identity, "page": target, "seen": sorted(seen)},
+                  "display_ready": False, "updated_at": self.clock()}
+        if not self.state.compare_replace(record, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(result)
+
     def _navigate(
         self, record: dict[str, Any], action: str, *, package_files: Any = None,
     ) -> dict[str, Any]:
@@ -2017,6 +2130,8 @@ class NativeReviewController:
         state = record["state"]
         if state == "kept":
             return self._resume_kept(record, action, service, invocation, authority)
+        if action.startswith(_PAGE_ACTION):
+            return self._turn_page(record, action)
         if action == "defer" or action.startswith(("suggest.", "catalog.install.")):
             return self._act_special(
                 action, record, service, invocation, authority,
@@ -2032,14 +2147,6 @@ class NativeReviewController:
                 record, record["operation"], service, invocation, authority,
                 progress=progress, acknowledged=True,
             )
-        if (action in {"details", "back"} and record.get("operation") in {"install", "update"}
-                and record.get("screen") in {"install_warnings", "install_warning_details"}):
-            shown = {**record, "screen": ("install_warning_details" if action == "details"
-                                          else "install_warnings"),
-                     "display_ready": False, "updated_at": self.clock()}
-            if not self.state.compare_replace(record, shown):
-                raise WisdomConflict("Collective Wisdom review changed; open it again")
-            return copy.deepcopy(shown)
         if action == "publish.ack" and record.get("operation") == "publish":
             return self._acknowledge_gateway(record, service, invocation, authority)
         if (record.get("operation") in {"install", "update"}
@@ -2211,7 +2318,7 @@ class NativeReviewController:
             "screen": "install_warnings", "acknowledged_findings": review_identity(fresh),
             "display_ready": False, "updated_at": self.clock(),
         }
-        for key in ("package_files", "inspection_receipt", "page", "inspected_through"):
+        for key in ("package_files", "inspection_receipt", "page", "inspected_through", "paged"):
             shown.pop(key, None)
         if not self.state.compare_replace(claimed, shown):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
@@ -2251,6 +2358,7 @@ class NativeReviewController:
             "updated_at": self.clock(), "display_ready": False,
         }
         ready.pop("acknowledged_findings", None)
+        ready.pop("paged", None)
         if fresh.get("allowed") is not True or _requires_partial_acknowledgement(fresh):
             ready.update(screen="approval", page=0, inspected_through=0)
             if not self.state.compare_replace(claimed, ready):
@@ -2539,11 +2647,17 @@ class NativeReviewController:
         if result is _UNHANDLED and action == "suggest.ack" and plan.get("native_stage") == "warnings":
             displayed = _prepared_review(service, plan)
             if review_identity(displayed) != review_identity(plan):
-                raise WisdomConflict("The package or scanner findings changed; open it again")
-            result = self._sharing_review(record, plan, displayed, service, True)
+                # Not the findings this card showed: show the current ones; nothing is acknowledged.
+                result = self._advance_prepared(record, {**record, "plan": {
+                    **displayed, "skill_name": plan.get("skill_name"), "native_stage": "prepared",
+                    **({"candidate_flow": True} if plan.get("candidate_flow") is True else {}),
+                }, "updated_at": self.clock()}, displayed, service)
+            else:
+                result = self._sharing_review(record, plan, displayed, service, True)
         if result is _UNHANDLED:
             raise WisdomValidationError("Collective Wisdom action was not recognized")
         assert isinstance(result, dict)
+        result.pop("paged", None)
         result["display_ready"] = False
         if not self.state.compare_replace(record, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
