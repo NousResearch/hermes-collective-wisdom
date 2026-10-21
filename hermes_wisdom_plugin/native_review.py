@@ -70,6 +70,9 @@ class NativeItem:
     preamble: str = ""
     literal: bool = False
     emphasis_labels: tuple[str, ...] = ()
+    # The detail is owner text (file names): Slack shows it as plain text, so
+    # mrkdwn operators in it stay literal. Other surfaces already escape it.
+    literal_detail: bool = False
 
     def detail_parts(self) -> list[tuple[str, str]]:
         """Split only explicitly owned line prefixes; leave all original text intact."""
@@ -1021,7 +1024,8 @@ def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
         return NativeView(
             "Skill needs attention", _skill_name(plan),
             [NativeItem("Not shared", _safe(plan["preparation_problem"],
-                                            "This skill cannot be shared as it is."))],
+                                            "This skill cannot be shared as it is."),
+                        literal_detail=True)],
             actions=[NativeAction("Retry", "suggest.refresh"),
                      NativeAction("Maybe later", "suggest.keep")],
             notice="Nothing has been uploaded. Fix this in the skill's folder, then press Retry.",

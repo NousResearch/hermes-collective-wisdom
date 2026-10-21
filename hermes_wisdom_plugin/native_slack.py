@@ -6,7 +6,9 @@ import re
 from typing import Any, Iterable
 
 from .native_context import NativeInvocation, adapter_profile
-from .native_review import NativeView, action_label, callback_value, slack_section_text
+from .native_review import (
+    SLACK_SECTION_LIMIT, NativeView, action_label, callback_value, slack_section_text,
+)
 
 _MAX_ITEMS = 5
 _MAX_FIELDS = 10
@@ -84,11 +86,12 @@ def _fields_are_lossless(view: NativeView) -> bool:
 
 
 def _item_bodies(view: NativeView) -> list[str]:
+    """The mrkdwn text of each item; a literal detail renders in its own block."""
     bodies = []
     for item in view.items:
         body = item.preamble + "\n\n" if item.preamble else ""
         body += f"*{item.title}*"
-        if item.detail:
+        if item.detail and not item.literal_detail:
             body += "\n" + "".join(
                 (f"*{label}*" if label else "") + rest
                 for label, rest in item.detail_parts()
@@ -149,6 +152,8 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
         and (not view.summary or _section_is_lossless(view.summary))
         and _fields_are_lossless(view)
         and all(_section_is_lossless(body) for body in item_bodies)
+        and all(len(item.detail) <= SLACK_SECTION_LIMIT
+                for item in view.items if item.literal_detail)
         and (not view.notice or _section_is_lossless(view.notice))
     )
     rendered: list[dict[str, Any]] = [{
@@ -174,6 +179,12 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
             "type": "plain_text" if item.literal else "mrkdwn",
             "text": body if item.literal else slack_section_text(body),
         }})
+        if item.literal_detail and item.detail and not item.literal:
+            # Owner text: plain_text shows * _ ~ ` < > & and :name: as written.
+            rendered.append({"type": "section", "text": {
+                "type": "plain_text", "text": _trim(item.detail, SLACK_SECTION_LIMIT),
+                "emoji": False,
+            }})
         rendered.extend(_action_blocks(
             item.actions, record_id, row=f"item_{item_index}",
             allow_primary=approval_is_lossless,

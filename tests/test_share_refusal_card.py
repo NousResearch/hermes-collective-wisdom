@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from types import SimpleNamespace
 
@@ -63,6 +64,42 @@ def test_native_share_of_a_symlinked_skill_names_the_exact_reason(tmp_path, surf
         await ui.click(queued["review_id"], "suggest.refresh")
         assert ui.view(queued["review_id"]).title == "📤 Share skill"
         assert not kernel.client.state.calls
+        ui.runtime.close()
+    asyncio.run(scenario())
+
+
+_MARKUP_NAME = "*bold*_`code`_<tag>.bin"
+
+
+def _texts(value, kind):
+    """Every Block Kit text object of one type, in order."""
+    if isinstance(value, dict):
+        found = [value["text"]] if value.get("type") == kind and "text" in value else []
+        return found + [text for item in value.values() for text in _texts(item, kind)]
+    if isinstance(value, list):
+        return [text for item in value for text in _texts(item, kind)]
+    return []
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_native_refusal_shows_owner_file_names_literally(tmp_path, surface):
+    """Slack mrkdwn never formats a file name; Telegram keeps its escaped HTML."""
+    async def scenario():
+        kernel = Kernel(tmp_path)
+        (kernel.source / "scripts").mkdir(exist_ok=True)
+        (kernel.source / "scripts" / _MARKUP_NAME).symlink_to(kernel.source / "SKILL.md")
+        ui = surface(tmp_path, kernel)
+        queued = ui.runtime.begin_suggest(ui.caller, "reviewed-skill")
+        await ui.flush()
+        detail = ui.view(queued["review_id"]).items[0].detail
+        assert f"scripts/{_MARKUP_NAME}" in detail
+        posted = ui.posts[-1]
+        if surface is SlackHarness:
+            assert detail in _texts(posted["blocks"], "plain_text")
+            assert not any("bold" in text for text in _texts(posted["blocks"], "mrkdwn"))
+            assert "*Not shared*" in _texts(posted["blocks"], "mrkdwn")
+        else:
+            assert html.escape(detail) in str(posted)
         ui.runtime.close()
     asyncio.run(scenario())
 
