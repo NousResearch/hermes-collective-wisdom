@@ -51,7 +51,6 @@ from .package import (
     verify_content_files,
 )
 from .professionalism import review_package, unavailable_review
-from .publisher_evidence import evidence_block, publication_description
 from .release_scope import active as release_scope
 
 # Host scanner findings that mean the skill text may carry a secret, so it must not
@@ -396,7 +395,6 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "local_scan": scan,
             "security_check": security,
             "professionalism_check": professionalism,
-            "publisher_evidence": evidence_block(str(draft["description"])),
             "network_submission": False,
             "notice": (
                 "Owner-private local preparation only. "
@@ -775,12 +773,10 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "original": {key: original[key][:4096] for key in written},
         }
 
-    def _share_description(self, skill_id, description, proposed) -> str:
+    def _share_description(self, _skill_id, description, proposed) -> str:
         """The shared description: Hermes' proposal when it replaced the skill's own."""
         if "editorial_description" in proposed["written_by_hermes"]:
             description = proposed["editorial_description"]
-        if self.source_store is not None:
-            description = publication_description(self.source_store, skill_id, description)
         return str(description)
 
     def _prepare_editorial(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -833,8 +829,6 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             editorial["failure"] = "disclosure_blocked"
         if editorial["provenance"]:
             description = editorial["editorial_description"]
-        if self.source_store is not None:
-            description = publication_description(self.source_store, skill_id, description)
         return frontmatter, description, editorial
 
     def _save_prepared(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals

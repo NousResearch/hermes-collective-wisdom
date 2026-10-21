@@ -170,7 +170,7 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
 
     assert result["state"] == "prepared"
     assert result["network_submission"] is False
-    assert result["publisher_evidence"] is None
+    assert "publisher_evidence" not in result
     assert "usage" not in json.dumps(result).casefold()
     assert result["security_check"]["local_status"] == "pass"
     assert result["security_check"]["status"] == "pending"
