@@ -19,7 +19,7 @@ from .catalog_table import COLUMNS as CATALOG_COLUMNS
 from .catalog_table import installed_cell, one_line, version_cell
 from .errors import (
     ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
-    WisdomNotFound, WisdomValidationError, describe_exception,
+    WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
 )
 from .native_context import NativeInvocation
 from .native_inspection import inspection_pages, sharing_checks
@@ -1006,7 +1006,26 @@ def _copy_problem(plan: dict[str, Any]) -> str:
     return _safe(plan.get("editorial_problem"), _LOCAL_COPY_REQUIRED)
 
 
+def _refused_preparation(skill_name: str, exc: BaseException) -> dict[str, Any]:
+    """A plan for a definite, owner-fixable refusal: nothing was prepared or uploaded."""
+    logger.warning("Collective Wisdom share refused (%s)", describe_exception(exc))
+    return {
+        "skill_name": skill_name, "native_stage": "prepared", "editorial_status": "incomplete",
+        "preparation_problem": redacted_message(exc, limit=1000),
+    }
+
+
 def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
+    if plan.get("preparation_problem"):
+        # A definite refusal names its exact reason; Retry prepares the source again.
+        return NativeView(
+            "Skill needs attention", _skill_name(plan),
+            [NativeItem("Not shared", _safe(plan["preparation_problem"],
+                                            "This skill cannot be shared as it is."))],
+            actions=[NativeAction("Retry", "suggest.refresh"),
+                     NativeAction("Maybe later", "suggest.keep")],
+            notice="Nothing has been uploaded. Fix this in the skill's folder, then press Retry.",
+        )
     detail = (_safe(plan.get("editorial_failure"), "Editorial copy or local checks are incomplete.")
               if release_scope().model_editorial else _copy_problem(plan))
     return NativeView(
@@ -1616,6 +1635,10 @@ class NativeReviewController:
                 "skill_name": str(skill_name).strip(), "native_stage": "prepared",
                 "editorial_status": "incomplete", "editorial_problem": str(exc),
             })
+        except (PackagePolicyError, WisdomValidationError) as exc:
+            # Definite and fixable by the owner: the card names the exact reason.
+            return self._insert(service, invocation, "suggest",
+                                _refused_preparation(str(skill_name).strip(), exc))
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):
@@ -2474,6 +2497,9 @@ class NativeReviewController:
                 "skill_name": name, "native_stage": "prepared",
                 "editorial_status": "incomplete", "editorial_problem": str(exc),
             }, "updated_at": self.clock()}
+        except (PackagePolicyError, WisdomValidationError) as exc:
+            return {**record, "plan": _refused_preparation(name, exc),
+                    "updated_at": self.clock()}
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):

@@ -24,7 +24,7 @@ from .client import AgentLedPolicyResponse, WisdomClient
 from .commands import PRIVATE_RANKING_COMMANDS, read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
-    describe_exception,
+    describe_exception, redacted_message,
 )
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError
@@ -1843,6 +1843,10 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 reply = self._slash_native_review(invocation, command, args)
                 if reply is not None:
                     return reply
+            except (PackagePolicyError, WisdomValidationError) as exc:
+                # A definite refusal says exactly why; retrying would not help.
+                logger.warning("Collective Wisdom review failed (%s)", describe_exception(exc))
+                return f"Couldn't open Collective Wisdom: {redacted_message(exc, limit=1000)}"
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning("Collective Wisdom review failed (%s)", describe_exception(exc))
                 return _REVIEW_UNAVAILABLE

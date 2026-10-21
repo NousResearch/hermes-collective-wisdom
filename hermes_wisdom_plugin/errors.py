@@ -124,15 +124,20 @@ def mask_credentials(message: str) -> str:
     return message
 
 
-def describe_exception(exc: BaseException, *, limit: int = 300) -> str:
-    """Return "Class: message" for logs, redacted, bounded, without controls."""
+def redacted_message(exc: BaseException, *, limit: int = 300) -> str:
+    """Return the exception message redacted, bounded and without controls."""
     message = str(exc)
     try:
         message = _host_redact(message)
     except Exception:  # pylint: disable=broad-exception-caught
         pass  # Fallback: the plugin masking below is always applied.
     message = mask_credentials(message)
-    message = " ".join("".join(
+    return " ".join("".join(
         char if char.isprintable() else " " for char in message
     ).split())[:limit]
+
+
+def describe_exception(exc: BaseException, *, limit: int = 300) -> str:
+    """Return "Class: message" for logs, redacted, bounded, without controls."""
+    message = redacted_message(exc, limit=limit)
     return type(exc).__name__ + (": " + message if message else "")
