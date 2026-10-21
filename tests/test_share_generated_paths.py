@@ -12,9 +12,12 @@ from test_reshare_pending import Kernel
 from test_share_copy import _share
 
 from hermes_wisdom_plugin.errors import WisdomConflict
+from hermes_wisdom_plugin.terminal_ui import render_inventory
 
 _LEFT_OUT = ("Left out (Hermes doesn't load these): node_modules/, "
              "scripts/__pycache__/, scripts/stale.pyc")
+_TERMINAL_LEFT_OUT = ("Left out (Hermes doesn't load these) (3):\n  - node_modules/\n"
+                      "  - scripts/__pycache__/\n  - scripts/stale.pyc")
 
 
 def _run_scripts(kernel) -> None:
@@ -86,8 +89,18 @@ def test_terminal_share_lists_what_it_left_out_and_publishes_the_rest(tmp_path, 
     kernel = Kernel(tmp_path)
     _run_scripts(kernel)
     assert _share(kernel, "--yes") == 0
-    assert _LEFT_OUT in capsys.readouterr().out
+    assert _TERMINAL_LEFT_OUT in capsys.readouterr().out
     assert set(_uploaded_paths(kernel)) == _expected_upload(kernel)
+
+
+def test_terminal_inventory_lists_every_path_left_out_however_long():
+    """An exact review never truncates what it left out."""
+    omitted = [f"scripts/generated-{number:03d}/__pycache__/" for number in range(300)]
+    rendered = render_inventory({"files": [], "omitted_paths": omitted})
+    assert len(rendered) > 4096
+    lines = rendered.splitlines()
+    assert lines[1] == "Left out (Hermes doesn't load these) (300):"
+    assert lines[2:] == [f"  - {path}" for path in omitted]
 
 
 def test_new_generated_output_after_review_requires_a_fresh_review(tmp_path):

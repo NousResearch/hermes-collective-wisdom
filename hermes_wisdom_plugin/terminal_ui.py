@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
-from .package import MAX_TREE_BYTES, PackagePolicyError, left_out_line
+from .package import LEFT_OUT_LABEL, MAX_TREE_BYTES, PackagePolicyError
 
 _SAFE_FINDING_FIELDS = (
     "severity", "category", "pattern_id", "file", "line", "description"
@@ -175,9 +175,12 @@ def render_inventory(value: object) -> str:
             facts.append(f"{size} bytes")
         suffix = " — " + ", ".join(facts) if facts else ""
         lines.append(f"  {number}. {path}{mode}{suffix}")
-    left_out = left_out_line(data)
-    if left_out:
-        lines.append(text(left_out, limit=4096))
+    omitted = data.get("omitted_paths")
+    if isinstance(omitted, list) and omitted:
+        # Every path, one per line like the files above: an exact review never
+        # truncates what it left out.
+        lines.append(f"{LEFT_OUT_LABEL} ({len(omitted)}):")
+        lines.extend(f"  - {text(path)}" for path in omitted)
     return "\n".join(lines)
 
 
