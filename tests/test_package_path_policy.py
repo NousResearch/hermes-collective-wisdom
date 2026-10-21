@@ -1,4 +1,4 @@
-"""Package path policy: transport hazards everywhere, platform rules only where declared."""
+"""Package path policy: Gateway's path rules on every package; generated trees left out."""
 
 import json
 import os
@@ -66,23 +66,19 @@ def _download(paths: list[str], platforms: list[str] | None = None):
 
 
 INERT = {
-    "assets/hooks/run": b"#!/bin/sh\necho inert\n",
-    "refs/.hooks/pre-commit": b"inert hook text\n",
-    "refs/.gitlab/ci.yml": b"stages: [docs]\n",
-    "refs/.circleci/config.yml": b"version: 2\n",
-    "refs/bad?name.txt": b"question mark\n",
-    "refs/trailing.txt.": b"trailing dot\n",
-    "refs/NUL.txt": b"device name elsewhere\n",
-    "refs/Notes.txt": b"upper\n",
-    "refs/notes.txt": b"lower\n",
+    "assets/hook/run": b"#!/bin/sh\necho inert\n",
+    "refs/hooks.md": b"a file named like the folder\n",
+    "refs/.gitlab-ci.yml": b"stages: [docs]\n",
+    "refs/circleci/config.yml": b"version: 2\n",
+    "refs/console.txt": b"not a device name\n",
+    "refs/NULL.txt": b"not a device name either\n",
+    "refs/Notes.txt": b"upper only\n",
 }
 
 
 @pytest.mark.parametrize("platforms", [["linux"], None])
-def test_inert_repository_names_and_linux_paths_share_byte_for_byte(
-    tmp_path: Path, platforms
-):
-    """Names with no meaning to Hermes inside a skill are ordinary content."""
+def test_names_gateway_accepts_share_byte_for_byte(tmp_path: Path, platforms):
+    """Near misses of Gateway's refused names are ordinary content."""
     package = _prepare(_skill(tmp_path, INERT), tmp_path, platforms)
     raw = package_module.read_validated_package_files(package.overlay)
     by_path = {path: body for path, _mode, body in raw}
@@ -133,11 +129,12 @@ def test_case_variants_and_pyo_are_not_left_out_since_hermes_loads_them(tmp_path
     ("scripts/__PYCACHE__/required.py", "__PYCACHE__"),
     ("refs/.Git/notes.md", ".Git"),
     ("Node_Modules/pkg/index.js", "Node_Modules"),
+    ("Hooks/notes.md", "Hooks"),
 ])
 def test_a_case_variant_of_an_install_refused_name_is_refused_not_left_out(
     tmp_path: Path, relative: str, segment: str
 ):
-    """Every installer refuses any spelling; the share says so instead of dropping it."""
+    """Gateway refuses any spelling; the share says so instead of dropping it."""
     if not _case_sensitive(tmp_path):
         pytest.skip("needs a case-sensitive filesystem")
     skill = _skill(tmp_path, {relative: b"real content\n"})
@@ -148,7 +145,7 @@ def test_a_case_variant_of_an_install_refused_name_is_refused_not_left_out(
     assert str(share.value) == (
         f"package path {directory!r} is refused: directory {segment!r} matches {folded!r} "
         f"({package_module.BLOCKED_PATH_SEGMENTS[folded]}) except for letter case; "
-        "Collective Wisdom installs refuse every spelling, and a case-folding filesystem "
+        "Gateway refuses every spelling, and a case-folding filesystem "
         f"treats it as {folded!r}"
     )
     with pytest.raises(PackagePolicyError, match="except for letter case"):
@@ -165,7 +162,7 @@ def test_a_case_variant_regular_file_is_refused_by_name_not_as_a_directory(
     expected = (
         f"package path {relative!r} is refused: file name 'Node_Modules' matches "
         f"'node_modules' ({package_module.BLOCKED_PATH_SEGMENTS['node_modules']}) except "
-        "for letter case; Collective Wisdom installs refuse every spelling, and a "
+        "for letter case; Gateway refuses every spelling, and a "
         "case-folding filesystem treats it as 'node_modules'"
     )
     skill = _skill(tmp_path, {relative: b"a regular file\n"})
@@ -191,9 +188,12 @@ def test_generated_paths_hermes_does_not_load_are_left_out_and_listed(tmp_path: 
     )
 
 
-def test_every_name_an_installer_refuses_is_one_sharing_leaves_out():
-    """A package Hermes builds can never carry a path its installers refuse."""
-    assert set(package_module.BLOCKED_PATH_SEGMENTS) <= package_module.GENERATED_SKILL_DIRS
+def test_gateway_refused_names_are_left_out_only_where_hermes_skips_them():
+    """Hermes-skipped names never reach Gateway; the names Hermes loads are refused."""
+    blocked = set(package_module.BLOCKED_PATH_SEGMENTS)
+    assert blocked - package_module.GENERATED_SKILL_DIRS == {
+        ".circleci", ".gitlab", ".hooks", "hooks",
+    }
 
 
 def test_source_hash_binds_what_was_left_out(tmp_path: Path):
@@ -317,33 +317,32 @@ def test_downloaded_package_with_a_generated_directory_is_refused_by_name(
 @pytest.mark.parametrize(
     "relative,rule",
     [
-        ("refs/bad?name.txt", "cannot be stored on Windows"),
+        ("refs/bad?name.txt", "can't be stored on Windows; Gateway refuses it"),
         ("refs/trailing.txt.", "ends in '.' or space"),
-        ("refs/com1.notes.txt", "reserved Windows device name"),
+        ("refs/com1.notes.txt", "reserved Windows device name 'com1'"),
     ],
 )
-def test_declared_windows_refuses_windows_names_before_writing_an_overlay(
-    tmp_path: Path, relative: str, rule: str
+@pytest.mark.parametrize("platforms", [None, ["linux"], ["windows"]])
+def test_windows_names_are_refused_on_every_package_before_writing_an_overlay(
+    tmp_path: Path, relative: str, rule: str, platforms
 ):
-    """Windows rules apply when the skill declares Windows, naming path and rule."""
+    """Gateway applies Windows rules whatever the skill declares, so sharing does too."""
     skill = _skill(tmp_path, {relative: b"x"})
     with pytest.raises(PackagePolicyError) as share:
-        _prepare(skill, tmp_path, ["windows"])
+        _prepare(skill, tmp_path, platforms)
     assert repr(relative) in str(share.value) and rule in str(share.value)
     assert not (tmp_path / "overlays").exists()
-    with pytest.raises(PackagePolicyError, match=rule):
-        _download([relative], ["Windows"])
+    with pytest.raises(PackagePolicyError, match=re.escape(rule)):
+        _download([relative], platforms)
 
 
-@pytest.mark.parametrize("platforms", [["windows"], ["macos"], ["linux", "macos"]])
-def test_case_fold_collisions_are_refused_only_for_case_folding_platforms(
-    tmp_path: Path, platforms
-):
-    """A declared case-folding platform cannot hold Notes.txt and notes.txt."""
+@pytest.mark.parametrize("platforms", [None, ["linux"], ["windows"], ["macos"]])
+def test_case_fold_collisions_are_refused_on_every_package(tmp_path: Path, platforms):
+    """Gateway cannot hold Notes.txt and notes.txt in one package, declared or not."""
     files = {"refs/Notes.txt": b"one", "refs/notes.txt": b"two"}
-    with pytest.raises(PackagePolicyError, match="only by letter case"):
+    with pytest.raises(PackagePolicyError, match="only by letter case; Gateway refuses"):
         _prepare(_skill(tmp_path, files), tmp_path, platforms)
-    with pytest.raises(PackagePolicyError, match="only by letter case"):
+    with pytest.raises(PackagePolicyError, match="only by letter case; Gateway refuses"):
         _download(list(files), platforms)
 
 

@@ -40,14 +40,18 @@ MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_TREE_DEPTH = 16
 MAX_SEGMENT_BYTES = 255
 REQUIRED_ROOT_FILES = frozenset({"SKILL.md", "skill.manifest.json"})
+# Gateway refuses every package path with one of these rules, whatever the
+# skill declares, so sharing refuses them locally first with a reason naming
+# the path. Mirrors gateway-gateway src/sync/packageValidator.ts
+# (``WINDOWS_RESERVED_NAMES``, ``validateSegment``); see
+# tests/test_gateway_package_parity.py for the pinned revision.
 WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
-# Characters a Windows filesystem cannot store. ``:`` is refused on every
-# platform instead, matching Hermes skill installs (``_normalize_bundle_path``
-# in tools/skills_hub_models.py: Windows drive or alternate data stream).
+# Characters a Windows filesystem cannot store. ``:`` has its own reason
+# (Hermes skill installs refuse it too: Windows drive or alternate data stream).
 WINDOWS_INVALID_CHARS = frozenset('<>"|?*')
 PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 # Directory names Hermes does not treat as skill content (``EXCLUDED_SKILL_DIRS``
@@ -56,7 +60,7 @@ PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 # __pycache__ never ship in a bundle", tools/skills_hub_github.py), and lists
 # what it left out. Running a skill's script must not make it unshareable.
 # Names match exactly, as Hermes skill discovery does (case-sensitive), and only
-# for real directories. A case variant of an install-refused name is refused by
+# for real directories. A case variant of a Gateway-refused name is refused by
 # name instead (``_check_blocked_segment``); any other case variant is shared.
 GENERATED_SKILL_DIRS = frozenset((
     ".git", ".github", ".hub", ".archive", ".curator_backups", ".locks",
@@ -68,25 +72,35 @@ GENERATED_SKILL_DIRS = frozenset((
 # never writes one (PEP 488), so it is ordinary content here too.
 GENERATED_FILE_SUFFIXES = (".pyc",)
 LEFT_OUT_LABEL = "Left out (Hermes doesn't load these)"
-# A Hermes-built package never contains these, so a downloaded package that
-# does is refused. This is the set refused before sharing began to leave
-# generated trees out; it stays the install rule so earlier shares still
-# install. Each entry says why.
+# Gateway refuses a package with any of these names, case-folded, in any path
+# segment ("prohibited active package directory": ``BLOCKED_PATH_SEGMENTS`` in
+# gateway-gateway src/sync/packageValidator.ts). Those Hermes also skips
+# (GENERATED_SKILL_DIRS) are left out of a share when they are real
+# directories; every other occurrence, including the names Hermes loads
+# (hooks, .hooks, .gitlab, .circleci) and any case variant, is refused locally
+# by name before upload. Each entry says why.
 BLOCKED_PATH_SEGMENTS = {
+    ".circleci": "CI configuration",
     ".git": "version-control metadata, which can carry hooks and configuration",
     ".github": "repository CI and automation metadata",
+    ".gitlab": "repository CI and automation metadata",
+    ".hooks": "hook scripts",
     ".tox": "a generated test environment",
     ".venv": "a Python virtual environment",
     "__pycache__": "generated Python bytecode",
+    "hooks": "hook scripts",
     "node_modules": "an installed dependency tree",
     "venv": "a Python virtual environment",
 }
-# Default filesystems of these declared platforms fold letter case, so two
-# paths differing only by case would land on one file there.
-CASE_INSENSITIVE_PLATFORMS = ("win", "mac", "darwin", "osx")
 # plugin.yaml ``requires_hermes``: the floor written when a skill declares none.
 PLUGIN_HERMES_FLOOR = "0.21.5"
-_COMPILED_EXECUTABLE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe")
+# Gateway ``COMPILED_EXECUTABLE_MAGIC``: ELF, PE, Mach-O (thin and universal,
+# both byte orders; CAFEBABE also covers Java classes) and WebAssembly.
+_COMPILED_EXECUTABLE_MAGIC = (
+    b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
+    b"\x00asm",
+)
 
 
 class PackagePolicyError(ValueError):
@@ -348,8 +362,12 @@ def _refuse(source: str, path: str, rule: str) -> SkillRefusal:
     return SkillRefusal(f"{source} path {path!r} is refused: {rule}")
 
 
-def _check_transport_segment(segment: str, *, path: str, source: str) -> None:
-    """Rules that hold on every platform: transport and containment hazards."""
+def _check_segment(segment: str, *, path: str, source: str) -> None:
+    """Gateway's per-segment rules, on every package whatever it declares.
+
+    Mirrors ``validateSegment`` in gateway-gateway src/sync/packageValidator.ts
+    (blocked names are ``_check_blocked_segment``), each with its own reason.
+    """
 
     control = next(
         (char for char in segment if ord(char) < 0x20 or ord(char) == 0x7F), None
@@ -363,51 +381,83 @@ def _check_transport_segment(segment: str, *, path: str, source: str) -> None:
         )
     if len(segment.encode("utf-8")) > MAX_SEGMENT_BYTES:
         raise _refuse(source, path, f"a path segment exceeds {MAX_SEGMENT_BYTES} bytes")
+    invalid = next((char for char in segment if char in WINDOWS_INVALID_CHARS), None)
+    if invalid is not None:
+        raise _refuse(
+            source, path,
+            f"{invalid!r} can't be stored on Windows; Gateway refuses it in every package",
+        )
+    if segment.endswith((".", " ")):
+        raise _refuse(
+            source, path,
+            "a name ends in '.' or space, which Windows strips; Gateway refuses it "
+            "in every package",
+        )
+    device = segment.casefold().split(".", 1)[0]
+    if device in WINDOWS_RESERVED_NAMES:
+        raise _refuse(
+            source, path,
+            f"{segment!r} is the reserved Windows device name {device!r}; Gateway "
+            "refuses it in every package",
+        )
 
 
 def _check_blocked_segment(
     segment: str, *, path: str, source: str, kind: str,
 ) -> None:
-    """Names a Hermes-built package never carries, so installs refuse them.
+    """Names Gateway refuses in any segment and spelling ("active package directory").
 
     ``kind`` is the real entry type of this segment: "directory" or "file".
+    A real directory Hermes skips is left out of a share before this runs.
     """
 
-    reason = BLOCKED_PATH_SEGMENTS.get(segment.casefold())
+    folded = segment.casefold()
+    reason = BLOCKED_PATH_SEGMENTS.get(folded)
+    if reason is None:
+        return
     # The reasons describe directories, so a file only carries the name.
     entry = f"directory {segment!r}" if kind == "directory" else f"file name {segment!r}"
-    if reason is not None and segment != segment.casefold():
-        # Hermes itself matches these names exactly, but every Wisdom install
-        # refuses any spelling, and a case-folding filesystem would treat this
-        # one as the generated directory itself. Refuse it by name; never
-        # leave it out silently.
+    if segment != folded:
+        # Hermes itself matches these names exactly, but Gateway refuses any
+        # spelling, and a case-folding filesystem would treat this one as the
+        # name itself. Refuse it by name; never leave it out silently.
         raise _refuse(
             source, path,
-            f"{entry} matches {segment.casefold()!r} ({reason}) except "
-            "for letter case; Collective Wisdom installs refuse every spelling, and a "
-            f"case-folding filesystem treats it as {segment.casefold()!r}",
+            f"{entry} matches {folded!r} ({reason}) except for letter case; Gateway "
+            f"refuses every spelling, and a case-folding filesystem treats it as {folded!r}",
         )
-    if reason is not None:
-        is_reason = reason if kind == "directory" else "reserved for " + reason
+    if folded not in GENERATED_SKILL_DIRS:
+        # Hermes loads this name as skill content, but Gateway never accepts it.
+        noun = "folders" if kind == "directory" else "files"
         raise _refuse(
             source, path,
-            f"{entry} is {is_reason}; Hermes does not treat it as skill "
-            "content, so it would not reach the agents that install this skill",
+            f"{noun} named {segment!r} can't be shared; Gateway treats them as active "
+            f"package directories ({reason}). Rename it",
         )
+    is_reason = reason if kind == "directory" else "reserved for " + reason
+    raise _refuse(
+        source, path,
+        f"{entry} is {is_reason}; Hermes does not treat it as skill "
+        "content, so it would not reach the agents that install this skill",
+    )
 
 
 def _validate_package_path(
     raw_path: str, *, source: str, blocked: bool = True
 ) -> tuple[PurePosixPath, str]:
-    """Check one package path against the rules that hold on every platform.
+    """Check one package path against Gateway's path rules.
 
     Returns the parsed path and its exact key for duplicate detection.
-    Windows names and case-fold collisions are target-specific: see
-    ``check_declared_platform_paths``. ``blocked=False`` leaves the blocked
-    name rule to a caller that must first check the entry's type.
+    Case-fold collisions span paths: see ``check_case_fold_collisions``.
+    ``blocked=False`` leaves the blocked name rule to a caller that must first
+    check the entry's type.
     """
     if not raw_path:
         raise _refuse(source, raw_path, "empty path")
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in raw_path):
+        # The filesystem name holds bytes that are not UTF-8 (Python keeps
+        # them as lone surrogates); Gateway refuses a lone surrogate.
+        raise _refuse(source, raw_path, "the name is not valid UTF-8")
     if "\\" in raw_path:
         raise _refuse(source, raw_path, "backslash separator ('/' is the only separator)")
     if unicodedata.normalize("NFC", raw_path) != raw_path:
@@ -422,7 +472,7 @@ def _validate_package_path(
     if pure.is_absolute() or not pure.parts:
         raise _refuse(source, raw_path, "absolute path")
     for index, part in enumerate(pure.parts):
-        _check_transport_segment(part, path=raw_path, source=source)
+        _check_segment(part, path=raw_path, source=source)
         if blocked:
             # Every caller passes a file path: only its last segment is a file.
             _check_blocked_segment(
@@ -434,58 +484,23 @@ def _validate_package_path(
     return pure, raw_path
 
 
-def _declared_platforms(manifest_body: bytes | None) -> list[str]:
-    """Platforms a package manifest declares, folded; [] when none or unreadable."""
+def check_case_fold_collisions(paths: list[str], *, source: str) -> None:
+    """Refuse two file paths that differ only by letter case, as Gateway does.
 
-    try:
-        requirements = json.loads(manifest_body or b"").get("requirements") or {}
-        platforms = requirements.get("platforms") or []
-    except (AttributeError, TypeError, ValueError):
-        return []
-    return [item.casefold() for item in platforms if isinstance(item, str)]
-
-
-def check_declared_platform_paths(
-    paths: list[str], manifest_body: bytes | None, *, source: str
-) -> None:
-    """Apply Windows and case-insensitive rules only to platforms the skill declares.
-
-    Hermes treats a skill without ``platforms:`` as portable and its skill
-    installs apply no Windows name or case rules, so neither does Wisdom. On a
-    case-folding filesystem the installer still refuses a collision exactly
-    (``stage_package``).
+    Gateway keys every file path by its case-folded segments
+    (``wisdomInstallTargetCaseFold``, aligned with ``str.casefold``) whatever
+    the skill declares. On a case-folding filesystem the installer also names
+    a collision exactly (``stage_package``).
     """
-    platforms = _declared_platforms(manifest_body)
-    windows = any(item.startswith("win") for item in platforms)
-    folds_case = any(item.startswith(CASE_INSENSITIVE_PLATFORMS) for item in platforms)
     seen: dict[str, str] = {}
     for path in paths:
-        if windows:
-            for segment in path.split("/"):
-                invalid = next((c for c in segment if c in WINDOWS_INVALID_CHARS), None)
-                if invalid is not None:
-                    raise _refuse(
-                        source, path, f"{invalid!r} cannot be stored on Windows, "
-                        "which this skill declares",
-                    )
-                if segment.endswith((".", " ")):
-                    raise _refuse(
-                        source, path, "a segment ends in '.' or space, which Windows "
-                        "strips; this skill declares Windows",
-                    )
-                if segment.casefold().split(".", 1)[0] in WINDOWS_RESERVED_NAMES:
-                    raise _refuse(
-                        source, path, f"{segment!r} is a reserved Windows device name; "
-                        "this skill declares Windows",
-                    )
-        if folds_case:
-            key = path.casefold()
-            if key in seen:
-                raise _refuse(
-                    source, path, f"differs from {seen[key]!r} only by letter case, "
-                    "and a declared platform's filesystem folds case",
-                )
-            seen[key] = path
+        key = path.casefold()
+        if key in seen:
+            raise _refuse(
+                source, path, f"differs from {seen[key]!r} only by letter case; Gateway "
+                "refuses two paths that would be one file on a case-folding filesystem",
+            )
+        seen[key] = path
 
 
 def _validate_allowed_file(pure: PurePosixPath, *, path: str) -> None:
@@ -558,12 +573,13 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
             for item in iterator:
                 path = Path(item.path)
                 rel = path.relative_to(root).as_posix()
+                # Validate first: a name that is not UTF-8 cannot be measured.
+                pure, _key = _validate_package_path(rel, source="package", blocked=False)
                 metadata_total += len(rel.encode("utf-8")) + 128
                 if metadata_total > MAX_METADATA_BYTES:
                     raise SkillRefusal(
                         f"package path metadata exceeds {MAX_METADATA_BYTES} bytes"
                     )
-                pure, _key = _validate_package_path(rel, source="package", blocked=False)
                 try:
                     metadata = item.stat(follow_symlinks=False)
                 except OSError as exc:
@@ -612,11 +628,7 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                     skill_body = body
                 entries.append(_SnapshotEntry(path, rel, mode, body))
     entries.sort(key=lambda entry: entry.relative)
-    check_declared_platform_paths(
-        [entry.relative for entry in entries],
-        next((e.body for e in entries if e.relative == "skill.manifest.json"), None),
-        source="package",
-    )
+    check_case_fold_collisions([entry.relative for entry in entries], source="package")
     if skill_body is None:
         raise SkillRefusal("package requires exactly one root SKILL.md")
     if require_manifest and not any(
@@ -767,12 +779,8 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-    # Refuse paths the declared platforms cannot hold before writing an overlay.
-    check_declared_platform_paths(
-        [entry.relative for entry in source_snapshot],
-        authored_manifest or generated_manifest,
-        source="package",
-    )
+    # Every Gateway path rule, including case-fold collisions, already ran on
+    # the source snapshot, so no refused path reaches an overlay.
     # Invalid setup guidance is refused here, naming the field, rather than
     # breaking every later install review.
     for entry in source_snapshot:
@@ -885,11 +893,7 @@ def verify_content_files(
         require_manifest and "skill.manifest.json" not in required
     ):
         raise PackagePolicyError("download is not a complete Wisdom package")
-    check_declared_platform_paths(
-        [record.path for record in records],
-        next((body for path, _, body in files if path == "skill.manifest.json"), None),
-        source="package",
-    )
+    check_case_fold_collisions([record.path for record in records], source="package")
     skill_body = next(body for path, _, body in files if path == "SKILL.md")
     try:
         skill_body.decode("utf-8")

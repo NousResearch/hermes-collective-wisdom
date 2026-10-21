@@ -257,9 +257,11 @@ credentials and private keys are refused. Directories Hermes does not treat as s
 spelled exactly as Hermes skill discovery matches them) and Python bytecode files (`.pyc`) are left
 out of the package; the share's details list everything left out. A symlink or special file with
 one of those names is refused like any other, and a differently cased `.git`, `.github`,
-`node_modules`, `.venv`, `venv`, `.tox` or `__pycache__` is refused by name. A downloaded package
-that carries a version-control, virtual-environment, dependency or bytecode directory is refused at
-install. A skill that declares Windows or macOS must also use paths those platforms can store.
+`node_modules`, `.venv`, `venv`, `.tox` or `__pycache__` is refused by name. The Collective Wisdom
+service also refuses folders named `hooks`, `.hooks`, `.gitlab` or `.circleci` in any spelling,
+Windows device names (`CON`, `aux.md`, `com1.txt` and the like), names with `< > : " | ? *` or
+ending in a dot or space, and two paths that differ only by letter case, so sharing refuses those
+first and names the file. A downloaded package that breaks these rules is refused at install.
 Scripts in a package are never run during sharing, review or install.
 
 ## Privacy and data use
