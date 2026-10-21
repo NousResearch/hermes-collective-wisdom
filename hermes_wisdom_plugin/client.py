@@ -913,7 +913,9 @@ class WisdomClient:
         try:
             _, derived = verify_content_files(decoded)
         except PackagePolicyError as exc:
-            raise WisdomValidationError("version content failed package validation") from exc
+            raise WisdomValidationError(
+                f"version content failed package validation: {exc}"
+            ) from exc
         if derived != response.content_hash:
             raise WisdomValidationError(
                 "version content hash failed integrity validation"

@@ -50,10 +50,25 @@ WINDOWS_RESERVED_NAMES = frozenset(
 # in tools/skills_hub_models.py: Windows drive or alternate data stream).
 WINDOWS_INVALID_CHARS = frozenset('<>"|?*')
 PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
-# Directory names Hermes does not treat as skill content
-# (``EXCLUDED_SKILL_DIRS`` in agent/skill_utils.py): skill discovery skips
-# them and remote sandboxes never receive them, so a package carrying one
-# would publish files no installer's agent can see. Each entry says why.
+# Directory names Hermes does not treat as skill content (``EXCLUDED_SKILL_DIRS``
+# in agent/skill_utils.py): skill discovery prunes them. Sharing leaves them
+# out of the package, like the Hermes skills hub ("Dotfiles, bytecode and
+# __pycache__ never ship in a bundle", tools/skills_hub_github.py), and lists
+# what it left out. Running a skill's script must not make it unshareable.
+# Names match case-insensitively, as the install refusal below does, so a
+# package Hermes builds never carries a name an installer refuses.
+GENERATED_SKILL_DIRS = frozenset((
+    ".git", ".github", ".hub", ".archive", ".curator_backups", ".locks",
+    ".venv", "venv", "node_modules", "site-packages", "__pycache__",
+    ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+))
+# Python bytecode files: generated, never skill content.
+GENERATED_FILE_SUFFIXES = (".pyc", ".pyo")
+LEFT_OUT_LABEL = "Left out (Hermes doesn't load these)"
+# A Hermes-built package never contains these, so a downloaded package that
+# does is refused. This is the set refused before sharing began to leave
+# generated trees out; it stays the install rule so earlier shares still
+# install. Each entry says why.
 BLOCKED_PATH_SEGMENTS = {
     ".git": "version-control metadata, which can carry hooks and configuration",
     ".github": "repository CI and automation metadata",
@@ -146,6 +161,16 @@ class PreparedPackage:  # pylint: disable=too-many-instance-attributes
     files: list[ContentFile]
     objects: ObjectSet
     commit: str
+    # Generated source paths left out of the package (directories end in '/').
+    omitted_paths: tuple[str, ...] = ()
+
+
+def left_out_line(value: object) -> str | None:
+    """The one display line naming generated paths a share left out, if any."""
+    paths = value.get("omitted_paths") if isinstance(value, dict) else None
+    if not isinstance(paths, list) or not paths:
+        return None
+    return LEFT_OUT_LABEL + ": " + ", ".join(str(path) for path in paths)
 
 
 def _declared_strings(value: object) -> list[str]:
@@ -452,9 +477,14 @@ class _SnapshotEntry:
 
 
 def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
-    root: Path, *, require_manifest: bool
+    root: Path, *, require_manifest: bool, omitted: list[str] | None = None
 ) -> list[_SnapshotEntry]:
-    """Admit metadata and payload before sorting or further processing."""
+    """Admit metadata and payload before sorting or further processing.
+
+    A package walk (``omitted is None``) refuses generated paths. A source walk
+    leaves generated directories (not descended) and regular bytecode files out
+    and appends each one's path to ``omitted``; every other rule still holds.
+    """
 
     try:
         root_metadata = root.lstat()
@@ -481,16 +511,24 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
             for item in iterator:
                 path = Path(item.path)
                 rel = path.relative_to(root).as_posix()
-                pure, _key = _validate_package_path(rel, source="package")
                 metadata_total += len(rel.encode("utf-8")) + 128
                 if metadata_total > MAX_METADATA_BYTES:
                     raise PackagePolicyError(
                         f"package path metadata exceeds {MAX_METADATA_BYTES} bytes"
                     )
+                if omitted is not None and item.name.casefold() in GENERATED_SKILL_DIRS:
+                    # Pruned by name, like Hermes skill discovery; never followed.
+                    omitted.append(rel + "/" if item.is_dir(follow_symlinks=False) else rel)
+                    continue
+                pure, _key = _validate_package_path(rel, source="package")
                 try:
                     metadata = item.stat(follow_symlinks=False)
                 except OSError as exc:
                     raise PackagePolicyError("package tree changed while reading") from exc
+                if (omitted is not None and stat.S_ISREG(metadata.st_mode)
+                        and item.name.casefold().endswith(GENERATED_FILE_SUFFIXES)):
+                    omitted.append(rel)
+                    continue
                 if stat.S_ISLNK(metadata.st_mode):
                     raise PackagePolicyError(f"symlinks are not supported: {rel}")
                 if stat.S_ISDIR(metadata.st_mode):
@@ -584,28 +622,39 @@ def _read_regular_file(
         os.close(descriptor)
 
 
+def _source_snapshot(source: Path) -> tuple[list[_SnapshotEntry], tuple[str, ...]]:
+    """Source files to share and the generated paths left out, both sorted."""
+    omitted: list[str] = []
+    entries = _bounded_snapshot(source, require_manifest=False, omitted=omitted)
+    return entries, tuple(sorted(omitted))
+
+
+def _source_hash(entries: list[_SnapshotEntry], omitted: tuple[str, ...]) -> str:
+    """Bind the shared bytes and the list of what was left out.
+
+    The hash is unchanged when nothing is left out. No admitted path holds a
+    NUL or newline, so the omission section cannot read as a file record.
+    """
+    records = "".join(
+        f"{entry.relative} {entry.mode} {sha256_address(entry.body)}\n" for entry in entries
+    )
+    if omitted:
+        records += "\0omitted\n" + "".join(f"{path}\n" for path in omitted)
+    return sha256_address(records.encode("utf-8"))
+
+
 def source_fingerprint(source: Path) -> str:
     """Hash the exact regular source files while rejecting unsafe entries."""
 
     if source.is_symlink() or not source.is_dir():
         raise PackagePolicyError("skill root must be a regular directory")
-    records = [
-        f"{entry.relative} {entry.mode} {sha256_address(entry.body)}\n"
-        for entry in _bounded_snapshot(source, require_manifest=False)
-    ]
-    return sha256_address("".join(records).encode("utf-8"))
+    return _source_hash(*_source_snapshot(source))
 
 
 def read_validated_source_files(source: Path) -> list[tuple[str, str, bytes]]:
-    """Read every source byte for local preflight without requiring a manifest."""
-    first = [
-        (e.relative, e.mode, e.body)
-        for e in _bounded_snapshot(source, require_manifest=False)
-    ]
-    second = [
-        (e.relative, e.mode, e.body)
-        for e in _bounded_snapshot(source, require_manifest=False)
-    ]
+    """Read every shared source byte for local preflight without requiring a manifest."""
+    first = [(e.relative, e.mode, e.body) for e in _source_snapshot(source)[0]]
+    second = [(e.relative, e.mode, e.body) for e in _source_snapshot(source)[0]]
     if first != second:
         raise PackagePolicyError("source changed during local preflight")
     return first
@@ -641,11 +690,8 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     if source.is_symlink():
         raise PackagePolicyError("skill root must be a regular directory")
     source = source.resolve()
-    source_snapshot = _bounded_snapshot(source, require_manifest=False)
-    source_hash = sha256_address("".join(
-        f"{entry.relative} {entry.mode} {sha256_address(entry.body)}\n"
-        for entry in source_snapshot
-    ).encode("utf-8"))
+    source_snapshot, omitted_paths = _source_snapshot(source)
+    source_hash = _source_hash(source_snapshot, omitted_paths)
     target = overlay_root / source_hash.removeprefix("sha256:")
     if target.exists():
         raise PackagePolicyError("prepared overlay already exists; review the existing draft")
@@ -680,7 +726,8 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
                 raise PackagePolicyError(str(exc)) from exc
     target.mkdir(parents=True, mode=0o700)
     # Copy only validated allowlisted bytes. Validation happens first so an
-    # unsupported referenced file never disappears silently from the package.
+    # unsupported referenced file never disappears silently from the package;
+    # generated paths left out are named in ``omitted_paths``.
     for entry in source_snapshot:
         dest = target.joinpath(*PurePosixPath(entry.relative).parts)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -737,6 +784,7 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
         files=files,
         objects=objects,
         commit=commit,
+        omitted_paths=omitted_paths,
     )
 
 

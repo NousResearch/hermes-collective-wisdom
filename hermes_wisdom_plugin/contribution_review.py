@@ -387,6 +387,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                if copy_problem else {}),
             **shown_copy_provenance(draft, editorial),
             "files": files,
+            "omitted_paths": [str(path) for path in draft.get("omitted_paths") or []],
             "hashes": {
                 "content": str(draft["content_hash"]),
                 "author_description": str(draft["description_hash"]),
@@ -887,6 +888,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "content_hash": package.content_hash,
                 "description_hash": package.description_hash,
                 "manifest_hash": package.manifest_hash,
+                # Bound by source_hash, which covers the same list.
+                "omitted_paths": list(package.omitted_paths),
                 "editorial_complete_hash": (
                     package.content_hash if editorial_copy_complete(package.overlay, skill_name)
                     else None

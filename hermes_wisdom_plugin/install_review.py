@@ -461,6 +461,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         files = list(raw_files)
         try:
             records, content_hash = verify_content_files(files)
+        except PackagePolicyError as exc:
+            # The policy names the refused path and rule; say exactly that.
+            raise WisdomValidationError(f"Gateway returned invalid package content: {exc}") from exc
         except (TypeError, ValueError) as exc:
             raise WisdomValidationError("Gateway returned invalid package content") from exc
         response_hash = getattr(content, "content_hash", None)

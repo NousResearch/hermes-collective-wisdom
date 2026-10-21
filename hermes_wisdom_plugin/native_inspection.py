@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .professionalism import CHECK_LABELS
 from .local_security import safe_scan_findings
+from .package import left_out_line
 from .release_scope import active as release_scope
 
 SECURITY_LABELS = {
@@ -233,6 +234,7 @@ def _copy_origin_lines(plan):
 
 def _sharing_lines(plan):
     benefit = plan.get('coworker_benefit')
+    left_out = left_out_line(plan)
     lines = [
         "ℹ️ Skill name: " + _readable(plan.get('editorial_name') or plan.get('slug')
                                       or 'Name unavailable'),
@@ -242,6 +244,7 @@ def _sharing_lines(plan):
           if benefit or release_scope().model_editorial else []),
         f"ℹ️ Publication name: {_readable(plan.get('slug') or 'Unavailable')}",
         *_copy_origin_lines(plan),
+        *([f"ℹ️ {_readable(left_out)}"] if left_out else []),
         "ℹ️ Nothing has been uploaded or shared by viewing these details.",
     ]
     lines.extend(_human_check_rows(plan))

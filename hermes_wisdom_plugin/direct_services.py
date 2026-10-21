@@ -1486,7 +1486,7 @@ class PublicationService:  # pylint: disable=too-many-public-methods
             "review": {
                 key: copy.deepcopy(prepared.get(key)) for key in (
                     "security_check", "professionalism_check", "source_hash",
-                    "description", "system_specification", "local_scan",
+                    "description", "system_specification", "local_scan", "omitted_paths",
                 )
             },
         }

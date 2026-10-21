@@ -1,0 +1,102 @@
+"""Sharing a skill whose scripts were run: generated trees are left out and listed."""
+# pylint: disable=missing-function-docstring
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+from restoration_support import SlackHarness, TelegramHarness
+from test_reshare_pending import Kernel
+from test_share_copy import _share
+
+from hermes_wisdom_plugin.errors import WisdomConflict
+
+_LEFT_OUT = ("Left out (Hermes doesn't load these): node_modules/, "
+             "scripts/__pycache__/, scripts/stale.pyc")
+
+
+def _run_scripts(kernel) -> None:
+    """What running a skill's script and installing its JS dependencies leave behind."""
+    scripts = kernel.source / "scripts"
+    scripts.mkdir(exist_ok=True)
+    (scripts / "fetch.py").write_bytes(b"print('fetch')\n")
+    (scripts / "__pycache__").mkdir()
+    (scripts / "__pycache__" / "fetch.cpython-311.pyc").write_bytes(b"\x00bytecode")
+    (scripts / "stale.pyc").write_bytes(b"\x00bytecode")
+    (kernel.source / "node_modules" / "left-pad").mkdir(parents=True)
+    (kernel.source / "node_modules" / "left-pad" / "index.js").write_bytes(b"module.exports=1\n")
+
+
+def _uploaded_paths(kernel) -> dict[str, bytes]:
+    """Every file path and body in the exact uploaded commit tree."""
+    objects = kernel.client.state.uploaded_objects
+    commit = json.loads(objects[kernel.client.state.drafts["draft-1"].draftCommit][1])
+    found: dict[str, bytes] = {}
+
+    def walk(tree: str, prefix: str) -> None:
+        for entry in json.loads(objects[tree][1])["entries"]:
+            if entry["kind"] == "tree":
+                walk(entry["hash"], prefix + entry["name"] + "/")
+            else:
+                found[prefix + entry["name"]] = objects[entry["hash"]][1]
+
+    walk(commit["tree"], "")
+    return found
+
+
+def _expected_upload(kernel) -> set[str]:
+    return {
+        path.relative_to(kernel.source).as_posix()
+        for path in kernel.source.rglob("*")
+        if path.is_file() and not any(
+            part in {"__pycache__", "node_modules"} for part in path.parts
+        ) and path.suffix != ".pyc"
+    } | {"skill.manifest.json"}
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_native_share_leaves_generated_trees_out_lists_them_and_publishes_the_rest(
+    tmp_path, surface,
+):
+    async def scenario():
+        kernel = Kernel(tmp_path)
+        _run_scripts(kernel)
+        ui = surface(tmp_path, kernel)
+        identity = ui.runtime.begin_suggest(ui.caller, "reviewed-skill")["review_id"]
+        await ui.flush()
+        assert ui.view(identity).title == "📤 Share skill"
+        await ui.click(identity, "details")
+        details = ui.view(identity).to_text()
+        assert _LEFT_OUT in details
+        assert "File: scripts/__pycache__" not in details
+        await ui.click(identity, "back")
+        await ui.click(identity, "confirm")
+        assert ui.record(identity)["state"] == "completed"
+        assert kernel.client.state.calls["publish"] == 1
+        uploaded = _uploaded_paths(kernel)
+        assert set(uploaded) == _expected_upload(kernel)
+        assert uploaded["scripts/fetch.py"] == b"print('fetch')\n"
+        ui.runtime.close()
+    asyncio.run(scenario())
+
+
+def test_terminal_share_lists_what_it_left_out_and_publishes_the_rest(tmp_path, capsys):
+    kernel = Kernel(tmp_path)
+    _run_scripts(kernel)
+    assert _share(kernel, "--yes") == 0
+    assert _LEFT_OUT in capsys.readouterr().out
+    assert set(_uploaded_paths(kernel)) == _expected_upload(kernel)
+
+
+def test_new_generated_output_after_review_requires_a_fresh_review(tmp_path):
+    """The omission list is bound: what the card listed is what was left out."""
+    kernel = Kernel(tmp_path)
+    _run_scripts(kernel)
+    prepared = kernel.suggest("reviewed-skill")
+    review = kernel.publication_review(prepared["draft_id"])
+    (kernel.source / ".pytest_cache").mkdir()
+    with pytest.raises(WisdomConflict, match="changed after review"):
+        kernel.publication_submit(review["receipt"])
+    assert not kernel.client.state.calls["upload"]

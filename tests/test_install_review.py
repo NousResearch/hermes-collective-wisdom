@@ -472,3 +472,18 @@ def test_owner_change_and_redirected_skills_root_fail_closed(tmp_path: Path):
     host.skills_root.symlink_to(outside, target_is_directory=True)
     with pytest.raises(PackagePolicyError, match="staging is unsafe"):
         _reviewer(tmp_path, host=host).plan("skill-1")
+
+
+def test_downloaded_package_with_generated_bytecode_is_refused_exactly(tmp_path: Path):
+    """Sharing leaves __pycache__ out, so a download carrying it is refused, naming it."""
+    client = Client()
+    client.files.append(("scripts/__pycache__/run.cpython-311.pyc", "file", b"\x00"))
+    client.version_value["content_hash"] = _content(client.files).content_hash
+    with pytest.raises(WisdomValidationError) as refused:
+        _reviewer(tmp_path, client=client).plan("skill-1")
+    assert str(refused.value) == (
+        "Gateway returned invalid package content: "
+        "package path 'scripts/__pycache__/run.cpython-311.pyc' is refused: directory "
+        "'__pycache__' is generated Python bytecode; Hermes does not treat it as skill "
+        "content, so it would not reach the agents that install this skill"
+    )

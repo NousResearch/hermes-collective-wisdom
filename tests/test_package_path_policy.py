@@ -1,6 +1,7 @@
 """Package path policy: transport hazards everywhere, platform rules only where declared."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,79 @@ def test_inert_repository_names_and_linux_paths_share_byte_for_byte(
     _download(list(INERT), platforms)
 
 
+GENERATED = {
+    "refs/.git/config": "refs/.git/",
+    "refs/.github/workflows/note.md": "refs/.github/",
+    "node_modules/left-pad/index.js": "node_modules/",
+    "scripts/.venv/pyvenv.cfg": "scripts/.venv/",
+    "venv/bin/activate": "venv/",
+    "scripts/__pycache__/x.cpython-311.pyc": "scripts/__pycache__/",
+    ".tox/py311/log.txt": ".tox/",
+    "lib/site-packages/pkg/__init__.py": "lib/site-packages/",
+    ".pytest_cache/v/cache/nodeids": ".pytest_cache/",
+    "scripts/helper.pyc": "scripts/helper.pyc",
+    "scripts/legacy.pyo": "scripts/legacy.pyo",
+}
+
+
+def test_generated_paths_hermes_does_not_load_are_left_out_and_listed(tmp_path: Path):
+    """Share skips what Hermes skill discovery skips, and names every path it left out."""
+    files = {**dict.fromkeys(GENERATED, b"generated\n"), "scripts/run.py": b"print(1)\n"}
+    package = _prepare(_skill(tmp_path, files), tmp_path)
+    assert package.omitted_paths == tuple(sorted(set(GENERATED.values())))
+    shared = {path for path, _mode, _body in
+              package_module.read_validated_package_files(package.overlay)}
+    assert shared == {"SKILL.md", "skill.manifest.json", "scripts/run.py"}
+    assert {item.path for item in package.files} == shared
+    assert package_module.left_out_line({"omitted_paths": list(package.omitted_paths)}) == (
+        "Left out (Hermes doesn't load these): " + ", ".join(package.omitted_paths)
+    )
+
+
+def test_every_name_an_installer_refuses_is_one_sharing_leaves_out():
+    """A package Hermes builds can never carry a path its installers refuse."""
+    assert set(package_module.BLOCKED_PATH_SEGMENTS) <= package_module.GENERATED_SKILL_DIRS
+
+
+def test_source_hash_binds_what_was_left_out(tmp_path: Path):
+    """Unchanged with nothing left out; a new generated path changes it."""
+    skill = _skill(tmp_path, {"scripts/run.py": b"print(1)\n"})
+    plain = package_module.source_fingerprint(skill)
+    records = "".join(
+        f"{path} file {package_module.sha256_address(body)}\n"
+        for path, body in sorted({
+            "SKILL.md": (skill / "SKILL.md").read_bytes(), "scripts/run.py": b"print(1)\n",
+        }.items())
+    )
+    assert plain == package_module.sha256_address(records.encode("utf-8"))
+    (skill / "scripts" / "__pycache__").mkdir()
+    (skill / "scripts" / "__pycache__" / "run.cpython-311.pyc").write_bytes(b"\x00")
+    assert package_module.source_fingerprint(skill) != plain
+    assert _prepare(skill, tmp_path).omitted_paths == ("scripts/__pycache__/",)
+
+
+@pytest.mark.parametrize("name", ["link.pyc", "evil\x01.pyc"])
+def test_real_hazards_named_like_bytecode_stay_refused(tmp_path: Path, name: str):
+    """Only regular, valid bytecode files are left out; symlinks and bad names refuse."""
+    skill = _skill(tmp_path, {})
+    if name == "link.pyc":
+        (skill / name).symlink_to(skill / "SKILL.md")
+        rule = "symlinks are not supported: link.pyc"
+    else:
+        (skill / name).write_bytes(b"x")
+        rule = "control character U+0001"
+    with pytest.raises(PackagePolicyError, match=re.escape(rule)):
+        _prepare(skill, tmp_path)
+
+
+def test_symlink_inside_a_shared_directory_stays_refused(tmp_path: Path):
+    """Leaving generated paths out never relaxes the symlink refusal."""
+    skill = _skill(tmp_path, {"scripts/run.py": b"print(1)\n"})
+    (skill / "scripts" / "link").symlink_to(skill / "SKILL.md")
+    with pytest.raises(PackagePolicyError, match="symlinks are not supported: scripts/link"):
+        _prepare(skill, tmp_path)
+
+
 @pytest.mark.parametrize(
     "relative,directory,reason",
     [
@@ -102,21 +176,18 @@ def test_inert_repository_names_and_linux_paths_share_byte_for_byte(
         (".tox/py311/log.txt", ".tox", "generated test environment"),
     ],
 )
-def test_directories_hermes_excludes_from_skills_are_refused_by_name(
-    tmp_path: Path, relative: str, directory: str, reason: str
+def test_downloaded_package_with_a_generated_directory_is_refused_by_name(
+    relative: str, directory: str, reason: str
 ):
-    """Each refusal names the path, the directory and why Hermes skips it."""
-    skill = _skill(tmp_path, {relative: b"content\n"})
-    with pytest.raises(PackagePolicyError) as share:
-        _prepare(skill, tmp_path)
-    message = str(share.value)
-    # The tree walk meets the directory itself first and names it.
-    walked = relative[: relative.index(directory) + len(directory)]
-    assert repr(walked) in message and repr(directory) in message and reason in message
-    assert "not treat it as skill content" in message
+    """A Hermes-built package never has one, so a download that does is refused exactly."""
     with pytest.raises(PackagePolicyError) as download:
         _download([relative])
-    assert repr(relative) in str(download.value) and reason in str(download.value)
+    assert str(download.value) == (
+        f"package path {relative!r} is refused: directory {directory!r} is "
+        f"{package_module.BLOCKED_PATH_SEGMENTS[directory]}; Hermes does not treat it as "
+        "skill content, so it would not reach the agents that install this skill"
+    )
+    assert reason in str(download.value)
 
 
 @pytest.mark.parametrize(

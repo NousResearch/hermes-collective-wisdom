@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
-from .package import MAX_TREE_BYTES, PackagePolicyError
+from .package import MAX_TREE_BYTES, PackagePolicyError, left_out_line
 
 _SAFE_FINDING_FIELDS = (
     "severity", "category", "pattern_id", "file", "line", "description"
@@ -175,6 +175,9 @@ def render_inventory(value: object) -> str:
             facts.append(f"{size} bytes")
         suffix = " — " + ", ".join(facts) if facts else ""
         lines.append(f"  {number}. {path}{mode}{suffix}")
+    left_out = left_out_line(data)
+    if left_out:
+        lines.append(text(left_out, limit=4096))
     return "\n".join(lines)
 
 
