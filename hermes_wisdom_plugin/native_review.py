@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import secrets
 import time
@@ -23,7 +24,7 @@ from .errors import (
     WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
 )
 from .native_context import NativeInvocation
-from .native_inspection import finding_pages, inspection_pages, sharing_checks
+from .native_inspection import finding_pages, inspection_pages, sharing_checks, text_pages
 from .package import PackagePolicyError, SkillRefusal
 from .portal_urls import safe_portal_url
 from .release_scope import active as release_scope
@@ -911,7 +912,7 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
     description = plan.get("editorial_description") or plan.get("author_description") or plan.get("description")
     files = plan.get("files")
     setup_commands = plan.get("setup_commands")
-    return NativeView(
+    view = NativeView(
         "A shared skill in your organization is available",
         title,
         [NativeItem("What it does", _safe(description, "Description unavailable")),
@@ -940,32 +941,69 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
             NativeAction("Update Skill" if updating else "Install Skill", verb, primary=True),
         ],
     )
+    if _approval_is_lossless(view) or not any(item.title == "Setup" for item in view.items):
+        return view
+    # Installing never runs setup; the setup card shows every command before it can run.
+    count = f"{len(setup_commands)} command" + ("" if len(setup_commands) == 1 else "s")
+    return replace(view, items=[
+        replace(item, detail=f"{count}. You see every command before choosing whether to run "
+                "them.") if item.title == "Setup" else item
+        for item in view.items
+    ])
 
 
-def _setup_permission_view(record: dict[str, Any]) -> NativeView:
-    """File-write consent cannot authorize execution of setup commands."""
-    plan = record["plan"]
+def _setup_commands(plan: dict[str, Any]) -> list[str]:
     commands = plan.get("setup_commands")
     if not isinstance(commands, list) or not commands or not all(
         isinstance(command, str) and command for command in commands
     ):
         raise WisdomValidationError("Reviewed setup commands are unavailable")
+    return commands
+
+
+def _setup_pages(plan: dict[str, Any]) -> tuple[list[str], str]:
+    commands = _setup_commands(plan)
+    return text_pages("\n".join(commands)), _digest("setup", json.dumps(commands))
+
+
+def _setup_permission_view(record: dict[str, Any]) -> NativeView:
+    """File-write consent cannot authorize execution of setup commands.
+
+    Commands too long for one card are paged; Run setup needs every page shown."""
+    plan = record["plan"]
+    commands = _setup_commands(plan)
+    run = NativeAction("Run setup", "setup.run", primary=True)
+    pages, identity = _setup_pages(plan)
+    page = _open_page(record, pages, identity)
+    if page is not None:
+        return _without_unrendered_approval(NativeView(
+            "Setup commands", f"{_skill_name(plan)} · page {page + 1} of {len(pages)}",
+            [NativeItem("Commands Hermes will run on this computer", pages[page], literal=True)],
+            actions=_page_controls(record, pages, identity, run),
+            notice="Reading the commands runs nothing.",
+        ))
     verb = "updated" if record["operation"] == "update" else "installed"
     view = NativeView(
         "Setup needed", f"{_skill_name(plan)}: files {verb}; setup incomplete.",
         [NativeItem("Commands Hermes will run on this computer", "\n".join(commands))],
         notice="This skill requires setup before it can be used. Run the commands shown above? "
         "Not now leaves the files installed but not ready.",
-        actions=[NativeAction("Run setup", "setup.run", primary=True),
-                 NativeAction("Not now", "setup.defer")],
+        actions=[run, NativeAction("Not now", "setup.defer")],
     )
     if _approval_is_lossless(view):
         return view
-    return replace(
-        view, actions=[NativeAction("Not now", "setup.defer")],
-        notice="Setup commands cannot be shown completely here. Use the terminal setup review; "
-        "the files are installed but not ready.",
-    )
+    unlocked = _all_pages_seen(record, pages, identity)
+    count = f"{len(commands)} command" + ("" if len(commands) == 1 else "s")
+    return _without_unrendered_approval(replace(
+        view,
+        items=[NativeItem(f"Commands Hermes will run on this computer, page 1 of {len(pages)}",
+                          pages[0], literal=True)],
+        actions=[*([run] if unlocked else []), NativeAction("Not now", "setup.defer"),
+                 NativeAction("View all commands", f"{_PAGE_ACTION}0", row=1)],
+        notice=f"This skill requires setup before it can be used. View all commands lists all "
+        f"{count}." + ("" if unlocked else " Run setup appears once you reach the last page.")
+        + " Not now leaves the files installed but not ready.",
+    ))
 
 
 def _suggest_terminal_view(plan: dict[str, Any], state: str, result: Any = None) -> NativeView:
@@ -1070,6 +1108,12 @@ def _paged_review(record: dict[str, Any]) -> tuple[list[str], str] | None:
     plan: dict[str, Any] = raw if isinstance(raw, dict) else {}
     if _warning_review(record):
         return _findings_pages(plan)
+    if (record.get("state") == "pending" and record.get("screen") == "setup"
+            and record.get("operation") in {"install", "update"}):
+        try:
+            return _setup_pages(plan)
+        except WisdomValidationError:
+            return None
     return None
 
 

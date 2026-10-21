@@ -149,7 +149,9 @@ away into your profile's skills. If the Hermes skills scanner reports warnings, 
 and waits for your acknowledgement. A skill is blocked only by what its own `SKILL.md` declares
 (`platforms`, or a minimum Hermes version); a recorded CPU architecture is informational and shows as
 a note. Commands a skill declares for setup never run during install;
-review and approve them separately with `hermes wisdom installed-setup`. A skill can declare any
+review and approve them separately with `hermes wisdom installed-setup`. In Slack and Telegram,
+setup commands too long for one card are paged, and Run setup appears once you have seen every
+page. A skill can declare any
 number of setup commands, up to 256 characters each and 5,120 bytes in total; sharing refuses a
 setup document over that limit and names the field and its size.
 
