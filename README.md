@@ -250,12 +250,14 @@ Every share is checked twice before anything is published:
 Packages can contain the skill's `SKILL.md`, supporting files, `references/`, `scripts/`,
 `templates/` and `assets/`, up to 10 MiB in total. Compiled executables, symlinks, hard links,
 credentials and private keys are refused. Directories Hermes does not treat as skill content
-(`.git`, `node_modules`, `.venv`, `venv`, `__pycache__`, `site-packages`, tool caches and the like)
-and Python bytecode files (`.pyc`, `.pyo`) are left out of the package, as Hermes skill discovery
-skips them; the share's details list everything left out. A downloaded package that carries a
-version-control, virtual-environment, dependency or bytecode directory is refused at install. A
-skill that declares Windows or macOS must also use paths those platforms can store. Scripts in a
-package are never run during sharing, review or install.
+(`.git`, `node_modules`, `.venv`, `venv`, `__pycache__`, `site-packages`, tool caches and the like,
+spelled exactly as Hermes skill discovery matches them) and Python bytecode files (`.pyc`) are left
+out of the package; the share's details list everything left out. A symlink or special file with
+one of those names is refused like any other, and a differently cased `.git`, `.github`,
+`node_modules`, `.venv`, `venv`, `.tox` or `__pycache__` is refused by name. A downloaded package
+that carries a version-control, virtual-environment, dependency or bytecode directory is refused at
+install. A skill that declares Windows or macOS must also use paths those platforms can store.
+Scripts in a package are never run during sharing, review or install.
 
 ## Privacy and data use
 

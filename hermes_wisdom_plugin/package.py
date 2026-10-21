@@ -55,15 +55,18 @@ PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 # out of the package, like the Hermes skills hub ("Dotfiles, bytecode and
 # __pycache__ never ship in a bundle", tools/skills_hub_github.py), and lists
 # what it left out. Running a skill's script must not make it unshareable.
-# Names match case-insensitively, as the install refusal below does, so a
-# package Hermes builds never carries a name an installer refuses.
+# Names match exactly, as Hermes skill discovery does (case-sensitive), and only
+# for real directories. A case variant of an install-refused name is refused by
+# name instead (``_check_blocked_segment``); any other case variant is shared.
 GENERATED_SKILL_DIRS = frozenset((
     ".git", ".github", ".hub", ".archive", ".curator_backups", ".locks",
     ".venv", "venv", "node_modules", "site-packages", "__pycache__",
     ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
-# Python bytecode files: generated, never skill content.
-GENERATED_FILE_SUFFIXES = (".pyc", ".pyo")
+# Python bytecode files, matched like the Hermes skills hub
+# (``base.endswith(".pyc")``). ``.pyo`` is ordinary content there, and Python 3
+# never writes one (PEP 488), so it is ordinary content here too.
+GENERATED_FILE_SUFFIXES = (".pyc",)
 LEFT_OUT_LABEL = "Left out (Hermes doesn't load these)"
 # A Hermes-built package never contains these, so a downloaded package that
 # does is refused. This is the set refused before sharing began to leave
@@ -356,6 +359,17 @@ def _check_blocked_segment(segment: str, *, path: str, source: str) -> None:
     """Names a Hermes-built package never carries, so installs refuse them."""
 
     reason = BLOCKED_PATH_SEGMENTS.get(segment.casefold())
+    if reason is not None and segment != segment.casefold():
+        # Hermes itself matches these names exactly, but every Wisdom install
+        # refuses any spelling, and a case-folding filesystem would treat this
+        # one as the generated directory itself. Refuse it by name; never
+        # leave it out silently.
+        raise _refuse(
+            source, path,
+            f"directory {segment!r} matches {segment.casefold()!r} ({reason}) except "
+            "for letter case; Collective Wisdom installs refuse every spelling, and a "
+            f"case-folding filesystem treats it as {segment.casefold()!r}",
+        )
     if reason is not None:
         raise _refuse(
             source, path,
@@ -533,7 +547,7 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                 except OSError as exc:
                     raise PackagePolicyError("package tree changed while reading") from exc
                 if (omitted is not None and stat.S_ISDIR(metadata.st_mode)
-                        and item.name.casefold() in GENERATED_SKILL_DIRS):
+                        and item.name in GENERATED_SKILL_DIRS):
                     # A real directory Hermes prunes by name; never descended.
                     # Anything else with such a name meets the rules below.
                     omitted.append(rel + "/")
@@ -547,7 +561,7 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                 for part in pure.parts:
                     _check_blocked_segment(part, path=rel, source="package")
                 if (omitted is not None and stat.S_ISREG(metadata.st_mode)
-                        and item.name.casefold().endswith(GENERATED_FILE_SUFFIXES)):
+                        and item.name.endswith(GENERATED_FILE_SUFFIXES)):
                     omitted.append(rel)
                     continue
                 if stat.S_ISDIR(metadata.st_mode):

@@ -103,8 +103,56 @@ GENERATED = {
     "lib/site-packages/pkg/__init__.py": "lib/site-packages/",
     ".pytest_cache/v/cache/nodeids": ".pytest_cache/",
     "scripts/helper.pyc": "scripts/helper.pyc",
-    "scripts/legacy.pyo": "scripts/legacy.pyo",
 }
+
+
+def _case_sensitive(root: Path) -> bool:
+    probe = root / "case-probe"
+    probe.write_bytes(b"")
+    return not (root / "CASE-PROBE").exists()
+
+
+def test_case_variants_and_pyo_are_not_left_out_since_hermes_loads_them(tmp_path: Path):
+    """Hermes matches excluded names exactly and skips only .pyc: so does sharing."""
+    if not _case_sensitive(tmp_path):
+        pytest.skip("needs a case-sensitive filesystem")
+    files = {
+        ".Pytest_Cache/notes.md": b"kept\n",
+        "lib/SITE-PACKAGES/pkg.py": b"kept\n",
+        "scripts/helper.PYC": b"kept\n",
+        "scripts/legacy.pyo": b"kept\n",
+    }
+    package = _prepare(_skill(tmp_path, files), tmp_path)
+    assert not package.omitted_paths
+    shared = {path: body for path, _mode, body in
+              package_module.read_validated_package_files(package.overlay)}
+    assert {path: shared[path] for path in files} == files
+
+
+@pytest.mark.parametrize("relative,segment", [
+    ("scripts/__PYCACHE__/required.py", "__PYCACHE__"),
+    ("refs/.Git/notes.md", ".Git"),
+    ("Node_Modules/pkg/index.js", "Node_Modules"),
+])
+def test_a_case_variant_of_an_install_refused_name_is_refused_not_left_out(
+    tmp_path: Path, relative: str, segment: str
+):
+    """Every installer refuses any spelling; the share says so instead of dropping it."""
+    if not _case_sensitive(tmp_path):
+        pytest.skip("needs a case-sensitive filesystem")
+    skill = _skill(tmp_path, {relative: b"real content\n"})
+    with pytest.raises(PackagePolicyError) as share:
+        _prepare(skill, tmp_path)
+    folded = segment.casefold()
+    directory = relative[:relative.index(segment) + len(segment)]
+    assert str(share.value) == (
+        f"package path {directory!r} is refused: directory {segment!r} matches {folded!r} "
+        f"({package_module.BLOCKED_PATH_SEGMENTS[folded]}) except for letter case; "
+        "Collective Wisdom installs refuse every spelling, and a case-folding filesystem "
+        f"treats it as {folded!r}"
+    )
+    with pytest.raises(PackagePolicyError, match="except for letter case"):
+        _download([relative])
 
 
 def test_generated_paths_hermes_does_not_load_are_left_out_and_listed(tmp_path: Path):
