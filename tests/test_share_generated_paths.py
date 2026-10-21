@@ -103,6 +103,33 @@ def test_terminal_inventory_lists_every_path_left_out_however_long():
     assert lines[2:] == [f"  - {path}" for path in omitted]
 
 
+def test_terminal_share_prints_a_long_valid_path_whole(tmp_path, capsys):
+    """Each segment is valid (200 < 255 bytes); the full path exceeds 512 characters."""
+    kernel = Kernel(tmp_path)
+    deep = "/".join(letter * 200 for letter in "abc")
+    (kernel.source / deep / "__pycache__").mkdir(parents=True)
+    (kernel.source / deep / "__pycache__" / "x.cpython-311.pyc").write_bytes(b"\x00bytecode")
+    (kernel.source / deep / "notes.md").write_bytes(b"notes\n")
+    assert _share(kernel, "--yes") == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(deep + "/__pycache__/") > 512
+    assert f"  - {deep}/__pycache__/" in lines
+    assert any(line.endswith(f". {deep}/notes.md — 6 bytes") for line in lines)
+    assert f"{deep}/notes.md" in _uploaded_paths(kernel)
+
+
+def test_terminal_inventory_is_bounded_by_the_package_path_budget():
+    """Whole paths, never cut; the existing metadata budget bounds the listing."""
+    path = "/".join(["s" * 250] * 16)
+    omitted = [f"{path}/{number:05d}/" for number in range(600)]
+    rendered = render_inventory({"files": [], "omitted_paths": omitted})
+    shown = [line[4:] for line in rendered.splitlines() if line.startswith("  - ")]
+    assert shown == omitted[:len(shown)] and 0 < len(shown) < len(omitted)
+    assert rendered.splitlines()[-1] == (
+        f"…and {len(omitted) - len(shown)} more paths: the list exceeds the "
+        "2097152-byte package path budget.")
+
+
 def test_new_generated_output_after_review_requires_a_fresh_review(tmp_path):
     """The omission list is bound: what the card listed is what was left out."""
     kernel = Kernel(tmp_path)
