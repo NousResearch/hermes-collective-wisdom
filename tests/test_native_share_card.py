@@ -137,6 +137,49 @@ def test_scanner_warnings_need_acknowledge_before_share(tmp_path, surface):
 
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_share_card_too_long_for_one_card_is_paged_to_share(tmp_path, surface):
+    description = "Review incident notes and draft the follow-up. " * 80
+
+    class LongShare(Service):
+        def suggest(self, name):
+            del name
+            return self.prepared_review("local:draft-1")
+
+        def publication_review(self, draft_id, *, accept_warnings=False):
+            return {**super().publication_review(draft_id, accept_warnings=accept_warnings),
+                    "editorial_description": description}
+
+    async def scenario():
+        service = LongShare()
+        ui = surface(tmp_path, service)
+        identity, view = await _first_card(ui, "begin_suggest", "incident")
+        assert view.title == "📤 Share skill" and "Page 1 of " in view.summary
+        assert _controls(view) == [("Next", "paged.1"), ("Cancel", "cancel"),
+                                   ("View details", "details")]
+        assert "terminal" not in view.to_text().lower()
+        await ui.click(identity, "confirm")
+        assert not service.applied
+        pages = []
+        while True:
+            current = ui.view(identity)
+            pages.append(current.items[0].detail)
+            if not any(action.label == "Next" for action in current.actions):
+                break
+            assert "Share" not in sum(_transport_labels(ui, ui.edits[-1] if ui.edits
+                                                        else ui.posts[-1]), [])
+            await ui.next_page(identity)
+        text = "".join(pages)
+        assert description.strip() in text and "Incident Response" in text
+        assert ("Share", "confirm") in _controls(ui.view(identity))
+        assert "Share" in sum(_transport_labels(ui, ui.edits[-1]), [])
+        await ui.click(identity, "confirm")
+        await ui.click(identity, "confirm")
+        assert service.applied == ["publication-receipt"]
+        ui.runtime.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_portal_draft_is_unreachable_in_manual_sharing(tmp_path, surface):
     assert release_scope.active() == release_scope.MANUAL_SHARING
 

@@ -792,7 +792,7 @@ def _copy_note(plan: dict[str, Any]) -> str:
     return _safe(line) + " View details shows your original. " if line else ""
 
 
-def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+def _whole_share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
     """The single /wisdom share confirmation: Share, Cancel, View details."""
     from .native_inspection import _date  # pylint: disable=import-outside-toplevel
     ready = _share_ready(record, plan)
@@ -801,7 +801,7 @@ def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
         actions.insert(0, NativeAction("Share", "confirm", primary=True))
     handling = _SHARE_HANDLING.get(str(plan.get("publication_mode") or ""),
                                    "Publication policy unavailable.")
-    view = NativeView(
+    return NativeView(
         "📤 Share skill",
         _safe(plan.get("editorial_description"), "Description unavailable"),
         fields=_share_fields(record, plan), actions=actions,
@@ -809,11 +809,32 @@ def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
         + f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
         if ready else "Sharing facts are incomplete. Run hermes wisdom share in a terminal.",
     )
-    if not _approval_is_lossless(view):
-        return replace(view, actions=[action for action in actions if not action.primary],
-                       notice="This review is too large to show here. "
-                       "Run hermes wisdom share in a terminal. Nothing was uploaded.")
-    return view
+
+
+def _share_pages(record: dict[str, Any], plan: dict[str, Any]) -> tuple[list[str], str]:
+    text = _whole_share_card(record, plan).to_text()
+    return text_pages(text), _digest("share", json.dumps([text, plan.get("receipt")]))
+
+
+def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """The share card whole, or paged when it is longer than one card holds.
+
+    Paged, Share appears on the last page once every page has been shown."""
+    view = _whole_share_card(record, plan)
+    if _approval_is_lossless(view):
+        return view
+    pages, identity = _share_pages(record, plan)
+    page = _open_page(record, pages, identity) or 0
+    share = next((action for action in view.actions if action.primary), None)
+    controls = _page_controls(record, pages, identity, share, back=False)
+    return _without_unrendered_approval(replace(
+        view, summary=f"This review is longer than one card. Page {page + 1} of {len(pages)}.",
+        fields=[], items=[NativeItem("Review", pages[page], literal=True)],
+        actions=[*controls, *(action for action in view.actions if not action.primary)],
+        notice="Nothing has been uploaded." + (
+            " Share appears on the last page once you have read every page."
+            if share is not None and page + 1 < len(pages) else ""),
+    ))
 
 
 def _inspection_view(record: dict[str, Any]) -> NativeView:
@@ -1108,6 +1129,9 @@ def _paged_review(record: dict[str, Any]) -> tuple[list[str], str] | None:
     plan: dict[str, Any] = raw if isinstance(raw, dict) else {}
     if _warning_review(record):
         return _findings_pages(plan)
+    if (record.get("state") == "pending" and record.get("screen") == "approval"
+            and record.get("operation") == "publish" and plan.get("candidate_flow") is True):
+        return _share_pages(record, plan)
     if (record.get("state") == "pending" and record.get("screen") == "setup"
             and record.get("operation") in {"install", "update"}):
         try:
@@ -1138,7 +1162,8 @@ def _all_pages_seen(record: dict[str, Any], pages: list[str], identity: str) -> 
 
 
 def _page_controls(
-    record: dict[str, Any], pages: list[str], identity: str, finish: NativeAction,
+    record: dict[str, Any], pages: list[str], identity: str, finish: NativeAction | None,
+    *, back: bool = True,
 ) -> list[NativeAction]:
     """Previous/Next through every page; the approval appears on the last one once all were seen."""
     page = _open_page(record, pages, identity) or 0
@@ -1147,9 +1172,10 @@ def _page_controls(
         actions.append(NativeAction("Previous", f"{_PAGE_ACTION}{page - 1}"))
     if page + 1 < len(pages):
         actions.append(NativeAction("Next", f"{_PAGE_ACTION}{page + 1}"))
-    elif _all_pages_seen(record, pages, identity):
+    elif finish is not None and _all_pages_seen(record, pages, identity):
         actions.append(finish)
-    actions.append(NativeAction("Back", f"{_PAGE_ACTION}back"))
+    if back:
+        actions.append(NativeAction("Back", f"{_PAGE_ACTION}back"))
     return actions
 
 
