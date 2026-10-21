@@ -141,6 +141,28 @@ def test_content_tolerates_additive_fields_but_rejects_invalid_base64():
         client.content("skill", 1, installation_id="install", takedown_generation=0)
 
 
+def test_content_with_a_generated_directory_names_the_refused_path():
+    """A Hermes-built package never carries __pycache__; the refusal says exactly why."""
+    response = _content_response()
+    body = b"\x00bytecode"
+    response["files"].append({
+        "path": "scripts/__pycache__/run.pyc", "mode": "file", "hash": sha256_address(body),
+        "content_base64": base64.b64encode(body).decode(),
+    })
+    client = WisdomClient(
+        lambda: _credentials("read"), "org-1", session=Session([response]),
+        install_credential_provider=lambda: _credentials("install"),
+    )
+    with pytest.raises(WisdomValidationError) as refused:
+        client.content("skill", 1, installation_id="install", takedown_generation=0)
+    assert str(refused.value) == (
+        "version content failed package validation: package path "
+        "'scripts/__pycache__/run.pyc' is refused: directory '__pycache__' is generated "
+        "Python bytecode; Hermes does not treat it as skill content, so it would not "
+        "reach the agents that install this skill"
+    )
+
+
 def test_install_acknowledgements_must_match_requests():
     client = WisdomClient(
         lambda: _credentials("read"),

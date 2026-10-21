@@ -22,6 +22,7 @@ from hermes_wisdom_plugin.editorial import apply_editorial_metadata_to_overlay
 from hermes_wisdom_plugin.errors import WisdomAuthError, WisdomConflict
 from hermes_wisdom_plugin.package import (
     MAX_TREE_BYTES,
+    PLUGIN_HERMES_FLOOR,
     PackagePolicyError,
     PackageSecurityDecision,
 )
@@ -30,8 +31,6 @@ from hermes_wisdom_plugin.local_state import QualificationState
 
 class Host:
     """Deterministic host boundary for local preparation."""
-
-    hermes_version = "1.2.3"
 
     def __init__(
         self,
@@ -171,7 +170,7 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
 
     assert result["state"] == "prepared"
     assert result["network_submission"] is False
-    assert result["publisher_evidence"] is None
+    assert "publisher_evidence" not in result
     assert "usage" not in json.dumps(result).casefold()
     assert result["security_check"]["local_status"] == "pass"
     assert result["security_check"]["status"] == "pending"
@@ -189,7 +188,8 @@ def test_local_preparation_is_private_exact_and_does_not_mutate_source(tmp_path:
     assert result["security_check"]["author_description_hash"] == (
         result["hashes"]["author_description"]
     )
-    assert result["system_specification"]["hermes"]["minimum_version"] == "1.2.3"
+    assert result["system_specification"]["hermes"]["minimum_version"] == PLUGIN_HERMES_FLOOR
+    assert result["system_specification"]["architectures"] == []
     assert result["editorial_name"] == "reviewed-skill"
     assert result["editorial_description"] == "Review incident notes."
     assert result["next_step"] == (
@@ -896,7 +896,7 @@ def test_save_cannot_remove_required_root_file(tmp_path: Path, required: str):
     assert not edits.exists() or not list(edits.iterdir())
 
 
-@pytest.mark.parametrize("mutation", ["duplicate", "traversal", "collision"])
+@pytest.mark.parametrize("mutation", ["duplicate", "traversal"])
 def test_save_rejects_unsafe_complete_file_set(tmp_path: Path, mutation: str):
     value, _source, _binding = reviewer(tmp_path)
     prepared = value.prepare("reviewed-skill")
@@ -906,15 +906,10 @@ def test_save_rejects_unsafe_complete_file_set(tmp_path: Path, mutation: str):
     ]
     if mutation == "duplicate":
         files.append(dict(files[0]))
-    elif mutation == "traversal":
-        files[0]["path"] = "../SKILL.md"
     else:
-        files.extend([
-            {"path": "refs/Name.md", "content_utf8": "first\n"},
-            {"path": "refs/name.md", "content_utf8": "second\n"},
-        ])
+        files[0]["path"] = "../SKILL.md"
 
-    with pytest.raises(PackagePolicyError, match="duplicate|unsafe|collision"):
+    with pytest.raises(PackagePolicyError, match="duplicate|path traversal"):
         value.save_prepared(
             prepared["draft_id"], author_description="Owner copy.",
             files=files, expected_hashes=prepared["hashes"],

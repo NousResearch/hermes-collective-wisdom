@@ -507,10 +507,12 @@ class WisdomClient:
                 code=code,
             )
         if response.status_code == 422:
+            detail = body.get("detail") if isinstance(body, dict) else None
             raise WisdomValidationError(
                 str(code or "Collective Wisdom rejected invalid content"),
                 status=422,
                 code=code,
+                detail=detail if isinstance(detail, str) else None,
             )
         if response.status_code in (502, 503, 504):
             raise WisdomUnavailable(status=response.status_code, code=code)
@@ -913,7 +915,9 @@ class WisdomClient:
         try:
             _, derived = verify_content_files(decoded)
         except PackagePolicyError as exc:
-            raise WisdomValidationError("version content failed package validation") from exc
+            raise WisdomValidationError(
+                f"version content failed package validation: {exc}"
+            ) from exc
         if derived != response.content_hash:
             raise WisdomValidationError(
                 "version content hash failed integrity validation"

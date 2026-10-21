@@ -194,7 +194,8 @@ function Compatibility({ value }) {
     jsx(KeyValue, { name: 'Works with', value: Array.isArray(value.satisfied) ? value.satisfied.join(', ') || 'No checks reported' : 'Unavailable' }),
     jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Limitations' }), jsx(StringList, { items: value.limitations, empty: 'No limitations reported.' })] }),
     jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Setup needing your attention' }), jsx(StringList, { items: value.setup_actions, empty: 'No additional setup reported.' })] }),
-    jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'What prevents installation' }), jsx(StringList, { items: value.blocked, empty: 'Nothing reported.' })] })
+    jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'What prevents installation' }), jsx(StringList, { items: value.blocked, empty: 'Nothing reported.' })] }),
+    ...(Array.isArray(value.notes) && value.notes.length ? [jsxs('div', { children: [jsx('div', { className: 'text-xs text-(--ui-text-quaternary)', children: 'Notes' }), jsx(StringList, { items: value.notes, empty: '' })] })] : [])
   ] })
 }
 

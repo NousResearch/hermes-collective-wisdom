@@ -7,6 +7,7 @@ import asyncio
 import copy
 import json
 import logging
+import sys
 from collections import Counter
 
 import pytest
@@ -15,8 +16,12 @@ from restoration_support import SlackHarness, TelegramHarness
 from test_publication import RecordingPublicationClient
 from test_reshare_pending import Kernel
 
+from hermes_wisdom_plugin import share_command
 from hermes_wisdom_plugin.commands import build_parser, run_cli
+from hermes_wisdom_plugin.direct_services import DirectState
+from hermes_wisdom_plugin.errors import WisdomConflict
 from hermes_wisdom_plugin.native_review import project_view
+from hermes_wisdom_plugin.share_command import run_share
 
 FINDINGS = [
     {"category": "secret_like", "severity": "advisory", "path": "SKILL.md",
@@ -252,8 +257,79 @@ def test_terminal_accept_warnings_without_any_shown_evidence_submits_nothing(tmp
         ["share", "reviewed-skill", "--accept-warnings", "--yes", "--json"]), kernel)
     result = json.loads(capsys.readouterr().out)
     assert (code, result["outcome"]) == (1, "gateway_review_required")
-    assert "Looks like an API key assignment." in result["detail"]
     assert kernel.client.state.calls == Counter(upload=1, submit=1)
+
+
+class _BrokenStdout:
+    """A caller that went away: every write fails (EPIPE)."""
+
+    def write(self, _value):
+        raise BrokenPipeError("caller closed the pipe")
+
+    def flush(self):
+        raise BrokenPipeError("caller closed the pipe")
+
+
+def _fresh_process(kernel):
+    """A new invocation process over the same retained on-disk state."""
+    old = kernel.publication.state
+    kernel.publication.state = kernel.publication.store = DirectState(old.state, old.root)
+
+
+def _emit_raises(_args, _result):
+    raise RuntimeError("emit failed")
+
+
+@pytest.mark.parametrize("failure", ["stdout", "emit"])
+def test_unwritten_gateway_result_is_never_recorded_as_shown(
+    tmp_path, capsys, monkeypatch, failure,
+):
+    """Salt R2 B1: the caller never received the findings; a fresh run publishes nothing."""
+    kernel = AdvisoryKernel(tmp_path)
+    parser = argparse.ArgumentParser(prog="hermes wisdom")
+    build_parser(parser)
+    with monkeypatch.context() as patched:
+        if failure == "stdout":
+            patched.setattr(sys, "stdout", _BrokenStdout())
+        else:
+            patched.setattr(share_command, "_emit_result", _emit_raises)
+        with pytest.raises((BrokenPipeError, RuntimeError)):
+            run_share(parser.parse_args(["share", "reviewed-skill", "--yes", "--json"]), kernel)
+    capsys.readouterr()
+    operation_id = kernel.publication.share_status("reviewed-skill")["operation_id"]
+    assert kernel.publication.state.publication(operation_id).get(
+        "gateway_evidence_shown") is None, "nothing recorded"
+
+    _fresh_process(kernel)
+    code = run_cli(parser.parse_args(
+        ["share", "reviewed-skill", "--accept-warnings", "--yes", "--json"]), kernel)
+    result = json.loads(capsys.readouterr().out)
+    assert (code, result["outcome"]) == (1, "gateway_review_required")
+    assert "Looks like an API key assignment." in result["detail"]
+    assert kernel.client.state.calls == Counter(upload=1, submit=1), "no approve or publish"
+
+
+def test_mark_gateway_shown_accepts_only_evidence_this_process_rendered(tmp_path):
+    kernel = AdvisoryKernel(tmp_path)
+    prepared = kernel.suggest("reviewed-skill")
+    pending = kernel.publication.submit(kernel.publication_review(prepared["draft_id"])["receipt"])
+    operation_id = pending["operation_id"]
+    live = kernel.publication.state.publication(operation_id)["gateway_evidence_hash"]
+    assert pending["gateway_evidence_hash"] == live
+
+    with pytest.raises(WisdomConflict, match="displayed by this process"):
+        kernel.publication.mark_gateway_shown(operation_id, "sha256:" + "0" * 64)
+    _fresh_process(kernel)
+    # The live hash, supplied by a caller that never rendered it, is refused too.
+    with pytest.raises(WisdomConflict, match="displayed by this process"):
+        kernel.publication.mark_gateway_shown(operation_id, live)
+    assert kernel.publication.state.publication(operation_id).get(
+        "gateway_evidence_shown") is None
+
+    displayed = kernel.publication_gateway_review(operation_id)
+    kernel.publication.mark_gateway_shown(operation_id, displayed["gateway_evidence_hash"])
+    assert kernel.publication.state.publication(operation_id)[
+        "gateway_evidence_shown"] == live
 
 
 @pytest.mark.parametrize("change", [

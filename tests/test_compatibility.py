@@ -2,7 +2,9 @@
 
 from hermes_wisdom_plugin.compatibility import (
     LocalCapabilities,
+    SkillDeclarations,
     evaluate,
+    skill_declarations,
 )
 from hermes_wisdom_plugin.contract import (
     FilesystemRequirement,
@@ -126,3 +128,54 @@ def test_platform_and_architecture_aliases_match():
         local(os="darwin", architecture="arm64"),
     )
     assert result.outcome == "compatible"
+    assert not result.notes
+
+
+def test_recorded_architecture_mismatch_is_a_note_never_a_block():
+    """Hermes has no architecture gating; a recorded CPU list is informational."""
+
+    result = evaluate(spec(architectures=["arm64"]), local(os="linux", architecture="x86_64"))
+    assert result.outcome == "compatible"
+    assert not result.blocked
+    assert result.notes == ("Shared with architectures: arm64; this machine is x86_64",)
+
+
+def test_undeclared_recorded_platform_and_hermes_floor_are_notes():
+    """Legacy pins the skill did not declare inform; they do not block install."""
+
+    result = evaluate(
+        spec(hermes=HermesRequirement(minimum_version="9.0.0"), platforms=["macOS"]),
+        local(os="linux", architecture="x86_64"),
+    )
+    assert result.outcome == "compatible"
+    assert result.notes == (
+        "Shared with Hermes >= 9.0.0; this machine runs Hermes 1.0.0",
+        "Shared with platforms: macOS; this machine is Linux",
+    )
+
+
+def test_platform_declared_in_skill_frontmatter_blocks_with_exact_reason():
+    """Hermes semantics: a SKILL.md platforms list is enforced on this OS."""
+
+    declared = skill_declarations({"name": "x", "platforms": ["macos"]})
+    result = evaluate(spec(platforms=["macOS"]), local(os="linux"), declared)
+    assert result.outcome == "blocked_pending_action"
+    assert result.blocked == ("requires macOS; this machine is Linux",)
+    assert evaluate(spec(), local(os="darwin"), declared).outcome == "compatible"
+
+
+def test_hermes_floor_declared_in_skill_frontmatter_blocks():
+    """Only a SKILL.md-declared Hermes floor blocks an older host."""
+
+    declared = skill_declarations({"metadata": {"hermes": {"minimum_version": "2.0"}}})
+    result = evaluate(spec(), local(hermes_version="1.0.0"), declared)
+    assert result.blocked == ("requires Hermes 2.0 or newer; this machine runs Hermes 1.0.0",)
+    assert evaluate(spec(), local(hermes_version="2.1.0"), declared).outcome == "compatible"
+
+
+def test_skill_declarations_ignore_malformed_frontmatter():
+    """Non-dict or malformed values declare nothing (Hermes: absent = all platforms)."""
+
+    assert skill_declarations(None) == SkillDeclarations()
+    assert skill_declarations({"platforms": [1, ""], "metadata": "x"}) == SkillDeclarations()
+    assert skill_declarations({"platforms": "linux"}).platforms == ("linux",)

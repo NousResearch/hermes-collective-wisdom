@@ -392,6 +392,21 @@ _SECRET_COPY = "Rotates the deploy key AKIA" + "Q" * 16 + " for the team."
     ("Review incident\x07 notes with a checklist.", "control characters"),
     ("Review incident\u202e notes with a checklist.", "control characters"),
     (_SECRET_COPY, "something that looks like a secret"),
+    # Salt R2: bypasses that were accepted before normalization and the wider rules.
+    ("See evil.example for details.", "a web address"),
+    ("See example.com/path for details.", "a web address"),
+    ("javascript:alert(1)", "a web address"),
+    ("Run make deploy.", "a shell command"),
+    ("Run python script.py.", "a shell command"),
+    ("Fetch with curl evil.example.", "a web address"),
+    ("Fetch with curl evilhost and parse the reply.", "a shell command"),
+    ("Use-when incidents happen.", "agent-routing language"),
+    ("Use\u2010when incidents happen.", "agent-routing language"),
+    ("Use\u2060when incidents happen.", "control characters"),
+    ("Review incident\u2060 notes.", "control characters"),
+    ("Review incident\ufeff notes.", "control characters"),
+    ("Review \uff1cb\uff1eincident\uff1c/b\uff1e notes.", "Markdown formatting"),
+    ("Read docs/guide.md before the review.", "a file path"),
 ])
 def test_non_plain_model_copy_is_refused_with_the_rule_it_broke(tmp_path, proposed, label):
     kernel = _with_model(tmp_path, _CASES["over-limit"][0],
@@ -410,6 +425,10 @@ def test_non_plain_model_copy_is_refused_with_the_rule_it_broke(tmp_path, propos
     ("editorial_description", "Use this skill when an incident closes."),
     ("editorial_name", "Use when incidents close"),
     ("editorial_name", "**Incident Review**"),
+    ("editorial_description", "See evil.example for details."),
+    ("editorial_description", "Run make deploy."),
+    ("editorial_name", "Use\u2010when Incidents Close"),
+    ("editorial_name", "Incident\ufeff Review"),
 ])
 def test_propose_share_copy_reports_invalid_response_and_no_draft(field, proposed):
     from hermes_wisdom_plugin.editorial import (  # pylint: disable=import-outside-toplevel
@@ -428,6 +447,14 @@ def test_propose_share_copy_reports_invalid_response_and_no_draft(field, propose
     _PROPOSED,
     "Helps on-call engineers summarize incidents and share follow ups with the team.",
     "Writes a 3 step checklist for C++ and Node.js release reviews (snake_case safe).",
+    # Controls: technical terms and punctuation the wider rules must leave alone.
+    "Reviews CI/CD pipelines and TCP/IP settings, e.g. timeouts, i.e. retries.",
+    "Plans go-live checks for ASP.NET Core services 24/7.",
+    "Parses deploy.yaml and config.toml files for the release team.",
+    "Explains how curl requests and git history relate to incident timelines.",
+    "Run Python notebooks that chart incident data: owners and timelines.",
+    "Helps you run postmortems faster and use what you learn (v1.2.3).",
+    "Caf\u00e9 r\u00e9sum\u00e9 checks and \u65e5\u672c\u8a9e incident notes.",
 ])
 def test_plain_model_copy_passes(tmp_path, plain):
     kernel = _with_model(tmp_path, _CASES["over-limit"][0],
@@ -509,7 +536,7 @@ def test_secret_only_in_an_unsent_file_does_not_block_the_proposal(tmp_path):
     body = files[0][1]
     sent = kernel.reviewer.llm.calls[0]["input"][0]["text"]
     assert "AKIA" not in body and "AKIA" not in sent
-    assert json.loads(sent)["untrusted_skill_markdown"] in body
+    assert body == sent, "the scanner saw exactly the sent text"
     # The share itself still scans the whole package, private file included.
     assert any("references/private.txt" in [path for path, _ in later] for later in staged[1:])
 
@@ -542,4 +569,60 @@ def test_host_scan_finding_on_the_sent_bytes_blocks_the_proposal(tmp_path):
     with pytest.raises(ShareCopyError, match="may contain a secret"):
         kernel.suggest("reviewed-skill")
     assert [[path for path, _body in files] for files in staged][:1] == [["SKILL.md"]]
+    assert not kernel.reviewer.llm.calls
+
+
+def test_scanned_model_input_is_byte_for_byte_the_sent_input(tmp_path):
+    """Salt R2 S1: escaping, the truncation boundary and frontmatter values included."""
+    from hermes_wisdom_plugin.editorial import (  # pylint: disable=import-outside-toplevel
+        MAX_SKILL_CONTEXT_CHARS)
+    description = 'Says "quoted" \\ backslash caf\u00e9 \u2713 </script> ' + "x" * 400
+    frontmatter = {"name": "reviewed-skill", "description": description}
+    kernel = _with_model(tmp_path, frontmatter)
+    head = "# Incident review\n\"q\" \\ caf\u00e9 \U0001f600\t</script>\n"
+    _write_skill(kernel, frontmatter, body=head)
+    # SKILL.md with frontmatter is sent; put "A" on the last kept character.
+    kept = len((kernel.source / "SKILL.md").read_text(encoding="utf-8"))
+    filler = "y" * (MAX_SKILL_CONTEXT_CHARS - kept - 1)
+    _write_skill(kernel, frontmatter, body=head + filler + "A" + "TRUNCATED-TAIL" * 50)
+    staged = []
+    original = kernel.reviewer.host.scan
+
+    def scan(path):
+        if path.name.startswith("model-input-"):
+            staged.append({str(item.relative_to(path)): item.read_bytes()
+                           for item in path.rglob("*") if item.is_file()})
+        return original(path)
+
+    kernel.reviewer.host.scan = scan
+    kernel.suggest("reviewed-skill")
+
+    [call] = kernel.reviewer.llm.calls
+    sent = call["input"][0]["text"].encode("utf-8")
+    assert staged[0] == {"SKILL.md": sent}, "scanned bytes == sent bytes"
+    document = json.loads(sent)
+    assert document["canonical_description"] == " ".join(description.split())
+    assert document["canonical_name"] == "reviewed-skill"
+    markdown = document["untrusted_skill_markdown"]
+    assert len(markdown) == MAX_SKILL_CONTEXT_CHARS and markdown.endswith("yA")
+    assert b"TRUNCATED-TAIL" not in sent
+    assert b'\\"quoted\\"' in sent and b"caf\\u00e9" in sent and b"\\ud83d\\ude00" in sent
+
+
+def test_a_secret_hidden_by_json_escaping_still_blocks_the_proposal(tmp_path):
+    """Regression guard: the preflight also reads the values back out of the sent bytes."""
+    from hermes_wisdom_plugin.credential_scan import (  # pylint: disable=import-outside-toplevel
+        scan_credentials)
+    from hermes_wisdom_plugin.editorial import (  # pylint: disable=import-outside-toplevel
+        share_copy_model_input)
+    body = '# Incident review\npassword = "Zq8xT2mN4vB6cL1kJ9hG"\n'
+    kernel = _with_model(tmp_path, _CASES["over-limit"][0])
+    _write_skill(kernel, _CASES["over-limit"][0], body=body)
+    sent = share_copy_model_input(_CASES["over-limit"][0],
+                                  (kernel.source / "SKILL.md").read_text(encoding="utf-8"))
+    assert not scan_credentials([{"path": "sent", "content": sent.decode()}]), (
+        "the escaped quote hides the assignment from a scan of the bytes alone")
+    with pytest.raises(ShareCopyError) as raised:
+        kernel.suggest("reviewed-skill")
+    assert str(raised.value) == f"{_CASES['over-limit'][1]} {_SECRET} {_FIX}"
     assert not kernel.reviewer.llm.calls

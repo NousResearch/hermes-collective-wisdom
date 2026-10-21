@@ -259,6 +259,58 @@ def test_install_name_wins_over_another_skills_matching_id(tmp_path: Path):
     assert (plan["skill_id"], plan["slug"]) == ("skill-1", "managed-skill")
 
 
+def _legacy_client(spec, skill_md=b"# Managed\n"):
+    """A published package whose manifest pins facts its SKILL.md may not declare."""
+    client = Client()
+    client.spec = spec
+    client.files = [(path, mode, skill_md if path == "SKILL.md" else body)
+                    for path, mode, body in _files(spec)]
+    content = _content(client.files)
+    manifest = next(body for path, _, body in client.files if path == "skill.manifest.json")
+    client.version_value.update(
+        system_spec=spec.model_dump(mode="json"), content_hash=content.content_hash,
+        commit=content.commit, package_manifest_hash=sha256_address(manifest),
+    )
+    return client
+
+
+class LinuxHost(Host):
+    def capabilities(self, _specification):
+        return LocalCapabilities(
+            hermes_version="1.0.0", os="linux", architecture="x86_64",
+            runtime={"shell": True, "browser": False, "code": True, "sandbox": True},
+        )
+
+
+def test_legacy_arm64_pin_installs_on_x86_64_with_a_note(tmp_path: Path):
+    """A sharer-machine architecture pin never blocks; plan and verify agree."""
+    client = _legacy_client(_spec(platforms=["macOS"], architectures=["arm64"]))
+    reviewer = _reviewer(tmp_path, client=client, host=LinuxHost(tmp_path))
+    plan = reviewer.plan("skill-1@v1")
+    assert plan["allowed"] is True
+    assert plan["compatibility"]["outcome"] == "compatible"
+    assert plan["compatibility"]["blocked"] == []
+    assert plan["compatibility"]["notes"] == [
+        "Shared with platforms: macOS; this machine is Linux",
+        "Shared with architectures: arm64; this machine is x86_64",
+    ]
+    assert plan["permitted_actions"] == ["confirm_install", "recheck"]
+    assert reviewer.verify(plan).plan == plan
+
+
+def test_skill_md_platform_declaration_blocks_on_another_os(tmp_path: Path):
+    """SKILL.md platforms: [macos] blocks on Linux with the exact reason, at plan and verify."""
+    skill_md = b"---\nname: managed-skill\ndescription: Mac only.\nplatforms: [macos]\n---\n# M\n"
+    client = _legacy_client(_spec(platforms=["macOS"]), skill_md)
+    reviewer = _reviewer(tmp_path, client=client, host=LinuxHost(tmp_path))
+    plan = reviewer.plan("skill-1@v1")
+    assert plan["allowed"] is False
+    assert plan["compatibility"]["blocked"] == ["requires macOS; this machine is Linux"]
+    assert plan["permitted_actions"] == ["recheck"]
+    with pytest.raises(PackagePolicyError, match="blocked compatibility"):
+        reviewer.verify(plan)
+
+
 def test_plan_preserves_exact_version_url_and_complete_review(tmp_path: Path):
     reviewer = _reviewer(tmp_path)
     plan = reviewer.plan(
@@ -420,3 +472,18 @@ def test_owner_change_and_redirected_skills_root_fail_closed(tmp_path: Path):
     host.skills_root.symlink_to(outside, target_is_directory=True)
     with pytest.raises(PackagePolicyError, match="staging is unsafe"):
         _reviewer(tmp_path, host=host).plan("skill-1")
+
+
+def test_downloaded_package_with_generated_bytecode_is_refused_exactly(tmp_path: Path):
+    """Sharing leaves __pycache__ out, so a download carrying it is refused, naming it."""
+    client = Client()
+    client.files.append(("scripts/__pycache__/run.cpython-311.pyc", "file", b"\x00"))
+    client.version_value["content_hash"] = _content(client.files).content_hash
+    with pytest.raises(WisdomValidationError) as refused:
+        _reviewer(tmp_path, client=client).plan("skill-1")
+    assert str(refused.value) == (
+        "Gateway returned invalid package content: "
+        "package path 'scripts/__pycache__/run.cpython-311.pyc' is refused: directory "
+        "'__pycache__' is generated Python bytecode; Hermes does not treat it as skill "
+        "content, so it would not reach the agents that install this skill"
+    )

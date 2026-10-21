@@ -390,9 +390,13 @@ def test_candidate_warnings_use_bound_suggest_ack_before_exact_approval(tmp_path
         return prepared
 
     service.prepared_review = changed_scanner
-    with pytest.raises(WisdomConflict, match="scanner findings changed"):
-        controller.act(record["id"], "suggest.ack", service, clicked)
-    assert not any(call[0] == "publication_submit" for call in service.calls)
+    shown = controller.act(record["id"], "suggest.ack", service, clicked)
+    # The changed findings are shown on the same card and must be acknowledged again.
+    assert shown["operation"] == "suggest" and shown["plan"]["native_stage"] == "warnings"
+    assert shown["plan"]["local_scan"]["guard"]["findings"][0]["pattern_id"] == "changed"
+    assert "changed" in controller.view(shown).to_text()
+    assert not any(call[0] in {"publication_review", "publication_submit"}
+                   for call in service.calls)
 
 
 def test_candidate_warning_ack_leads_to_readable_proposal(tmp_path):

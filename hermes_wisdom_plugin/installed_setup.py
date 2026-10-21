@@ -10,8 +10,9 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .compatibility import evaluate
+from .compatibility import evaluate, skill_declarations
 from .contract import parse_manifest_bytes
+from .install_review import skill_frontmatter
 from .managed_target import validate_managed_target
 from .package import (
     MAX_METADATA_BYTES,
@@ -20,7 +21,7 @@ from .package import (
     _validate_package_path,
     verify_content_files,
 )
-from .setup_document import SETUP_PATH, parse_setup_document
+from .setup_document import SETUP_PATH, SetupGuidanceError, parse_installed_setup_document
 
 
 def _installed_files(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -170,9 +171,12 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
         ) from exc
     if manifest.name != installation["slug"]:
         raise PackagePolicyError("installed manifest does not match the managed skill")
-    compatibility = asdict(
-        evaluate(manifest.requirements, host.capabilities(manifest.requirements))
-    )
+    compatibility = asdict(evaluate(
+        manifest.requirements, host.capabilities(manifest.requirements),
+        skill_declarations(skill_frontmatter([
+            ("SKILL.md", "file", files["SKILL.md"]),
+        ] if "SKILL.md" in files else [])),
+    ))
     result: dict[str, Any] = {
         "kind": "installed_setup",
         "skill_id": skill_id,
@@ -194,13 +198,16 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
     }
     if SETUP_PATH in files:
         try:
-            document = parse_setup_document(files[SETUP_PATH])
-        except (UnicodeError, ValueError):
+            document, degraded = parse_installed_setup_document(files[SETUP_PATH])
+        except (UnicodeError, ValueError) as exc:
             result["guidance_error"] = (
-                "The installed setup document is invalid or unsupported."
+                "The installed setup document is invalid or unsupported: "
+                + (str(exc) if isinstance(exc, SetupGuidanceError) else "it is not UTF-8")
             )
         else:
             result["guidance"] = document.model_dump(mode="json")
+            if degraded is not None:
+                result["guidance_error"] = degraded
             for item in document.requirements:
                 if item.kind == "command":
                     status = "present" if shutil.which(item.name) else "missing"
@@ -212,7 +219,8 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
                     {**item.model_dump(mode="json"), "status": status}
                 )
             needs_setup = bool(
-                compatibility["setup_actions"]
+                degraded is not None
+                or compatibility["setup_actions"]
                 or compatibility["blocked"]
                 or document.setup_instructions
                 or document.setup_commands
@@ -221,6 +229,8 @@ def inspect_installed_setup(  # pylint: disable=too-many-locals,too-many-branche
             result["state"] = "setup_required" if needs_setup else "verification_required"
     result["setup_progress"] = setup_progress(progress, owner, result)
     _derive_readiness(result)
+    if result.get("guidance_error"):
+        result["message"] = f"{result['message']} {result['guidance_error']}"
     if _require_committed(installed, host, owner, skill_id, version) != installation:
         raise PackagePolicyError(
             "installation changed during setup inspection; inspect again"
@@ -243,7 +253,8 @@ def _derive_readiness(result: dict[str, Any]) -> None:
         result["state"] = "setup_in_progress"
         return
     guidance = result.get("guidance")
-    if not guidance or not verification:
+    # Setup a publisher declared but this document cannot show is never verified.
+    if not guidance or not verification or result.get("guidance_error"):
         return
     prerequisites_ready = all(
         item["status"] == "present"

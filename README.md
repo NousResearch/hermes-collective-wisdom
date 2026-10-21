@@ -107,6 +107,9 @@ When Hermes cannot propose copy (no model, the setting below is off, the skill m
 or the model fails), the review names the exact problem, for example "Description is 839
 characters; the limit is 320.", and nothing is uploaded.
 
+The shared requirements come only from what the skill declares (`platforms`, `architectures` and
+`metadata.hermes` in `SKILL.md`), never from the machine that shares it.
+
 The result is one of: shared (with the version, a Portal link and the install command for teammates),
 already shared, blocked by a security check, name already owned by another author, not entitled,
 invalid package, or uncertain. An uncertain result names a status command to check; do not share
@@ -143,8 +146,14 @@ hermes wisdom install <skill> --plan      # review without installing
 
 `<skill>` is the skill's name or its ID, both shown in the Portal. A clean package installs straight
 away into your profile's skills. If the Hermes skills scanner reports warnings, the install shows them
-and waits for your acknowledgement. Commands a skill declares for setup never run during install;
-review and approve them separately with `hermes wisdom installed-setup`.
+and waits for your acknowledgement. A skill is blocked only by what its own `SKILL.md` declares
+(`platforms`, or a minimum Hermes version); a recorded CPU architecture is informational and shows as
+a note. Commands a skill declares for setup never run during install;
+review and approve them separately with `hermes wisdom installed-setup`. In Slack and Telegram,
+setup commands too long for one card are paged, and Run setup appears once you have seen every
+page. A skill can declare any
+number of setup commands, up to 256 characters each and 5,120 bytes in total; sharing refuses a
+setup document over that limit and names the field and its size.
 
 In a private Telegram chat or Slack DM, `/wisdom install <skill>` installs from the chat. In Hermes
 Desktop, install from the Collective Wisdom page or from the dialog that `/wisdom browse` opens.
@@ -235,15 +244,25 @@ Every share is checked twice before anything is published:
 
 - **On your machine, before upload:** private keys, live credentials and secret-like assignments
   block the share. Warnings from the Hermes skills scanner need your acknowledgement, and editing the
-  package resets it.
+  package resets it. In Slack and Telegram, a list too long for one card is paged: View details
+  lists every finding, and Acknowledge appears once you have reached the last page.
 - **On the service, before publishing:** the package and its description are scanned against the
   built-in checks and your team's content rules, and scanned again at publish time against the
   current rules. A blocked package is not published.
 
 Packages can contain the skill's `SKILL.md`, supporting files, `references/`, `scripts/`,
 `templates/` and `assets/`, up to 10 MiB in total. Compiled executables, symlinks, hard links,
-credentials and private keys are refused. Scripts in a package are never run during sharing, review
-or install.
+credentials and private keys are refused. Directories Hermes does not treat as skill content
+(`.git`, `node_modules`, `.venv`, `venv`, `__pycache__`, `site-packages`, tool caches and the like,
+spelled exactly as Hermes skill discovery matches them) and Python bytecode files (`.pyc`) are left
+out of the package; the share's details list everything left out. A symlink or special file with
+one of those names is refused like any other, and a differently cased `.git`, `.github`,
+`node_modules`, `.venv`, `venv`, `.tox` or `__pycache__` is refused by name. The Collective Wisdom
+service also refuses folders named `hooks`, `.hooks`, `.gitlab` or `.circleci` in any spelling,
+Windows device names (`CON`, `aux.md`, `com1.txt` and the like), names with `< > : " | ? *` or
+ending in a dot or space, and two paths that differ only by letter case, so sharing refuses those
+first and names the file. A downloaded package that breaks these rules is refused at install.
+Scripts in a package are never run during sharing, review or install.
 
 ## Privacy and data use
 

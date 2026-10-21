@@ -8,6 +8,7 @@ import pytest
 
 import hermes_wisdom_plugin.package as package_module
 from hermes_wisdom_plugin.package import (
+    PLUGIN_HERMES_FLOOR,
     PackageHostProvider,
     PackagePolicyError,
     PackageSecurityDecision,
@@ -18,8 +19,6 @@ from hermes_wisdom_plugin.package import (
 
 class _Host(PackageHostProvider):
     """Deterministic supported-host seam for package kernel tests."""
-
-    hermes_version = "9.8.7"
 
     def __init__(
         self,
@@ -103,16 +102,60 @@ def test_preparation_creates_only_instruction_overlay_and_hashes(tmp_path: Path)
         (package.overlay / "skill.manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["requirements"]["tools"] == []
-    assert manifest["requirements"]["hermes"]["minimum_version"] == _Host.hermes_version
-    assert len(manifest["requirements"]["platforms"]) == 1
-    assert len(manifest["requirements"]["architectures"]) == 1
+    assert manifest["requirements"]["hermes"]["minimum_version"] == PLUGIN_HERMES_FLOOR
+    assert manifest["requirements"]["platforms"] == []
+    assert manifest["requirements"]["architectures"] == []
     assert package.content_hash.startswith("sha256:")
 
 
-def test_authoring_defaults_normalize_device_and_explicit_skill_requirements(
+def test_share_on_arm64_mac_records_no_undeclared_platform_or_architecture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A skill with no declarations is portable, whatever machine shares it."""
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    package = prepare_package(
+        make_skill(tmp_path), overlay_root=tmp_path / "overlays",
+        author_description="Does the useful thing.", owner="owner",
+        installation_id="installation-123456",
+    )
+    requirements = package.manifest.requirements
+    assert requirements.platforms == []
+    assert requirements.architectures == []
+    assert requirements.hermes.minimum_version == PLUGIN_HERMES_FLOOR
+
+
+def test_share_preserves_declared_architectures_platforms_and_hermes_floor(tmp_path: Path):
+    """Declared requirements are recorded exactly (normalized), never replaced."""
+
+    host = _Host(frontmatter={
+        "name": "my-skill", "description": "Test.", "platforms": ["macos"],
+        "architectures": ["aarch64"],
+        "metadata": {"hermes": {"minimum_version": "0.30.1"}},
+    })
+    package = prepare_package(
+        make_skill(tmp_path), host=host, overlay_root=tmp_path / "overlays",
+        author_description="Does the useful thing.", owner="owner",
+        installation_id="installation-123456",
+    )
+    requirements = package.manifest.requirements
+    assert requirements.platforms == ["macOS"]
+    assert requirements.architectures == ["arm64"]
+    assert requirements.hermes.minimum_version == "0.30.1"
+
+
+def test_plugin_hermes_floor_matches_plugin_requirement():
+    """The undeclared floor is exactly the plugin's own requires_hermes floor."""
+
+    plugin = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text(encoding="utf-8")
+    assert f'requires_hermes: ">={PLUGIN_HERMES_FLOOR}"' in plugin
+
+
+def test_authoring_requirements_come_only_from_explicit_skill_metadata(
     tmp_path: Path,
 ):
-    """Generated requirements use explicit metadata and normalized host facts."""
+    """Generated requirements use explicit metadata only, never host facts."""
 
     skill = make_skill(tmp_path)
     (skill / "SKILL.md").write_text(
@@ -137,9 +180,6 @@ metadata:
 
     specification = infer_authoring_system_specification(
         skill,
-        hermes_version="9.8.7",
-        system_name="Darwin",
-        machine="aarch64",
         frontmatter={
             "name": "my-skill",
             "description": "Test.",
@@ -160,9 +200,9 @@ metadata:
         },
     )
 
-    assert specification.hermes.minimum_version == "9.8.7"
-    assert specification.platforms == ["macOS"]
-    assert specification.architectures == ["arm64"]
+    assert specification.hermes.minimum_version == PLUGIN_HERMES_FLOOR
+    assert specification.platforms == []
+    assert specification.architectures == []
     assert [requirement.name for requirement in specification.tools] == [
         "terminal",
         "browser",
@@ -187,8 +227,8 @@ metadata:
     ]
 
 
-def test_explicit_portability_declarations_override_device_defaults(tmp_path: Path):
-    """Explicit portability declarations override authoring-device defaults."""
+def test_explicit_portability_declarations_are_recorded(tmp_path: Path):
+    """Explicit portability declarations are recorded as written (normalized)."""
 
     skill = make_skill(tmp_path)
     (skill / "SKILL.md").write_text(
@@ -206,9 +246,6 @@ architectures: []
 
     specification = infer_authoring_system_specification(
         skill,
-        hermes_version="1.2.3",
-        system_name="Darwin",
-        machine="arm64",
         frontmatter={
             "name": "my-skill",
             "description": "Test.",
@@ -354,21 +391,6 @@ def test_ordinary_native_supporting_files_are_not_silently_omitted(
     assert (package.overlay / relative).read_text(encoding="utf-8") == content
 
 
-@pytest.mark.parametrize("relative", ["refs/.github/workflows/note.md", "assets/hooks/run"])
-def test_active_vcs_and_hook_metadata_remains_blocked(tmp_path: Path, relative: str):
-    """Native support does not admit VCS automation metadata or hook directories."""
-    skill = make_skill(tmp_path)
-    target = skill / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("unsafe metadata", encoding="utf-8")
-    with pytest.raises(PackagePolicyError, match="active package directory"):
-        prepare_package(
-            skill, overlay_root=tmp_path / "overlays",
-            author_description="A valid description.", owner="owner",
-            installation_id="installation-123456",
-        )
-
-
 def test_download_rejects_hostile_paths_but_accepts_native_modes_and_binary():
     """Downloads reject traversal while preserving native opaque resources."""
 
@@ -399,17 +421,13 @@ def test_download_rejects_hostile_paths_but_accepts_native_modes_and_binary():
         "refs/control\x00.txt",
         "refs/control\x1f.txt",
         "refs/control\x7f.txt",
-        "refs/trailing.txt.",
-        "refs/trailing.txt ",
-        "refs/NUL.txt",
-        "refs/com1.notes.txt",
         "refs/bad:name.txt",
         "refs/cafe\u0301.txt",
 
     ],
 )
 def test_download_rejects_nonportable_or_noncanonical_paths(path: str):
-    """Downloaded paths must be portable and canonically encoded."""
+    """Downloaded paths must be canonically encoded and transport-safe."""
 
     base = [
         ("SKILL.md", "file", b"# test"),
@@ -486,23 +504,6 @@ def test_source_metadata_budget_stops_before_reading_entire_empty_tree(
     with pytest.raises(PackagePolicyError, match="metadata"):
         package_module.source_fingerprint(skill)
     assert reads < 10
-
-
-def test_download_rejects_install_target_collisions():
-    """Case-folding install-target collisions fail closed."""
-
-    base = [
-        ("SKILL.md", "file", b"# test"),
-        ("skill.manifest.json", "file", b'{"schema_version":1}'),
-    ]
-    with pytest.raises(PackagePolicyError, match="collision"):
-        verify_content_files(
-            base
-            + [
-                ("refs/Notes.txt", "file", b"one"),
-                ("refs/notes.txt", "file", b"two"),
-            ]
-        )
 
 
 def test_download_uses_aggregate_payload_and_metadata_caps(monkeypatch):

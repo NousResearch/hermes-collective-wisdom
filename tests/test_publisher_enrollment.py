@@ -262,8 +262,8 @@ def test_direct_publication_enrolls_untouched_author_source_in_place(tmp_path: P
 def test_author_v2_advances_same_source_then_teammate_v3_uses_managed_review(
     tmp_path: Path, monkeypatch, system: str, architecture: str,
 ):
-    monkeypatch.setattr("hermes_wisdom_plugin.package.platform.system", lambda: system)
-    monkeypatch.setattr("hermes_wisdom_plugin.package.platform.machine", lambda: architecture)
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("platform.machine", lambda: architecture)
     prepared_reviewer, source, owner = reviewer(tmp_path)
     prepared_v1 = prepared_reviewer.prepare("reviewed-skill")
     draft_v1 = prepared_reviewer.store.draft(prepared_v1["draft_id"])

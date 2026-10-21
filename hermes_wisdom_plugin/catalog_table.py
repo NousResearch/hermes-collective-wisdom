@@ -8,14 +8,23 @@ DESCRIPTION_LIMIT = 80
 COLUMNS = ("Skill", "Version", "Installed", "Description")
 
 
-def one_line(value: object, limit: int = DESCRIPTION_LIMIT) -> str:
-    """Collapse whitespace and controls to one line, trimmed with an ellipsis."""
-    text = " ".join(
+def flatten(value: object) -> str:
+    """One line: every line break, control and format character becomes a space.
+
+    Covers ``\\n``, ``\\r``, U+0085, U+2028 and U+2029 (``str.split`` whitespace)
+    and every Unicode ``C*`` category, so a value never adds a physical row.
+    """
+    return " ".join(
         "".join(
             " " if unicodedata.category(character).startswith("C") else character
             for character in str(value or "")
         ).split()
     )
+
+
+def one_line(value: object, limit: int = DESCRIPTION_LIMIT) -> str:
+    """Collapse whitespace and controls to one line, trimmed with an ellipsis."""
+    text = flatten(value)
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 

@@ -76,17 +76,6 @@ class InstallationHost:
 
         return self.profile_home / "skills"
 
-    @property
-    def hermes_version(self) -> str:
-        """Return the active, profile-checked host version."""
-
-        self._check_profile()
-        version = str(getattr(self._module("hermes_cli"), "__version__", "")).strip()
-        if not version:
-            raise PackagePolicyError("required Hermes host version is unavailable")
-        self._check_profile()
-        return version
-
     def parse_skill_frontmatter(self, source: Path) -> dict[str, object]:
         """Parse one local SKILL.md through the supported host utility."""
 

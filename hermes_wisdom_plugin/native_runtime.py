@@ -670,6 +670,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
                     active, progress_done,
                     selected in {"confirm", "confirm.partial"} and record.get("operation") == "publish"
                     or selected == record.get("operation") and selected in {"install", "update"}
+                    or selected == "package.ack"
                     or selected.startswith("catalog.install.") and record.get("operation") == "catalog",
                 )
                 if display:
@@ -824,6 +825,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             active, progress_done,
             selected in {"confirm", "confirm.partial"} and record.get("operation") == "publish"
             or selected == record.get("operation") and selected in {"install", "update"}
+            or selected == "package.ack"
             or selected.startswith("catalog.install.") and record.get("operation") == "catalog",
         )
 

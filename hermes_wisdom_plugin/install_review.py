@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
 
-from .compatibility import evaluate
+from .compatibility import evaluate, skill_declarations
 from .contract import (
     SystemSpecification,
     org_directory_name,
@@ -30,11 +30,11 @@ from .discovery import Discovery
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
 from .local_security import prepared_security_check
-from .setup_document import SETUP_PATH, parse_setup_document
+from .setup_document import SETUP_PATH, parse_installed_setup_document
 
 
-def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
-    """Read only bounded frontmatter in the already verified package, without a fetch."""
+def skill_frontmatter(files: list[tuple[str, str, bytes]]) -> dict[str, Any]:
+    """Bounded safe parse of the verified package's SKILL.md frontmatter, without a fetch."""
     body = next((body for path, _mode, body in files if path == "SKILL.md"), b"")
     try:
         text = body[:24_100].decode("utf-8-sig")
@@ -47,10 +47,14 @@ def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
         from ruamel.yaml import YAML  # pylint: disable=import-outside-toplevel
         data = YAML(typ="safe").load(text[opening.end():opening.end() + closing.start()])
     except Exception:  # pylint: disable=broad-exception-caught
-        # Invalid/unavailable presentation metadata does not bypass package checks.
+        # Invalid/unavailable metadata declares nothing; package checks still apply.
         return {}
-    if not isinstance(data, dict):
-        return {}
+    return {str(key): value for key, value in data.items()} if isinstance(data, dict) else {}
+
+
+def _reviewed_skill_copy(files: list[tuple[str, str, bytes]]) -> dict[str, str]:
+    """Read only bounded frontmatter in the already verified package, without a fetch."""
+    data = skill_frontmatter(files)
     metadata = data.get("metadata")
     hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
     hermes = hermes if isinstance(hermes, dict) else {}
@@ -457,6 +461,9 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         files = list(raw_files)
         try:
             records, content_hash = verify_content_files(files)
+        except PackagePolicyError as exc:
+            # The policy names the refused path and rule; say exactly that.
+            raise WisdomValidationError(f"Gateway returned invalid package content: {exc}") from exc
         except (TypeError, ValueError) as exc:
             raise WisdomValidationError("Gateway returned invalid package content") from exc
         response_hash = getattr(content, "content_hash", None)
@@ -489,13 +496,17 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
                 "version metadata does not match the exact package manifest"
             )
         local = self.host.capabilities(manifest.requirements)
-        evaluated = evaluate(manifest.requirements, local)
+        evaluated = evaluate(
+            manifest.requirements, local, skill_declarations(skill_frontmatter(files)),
+        )
+        setup = _reviewed_setup_commands(files)
         compatibility = {
             "outcome": evaluated.outcome,
             "satisfied": list(evaluated.satisfied),
             "setup_actions": list(evaluated.setup_actions),
-            "limitations": list(evaluated.limitations),
+            "limitations": list(evaluated.limitations) + ([setup[1]] if setup[1] else []),
             "blocked": list(evaluated.blocked),
+            "notes": list(evaluated.notes),
         }
         local_scan = self._stage_and_scan(files)
         scan_allowed = local_scan["allowed"]
@@ -574,7 +585,7 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             "update_mode": update_mode,
             "manifest": manifest.model_dump(mode="json"),
             "files": inventory,
-            "setup_commands": _reviewed_setup_commands(files),
+            "setup_commands": setup[0],
             "compatibility": compatibility,
             "server_checks": server_checks,
             "local_scan": local_scan,
@@ -685,15 +696,22 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
         )
 
 
-def _reviewed_setup_commands(files: list[tuple[str, str, bytes]]) -> list[str]:
-    """Extract only structured, hash-covered commands; prose is never shell code."""
+def _reviewed_setup_commands(
+    files: list[tuple[str, str, bytes]],
+) -> tuple[list[str], str | None]:
+    """Extract only structured, hash-covered commands; prose is never shell code.
+
+    Commands over the setup byte budget are dropped with the exact reason
+    instead of rejecting the whole guidance; they are never shown or run.
+    """
     for path, _mode, body in files:
         if path == SETUP_PATH:
             try:
-                return parse_setup_document(body).setup_commands or []
+                document, degraded = parse_installed_setup_document(body)
             except (UnicodeError, ValueError) as exc:
-                raise PackagePolicyError("published setup guidance is invalid") from exc
-    return []
+                raise PackagePolicyError(f"published setup guidance is invalid: {exc}") from exc
+            return document.setup_commands or [], degraded
+    return [], None
 
 
 def _is_utf8(body: bytes) -> bool:

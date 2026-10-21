@@ -26,6 +26,7 @@ from .editorial import (
     overlay_copy_problem,
     propose_share_copy,
     resolve_editorial_metadata,
+    share_copy_disclosure_ready,
     share_copy_model_input,
     share_copy_values,
 )
@@ -50,7 +51,6 @@ from .package import (
     verify_content_files,
 )
 from .professionalism import review_package, unavailable_review
-from .publisher_evidence import evidence_block, publication_description
 from .release_scope import active as release_scope
 
 # Host scanner findings that mean the skill text may carry a secret, so it must not
@@ -387,6 +387,7 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                if copy_problem else {}),
             **shown_copy_provenance(draft, editorial),
             "files": files,
+            "omitted_paths": [str(path) for path in draft.get("omitted_paths") or []],
             "hashes": {
                 "content": str(draft["content_hash"]),
                 "author_description": str(draft["description_hash"]),
@@ -395,7 +396,6 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "local_scan": scan,
             "security_check": security,
             "professionalism_check": professionalism,
-            "publisher_evidence": evidence_block(str(draft["description"])),
             "network_submission": False,
             "notice": (
                 "Owner-private local preparation only. "
@@ -701,21 +701,20 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 ready = False
         return ready
 
-    def _share_copy_disclosure_block(self, frontmatter, skill_markdown) -> str | None:
+    def _share_copy_disclosure_block(self, model_input) -> str | None:
         """Why the skill must not reach the owner's model for share copy, or None.
 
-        Both checks run over exactly the bytes the model call would disclose
-        (the SKILL.md prefix plus the shareable name and description), staged as
-        a SKILL.md for the host scanner; other package files are never sent, so
-        they do not decide this. The share itself still scans the whole package.
-        The model call only proposes copy the owner reviews before sharing, so the
-        question is disclosure: a credential match from the plugin's preflight or
-        a credential finding from the host scan blocks it, and so does a scan that
-        did not run. Other scanner findings (shell snippets, unpinned installs)
-        are not a disclosure risk; they still gate the share itself.
+        Both checks run over ``model_input``, exactly the bytes the model call sends
+        (serialized SKILL.md prefix, shareable name and description) staged as SKILL.md
+        for the host scanner; unsent package files do not decide this, though the share
+        itself scans the whole package. The model call only proposes copy the owner
+        reviews, so the question is disclosure: a credential match from the plugin's
+        preflight or a credential finding from the host scan blocks it, as does a scan
+        that did not run. Other findings (shell snippets, unpinned installs) are not a
+        disclosure risk; they still gate the share itself.
         """
-        payload = [("SKILL.md", "file", share_copy_model_input(frontmatter, skill_markdown))]
-        if not model_disclosure_ready(payload):
+        payload = [("SKILL.md", "file", model_input)]
+        if not share_copy_disclosure_ready(model_input):
             return "disclosure_blocked"
         try:
             guard = _scan_snapshot(self.host, self.store.root / "model-inputs", payload)
@@ -749,15 +748,15 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             raise ShareCopyError(copy_problem_message(problem, "model_copy_disabled"))
         if self.llm is None:
             raise ShareCopyError(copy_problem_message(problem, "model_unavailable"))
-        blocked = self._share_copy_disclosure_block(frontmatter, skill_markdown)
+        model_input = share_copy_model_input(frontmatter, skill_markdown)  # scanned and sent
+        blocked = self._share_copy_disclosure_block(model_input)
         if source_fingerprint(source) != source_hash:
             raise WisdomConflict("source changed during local disclosure preflight")
         if blocked is not None:
             raise ShareCopyError(copy_problem_message(problem, blocked))
         self._require_current(may_apply)
-        proposal = propose_share_copy(
-            frontmatter=frontmatter, skill_markdown=skill_markdown, llm=self.llm,
-        )
+        proposal = propose_share_copy(frontmatter=frontmatter, skill_markdown=skill_markdown,
+                                      llm=self.llm, model_input=model_input)
         self._require_current(may_apply)
         if proposal.get("failure") or not proposal["provenance"]:
             raise ShareCopyError(copy_problem_message(
@@ -775,12 +774,10 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             "original": {key: original[key][:4096] for key in written},
         }
 
-    def _share_description(self, skill_id, description, proposed) -> str:
+    def _share_description(self, _skill_id, description, proposed) -> str:
         """The shared description: Hermes' proposal when it replaced the skill's own."""
         if "editorial_description" in proposed["written_by_hermes"]:
             description = proposed["editorial_description"]
-        if self.source_store is not None:
-            description = publication_description(self.source_store, skill_id, description)
         return str(description)
 
     def _prepare_editorial(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -833,8 +830,6 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
             editorial["failure"] = "disclosure_blocked"
         if editorial["provenance"]:
             description = editorial["editorial_description"]
-        if self.source_store is not None:
-            description = publication_description(self.source_store, skill_id, description)
         return frontmatter, description, editorial
 
     def _save_prepared(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -893,6 +888,8 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
                 "content_hash": package.content_hash,
                 "description_hash": package.description_hash,
                 "manifest_hash": package.manifest_hash,
+                # Bound by source_hash, which covers the same list.
+                "omitted_paths": list(package.omitted_paths),
                 "editorial_complete_hash": (
                     package.content_hash if editorial_copy_complete(package.overlay, skill_name)
                     else None

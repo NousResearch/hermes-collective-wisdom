@@ -33,6 +33,13 @@ def publication_copy(result: dict[str, Any]) -> tuple[str, str]:
                 "before authorizing a rescan. Not published.")
     if state == "rejected" and (result.get("phase") == "rejected" or
                                 "before creation" in str(result.get("detail") or "")):
+        if result.get("code") == "instruction_only_violation":
+            # ``reason`` is plugin-authored (the local package rules' own
+            # words); Gateway's detail never reaches this copy.
+            reason = result.get("reason")
+            return ("Failed", "Gateway's package rules refused a file in this skill. "
+                    "Nothing was published." + (
+                        f" {reason}" if isinstance(reason, str) and reason else ""))
         return ("Failed", "Gateway rejected the submission before creating a draft. "
                 "Edit and re-review the local draft before a fresh submission. "
                 "Nothing was published.")

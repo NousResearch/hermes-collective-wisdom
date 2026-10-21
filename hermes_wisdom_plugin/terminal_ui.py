@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
-from .package import MAX_TREE_BYTES, PackagePolicyError
+from .package import LEFT_OUT_LABEL, MAX_METADATA_BYTES, MAX_TREE_BYTES, PackagePolicyError
 
 _SAFE_FINDING_FIELDS = (
     "severity", "category", "pattern_id", "file", "line", "description"
@@ -41,6 +41,12 @@ def text(value: object, *, limit: int = 512) -> str:
     """Return one bounded, whitespace-normalized terminal value."""
 
     return " ".join(without_controls(value).split())[:limit]
+
+
+def path_text(value: object) -> str:
+    """Return one complete package path, controls replaced and nothing truncated."""
+
+    return without_controls(value)
 
 
 def safe_scan_details(scan: object) -> list[dict[str, Any]]:
@@ -158,23 +164,54 @@ def render_gateway_findings(value: object, *, limit: int | None = None) -> str:
     return "\n".join(lines)
 
 
+def _file_line(number: int, item: dict[str, Any], path: str) -> str:
+    """One reviewed file: whole path, executable mark and size."""
+
+    mode = " [executable]" if item.get("mode") == "exec" else ""
+    size = item.get("size")
+    suffix = (f" — {size} bytes"
+              if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else "")
+    return f"  {number}. {path}{mode}{suffix}"
+
+
 def render_inventory(value: object) -> str:
     """Render every reviewed file without dumping file bodies."""
 
     data = value if isinstance(value, dict) else {}
     files = data.get("files") if isinstance(data.get("files"), list) else []
     lines = [f"Files ({len(files)})"]
+    # Paths print whole. The package walk already bounds every path it admits
+    # or leaves out by MAX_METADATA_BYTES, so the listing uses that same budget
+    # instead of cutting individual paths.
+    budget = [MAX_METADATA_BYTES]
+
+    def complete(path: str) -> str | None:
+        budget[0] -= len(path.encode("utf-8")) + 128
+        return path if budget[0] >= 0 else None
+
+    hidden = 0
     for number, item in enumerate(files, start=1):
         if not isinstance(item, dict):
             continue
-        path = text(item.get("path") or "unnamed")
-        mode = " [executable]" if item.get("mode") == "exec" else ""
-        facts = []
-        size = item.get("size")
-        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
-            facts.append(f"{size} bytes")
-        suffix = " — " + ", ".join(facts) if facts else ""
-        lines.append(f"  {number}. {path}{mode}{suffix}")
+        path = complete(path_text(item.get("path") or "unnamed"))
+        if path is None:
+            hidden += 1
+        else:
+            lines.append(_file_line(number, item, path))
+    omitted = data.get("omitted_paths")
+    if isinstance(omitted, list) and omitted:
+        # Every path, one per line like the files above: an exact review never
+        # truncates what it left out.
+        lines.append(f"{LEFT_OUT_LABEL} ({len(omitted)}):")
+        for raw in omitted:
+            path = complete(path_text(raw))
+            if path is None:
+                hidden += 1
+            else:
+                lines.append(f"  - {path}")
+    if hidden:
+        lines.append(f"…and {hidden} more paths: the list exceeds the "
+                     f"{MAX_METADATA_BYTES}-byte package path budget.")
     return "\n".join(lines)
 
 
@@ -252,6 +289,7 @@ def _compatibility_lines(data: dict[str, Any]) -> list[str]:
             ("setup_actions", "Required setup actions"),
             ("limitations", "Known limitations"),
             ("blocked", "Needs attention"),
+            ("notes", "Notes"),
         ):
             lines.extend(_list_lines(label, compatibility.get(key)))
     requirements = data.get("system_specification")
@@ -396,7 +434,8 @@ def _compact_compat_lines(data: dict[str, Any]) -> list[str]:
         lines.append("Compatibility: " + text(compatibility.get("outcome") or "unknown"))
         for key, label in (("blocked", "Needs attention"),
                            ("setup_actions", "Required setup actions"),
-                           ("limitations", "Known limitations")):
+                           ("limitations", "Known limitations"),
+                           ("notes", "Notes")):
             actions = compatibility.get(key)
             if isinstance(actions, list) and actions:
                 lines.extend(_list_lines(label, actions[:2]))

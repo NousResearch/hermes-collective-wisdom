@@ -48,7 +48,7 @@ class Host:
         return name in self.environment
 
 
-def _setup_bytes() -> bytes:
+def _setup_bytes(**changes) -> bytes:
     value = {
         "schema_version": 1,
         "execution_requires_user_approval": True,
@@ -64,6 +64,7 @@ def _setup_bytes() -> bytes:
         "removed_or_generalized": [],
         "related_skills": [],
     }
+    value.update(changes)
     return PREFIX.encode() + canonical_json_bytes(value) + SUFFIX.encode()
 
 
@@ -244,3 +245,71 @@ def test_setup_readiness_never_carries_across_an_updated_version(installed):
     assert not updated["setup_progress"]
     assert updated["ready_to_use"] is None
     assert updated["state"] == "setup_required"
+
+
+def _reinstall_setup(installed_state, target, body: bytes) -> None:
+    row = installed_state.installation("skill-1", owner=OWNER)
+    (target / SETUP_PATH).write_bytes(body)
+    files = [(name, "file", (target / name).read_bytes()) for name in (
+        "SKILL.md", "skill.manifest.json", SETUP_PATH,
+    )]
+    records, content_hash = verify_content_files(files)
+    installed_state.record_install({
+        **row, "content_hash": content_hash,
+        "baseline": {item.path: item.hash for item in records},
+    })
+
+
+def test_four_installed_setup_commands_stay_separately_reviewable(installed):
+    from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
+
+    installed_state, progress, host, target = installed
+    commands = ["printf one", "printf two", "printf three", "printf four"]
+    _reinstall_setup(installed_state, target, _setup_bytes(setup_commands=commands))
+
+    result = inspect_installed_setup(installed_state, progress, host, OWNER, "skill-1")
+    guidance = result.get("guidance") or {}
+    assert isinstance(guidance, dict) and guidance["setup_commands"] == commands
+    assert "guidance_error" not in result
+    assert result["execution_authorized"] is False
+
+
+def test_over_budget_installed_commands_degrade_only_that_field(installed, monkeypatch):
+    from hermes_wisdom_plugin.installed_setup import inspect_installed_setup
+    from hermes_wisdom_plugin.setup_document import MAX_SETUP_COMMANDS_TOTAL_BYTES
+
+    installed_state, progress, host, target = installed
+    commands = ["printf " + "x" * 249] * 21  # 21 x 256 = 5376 bytes
+    _reinstall_setup(installed_state, target, _setup_bytes(setup_commands=commands))
+    monkeypatch.setattr(os, "system", lambda *_args: pytest.fail("inspection executed a command"))
+    host.environment.add("EXAMPLE_TOKEN")
+    with progress.change() as value:
+        value["setup_progress"]["skill-1"] = [
+            {
+                "operation_id": f"op-{phase}-{index}", "receipt": "r", "owner": OWNER,
+                "version": 1,
+                "content_hash": installed_state.installation("skill-1", owner=OWNER)[
+                    "content_hash"],
+                "phase": phase, "index": index, "state": "passed",
+            }
+            for phase, index in (("prerequisite", 2), ("setup", 0), ("verify", 0))
+        ]
+
+    result = inspect_installed_setup(installed_state, progress, host, OWNER, "skill-1")
+    expected = (
+        f"{SETUP_PATH} field setup_commands: 5376 bytes of commands; the limit is "
+        f"{MAX_SETUP_COMMANDS_TOTAL_BYTES} bytes in total. These commands are not shown "
+        "and will not run."
+    )
+    assert result["guidance_error"] == expected
+    assert expected in result["message"]
+    assert "invalid or unsupported" not in result["message"]
+    # Every other field survives exactly; only the commands are withheld.
+    guidance = result.get("guidance") or {}
+    assert isinstance(guidance, dict) and guidance["setup_commands"] is None
+    assert guidance["verification_step"] == "Check the example client."
+    assert guidance["setup_instructions"] == ["Configure the example client."]
+    assert [item["name"] for item in result["prerequisites"]] == ["EXAMPLE_TOKEN", "sh", "example"]
+    # Setup the publisher declared but nobody can see is never "verified".
+    assert result["ready_to_use"] is None
+    assert result["state"] != "verified"

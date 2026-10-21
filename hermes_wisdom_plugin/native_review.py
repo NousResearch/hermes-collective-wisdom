@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import secrets
 import time
@@ -19,11 +21,11 @@ from .catalog_table import COLUMNS as CATALOG_COLUMNS
 from .catalog_table import installed_cell, one_line, version_cell
 from .errors import (
     ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
-    WisdomNotFound, WisdomValidationError, describe_exception,
+    WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
 )
 from .native_context import NativeInvocation
-from .native_inspection import inspection_pages, sharing_checks
-from .package import PackagePolicyError
+from .native_inspection import finding_pages, inspection_pages, sharing_checks, text_pages
+from .package import PackagePolicyError, SkillRefusal
 from .portal_urls import safe_portal_url
 from .release_scope import active as release_scope
 from .review_state import ReviewState
@@ -70,6 +72,9 @@ class NativeItem:
     preamble: str = ""
     literal: bool = False
     emphasis_labels: tuple[str, ...] = ()
+    # The detail is owner text (file names): Slack shows it as plain text, so
+    # mrkdwn operators in it stay literal. Other surfaces already escape it.
+    literal_detail: bool = False
 
     def detail_parts(self) -> list[tuple[str, str]]:
         """Split only explicitly owned line prefixes; leave all original text intact."""
@@ -561,16 +566,20 @@ def _requires_partial_acknowledgement(plan: dict[str, Any]) -> bool:
     )
 
 
-def _fresh_package_plan(record: dict[str, Any], action: str, service: Any) -> dict:
+def _fresh_package_plan(record: dict[str, Any], action: str, service: Any, *,
+                        accept_warnings: bool = False) -> dict:
     """Refresh the displayed package exactly and retain its owner/version binding."""
     old = record["plan"]
     if action == "install":
         skill_id = str(old.get("skill_id") or "")
         version = old.get("version")
         reference = f"{skill_id}@v{version}" if skill_id and isinstance(version, int) else skill_id
-        fresh = service.install_plan(reference)
+        fresh = (service.install_plan(reference, accept_warnings=True) if accept_warnings
+                 else service.install_plan(reference))
     else:
-        fresh = service.update_plan(str(old.get("skill_id") or ""))
+        skill_id = str(old.get("skill_id") or "")
+        fresh = (service.update_plan(skill_id, accept_warnings=True) if accept_warnings
+                 else service.update_plan(skill_id))
     if not isinstance(fresh, dict) or fresh.get("operation") != action:
         raise WisdomValidationError(f"native {action} review is invalid")
     for key in ("skill_id", "version", "content_hash", "manifest_hash"):
@@ -581,12 +590,32 @@ def _fresh_package_plan(record: dict[str, Any], action: str, service: Any) -> di
     return fresh
 
 
-def _package_needs_acknowledgement(plan: dict[str, Any]) -> bool:
-    return (
-        plan.get("allowed") is not True
-        or has_reviewable_warnings(plan)
-        or _requires_partial_acknowledgement(plan)
-    )
+def _compatibility_blocks(plan: dict[str, Any]) -> list[str]:
+    """Declared requirements this machine does not meet, as plugin-authored reasons."""
+    compatibility = plan.get("compatibility")
+    blocked = compatibility.get("blocked") if isinstance(compatibility, dict) else None
+    if not isinstance(blocked, list):
+        return []
+    return [_safe(reason, "an unmet requirement") for reason in blocked if reason]
+
+
+def _install_display_plan(fresh: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """A warning-card plan: findings to show, never a spendable receipt."""
+    display = {key: copy.deepcopy(value) for key, value in fresh.items() if key != "receipt"}
+    display["installation_status"] = record["plan"].get("installation_status")
+    return display
+
+
+def _failure_category(exc: BaseException) -> str:
+    if isinstance(exc, PackagePolicyError):
+        return "policy_blocked"
+    if isinstance(exc, WisdomAuthError):
+        return "authorization"
+    if isinstance(exc, WisdomConflict):
+        return "changed"
+    if isinstance(exc, (WisdomValidationError, WisdomNotFound)):
+        return "invalid_review"
+    return "unavailable"
 
 
 def _validate_review_action(record: dict[str, Any], action: str) -> None:
@@ -763,28 +792,71 @@ def _copy_note(plan: dict[str, Any]) -> str:
     return _safe(line) + " View details shows your original. " if line else ""
 
 
-def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
-    """The single /wisdom share confirmation: Share, Cancel, View details."""
+def _missing_share_facts(record: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    """Name what keeps a share card from offering Share, in the owner's words."""
+    team = record.get("team_name")
+    benefit = ("coworker_benefit",) if release_scope().model_editorial else ()
+    checks = (
+        ("your team's name", isinstance(team, str) and bool(team.strip())
+         and team != (record.get("owner") or {}).get("organization_id")),
+        ("the skill's name and description", plan.get("editorial_status") == "complete" and all(
+            plan.get(key) for key in ("editorial_name", "editorial_description", *benefit))),
+        ("your team's sharing policy", bool(plan.get("publication_mode")
+                                             and plan.get("policy_version"))),
+        ("the review authorization", bool(plan.get("receipt") and plan.get("hashes")
+                                          and plan.get("authorization_expires_at"))),
+        ("permission to share", bool(plan.get("allowed", True))),
+    )
+    return [name for name, present in checks if not present]
+
+
+def _whole_share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """The single /wisdom share confirmation: Share, Cancel, View details.
+
+    A card missing a sharing fact names it and offers Refresh in its place."""
     from .native_inspection import _date  # pylint: disable=import-outside-toplevel
     ready = _share_ready(record, plan)
     actions = [NativeAction("Cancel", "cancel"), NativeAction("View details", "details", row=1)]
-    if ready:
-        actions.insert(0, NativeAction("Share", "confirm", primary=True))
+    actions.insert(0, NativeAction("Share", "confirm", primary=True) if ready
+                   else NativeAction("Refresh", "refresh.review"))
     handling = _SHARE_HANDLING.get(str(plan.get("publication_mode") or ""),
                                    "Publication policy unavailable.")
-    view = NativeView(
+    missing = ", ".join(_missing_share_facts(record, plan)) or "a sharing fact"
+    return NativeView(
         "📤 Share skill",
         _safe(plan.get("editorial_description"), "Description unavailable"),
         fields=_share_fields(record, plan), actions=actions,
         notice=_copy_note(plan)
         + f"{handling} Review open until {_date(plan.get('authorization_expires_at'))}."
-        if ready else "Sharing facts are incomplete. Run hermes wisdom share in a terminal.",
+        if ready else f"Not ready to share. Missing: {missing}. Press Refresh to check again. "
+        "Nothing has been uploaded.",
     )
-    if not _approval_is_lossless(view):
-        return replace(view, actions=[action for action in actions if not action.primary],
-                       notice="This review is too large to show here. "
-                       "Run hermes wisdom share in a terminal. Nothing was uploaded.")
-    return view
+
+
+def _share_pages(record: dict[str, Any], plan: dict[str, Any]) -> tuple[list[str], str]:
+    text = _whole_share_card(record, plan).to_text()
+    return text_pages(text), _digest("share", json.dumps([text, plan.get("receipt")]))
+
+
+def _share_card(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """The share card whole, or paged when it is longer than one card holds.
+
+    Paged, Share appears on the last page once every page has been shown."""
+    view = _whole_share_card(record, plan)
+    if _approval_is_lossless(view):
+        return view
+    pages, identity = _share_pages(record, plan)
+    page = _open_page(record, pages, identity) or 0
+    share = next((action for action in view.actions if action.primary), None)
+    controls = _page_controls(record, pages, identity, share, back=False)
+    return _without_unrendered_approval(replace(
+        view, summary=f"This review is longer than one card. Page {page + 1} of {len(pages)}.",
+        fields=[], items=[NativeItem("Review", pages[page], literal=True)],
+        actions=[*controls, *(action for action in view.actions if not action.primary)],
+        notice="Nothing has been uploaded." + (
+            " Share appears on the last page once you have read every page."
+            if share is not None and page + 1 < len(pages) else ""),
+    ))
 
 
 def _inspection_view(record: dict[str, Any]) -> NativeView:
@@ -827,7 +899,8 @@ def _inspection_view(record: dict[str, Any]) -> NativeView:
     )
     if approving and sharing and not _approval_is_lossless(view):
         return replace(view, actions=[action for action in actions if not action.primary],
-                       notice="Approval facts cannot be displayed completely here; use terminal review.")
+                       notice="Approval facts cannot be displayed completely here. Nothing was "
+                       "shared; run /wisdom share again to start a new review.")
     return view
 
 
@@ -883,7 +956,7 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
     description = plan.get("editorial_description") or plan.get("author_description") or plan.get("description")
     files = plan.get("files")
     setup_commands = plan.get("setup_commands")
-    return NativeView(
+    view = NativeView(
         "A shared skill in your organization is available",
         title,
         [NativeItem("What it does", _safe(description, "Description unavailable")),
@@ -912,32 +985,69 @@ def _installation_view(record: dict[str, Any]) -> NativeView:
             NativeAction("Update Skill" if updating else "Install Skill", verb, primary=True),
         ],
     )
+    if _approval_is_lossless(view) or not any(item.title == "Setup" for item in view.items):
+        return view
+    # Installing never runs setup; the setup card shows every command before it can run.
+    count = f"{len(setup_commands)} command" + ("" if len(setup_commands) == 1 else "s")
+    return replace(view, items=[
+        replace(item, detail=f"{count}. You see every command before choosing whether to run "
+                "them.") if item.title == "Setup" else item
+        for item in view.items
+    ])
 
 
-def _setup_permission_view(record: dict[str, Any]) -> NativeView:
-    """File-write consent cannot authorize execution of setup commands."""
-    plan = record["plan"]
+def _setup_commands(plan: dict[str, Any]) -> list[str]:
     commands = plan.get("setup_commands")
     if not isinstance(commands, list) or not commands or not all(
         isinstance(command, str) and command for command in commands
     ):
         raise WisdomValidationError("Reviewed setup commands are unavailable")
+    return commands
+
+
+def _setup_pages(plan: dict[str, Any]) -> tuple[list[str], str]:
+    commands = _setup_commands(plan)
+    return text_pages("\n".join(commands)), _digest("setup", json.dumps(commands))
+
+
+def _setup_permission_view(record: dict[str, Any]) -> NativeView:
+    """File-write consent cannot authorize execution of setup commands.
+
+    Commands too long for one card are paged; Run setup needs every page shown."""
+    plan = record["plan"]
+    commands = _setup_commands(plan)
+    run = NativeAction("Run setup", "setup.run", primary=True)
+    pages, identity = _setup_pages(plan)
+    page = _open_page(record, pages, identity)
+    if page is not None:
+        return _without_unrendered_approval(NativeView(
+            "Setup commands", f"{_skill_name(plan)} · page {page + 1} of {len(pages)}",
+            [NativeItem("Commands Hermes will run on this computer", pages[page], literal=True)],
+            actions=_page_controls(record, pages, identity, run),
+            notice="Reading the commands runs nothing.",
+        ))
     verb = "updated" if record["operation"] == "update" else "installed"
     view = NativeView(
         "Setup needed", f"{_skill_name(plan)}: files {verb}; setup incomplete.",
         [NativeItem("Commands Hermes will run on this computer", "\n".join(commands))],
         notice="This skill requires setup before it can be used. Run the commands shown above? "
         "Not now leaves the files installed but not ready.",
-        actions=[NativeAction("Run setup", "setup.run", primary=True),
-                 NativeAction("Not now", "setup.defer")],
+        actions=[run, NativeAction("Not now", "setup.defer")],
     )
     if _approval_is_lossless(view):
         return view
-    return replace(
-        view, actions=[NativeAction("Not now", "setup.defer")],
-        notice="Setup commands cannot be shown completely here. Use the terminal setup review; "
-        "the files are installed but not ready.",
-    )
+    unlocked = _all_pages_seen(record, pages, identity)
+    count = f"{len(commands)} command" + ("" if len(commands) == 1 else "s")
+    return _without_unrendered_approval(replace(
+        view,
+        items=[NativeItem(f"Commands Hermes will run on this computer, page 1 of {len(pages)}",
+                          pages[0], literal=True)],
+        actions=[*([run] if unlocked else []), NativeAction("Not now", "setup.defer"),
+                 NativeAction("View all commands", f"{_PAGE_ACTION}0", row=1)],
+        notice=f"This skill requires setup before it can be used. View all commands lists all "
+        f"{count}." + ("" if unlocked else " Run setup appears once you reach the last page.")
+        + " Not now leaves the files installed but not ready.",
+    ))
 
 
 def _suggest_terminal_view(plan: dict[str, Any], state: str, result: Any = None) -> NativeView:
@@ -982,7 +1092,27 @@ def _copy_problem(plan: dict[str, Any]) -> str:
     return _safe(plan.get("editorial_problem"), _LOCAL_COPY_REQUIRED)
 
 
+def _refused_preparation(skill_name: str, exc: BaseException) -> dict[str, Any]:
+    """A plan for a definite, owner-fixable refusal: nothing was prepared or uploaded."""
+    logger.warning("Collective Wisdom share refused (%s)", describe_exception(exc))
+    return {
+        "skill_name": skill_name, "native_stage": "prepared", "editorial_status": "incomplete",
+        "preparation_problem": redacted_message(exc, limit=1000),
+    }
+
+
 def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
+    if plan.get("preparation_problem"):
+        # A definite refusal names its exact reason; Retry prepares the source again.
+        return NativeView(
+            "Skill needs attention", _skill_name(plan),
+            [NativeItem("Not shared", _safe(plan["preparation_problem"],
+                                            "This skill cannot be shared as it is."),
+                        literal_detail=True)],
+            actions=[NativeAction("Retry", "suggest.refresh"),
+                     NativeAction("Maybe later", "suggest.keep")],
+            notice="Nothing has been uploaded. Fix this in the skill's folder, then press Retry.",
+        )
     detail = (_safe(plan.get("editorial_failure"), "Editorial copy or local checks are incomplete.")
               if release_scope().model_editorial else _copy_problem(plan))
     return NativeView(
@@ -993,43 +1123,171 @@ def _suggest_prepared_view(plan: dict[str, Any]) -> NativeView:
         notice="Nothing has been uploaded. Edit the local skill in the terminal if needed.",
     )
 
-def _suggest_checks_view(plan: dict[str, Any]) -> NativeView:
-    details = render_findings(plan)
-    complete = len(details) <= 2200
-    shown = details if complete else details[:2199].rstrip() + "…"
+FINDINGS_CARD_LIMIT = 2200
+_PAGE_ACTION = "paged."
 
-    actions = [NativeAction("Acknowledge", "suggest.ack", primary=True),
-               NativeAction("Cancel", "cancel")]
-    view = NativeView(
-        "⚠️ Review warnings", "The scanner flagged this skill. Acknowledge the warnings "
-        "to continue to the Share card.",
-        [NativeItem("Scanner warnings", shown)],
-        fields=[NativeField("Skill", _skill_name(plan)),
-                NativeField("Files", _file_summary(plan.get("files")))],
-        actions=actions, notice="Nothing has been uploaded.",
+
+def _digest(kind: str, material: str) -> str:
+    return hashlib.sha256(f"{kind}:{material}".encode("utf-8")).hexdigest()
+
+
+def _warning_review(record: dict[str, Any]) -> bool:
+    """A pending card asking the owner to acknowledge local scanner findings."""
+    raw = record.get("plan")
+    plan: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    operation = record.get("operation")
+    return record.get("state") == "pending" and (
+        (operation == "suggest" and plan.get("native_stage") == "warnings")
+        or (operation in {"install", "update"} and record.get("screen") == "install_warnings")
     )
-    if complete and _approval_is_lossless(view):
+
+
+def _findings_pages(plan: dict[str, Any]) -> tuple[list[str], str]:
+    return finding_pages(render_findings(plan)), _digest("findings", review_identity(plan))
+
+
+def _paged_review(record: dict[str, Any]) -> tuple[list[str], str] | None:
+    """The pages an approval on this card covers, and the identity they are bound to."""
+    raw = record.get("plan")
+    plan: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if _warning_review(record):
+        return _findings_pages(plan)
+    if (record.get("state") == "pending" and record.get("screen") == "approval"
+            and record.get("operation") == "publish" and plan.get("candidate_flow") is True):
+        return _share_pages(record, plan)
+    if (record.get("state") == "pending" and record.get("screen") == "setup"
+            and record.get("operation") in {"install", "update"}):
+        try:
+            return _setup_pages(plan)
+        except WisdomValidationError:
+            return None
+    return None
+
+
+def _paging(record: dict[str, Any], identity: str) -> tuple[int | None, set[int]]:
+    """The open page and the pages seen, only while they belong to exactly this content."""
+    state = record.get("paged")
+    if not isinstance(state, dict) or state.get("identity") != identity:
+        return None, set()
+    page = state.get("page")
+    seen = {item for item in state.get("seen") or []
+            if isinstance(item, int) and not isinstance(item, bool)}
+    return (page if isinstance(page, int) and not isinstance(page, bool) else None), seen
+
+
+def _open_page(record: dict[str, Any], pages: list[str], identity: str) -> int | None:
+    page, _seen = _paging(record, identity)
+    return page if page is not None and 0 <= page < len(pages) else None
+
+
+def _all_pages_seen(record: dict[str, Any], pages: list[str], identity: str) -> bool:
+    return set(range(len(pages))) <= _paging(record, identity)[1]
+
+
+def _page_controls(
+    record: dict[str, Any], pages: list[str], identity: str, finish: NativeAction | None,
+    *, back: bool = True,
+) -> list[NativeAction]:
+    """Previous/Next through every page; the approval appears on the last one once all were seen."""
+    page = _open_page(record, pages, identity) or 0
+    actions = []
+    if page:
+        actions.append(NativeAction("Previous", f"{_PAGE_ACTION}{page - 1}"))
+    if page + 1 < len(pages):
+        actions.append(NativeAction("Next", f"{_PAGE_ACTION}{page + 1}"))
+    elif finish is not None and _all_pages_seen(record, pages, identity):
+        actions.append(finish)
+    if back:
+        actions.append(NativeAction("Back", f"{_PAGE_ACTION}back"))
+    return actions
+
+
+def _without_unrendered_approval(view: NativeView) -> NativeView:
+    """A provider that cannot show every fact on this card never shows its approval."""
+    if _approval_is_lossless(view):
         return view
-    return replace(
-        view, actions=[action for action in actions if not action.primary],
-        notice="Warnings cannot be acknowledged here; inspect the same draft in the terminal.",
+    return replace(view, actions=[action for action in view.actions if not action.primary])
+
+
+def _finding_counts(details: list[dict[str, Any]]) -> str:
+    severities: dict[str, int] = {}
+    categories: dict[str, int] = {}
+    for finding in details:
+        severity = str(finding.get("severity") or "warning").upper()
+        category = str(finding.get("category") or "other")
+        severities[severity] = severities.get(severity, 0) + 1
+        categories[category] = categories.get(category, 0) + 1
+    return ("By severity: " + " · ".join(f"{name} {count}" for name, count in severities.items())
+            + "\nBy category: "
+            + " · ".join(f"{name} {count}" for name, count in categories.items()))
+
+
+@dataclass(frozen=True, slots=True)
+class _FindingsCopy:
+    acknowledge: NativeAction
+    summary: str
+    nothing_done: str
+    viewing: str
+    changed: str = ""
+
+
+def _findings_card(
+    record: dict[str, Any], plan: dict[str, Any], words: _FindingsCopy,
+) -> NativeView:
+    """Every finding on one card when it fits; otherwise a summary, the first page and
+    View details through all of them. Acknowledge needs every finding to have been shown."""
+    details = render_findings(plan)
+    pages, identity = _findings_pages(plan)
+    page = _open_page(record, pages, identity)
+    if page is not None:
+        return _without_unrendered_approval(NativeView(
+            "Scanner findings", f"{_skill_name(plan)} · page {page + 1} of {len(pages)}",
+            [NativeItem("Findings", pages[page], literal=True)],
+            actions=_page_controls(record, pages, identity, words.acknowledge),
+            notice=words.viewing,
+        ))
+    count = len(safe_scan_details(plan.get("local_scan")))
+    listed = f" View details lists all {count} finding" + ("" if count == 1 else "s") + "."
+    fields = [NativeField("Skill", _skill_name(plan)),
+              NativeField("Files", _file_summary(plan.get("files")))]
+    view_details = NativeAction("View details", f"{_PAGE_ACTION}0", row=1)
+    whole = NativeView(
+        "⚠️ Review warnings", words.summary, [NativeItem("Scanner warnings", details)],
+        fields=fields, actions=[words.acknowledge, NativeAction("Cancel", "cancel"), view_details],
+        notice=words.nothing_done + listed + words.changed,
     )
+    if len(details) <= FINDINGS_CARD_LIMIT and _approval_is_lossless(whole):
+        return whole
+    unlocked = _all_pages_seen(record, pages, identity)
+    return _without_unrendered_approval(replace(
+        whole,
+        items=[NativeItem("Summary", _finding_counts(safe_scan_details(plan.get("local_scan")))),
+               NativeItem(f"Findings, page 1 of {len(pages)}", pages[0], literal=True)],
+        actions=[action for action in whole.actions if unlocked or not action.primary],
+        notice=words.nothing_done + listed
+        + ("" if unlocked else " Acknowledge appears once you reach the last page.")
+        + words.changed,
+    ))
+
+
+def _suggest_checks_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    return _findings_card(record, plan, _FindingsCopy(
+        NativeAction("Acknowledge", "suggest.ack", primary=True),
+        "The scanner flagged this skill. Acknowledge the warnings to continue to the Share card.",
+        "Nothing has been uploaded.", "Viewing findings shares nothing.",
+    ))
 
 def _suggest_view(plan: dict[str, Any], state: str, result: Any = None) -> NativeView:
     if state != "pending":
         return _suggest_terminal_view(plan, state, result)
-    stage = str(plan.get("native_stage") or "prepared")
-    views = {
-        "prepared": _suggest_prepared_view,
-        "warnings": _suggest_checks_view,
-    }
-    render = views.get(stage)
-    if render is not None:
-        return render(plan)
+    if str(plan.get("native_stage") or "prepared") == "prepared":
+        return _suggest_prepared_view(plan)
+    name = _skill_name(plan)
     return NativeView(
-        "Collective Wisdom contribution", _skill_name(plan),
-        [NativeItem("Review unavailable", "Open the same prepared draft in the terminal.")],
-        notice="Open this prepared draft in the terminal to continue.", dismissed=True,
+        "Collective Wisdom contribution", name,
+        [NativeItem("Review unavailable", "This review can't continue on this card.")],
+        notice=f"Nothing has been uploaded. Run /wisdom share {name} again to start a new review.",
+        dismissed=True,
     )
 
 
@@ -1056,6 +1314,34 @@ def _authority_projection(
     return enriched, lines
 
 
+def _install_warnings_view(record: dict[str, Any], plan: dict[str, Any]) -> NativeView:
+    """Scanner findings on a shared package: Acknowledge binds to exactly these findings."""
+    count = len(safe_scan_details(plan.get("local_scan")))
+    noun = "finding" + ("" if count == 1 else "s")
+    verb = "update" if record.get("operation") == "update" else "install"
+    return _findings_card(record, plan, _FindingsCopy(
+        NativeAction("Acknowledge", "package.ack", primary=True),
+        f"The scanner found {count} {noun} in {_skill_name(plan)}. Acknowledge them to "
+        f"{verb} this exact version.",
+        "Nothing has been installed.", "Viewing findings installs nothing.",
+        " If the findings change before installing, they are shown again.",
+    ))
+
+
+def _install_blocked_view(name: str, result: dict[str, Any]) -> NativeView:
+    reasons = result.get("reasons")
+    if isinstance(reasons, list) and reasons:
+        return NativeView(
+            f"⚠️ {name} unchanged",
+            "Can't install here: " + "; ".join(_safe(reason, "an unmet requirement")
+                                               for reason in reasons),
+            notice="The skill declares this requirement. No changes were made.",
+            dismissed=True,
+        )
+    return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
+                      dismissed=True)
+
+
 def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     result = record.get("result")
     if not isinstance(result, dict):
@@ -1063,8 +1349,7 @@ def _completed_outcome_view(record: dict[str, Any]) -> NativeView | None:
     plan = record.get("plan")
     name = _skill_name(plan if isinstance(plan, dict) else {})
     if record.get("state") == "failed" and result.get("install_blocked") is True:
-        return NativeView(f"⚠️ {name} unchanged", "Install unavailable; no changes made.",
-                          dismissed=True)
+        return _install_blocked_view(name, result)
     if record.get("operation") == "publish":
         return None
     from .publication_copy import publication_copy  # pylint: disable=import-outside-toplevel
@@ -1241,6 +1526,9 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     state = str(record.get("state") or "pending")
     if state == "pending" and record.get("screen") == "gateway_advisory":
         return _gateway_advisory_view(record, plan)
+    if _warning_review(record):
+        return (_install_warnings_view(record, plan) if record.get("screen") == "install_warnings"
+                else _suggest_checks_view(record, plan))
     if state == "pending" and record.get("screen") == "checks":
         safe, checks = sharing_checks({**plan, "candidate_flow": True})
         return NativeView(
@@ -1282,11 +1570,12 @@ def _share_status_view(plan: dict[str, Any], state: str) -> NativeView:
         title, detail = publication_copy(status)
     elif status.get("phase") in _AWAITING_REVIEW:
         title, detail = ("Earlier share needs review", "This skill's earlier share is waiting "
-                         "for review. Finish it in the terminal with hermes wisdom share.")
+                         "for review and couldn't be reopened here. Nothing new was uploaded. "
+                         f"Run /wisdom share {name} again to retry.")
     else:
         title, detail = ("Earlier share still in progress", "An earlier share of this skill "
-                         "hasn't finished. Nothing new was uploaded. Check it with "
-                         "hermes wisdom publication status.")
+                         "hasn't finished. Nothing new was uploaded. Run /wisdom share "
+                         f"{name} again to check on it.")
     return NativeView(
         "Hermes Collective Wisdom", name, [NativeItem(title, detail)],
         actions=[NativeAction("OK", "cancel")] if state == "pending" else [],
@@ -1535,6 +1824,11 @@ class NativeReviewController:
                 "skill_name": str(skill_name).strip(), "native_stage": "prepared",
                 "editorial_status": "incomplete", "editorial_problem": str(exc),
             })
+        except SkillRefusal as exc:
+            # The skill's own files break a rule: the card names the exact
+            # reason. Any other failure keeps the generic reply.
+            return self._insert(service, invocation, "suggest",
+                                _refused_preparation(str(skill_name).strip(), exc))
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):
@@ -1776,6 +2070,30 @@ class NativeReviewController:
             raise
         self.state.compare_replace(fenced, {**fenced, "display_ready": True})
 
+    def _turn_page(self, record: dict[str, Any], action: str) -> dict[str, Any]:
+        """Open one offered page, recording it as seen for exactly this content."""
+        paged = _paged_review(record)
+        if paged is None:
+            raise StaleControlError()
+        pages, identity = paged
+        page, seen = _paging(record, identity)
+        target: int | None = None
+        if action != f"{_PAGE_ACTION}back":
+            try:
+                target = int(action[len(_PAGE_ACTION):])
+            except ValueError as exc:
+                raise WisdomValidationError("Invalid review page") from exc
+            if not 0 <= target < len(pages):
+                raise WisdomValidationError("Invalid review page")
+            seen.add(target)
+        # The card shows the first page; a control pressed on a page proves it was displayed.
+        seen.add(page if page is not None and 0 <= page < len(pages) else 0)
+        result = {**record, "paged": {"identity": identity, "page": target, "seen": sorted(seen)},
+                  "display_ready": False, "updated_at": self.clock()}
+        if not self.state.compare_replace(record, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(result)
+
     def _navigate(
         self, record: dict[str, Any], action: str, *, package_files: Any = None,
     ) -> dict[str, Any]:
@@ -1908,6 +2226,8 @@ class NativeReviewController:
         state = record["state"]
         if state == "kept":
             return self._resume_kept(record, action, service, invocation, authority)
+        if action.startswith(_PAGE_ACTION):
+            return self._turn_page(record, action)
         if action == "defer" or action.startswith(("suggest.", "catalog.install.")):
             return self._act_special(
                 action, record, service, invocation, authority,
@@ -1916,6 +2236,12 @@ class NativeReviewController:
         if action in {"install", "update"} and action == record.get("operation"):
             return self._one_click_package(
                 record, action, service, invocation, authority, progress=progress,
+            )
+        if (action == "package.ack" and record.get("screen") == "install_warnings"
+                and record.get("operation") in {"install", "update"}):
+            return self._one_click_package(
+                record, record["operation"], service, invocation, authority,
+                progress=progress, acknowledged=True,
             )
         if action == "publish.ack" and record.get("operation") == "publish":
             return self._acknowledge_gateway(record, service, invocation, authority)
@@ -2018,6 +2344,7 @@ class NativeReviewController:
         self, record: dict[str, Any], action: str, service: Any,
         invocation: NativeInvocation, authority: Callable[[], bool], *,
         progress: Callable[[NativeView, dict[str, Any]], None] | None = None,
+        acknowledged: bool = False,
     ) -> dict[str, Any]:
         """Prepare and spend a fresh exact receipt inside the explicit click."""
         plan = record["plan"]
@@ -2041,8 +2368,15 @@ class NativeReviewController:
                 })
                 raise
         try:
-            return self._prepare_one_click(record, claimed, action, service, invocation, authority)
-        except Exception:
+            prepared, apply_now = self._prepare_one_click(
+                record, claimed, action, service, invocation, authority,
+                acknowledged=acknowledged,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Collective Wisdom %s preparation failed category=%s review=%s (%s)",
+                action, _failure_category(exc), record.get("id"), describe_exception(exc),
+            )
             if progress is None:
                 self.state.compare_replace(claimed, record)
             else:
@@ -2052,46 +2386,85 @@ class NativeReviewController:
                 if self.state.compare_replace(claimed, failed):
                     return copy.deepcopy(failed)
             raise
+        # The effect logs its own outcome; it is never reported as a preparation failure.
+        return self._apply(prepared, "confirm", service, invocation, authority) if apply_now \
+            else prepared
+
+    def _finish_blocked(self, record, claimed, action, reasons=None):
+        """Record an install the skill's own declarations (or policy) rule out here."""
+        logger.warning(
+            "Collective Wisdom %s blocked category=%s review=%s", action,
+            "declared_requirement" if reasons else "policy_blocked", record.get("id"),
+        )
+        blocked = {
+            **record, "state": "failed", "display_ready": False,
+            "result": {"install_blocked": True, **({"reasons": reasons} if reasons else {})},
+            "updated_at": self.clock(),
+        }
+        if not self.state.compare_replace(claimed, blocked):
+            raise WisdomConflict("Collective Wisdom review changed; open it again") from None
+        return copy.deepcopy(blocked)
+
+    def _show_install_warnings(self, record, claimed, fresh):
+        """Show exactly these findings; Acknowledge is bound to their identity."""
+        if not safe_scan_details(fresh.get("local_scan")):
+            raise PackagePolicyError("scanner warning details are unavailable")
+        shown = {
+            **record, "state": "pending", "plan": _install_display_plan(fresh, record),
+            "screen": "install_warnings", "acknowledged_findings": review_identity(fresh),
+            "display_ready": False, "updated_at": self.clock(),
+        }
+        for key in ("package_files", "inspection_receipt", "page", "inspected_through", "paged"):
+            shown.pop(key, None)
+        if not self.state.compare_replace(claimed, shown):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(shown)
 
     def _prepare_one_click(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self, record, claimed, action, service, invocation, authority,
-    ):
+        self, record, claimed, action, service, invocation, authority, *, acknowledged=False,
+    ) -> tuple[dict[str, Any], bool]:
+        """Return the stored record and whether its exact receipt may be spent now."""
         plan = record["plan"]
         try:
-            fresh = _fresh_package_plan(record, action, service)
+            fresh = _fresh_package_plan(record, action, service, accept_warnings=acknowledged)
         except PackagePolicyError:
-            if action != "install" or plan.get("receipt"):
+            if action != "install" or plan.get("receipt") or acknowledged:
                 raise
             if not authority() or not _owner_matches(record, service, invocation):
                 raise WisdomAuthError("Collective Wisdom review owner changed") from None
-            blocked = {
-                **record, "state": "failed", "display_ready": False,
-                "result": {"install_blocked": True},
-                "updated_at": self.clock(),
-            }
-            if not self.state.compare_replace(claimed, blocked):
-                raise WisdomConflict("Collective Wisdom review changed; open it again") from None
-            return blocked
+            return self._finish_blocked(record, claimed, action), False
+        if not authority() or not _owner_matches(record, service, invocation):
+            raise WisdomAuthError("Collective Wisdom review owner changed")
+        reasons = _compatibility_blocks(fresh)
+        if reasons and fresh.get("allowed") is not True:
+            return self._finish_blocked(record, claimed, action, reasons), False
+        if has_reviewable_warnings(fresh) and (
+                not acknowledged
+                or review_identity(fresh) != record.get("acknowledged_findings")):
+            # Unacknowledged, or the findings changed since they were shown: show them again.
+            return self._show_install_warnings(record, claimed, fresh), False
         inspect = getattr(service, f"native_{action}_inspect")
         files = inspect(fresh["receipt"])
         ready = {
             **record, "plan": copy.deepcopy({
-                **fresh, "installation_status": record["plan"].get("installation_status"),
+                **fresh, "installation_status": plan.get("installation_status"),
             }),
             "package_files": copy.deepcopy(files),
             "inspection_receipt": fresh.get("receipt"),
             "updated_at": self.clock(), "display_ready": False,
         }
-        if _package_needs_acknowledgement(fresh):
+        ready.pop("acknowledged_findings", None)
+        ready.pop("paged", None)
+        if fresh.get("allowed") is not True or _requires_partial_acknowledgement(fresh):
             ready.update(screen="approval", page=0, inspected_through=0)
             if not self.state.compare_replace(claimed, ready):
                 raise WisdomConflict("Collective Wisdom review changed; open it again")
-            return copy.deepcopy(ready)
+            return copy.deepcopy(ready), False
         if not authority() or not _owner_matches(record, service, invocation):
             raise WisdomAuthError("Collective Wisdom review owner changed")
         if not self.state.compare_replace(claimed, ready):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
-        return self._apply(ready, "confirm", service, invocation, authority)
+        return ready, True
 
     def _publish_progress(self, claimed, progress, label="⏳ Sharing…"):
         """A lost progress acknowledgement cannot authorize publication."""
@@ -2333,6 +2706,9 @@ class NativeReviewController:
                 "skill_name": name, "native_stage": "prepared",
                 "editorial_status": "incomplete", "editorial_problem": str(exc),
             }, "updated_at": self.clock()}
+        except SkillRefusal as exc:
+            return {**record, "plan": _refused_preparation(name, exc),
+                    "updated_at": self.clock()}
         if not isinstance(prepared, dict) or not str(
             prepared.get("draft_id") or prepared.get("local_draft_id") or ""
         ):
@@ -2367,11 +2743,17 @@ class NativeReviewController:
         if result is _UNHANDLED and action == "suggest.ack" and plan.get("native_stage") == "warnings":
             displayed = _prepared_review(service, plan)
             if review_identity(displayed) != review_identity(plan):
-                raise WisdomConflict("The package or scanner findings changed; open it again")
-            result = self._sharing_review(record, plan, displayed, service, True)
+                # Not the findings this card showed: show the current ones; nothing is acknowledged.
+                result = self._advance_prepared(record, {**record, "plan": {
+                    **displayed, "skill_name": plan.get("skill_name"), "native_stage": "prepared",
+                    **({"candidate_flow": True} if plan.get("candidate_flow") is True else {}),
+                }, "updated_at": self.clock()}, displayed, service)
+            else:
+                result = self._sharing_review(record, plan, displayed, service, True)
         if result is _UNHANDLED:
             raise WisdomValidationError("Collective Wisdom action was not recognized")
         assert isinstance(result, dict)
+        result.pop("paged", None)
         result["display_ready"] = False
         if not self.state.compare_replace(record, result):
             raise WisdomConflict("Collective Wisdom review changed; open it again")

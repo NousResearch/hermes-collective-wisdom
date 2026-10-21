@@ -6,6 +6,7 @@ import argparse
 import json
 from typing import Any
 
+from .catalog_table import flatten
 from .top_skills import (
     DEFAULT_PER_PAGE,
     EMPTY_TEXT,
@@ -89,8 +90,8 @@ def render_rows(data: dict[str, Any]) -> list[str]:
     """Render one page as numbered single-line rows."""
     start = (data["page"] - 1) * data["per_page"]
     return [
-        f"{start + index}. {row['name']} | {row['uses']} uses | {row['edits']} edits"
-        f" | last used {last_used_label(row['last_used'])}"
+        f"{start + index}. {flatten(str(row['name']))} | {row['uses']} uses"
+        f" | {row['edits']} edits | last used {last_used_label(row['last_used'])}"
         + (" | Shared" if row["shared"] else "")
         for index, row in enumerate(data["items"], start=1)
     ]
@@ -101,17 +102,30 @@ _RIGHT = frozenset({"#", "Uses", "Edits"})
 
 
 def _cells(data: dict[str, Any]) -> list[tuple[str, ...]]:
+    """Every cell on one line, for both the Markdown and the aligned table."""
     start = (data["page"] - 1) * data["per_page"]
     return [
-        (str(start + index), str(row["name"]), str(row["uses"]), str(row["edits"]),
-         last_used_label(row["last_used"]), "✓" if row["shared"] else "")
+        tuple(flatten(cell) for cell in (
+            str(start + index), str(row["name"]), str(row["uses"]), str(row["edits"]),
+            last_used_label(row["last_used"]), "✓" if row["shared"] else ""))
         for index, row in enumerate(data["items"], start=1)
     ]
 
 
 def markdown_cell(value: str) -> str:
-    """Escape a value for one GFM table cell (pipes, backslashes, backticks)."""
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("`", "'")
+    """One GFM table cell on one line (pipes, backslashes, backticks escaped)."""
+    return flatten(value).replace("\\", "\\\\").replace("|", "\\|").replace("`", "'")
+
+
+def markdown_code_cell(value: str) -> str:
+    """One GFM table cell shown literally: a single-line code span.
+
+    Links, emphasis, autolinks, HTML and mentions inside a code span render as
+    typed on every Markdown surface, including the host's Slack table renderer;
+    only the table's own pipe escape applies inside it.
+    """
+    text = flatten(value).replace("`", "'").replace("|", "\\|")
+    return f"`{text}`" if text else ""
 
 
 def render_markdown_table(data: dict[str, Any]) -> list[str]:
@@ -121,8 +135,8 @@ def render_markdown_table(data: dict[str, Any]) -> list[str]:
     surfaces without table support (Telegram MarkdownV2, Discord) receive the
     host's own table-to-list rewrite, so the reply stays structured everywhere.
     """
-    rows = [tuple(markdown_cell(cell) for cell in row) for row in _cells(data)]
-    rows = [(row[0], f"`{row[1]}`", *row[2:]) for row in rows]
+    rows = [(markdown_cell(row[0]), markdown_code_cell(row[1]),
+             *(markdown_cell(cell) for cell in row[2:])) for row in _cells(data)]
     return [
         "| " + " | ".join(_COLUMNS) + " |",
         "|" + "|".join("---:" if name in _RIGHT else ":---" for name in _COLUMNS) + "|",
