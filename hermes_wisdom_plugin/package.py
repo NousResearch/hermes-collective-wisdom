@@ -335,7 +335,7 @@ def _refuse(source: str, path: str, rule: str) -> PackagePolicyError:
     return PackagePolicyError(f"{source} path {path!r} is refused: {rule}")
 
 
-def _check_segment(segment: str, *, path: str, source: str) -> None:
+def _check_transport_segment(segment: str, *, path: str, source: str) -> None:
     """Rules that hold on every platform: transport and containment hazards."""
 
     control = next(
@@ -350,6 +350,11 @@ def _check_segment(segment: str, *, path: str, source: str) -> None:
         )
     if len(segment.encode("utf-8")) > MAX_SEGMENT_BYTES:
         raise _refuse(source, path, f"a path segment exceeds {MAX_SEGMENT_BYTES} bytes")
+
+
+def _check_blocked_segment(segment: str, *, path: str, source: str) -> None:
+    """Names a Hermes-built package never carries, so installs refuse them."""
+
     reason = BLOCKED_PATH_SEGMENTS.get(segment.casefold())
     if reason is not None:
         raise _refuse(
@@ -359,12 +364,15 @@ def _check_segment(segment: str, *, path: str, source: str) -> None:
         )
 
 
-def _validate_package_path(raw_path: str, *, source: str) -> tuple[PurePosixPath, str]:
+def _validate_package_path(
+    raw_path: str, *, source: str, blocked: bool = True
+) -> tuple[PurePosixPath, str]:
     """Check one package path against the rules that hold on every platform.
 
     Returns the parsed path and its exact key for duplicate detection.
     Windows names and case-fold collisions are target-specific: see
-    ``check_declared_platform_paths``.
+    ``check_declared_platform_paths``. ``blocked=False`` leaves the blocked
+    name rule to a caller that must first check the entry's type.
     """
     if not raw_path:
         raise _refuse(source, raw_path, "empty path")
@@ -382,7 +390,9 @@ def _validate_package_path(raw_path: str, *, source: str) -> tuple[PurePosixPath
     if pure.is_absolute() or not pure.parts:
         raise _refuse(source, raw_path, "absolute path")
     for part in pure.parts:
-        _check_segment(part, path=raw_path, source=source)
+        _check_transport_segment(part, path=raw_path, source=source)
+        if blocked:
+            _check_blocked_segment(part, path=raw_path, source=source)
     if len(pure.parts) - 1 > MAX_TREE_DEPTH:
         raise _refuse(source, raw_path, f"deeper than the maximum tree depth {MAX_TREE_DEPTH}")
     return pure, raw_path
@@ -482,8 +492,9 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
     """Admit metadata and payload before sorting or further processing.
 
     A package walk (``omitted is None``) refuses generated paths. A source walk
-    leaves generated directories (not descended) and regular bytecode files out
-    and appends each one's path to ``omitted``; every other rule still holds.
+    leaves real generated directories (lstat: never a symlink, never descended)
+    and regular bytecode files out and appends each one's path to ``omitted``;
+    any other entry with such a name meets every other rule.
     """
 
     try:
@@ -516,28 +527,32 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                     raise PackagePolicyError(
                         f"package path metadata exceeds {MAX_METADATA_BYTES} bytes"
                     )
-                if omitted is not None and item.name.casefold() in GENERATED_SKILL_DIRS:
-                    # Pruned by name, like Hermes skill discovery; never followed.
-                    omitted.append(rel + "/" if item.is_dir(follow_symlinks=False) else rel)
-                    continue
-                pure, _key = _validate_package_path(rel, source="package")
+                pure, _key = _validate_package_path(rel, source="package", blocked=False)
                 try:
                     metadata = item.stat(follow_symlinks=False)
                 except OSError as exc:
                     raise PackagePolicyError("package tree changed while reading") from exc
+                if (omitted is not None and stat.S_ISDIR(metadata.st_mode)
+                        and item.name.casefold() in GENERATED_SKILL_DIRS):
+                    # A real directory Hermes prunes by name; never descended.
+                    # Anything else with such a name meets the rules below.
+                    omitted.append(rel + "/")
+                    continue
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise PackagePolicyError(f"symlinks are not supported: {rel}")
+                if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+                    raise PackagePolicyError(
+                        f"special filesystem content is not supported: {rel}"
+                    )
+                for part in pure.parts:
+                    _check_blocked_segment(part, path=rel, source="package")
                 if (omitted is not None and stat.S_ISREG(metadata.st_mode)
                         and item.name.casefold().endswith(GENERATED_FILE_SUFFIXES)):
                     omitted.append(rel)
                     continue
-                if stat.S_ISLNK(metadata.st_mode):
-                    raise PackagePolicyError(f"symlinks are not supported: {rel}")
                 if stat.S_ISDIR(metadata.st_mode):
                     pending.append((path, depth + 1))
                     continue
-                if not stat.S_ISREG(metadata.st_mode):
-                    raise PackagePolicyError(
-                        f"special filesystem content is not supported: {rel}"
-                    )
                 _validate_allowed_file(pure, path=rel)
                 if metadata.st_nlink != 1:
                     raise PackagePolicyError(f"hard-linked content is not supported: {rel}")

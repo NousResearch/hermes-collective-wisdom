@@ -1,6 +1,7 @@
 """Package path policy: transport hazards everywhere, platform rules only where declared."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -162,6 +163,59 @@ def test_symlink_inside_a_shared_directory_stays_refused(tmp_path: Path):
     (skill / "scripts" / "link").symlink_to(skill / "SKILL.md")
     with pytest.raises(PackagePolicyError, match="symlinks are not supported: scripts/link"):
         _prepare(skill, tmp_path)
+
+
+@pytest.mark.parametrize("relative", ["__pycache__", "scripts/__pycache__", ".git", "node_modules"])
+def test_a_symlink_named_like_a_generated_directory_is_refused_not_left_out(
+    tmp_path: Path, relative: str
+):
+    """Only a real directory is left out by name; a symlink keeps its refusal."""
+    skill = _skill(tmp_path, {"scripts/run.py": b"print(1)\n"})
+    (skill / relative).symlink_to(skill / "SKILL.md")
+    with pytest.raises(PackagePolicyError) as share:
+        _prepare(skill, tmp_path)
+    assert str(share.value) == f"symlinks are not supported: {relative}"
+    with pytest.raises(PackagePolicyError, match=re.escape(relative)):
+        package_module.source_fingerprint(skill)
+
+
+def test_a_directory_symlink_named_like_a_generated_directory_is_refused(tmp_path: Path):
+    """A link to a real directory is still a link: refused, never followed or left out."""
+    skill = _skill(tmp_path, {"refs/notes.md": b"notes\n"})
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "__pycache__").symlink_to(skill / "refs", target_is_directory=True)
+    with pytest.raises(PackagePolicyError) as share:
+        _prepare(skill, tmp_path)
+    assert str(share.value) == "symlinks are not supported: scripts/__pycache__"
+
+
+def test_a_fifo_named_like_a_generated_directory_is_refused(tmp_path: Path):
+    """Special filesystem content keeps its refusal whatever it is called."""
+    skill = _skill(tmp_path, {})
+    os.mkfifo(skill / ".git")
+    with pytest.raises(PackagePolicyError) as share:
+        _prepare(skill, tmp_path)
+    assert str(share.value) == "special filesystem content is not supported: .git"
+
+
+def test_a_regular_file_named_like_a_generated_directory_meets_the_normal_rules(
+    tmp_path: Path,
+):
+    """Never left out: an install-refused name refuses; any other name is shared."""
+    skill = _skill(tmp_path, {"node_modules": b"not a directory\n"})
+    with pytest.raises(PackagePolicyError) as share:
+        _prepare(skill, tmp_path)
+    assert str(share.value).startswith(
+        "package path 'node_modules' is refused: directory 'node_modules' is an "
+        "installed dependency tree"
+    )
+    (tmp_path / "other").mkdir()
+    other = _skill(tmp_path / "other", {".pytest_cache": b"a file\n", "refs/.nox": b"x\n"})
+    package = _prepare(other, tmp_path / "other")
+    assert not package.omitted_paths
+    shared = {path: body for path, _mode, body in
+              package_module.read_validated_package_files(package.overlay)}
+    assert shared[".pytest_cache"] == b"a file\n" and shared["refs/.nox"] == b"x\n"
 
 
 @pytest.mark.parametrize(
