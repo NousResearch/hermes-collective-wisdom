@@ -896,7 +896,7 @@ def test_save_cannot_remove_required_root_file(tmp_path: Path, required: str):
     assert not edits.exists() or not list(edits.iterdir())
 
 
-@pytest.mark.parametrize("mutation", ["duplicate", "traversal", "collision"])
+@pytest.mark.parametrize("mutation", ["duplicate", "traversal"])
 def test_save_rejects_unsafe_complete_file_set(tmp_path: Path, mutation: str):
     value, _source, _binding = reviewer(tmp_path)
     prepared = value.prepare("reviewed-skill")
@@ -906,15 +906,10 @@ def test_save_rejects_unsafe_complete_file_set(tmp_path: Path, mutation: str):
     ]
     if mutation == "duplicate":
         files.append(dict(files[0]))
-    elif mutation == "traversal":
-        files[0]["path"] = "../SKILL.md"
     else:
-        files.extend([
-            {"path": "refs/Name.md", "content_utf8": "first\n"},
-            {"path": "refs/name.md", "content_utf8": "second\n"},
-        ])
+        files[0]["path"] = "../SKILL.md"
 
-    with pytest.raises(PackagePolicyError, match="duplicate|unsafe|collision"):
+    with pytest.raises(PackagePolicyError, match="duplicate|path traversal"):
         value.save_prepared(
             prepared["draft_id"], author_description="Owner copy.",
             files=files, expected_hashes=prepared["hashes"],

@@ -247,8 +247,10 @@ Every share is checked twice before anything is published:
 
 Packages can contain the skill's `SKILL.md`, supporting files, `references/`, `scripts/`,
 `templates/` and `assets/`, up to 10 MiB in total. Compiled executables, symlinks, hard links,
-credentials and private keys are refused. Scripts in a package are never run during sharing, review
-or install.
+credentials and private keys are refused. So are directories Hermes does not treat as skill
+content: `.git`, `.github`, `node_modules`, `.venv`, `venv`, `__pycache__` and `.tox`. A skill
+that declares Windows or macOS must also use paths those platforms can store. Scripts in a package
+are never run during sharing, review or install.
 
 ## Privacy and data use
 

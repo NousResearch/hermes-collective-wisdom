@@ -391,21 +391,6 @@ def test_ordinary_native_supporting_files_are_not_silently_omitted(
     assert (package.overlay / relative).read_text(encoding="utf-8") == content
 
 
-@pytest.mark.parametrize("relative", ["refs/.github/workflows/note.md", "assets/hooks/run"])
-def test_active_vcs_and_hook_metadata_remains_blocked(tmp_path: Path, relative: str):
-    """Native support does not admit VCS automation metadata or hook directories."""
-    skill = make_skill(tmp_path)
-    target = skill / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("unsafe metadata", encoding="utf-8")
-    with pytest.raises(PackagePolicyError, match="active package directory"):
-        prepare_package(
-            skill, overlay_root=tmp_path / "overlays",
-            author_description="A valid description.", owner="owner",
-            installation_id="installation-123456",
-        )
-
-
 def test_download_rejects_hostile_paths_but_accepts_native_modes_and_binary():
     """Downloads reject traversal while preserving native opaque resources."""
 
@@ -436,17 +421,13 @@ def test_download_rejects_hostile_paths_but_accepts_native_modes_and_binary():
         "refs/control\x00.txt",
         "refs/control\x1f.txt",
         "refs/control\x7f.txt",
-        "refs/trailing.txt.",
-        "refs/trailing.txt ",
-        "refs/NUL.txt",
-        "refs/com1.notes.txt",
         "refs/bad:name.txt",
         "refs/cafe\u0301.txt",
 
     ],
 )
 def test_download_rejects_nonportable_or_noncanonical_paths(path: str):
-    """Downloaded paths must be portable and canonically encoded."""
+    """Downloaded paths must be canonically encoded and transport-safe."""
 
     base = [
         ("SKILL.md", "file", b"# test"),
@@ -523,23 +504,6 @@ def test_source_metadata_budget_stops_before_reading_entire_empty_tree(
     with pytest.raises(PackagePolicyError, match="metadata"):
         package_module.source_fingerprint(skill)
     assert reads < 10
-
-
-def test_download_rejects_install_target_collisions():
-    """Case-folding install-target collisions fail closed."""
-
-    base = [
-        ("SKILL.md", "file", b"# test"),
-        ("skill.manifest.json", "file", b'{"schema_version":1}'),
-    ]
-    with pytest.raises(PackagePolicyError, match="collision"):
-        verify_content_files(
-            base
-            + [
-                ("refs/Notes.txt", "file", b"one"),
-                ("refs/notes.txt", "file", b"two"),
-            ]
-        )
 
 
 def test_download_uses_aggregate_payload_and_metadata_caps(monkeypatch):

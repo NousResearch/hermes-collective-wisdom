@@ -44,21 +44,27 @@ WINDOWS_RESERVED_NAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
-WINDOWS_INVALID_CHARS = frozenset('<>:"|?*')
+# Characters a Windows filesystem cannot store. ``:`` is refused on every
+# platform instead, matching Hermes skill installs (``_normalize_bundle_path``
+# in tools/skills_hub_models.py: Windows drive or alternate data stream).
+WINDOWS_INVALID_CHARS = frozenset('<>"|?*')
 PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
-BLOCKED_PATH_SEGMENTS = frozenset({
-    ".circleci",
-    ".git",
-    ".github",
-    ".gitlab",
-    ".hooks",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "hooks",
-    "node_modules",
-    "venv",
-})
+# Directory names Hermes does not treat as skill content
+# (``EXCLUDED_SKILL_DIRS`` in agent/skill_utils.py): skill discovery skips
+# them and remote sandboxes never receive them, so a package carrying one
+# would publish files no installer's agent can see. Each entry says why.
+BLOCKED_PATH_SEGMENTS = {
+    ".git": "version-control metadata, which can carry hooks and configuration",
+    ".github": "repository CI and automation metadata",
+    ".tox": "a generated test environment",
+    ".venv": "a Python virtual environment",
+    "__pycache__": "generated Python bytecode",
+    "node_modules": "an installed dependency tree",
+    "venv": "a Python virtual environment",
+}
+# Default filesystems of these declared platforms fold letter case, so two
+# paths differing only by case would land on one file there.
+CASE_INSENSITIVE_PLATFORMS = ("win", "mac", "darwin", "osx")
 # plugin.yaml ``requires_hermes``: the floor written when a skill declares none.
 PLUGIN_HERMES_FLOOR = "0.21.5"
 _COMPILED_EXECUTABLE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe")
@@ -299,55 +305,115 @@ def infer_authoring_system_specification(
     )
 
 
-def _segment_key(segment: str, *, path: str) -> str:
-    if segment in ("", ".", ".."):
-        raise PackagePolicyError(f"unsafe package path: {path!r}")
-    if unicodedata.normalize("NFC", segment) != segment:
-        raise PackagePolicyError(f"non-canonical package path: {path!r}")
-    if segment.endswith((".", " ")):
-        raise PackagePolicyError(f"unsafe install-target path: {path!r}")
-    invalid_char = next(
-        (
-            char
-            for char in segment
-            if ord(char) < 0x20 or ord(char) == 0x7F or char in WINDOWS_INVALID_CHARS
-        ),
-        None,
+def _refuse(source: str, path: str, rule: str) -> PackagePolicyError:
+    return PackagePolicyError(f"{source} path {path!r} is refused: {rule}")
+
+
+def _check_segment(segment: str, *, path: str, source: str) -> None:
+    """Rules that hold on every platform: transport and containment hazards."""
+
+    control = next(
+        (char for char in segment if ord(char) < 0x20 or ord(char) == 0x7F), None
     )
-    if invalid_char is not None:
-        raise PackagePolicyError(
-            f"unsafe character {invalid_char!r} in package path: {path!r}"
+    if control is not None:
+        raise _refuse(source, path, f"control character U+{ord(control):04X}")
+    if ":" in segment:
+        raise _refuse(
+            source, path,
+            "':' (Hermes skill installs refuse it: Windows drive or alternate data stream)",
         )
     if len(segment.encode("utf-8")) > MAX_SEGMENT_BYTES:
-        raise PackagePolicyError(f"package path segment is too long: {path!r}")
-    key = segment.casefold()
-    if key.split(".", 1)[0] in WINDOWS_RESERVED_NAMES:
-        raise PackagePolicyError(f"reserved install-target path: {path!r}")
-    return key
+        raise _refuse(source, path, f"a path segment exceeds {MAX_SEGMENT_BYTES} bytes")
+    reason = BLOCKED_PATH_SEGMENTS.get(segment.casefold())
+    if reason is not None:
+        raise _refuse(
+            source, path,
+            f"directory {segment!r} is {reason}; Hermes does not treat it as skill "
+            "content, so it would not reach the agents that install this skill",
+        )
 
 
 def _validate_package_path(raw_path: str, *, source: str) -> tuple[PurePosixPath, str]:
-    if (
-        not raw_path
-        or "\\" in raw_path
-        or unicodedata.normalize("NFC", raw_path) != raw_path
-        or PERCENT_ESCAPE_RE.search(raw_path)
-    ):
-        raise PackagePolicyError(f"non-canonical {source} path: {raw_path!r}")
-    raw_parts = raw_path.split("/")
-    if raw_path.startswith("/") or any(part in ("", ".", "..") for part in raw_parts):
-        raise PackagePolicyError(f"unsafe {source} path: {raw_path!r}")
+    """Check one package path against the rules that hold on every platform.
+
+    Returns the parsed path and its exact key for duplicate detection.
+    Windows names and case-fold collisions are target-specific: see
+    ``check_declared_platform_paths``.
+    """
+    if not raw_path:
+        raise _refuse(source, raw_path, "empty path")
+    if "\\" in raw_path:
+        raise _refuse(source, raw_path, "backslash separator ('/' is the only separator)")
+    if unicodedata.normalize("NFC", raw_path) != raw_path:
+        raise _refuse(source, raw_path, "Unicode is not in canonical (NFC) form")
+    if PERCENT_ESCAPE_RE.search(raw_path):
+        raise _refuse(source, raw_path, "percent-escape sequence")
+    if raw_path.startswith("/"):
+        raise _refuse(source, raw_path, "absolute path")
+    if any(part in ("", ".", "..") for part in raw_path.split("/")):
+        raise _refuse(source, raw_path, "empty, '.' or '..' segment (path traversal)")
     pure = PurePosixPath(raw_path)
     if pure.is_absolute() or not pure.parts:
-        raise PackagePolicyError(f"unsafe {source} path: {raw_path!r}")
-    keys = [_segment_key(part, path=raw_path) for part in pure.parts]
-    if any(key in BLOCKED_PATH_SEGMENTS for key in keys):
-        raise PackagePolicyError(f"active package directory is not allowed: {raw_path}")
+        raise _refuse(source, raw_path, "absolute path")
+    for part in pure.parts:
+        _check_segment(part, path=raw_path, source=source)
     if len(pure.parts) - 1 > MAX_TREE_DEPTH:
-        raise PackagePolicyError(
-            f"package path exceeds maximum tree depth {MAX_TREE_DEPTH}: {raw_path}"
-        )
-    return pure, "/".join(keys)
+        raise _refuse(source, raw_path, f"deeper than the maximum tree depth {MAX_TREE_DEPTH}")
+    return pure, raw_path
+
+
+def _declared_platforms(manifest_body: bytes | None) -> list[str]:
+    """Platforms a package manifest declares, folded; [] when none or unreadable."""
+
+    try:
+        requirements = json.loads(manifest_body or b"").get("requirements") or {}
+        platforms = requirements.get("platforms") or []
+    except (AttributeError, TypeError, ValueError):
+        return []
+    return [item.casefold() for item in platforms if isinstance(item, str)]
+
+
+def check_declared_platform_paths(
+    paths: list[str], manifest_body: bytes | None, *, source: str
+) -> None:
+    """Apply Windows and case-insensitive rules only to platforms the skill declares.
+
+    Hermes treats a skill without ``platforms:`` as portable and its skill
+    installs apply no Windows name or case rules, so neither does Wisdom. On a
+    case-folding filesystem the installer still refuses a collision exactly
+    (``stage_package``).
+    """
+    platforms = _declared_platforms(manifest_body)
+    windows = any(item.startswith("win") for item in platforms)
+    folds_case = any(item.startswith(CASE_INSENSITIVE_PLATFORMS) for item in platforms)
+    seen: dict[str, str] = {}
+    for path in paths:
+        if windows:
+            for segment in path.split("/"):
+                invalid = next((c for c in segment if c in WINDOWS_INVALID_CHARS), None)
+                if invalid is not None:
+                    raise _refuse(
+                        source, path, f"{invalid!r} cannot be stored on Windows, "
+                        "which this skill declares",
+                    )
+                if segment.endswith((".", " ")):
+                    raise _refuse(
+                        source, path, "a segment ends in '.' or space, which Windows "
+                        "strips; this skill declares Windows",
+                    )
+                if segment.casefold().split(".", 1)[0] in WINDOWS_RESERVED_NAMES:
+                    raise _refuse(
+                        source, path, f"{segment!r} is a reserved Windows device name; "
+                        "this skill declares Windows",
+                    )
+        if folds_case:
+            key = path.casefold()
+            if key in seen:
+                raise _refuse(
+                    source, path, f"differs from {seen[key]!r} only by letter case, "
+                    "and a declared platform's filesystem folds case",
+                )
+            seen[key] = path
 
 
 def _validate_allowed_file(pure: PurePosixPath, *, path: str) -> None:
@@ -396,7 +462,6 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
     if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
         raise PackagePolicyError("skill root must be a regular directory")
     entries: list[_SnapshotEntry] = []
-    collision_keys: set[str] = set()
     total = 0
     metadata_total = 0
     skill_body: bytes | None = None
@@ -415,15 +480,12 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
             for item in iterator:
                 path = Path(item.path)
                 rel = path.relative_to(root).as_posix()
-                pure, key = _validate_package_path(rel, source="package")
+                pure, _key = _validate_package_path(rel, source="package")
                 metadata_total += len(rel.encode("utf-8")) + 128
                 if metadata_total > MAX_METADATA_BYTES:
                     raise PackagePolicyError(
                         f"package path metadata exceeds {MAX_METADATA_BYTES} bytes"
                     )
-                if key in collision_keys:
-                    raise PackagePolicyError(f"install-target path collision: {rel}")
-                collision_keys.add(key)
                 try:
                     metadata = item.stat(follow_symlinks=False)
                 except OSError as exc:
@@ -454,6 +516,11 @@ def _bounded_snapshot(  # pylint: disable=too-many-branches,too-many-locals,too-
                     skill_body = body
                 entries.append(_SnapshotEntry(path, rel, mode, body))
     entries.sort(key=lambda entry: entry.relative)
+    check_declared_platform_paths(
+        [entry.relative for entry in entries],
+        next((e.body for e in entries if e.relative == "skill.manifest.json"), None),
+        source="package",
+    )
     if skill_body is None:
         raise PackagePolicyError("package requires exactly one root SKILL.md")
     if require_manifest and not any(
@@ -581,6 +648,27 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
     target = overlay_root / source_hash.removeprefix("sha256:")
     if target.exists():
         raise PackagePolicyError("prepared overlay already exists; review the existing draft")
+    authored_manifest = next(
+        (e.body for e in source_snapshot if e.relative == "skill.manifest.json"), None
+    )
+    generated_manifest = None if authored_manifest is not None else json.dumps(
+        PackageManifest(
+            name=source.name,
+            requirements=infer_authoring_system_specification(
+                source,
+                frontmatter=_frontmatter(source, host),
+            ),
+        ).model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    # Refuse paths the declared platforms cannot hold before writing an overlay.
+    check_declared_platform_paths(
+        [entry.relative for entry in source_snapshot],
+        authored_manifest or generated_manifest,
+        source="package",
+    )
     target.mkdir(parents=True, mode=0o700)
     # Copy only validated allowlisted bytes. Validation happens first so an
     # unsupported referenced file never disappears silently from the package.
@@ -599,22 +687,8 @@ def prepare_package(  # pylint: disable=too-many-arguments,too-many-locals
             editorial_name=editorial_name,
             editorial_description=editorial_description,
         )
-    if not (target / "skill.manifest.json").exists():
-        generated = PackageManifest(
-            name=source.name,
-            requirements=infer_authoring_system_specification(
-                source,
-                frontmatter=_frontmatter(source, host),
-            ),
-        )
-        (target / "skill.manifest.json").write_bytes(
-            json.dumps(
-                generated.model_dump(mode="json"),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
-        )
+    if generated_manifest is not None and not (target / "skill.manifest.json").exists():
+        (target / "skill.manifest.json").write_bytes(generated_manifest)
         (target / "skill.manifest.json").chmod(0o600)
     paths = _validate_tree(target)
     try:
@@ -675,9 +749,9 @@ def verify_content_files(
             raise PackagePolicyError("download contains an invalid package path")
         if not isinstance(mode, str) or not isinstance(body, bytes):
             raise PackagePolicyError(f"invalid package entry: {raw_path}")
-        pure, key = _validate_package_path(raw_path, source="server")
+        pure, key = _validate_package_path(raw_path, source="package")
         if key in keys:
-            raise PackagePolicyError(f"install-target collision: {raw_path}")
+            raise _refuse("package", raw_path, "duplicate path")
         keys.add(key)
         metadata_total += len(raw_path.encode("utf-8")) + 128
         if metadata_total > MAX_METADATA_BYTES:
@@ -697,6 +771,11 @@ def verify_content_files(
         require_manifest and "skill.manifest.json" not in required
     ):
         raise PackagePolicyError("download is not a complete Wisdom package")
+    check_declared_platform_paths(
+        [record.path for record in records],
+        next((body for path, _, body in files if path == "skill.manifest.json"), None),
+        source="package",
+    )
     skill_body = next(body for path, _, body in files if path == "SKILL.md")
     try:
         skill_body.decode("utf-8")

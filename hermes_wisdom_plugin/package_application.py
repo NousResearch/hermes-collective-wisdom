@@ -67,11 +67,19 @@ def stage_package(
             destination = staging.joinpath(*path.parts)
             within(destination, staging, "package file")
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("xb") as stream:
-                stream.write(body)
-                stream.flush()
-                os.fchmod(stream.fileno(), 0o700 if mode == "exec" else 0o600)
-                os.fsync(stream.fileno())
+            try:
+                with destination.open("xb") as stream:
+                    stream.write(body)
+                    stream.flush()
+                    os.fchmod(stream.fileno(), 0o700 if mode == "exec" else 0o600)
+                    os.fsync(stream.fileno())
+            except FileExistsError as exc:
+                # Only a case-folding filesystem maps two distinct verified
+                # paths onto one file.
+                raise PackagePolicyError(
+                    f"package path {raw_path!r} is refused: it collides with another "
+                    "package file on this filesystem, which folds letter case"
+                ) from exc
         require_tree(staging, expected)
         fsync_tree(staging)
     except BaseException:
