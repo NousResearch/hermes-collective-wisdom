@@ -5,6 +5,7 @@ from __future__ import annotations
 import unicodedata
 
 DESCRIPTION_LIMIT = 80
+PAGE_SIZE = 5
 COLUMNS = ("Skill", "Version", "Installed", "Description")
 
 
@@ -26,6 +27,20 @@ def one_line(value: object, limit: int = DESCRIPTION_LIMIT) -> str:
     """Collapse whitespace and controls to one line, trimmed with an ellipsis."""
     text = flatten(value)
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def newest_first(rows: list[dict]) -> list[dict]:
+    """Most recently published first; undated rows keep their order after the dated ones."""
+    def published(row: dict) -> str:
+        return str(row.get("latest_published_at") or row.get("first_published_at") or "")
+    return sorted(rows, key=published, reverse=True)
+
+
+def page_bounds(total: int, page: object) -> tuple[int, int]:
+    """The requested page clamped into range, and the page count (at least one)."""
+    count = max(1, -(-total // PAGE_SIZE))
+    current = page if isinstance(page, int) and not isinstance(page, bool) else 0
+    return min(max(current, 0), count - 1), count
 
 
 def version_cell(value: object) -> str:
