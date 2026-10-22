@@ -531,15 +531,18 @@ def _catalog_entry(
 
 
 def _catalog_navigation(total: int, page: int, pages: int) -> tuple[str, list[NativeAction]]:
-    """The browse count and position, and Previous/Next between pages."""
+    """The browse count and position, and Previous/Next between pages.
+
+    The controls are card actions on their own row: table layouts render card actions
+    beside the table's own controls, but not navigation actions."""
     text = f" · {total} skill{'s' if total != 1 else ''}, newest first"
     if pages > 1:
         text += f" · page {page + 1} of {pages}"
     actions = []
     if page:
-        actions.append(NativeAction("Previous", f"{_CATALOG_PAGE_ACTION}{page - 1}"))
+        actions.append(NativeAction("Previous", f"{_CATALOG_PAGE_ACTION}{page - 1}", row=2))
     if page + 1 < pages:
-        actions.append(NativeAction("Next", f"{_CATALOG_PAGE_ACTION}{page + 1}"))
+        actions.append(NativeAction("Next", f"{_CATALOG_PAGE_ACTION}{page + 1}", row=2))
     return text, actions
 
 
@@ -564,7 +567,7 @@ def _catalog_view(plan: dict[str, Any], state: str, page: object = 0) -> NativeV
     return NativeView(
         "Collective Wisdom catalog", summary,
         items, notice=(f"State: {state}" if state != "pending" else ""),
-        navigation_actions=navigation, dismissed=state != "pending",
+        actions=navigation, dismissed=state != "pending",
         table=_catalog_table(rows, items) if command == "Browse" and rows else None,
     )
 

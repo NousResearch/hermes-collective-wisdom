@@ -196,8 +196,7 @@ def _paged_view(count, page):
 
 
 def _offered(view):
-    return [action.action for action in view.navigation_actions + view.table.actions
-            if action.action]
+    return [action.action for action in view.actions + view.table.actions if action.action]
 
 
 def test_browse_pages_through_every_skill_with_absolute_install_indices():
@@ -211,7 +210,7 @@ def test_browse_pages_through_every_skill_with_absolute_install_indices():
     assert _offered(last) == ["catalog.page.1", "catalog.install.10",
                               "catalog.install.11", "catalog.install.12"]
     assert _offered(_paged_view(13, 1))[:2] == ["catalog.page.0", "catalog.page.2"]
-    assert _paged_view(5, 0).navigation_actions == []
+    assert _paged_view(5, 0).actions == []
     assert _paged_view(13, 99).summary.endswith("page 3 of 3")
 
 
@@ -249,6 +248,7 @@ def test_browse_next_page_reaches_and_installs_a_skill_past_the_first_five(tmp_p
         identity = ui.runtime.begin_catalog(ui.caller, "browse")["review_id"]
         await ui.flush()
         assert "catalog.install.6" not in str(ui.posts[-1])
+        assert "catalog.page.1" in str(ui.posts[-1])
         with pytest.raises((StaleControlError, WisdomValidationError)):
             ui.runtime.reviews.act(identity, "catalog.install.6", service,
                                    replace(ui.caller, message_id=ui.record(identity)["message_id"]))
@@ -264,3 +264,21 @@ def test_browse_next_page_reaches_and_installs_a_skill_past_the_first_five(tmp_p
         assert ui.record(identity)["state"] == "completed"
 
     asyncio.run(scenario())
+
+
+def test_every_surface_renders_the_browse_page_controls():
+    view = _paged_view(13, 1)
+    previous, following = "catalog.page.0", "catalog.page.2"
+
+    slack = blocks(view, "card-1")
+    assert [block["type"] for block in slack][-1] == "actions"
+    assert [button["value"] for button in slack[-1]["elements"]] == [
+        f"wi:agent:{previous}:card-1", f"wi:agent:{following}:card-1"]
+    assert [button["text"]["text"] for button in slack[-1]["elements"]] == ["Previous", "Next"]
+    rich = rich_html(view, "card-1")
+    assert f'data="wi:agent:{previous}:card-1"' in rich
+    assert f'data="wi:agent:{following}:card-1"' in rich
+    pytest.importorskip("telegram")
+    data = [button.callback_data for row in keyboard(view, "card-1").inline_keyboard
+            for button in row if button.callback_data]
+    assert data[-2:] == [f"wi:agent:{previous}:card-1", f"wi:agent:{following}:card-1"]
