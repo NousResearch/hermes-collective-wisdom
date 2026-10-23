@@ -588,13 +588,14 @@ function queryOptions(key, queryFn, enabled = true) {
 
 function catalogStatus(item) {
   const status = item?.installation_status
-  if (isObject(status) && ['installed', 'not_installed', 'unmanaged_local', 'unavailable'].includes(status.state)) return status
+  if (isObject(status) && ['installed', 'not_installed', 'unmanaged_local', 'removed', 'unavailable'].includes(status.state)) return status
   return { state: 'unavailable', text: 'Installation status unavailable', installed_version: null, latest_version: versionOf(item) }
 }
 
 function catalogAction(item) {
   const status = catalogStatus(item)
-  if (status.state === 'not_installed') return 'install'
+  // Removed outside Wisdom: the same reviewed install replaces the stale record.
+  if (status.state === 'not_installed' || status.state === 'removed') return 'install'
   if (status.state === 'unmanaged_local' && isPositiveInt(status.latest_version)) return 'update'
   if (status.state === 'installed' && isPositiveInt(status.latest_version) && isPositiveInt(status.installed_version) && status.latest_version > status.installed_version) return 'update'
   return null
@@ -767,7 +768,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
         jsxs('div', { 'data-testid': `catalog-actions-${item.id}`, className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
           versionOf(item) ? jsx(Badge, { children: `v${versionOf(item)}` }) : null,
           jsx(Button, { onClick: () => setSelected(item.id), size: 'sm', type: 'button', variant: 'secondary', children: 'View' }),
-          action ? jsx(Button, { disabled: prepare.isPending, onClick: () => prepare.mutate({ item, action }), size: 'sm', type: 'button', children: action === 'update' ? 'Update' : 'Install' }) : null
+          action ? jsx(Button, { disabled: prepare.isPending, onClick: () => prepare.mutate({ item, action }), size: 'sm', type: 'button', children: action === 'update' ? 'Update' : status.state === 'removed' ? 'Reinstall' : 'Install' }) : null
         ] })
       ] }, item.id)
       )
@@ -907,15 +908,18 @@ function Installed({ bootstrap, client, lifecycle, viewId }) {
               ? `Update unavailable: ${checked.result.reason || checked.result.state || 'the service did not return a reviewable update.'}`
               : 'Update review unavailable until you check for updates.'
       const preservationBlocked = item.modified && !preserve
+      const removed = item.state === 'removed'
       return jsxs('li', { className: 'gap-3 py-3', style: { alignItems: 'center', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }, children: [
         jsxs('div', { className: 'min-w-0 flex-1', children: [
           jsx('div', { className: 'text-sm font-medium', children: label(item) }),
-          jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `Installed v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
-          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus }),
+          jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: removed
+            ? `${text(item.status_text || 'Removed from this computer outside Wisdom')} · v${item.version || '?'} was installed`
+            : `Installed v${item.version || '?'}${item.modified ? ' · local edits detected · preservation required' : ''}` }),
+          jsx('p', { 'aria-live': 'polite', className: 'text-xs text-(--ui-text-tertiary)', style: { overflowWrap: 'anywhere' }, children: removed ? 'Install it again from Catalog.' : preservationBlocked ? 'Update review unavailable: enable preservation to protect local edits.' : checkStatus }),
           jsx(OperationOutcome, { kind: outcome?.kind === 'uninstall' ? 'Uninstall' : 'Update', result: outcome?.skill_id === item.skill_id ? outcome : null })
         ] }),
         jsxs('div', { className: 'flex items-center justify-end gap-2', style: { flexWrap: 'wrap' }, children: [
-          jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: checked?.transient ? 'Retry' : 'Check for updates' }),
+          removed ? null : jsx(Button, { disabled: check.isPending, loading: check.isPending, onClick: () => check.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: checked?.transient ? 'Retry' : 'Check for updates' }),
           jsx(Button, { disabled: uninstall.isPending, onClick: () => uninstall.mutate(item), size: 'sm', type: 'button', variant: 'secondary', children: 'Remove' })
         ] })
       ] }, item.skill_id)

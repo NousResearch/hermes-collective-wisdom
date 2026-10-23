@@ -54,6 +54,9 @@ def _positive(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
+_SIMPLE_CELLS = {"unmanaged_local": "Local copy", "removed": "Removed"}
+
+
 def installed_cell(status: object) -> str:
     """Short, never-empty Installed column value from the advisory local status."""
     data = status if isinstance(status, dict) else {}
@@ -66,8 +69,8 @@ def installed_cell(status: object) -> str:
         return "Yes"
     if state == "not_installed":
         return "No"
-    if state == "unmanaged_local":
-        return "Local copy"
+    if state in _SIMPLE_CELLS:
+        return _SIMPLE_CELLS[state]
     text = data.get("text")
     if state is None and isinstance(text, str) and text.strip():
         return one_line(text, 40)

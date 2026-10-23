@@ -16,7 +16,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .package import PackagePolicyError
-from .managed_target import validate_managed_target
+from .managed_target import REMOVED_TEXT, removed_outside_wisdom, validate_managed_target
 from .package_application import (
     durable_replace as _durable_replace,
     install_package as _install_package,
@@ -253,7 +253,10 @@ class InstallExecutor:
                 continue
             operation = pending_by_skill.pop(item["skill_id"], None)
             if item.get("state") == "active" or operation:
-                result.append(self._installed_item(item, by_skill, operation))
+                result.append(self._installed_item(
+                    item, by_skill, operation,
+                    removed=not operation and removed_outside_wisdom(self.host, item, owner),
+                ))
         for skill_id, operation in pending_by_skill.items():
             payload = self._payload(operation)
             result.append(self._installed_item({
@@ -271,16 +274,26 @@ class InstallExecutor:
         return result
 
     @staticmethod
-    def _installed_item(item: dict, remote: dict, operation: dict | None) -> dict:
+    def _installed_item(
+        item: dict, remote: dict, operation: dict | None, *, removed: bool = False,
+    ) -> dict:
         server = remote.get(item["skill_id"], {})
         target = item.get("target_path")
+        flagged = {
+            # Read-only projection: the stored record stays active until the
+            # owner reinstalls or uninstalls, so a read never changes state.
+            "state": "removed", "removed_outside_wisdom": True,
+            "status_text": REMOVED_TEXT, "modified": False,
+        } if removed else {
+            "modified": not target
+            or _tree_hashes(Path(target)) != item.get("baseline"),
+        }
         return {
             **item,
             "latest_version": server.get("latest_version"),
             "skill_state": server.get("skill_state"),
             "effective_update_mode": server.get("update_mode"),
-            "modified": not target
-            or _tree_hashes(Path(target)) != item.get("baseline"),
+            **flagged,
             "pending_operation": (
                 {"kind": operation["kind"], "phase": operation["stage"]}
                 if operation

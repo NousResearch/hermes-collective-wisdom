@@ -655,7 +655,8 @@ def _managed_reference(service, reference):
     listing = getattr(service, "list_installations", None)
     rows = cast(list[dict[str, Any]], listing()) if callable(listing) else []
     matches = [row for row in rows if isinstance(row, dict)
-               and row.get("slug") == reference and row.get("state", "active") == "active"]
+               and row.get("slug") == reference
+               and row.get("state", "active") in {"active", "removed"}]
     if len(matches) > 1:
         raise WisdomConflict("Managed skill name is ambiguous; use an exact ID with --json")
     if matches:

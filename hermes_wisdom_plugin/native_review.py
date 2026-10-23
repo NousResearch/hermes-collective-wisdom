@@ -308,6 +308,9 @@ def _local_installation_label(service: Any, plan: dict[str, Any]) -> dict[str, s
             if isinstance(rows, list):
                 for row in rows:
                     if (isinstance(row, dict) and row.get("skill_id") == plan.get("skill_id")
+                            and row.get("state") == "removed"):
+                        return {"state": "removed", "text": "Removed from this computer"}
+                    if (isinstance(row, dict) and row.get("skill_id") == plan.get("skill_id")
                             and row.get("state") == "active"):
                         return {"text": f"Installed v{_safe(row.get('version'), '?')}"}
                 return {"text": "No managed installation recorded"}
@@ -484,7 +487,7 @@ def _catalog_table(rows: list[NativeTableRow], items: list[NativeItem]) -> Nativ
             if action.url:
                 links.append(replace(action, label=f"Open {row.name}", row=1))
             else:
-                installs.append(replace(action, label=f"Install {row.name}"))
+                installs.append(replace(action, label=f"{action.label} {row.name}"))
     return NativeTable(CATALOG_COLUMNS, rows, [*installs, *links])
 
 
@@ -515,9 +518,11 @@ def _catalog_entry(
     version = row.get("version", row.get("latest_version"))
     actions = []
     status = row.get("installation_status")
-    if ((row.get("id") or row.get("skill_id")) and isinstance(status, dict)
-            and status.get("state") == "not_installed"):
-        actions.append(NativeAction("Install", f"catalog.install.{index}", primary=True))
+    state = status.get("state") if isinstance(status, dict) else None
+    if (row.get("id") or row.get("skill_id")) and state in {"not_installed", "removed"}:
+        # A skill removed outside Wisdom is installed again through the same review.
+        label = "Reinstall" if state == "removed" else "Install"
+        actions.append(NativeAction(label, f"catalog.install.{index}", primary=True))
     if row.get("portal_url"):
         actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
     item = NativeItem(title, "\n".join(_catalog_facts(row, version, detail)) or "Published skill",

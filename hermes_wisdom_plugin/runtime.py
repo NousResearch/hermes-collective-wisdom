@@ -1620,8 +1620,9 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
         rows = self.list_installations()
         self.check_owner()
+        managed = {"active", "removed"}  # Removed outside Wisdom is still managed.
         matches = [row for row in rows if isinstance(row, dict)
-                   and row.get("state") == "active"
+                   and row.get("state") in managed
                    and row.get("slug") == reference]
         if len(matches) > 1:
             raise WisdomConflict("Managed skill name is ambiguous; inspect installed --json")
@@ -1630,7 +1631,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             if isinstance(skill_id, str) and skill_id:
                 return skill_id
             raise WisdomValidationError("Managed skill identity is unavailable")
-        if any(isinstance(row, dict) and row.get("state") == "active"
+        if any(isinstance(row, dict) and row.get("state") in managed
                and row.get("skill_id") == reference for row in rows):
             return reference
         raise WisdomNotFound("Managed skill not found")
