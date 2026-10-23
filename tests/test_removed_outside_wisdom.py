@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import shutil
 
@@ -11,17 +12,28 @@ import pytest
 from rich.console import Console
 
 from test_install_execution import invocation_executor  # noqa: F401  (fixture)
+from restoration_support import SlackHarness, TelegramHarness
 from hermes_wisdom_plugin import commands, terminal_presentation
 from hermes_wisdom_plugin.catalog_status import CatalogInstallationStatus
 from hermes_wisdom_plugin.managed_target import removed_outside_wisdom
 from hermes_wisdom_plugin.native_review import project_view
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import keyboard, rich_html
+from hermes_wisdom_plugin.package import PackagePolicyError
 from hermes_wisdom_plugin.terminal_ui import render_read_command
 
 
 def _installed(invocation_executor):
-    executor, store, _client, _receipts, plan, target, _authority = invocation_executor
+    executor, store, client, _receipts, plan, target, _authority = invocation_executor
+    client.deactivate_calls = []
+
+    def deactivate_install(installation_id, skill_id):
+        client.deactivate_calls.append((installation_id, skill_id))
+        client.installation_rows = [
+            row for row in client.installation_rows if row["skill_id"] != skill_id]
+        return {"state": "inactive"}
+
+    client.deactivate_install = deactivate_install
     executor.apply(plan["receipt"])
     assert target.is_dir()
     return executor, store, target
@@ -166,3 +178,109 @@ def test_managed_name_resolution_still_finds_a_removed_skill():
             return [{"skill_id": "skill-1", "slug": "managed-skill", "state": "removed"}]
 
     assert commands._managed_reference(Service(), "managed-skill") == "skill-1"
+
+
+# Reinstall ------------------------------------------------------------------
+
+def _reinstall(executor):
+    return executor.reviewer.plan("skill-1@v2", update_mode="AUTO_WITH_NOTICE")
+
+
+def test_a_removed_skill_reinstalls_once_over_its_stale_record(invocation_executor):
+    executor, store, target = _removed(invocation_executor)
+    client = executor.client
+    before = len(client.record_calls)
+
+    plan = _reinstall(executor)
+    result = executor.apply(plan["receipt"])
+
+    assert result["installed"] is True and target.is_dir()
+    assert _record(store)["state"] == "active"
+    assert removed_outside_wisdom(executor.host, _record(store), executor._owner()) is False
+    assert len(client.record_calls) == before + 1
+    assert store.pending_operations() == []
+    assert executor.apply(plan["receipt"]) == result
+    assert len(client.record_calls) == before + 1
+
+
+def test_a_present_skill_is_still_refused_as_already_managed(invocation_executor):
+    executor, _store, _target = _installed(invocation_executor)
+    with pytest.raises(PackagePolicyError, match="already managed; use the update workflow"):
+        _reinstall(executor)
+    with pytest.raises(PackagePolicyError, match="already managed; use the update workflow"):
+        executor.reviewer.plan("managed-skill")
+
+
+def test_a_planted_file_at_a_removed_target_still_blocks_reinstall(invocation_executor):
+    executor, _store, target = _removed(invocation_executor)
+    plan = _reinstall(executor)
+    target.write_text("planted\n", encoding="utf-8")
+    with pytest.raises(PackagePolicyError):
+        executor.apply(plan["receipt"])
+    assert target.read_text(encoding="utf-8") == "planted\n"
+
+
+def test_an_uninstalled_skill_installs_again(invocation_executor):
+    executor, store, target = _installed(invocation_executor)
+    executor.uninstall("skill-1")
+    assert not target.exists() and _record(store)["state"] == "inactive"
+
+    plan = _reinstall(executor)
+    executor.apply(plan["receipt"])
+
+    assert target.is_dir() and _record(store)["state"] == "active"
+
+
+class _CatalogService:
+    """Real reviewer and executor behind the native catalog controls."""
+
+    def __init__(self, executor, store):
+        self.executor, self.store, self.applied = executor, store, 0
+
+    def native_owner(self):
+        return self.executor._owner()
+
+    def search_skills(self, _query=None):
+        status = CatalogInstallationStatus(
+            self.store, self.native_owner(), self.executor.host.profile_home)
+        return [{
+            "id": "skill-1", "slug": "managed-skill", "latest_version": 2,
+            "author_description": "A managed skill",
+            "installation_status": status.for_skill("skill-1", "managed-skill", 2),
+        }]
+
+    def install_plan(self, reference, **kwargs):
+        return self.executor.reviewer.plan(reference, **kwargs)
+
+    @staticmethod
+    def native_install_inspect(_receipt):
+        return [{"path": "SKILL.md", "content": "inert fixture"}]
+
+    def install_apply(self, receipt, *, may_apply, accept_partial=False):
+        self.applied += 1
+        return self.executor.apply(receipt, accept_partial=accept_partial, may_apply=may_apply)
+
+    @staticmethod
+    def close():
+        return None
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_reinstall_from_the_browse_card_applies_once(invocation_executor, tmp_path, surface):
+    executor, store, target = _removed(invocation_executor)
+    service = _CatalogService(executor, store)
+    before = len(executor.client.record_calls)
+
+    async def scenario():
+        ui = surface(tmp_path / "native", service)
+        identity = ui.runtime.begin_catalog(ui.caller, "browse")["review_id"]
+        await ui.flush()
+        assert "catalog.install.0" in str(ui.posts[-1])
+        await ui.click(identity, "catalog.install.0")
+        assert ui.record(identity)["state"] == "completed"
+        await ui.click(identity, "catalog.install.0")
+
+    asyncio.run(scenario())
+    assert service.applied == 1
+    assert target.is_dir() and _record(store)["state"] == "active"
+    assert len(executor.client.record_calls) == before + 1

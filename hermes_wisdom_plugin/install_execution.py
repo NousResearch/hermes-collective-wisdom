@@ -137,9 +137,13 @@ class InstallExecutor:
         existing = self.store.installation(skill_id)
         if existing:
             self._require_record_owner(existing, owner)
-            if existing.get("state") == "active":
+            # A skill removed outside Wisdom reinstalls over its stale record; an
+            # uninstalled one left no tree. Either way nothing may be at the target.
+            if existing.get("state") == "active" and not removed_outside_wisdom(
+                self.host, existing, owner,
+            ):
                 raise PackagePolicyError("managed installation already exists")
-            target = self._validated_record_target(existing, owner)
+            target = validate_managed_target(self.host, existing, owner, require_tree=False)
             if target.exists() or target.is_symlink():
                 raise PackagePolicyError("inactive managed target still exists")
         _require_compatibility(plan, accept_partial)
