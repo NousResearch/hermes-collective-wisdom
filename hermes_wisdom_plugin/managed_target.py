@@ -17,6 +17,18 @@ _LOCAL_KIND = "local_source"
 REMOVED_TEXT = "Removed from this computer outside Wisdom"
 
 
+class RemovedOutsideWisdom(PackagePolicyError):
+    """A managed skill has no files to check, update or review any more."""
+
+    def __init__(self, slug: str, version: object = None) -> None:
+        self.slug = slug
+        self.version = version if isinstance(version, int) else None
+        super().__init__(
+            f"{slug} was removed from this computer outside Wisdom; "
+            f"install it again with: hermes wisdom install {slug}"
+        )
+
+
 def removed_outside_wisdom(host: Any, record: dict[str, Any], owner: dict[str, str]) -> bool:
     """Whether an active managed install's validated target path no longer exists.
 

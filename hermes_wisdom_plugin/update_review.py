@@ -20,7 +20,10 @@ from .install_execution import (
     _tree_hashes,
 )
 from .install_review import InstallReviewer
-from .managed_target import local_provenance, validate_managed_target
+from .managed_target import (
+    REMOVED_TEXT, RemovedOutsideWisdom, local_provenance, removed_outside_wisdom,
+    validate_managed_target,
+)
 from .package import PackagePolicyError
 from .qualification import _eligible_path
 
@@ -156,6 +159,8 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
             }
         if installation.get("owner") != owner:
             raise WisdomAuthError("managed installation belongs to another enrolment")
+        if require_tree and removed_outside_wisdom(self.host, installation, owner):
+            raise RemovedOutsideWisdom(str(installation.get("slug")), installation.get("version"))
         validate_update_target(
             self.host, installation, owner, require_tree=require_tree,
         )
@@ -253,7 +258,14 @@ class UpdateReviewer:  # pylint: disable=too-many-instance-attributes
         """Compare local and authoritative versions without package/feed side effects."""
 
         owner = self._owner()
-        installation = self._installation(skill_id, owner, slug=slug)
+        try:
+            installation = self._installation(skill_id, owner, slug=slug)
+        except RemovedOutsideWisdom as removed:
+            return {
+                "skill_id": skill_id, "slug": removed.slug, "state": "removed",
+                "reason": REMOVED_TEXT, "installed_version": removed.version,
+                "latest_version": None,
+            }
         if self._unknown_local(installation):
             authority = self._catalog_authority(skill_id, owner)
             return {

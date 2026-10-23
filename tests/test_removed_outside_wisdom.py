@@ -15,12 +15,13 @@ from test_install_execution import invocation_executor  # noqa: F401  (fixture)
 from restoration_support import SlackHarness, TelegramHarness
 from hermes_wisdom_plugin import commands, terminal_presentation
 from hermes_wisdom_plugin.catalog_status import CatalogInstallationStatus
-from hermes_wisdom_plugin.managed_target import removed_outside_wisdom
+from hermes_wisdom_plugin.managed_target import RemovedOutsideWisdom, removed_outside_wisdom
 from hermes_wisdom_plugin.native_review import project_view
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import keyboard, rich_html
-from hermes_wisdom_plugin.package import PackagePolicyError
+from hermes_wisdom_plugin.package import PackagePolicyError, SkillRefusal
 from hermes_wisdom_plugin.terminal_ui import render_read_command
+from hermes_wisdom_plugin.update_review import UpdateReviewer
 
 
 def _installed(invocation_executor):
@@ -284,3 +285,71 @@ def test_reinstall_from_the_browse_card_applies_once(invocation_executor, tmp_pa
     assert service.applied == 1
     assert target.is_dir() and _record(store)["state"] == "active"
     assert len(executor.client.record_calls) == before + 1
+
+
+# Check and update ------------------------------------------------------------
+
+def _updates(executor):
+    return UpdateReviewer(executor.client, executor.store, executor.receipts,
+                          executor.host, executor.reviewer.owner)
+
+
+def test_check_reports_a_removed_skill_plainly(invocation_executor):
+    executor, _store, _target = _removed(invocation_executor)
+
+    result = _updates(executor).check("skill-1")
+
+    assert result == {
+        "skill_id": "skill-1", "slug": "managed-skill", "state": "removed",
+        "reason": "Removed from this computer outside Wisdom",
+        "installed_version": 2, "latest_version": None,
+    }
+    text = commands._human_render("check", result)
+    assert text == ("Update check\nSkill: managed-skill\n"
+                    "State: Removed from this computer outside Wisdom\n"
+                    "Next step: hermes wisdom install managed-skill")
+
+
+def test_update_of_a_removed_skill_names_the_reinstall(invocation_executor):
+    executor, _store, _target = _removed(invocation_executor)
+
+    with pytest.raises(RemovedOutsideWisdom) as raised:
+        _updates(executor).plan("skill-1")
+
+    assert not isinstance(raised.value, SkillRefusal)
+    assert str(raised.value) == (
+        "managed-skill was removed from this computer outside Wisdom; "
+        "install it again with: hermes wisdom install managed-skill")
+    assert "regular directory" not in str(raised.value)
+
+
+class _UpdateService(_CatalogService):
+    def update_plan(self, skill_id, **_kwargs):
+        return _updates(self.executor).plan(skill_id)
+
+    def show(self, _target):
+        row = self.search_skills()[0]
+        return {"skill": {"id": "skill-1", "slug": "managed-skill"},
+                "latest_version_detail": {"version": {"version": 2}},
+                "installation_status": row["installation_status"]}
+
+
+@pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
+def test_chat_update_of_a_removed_skill_offers_reinstall(invocation_executor, tmp_path, surface):
+    executor, store, target = _removed(invocation_executor)
+    service = _UpdateService(executor, store)
+
+    async def scenario():
+        ui = surface(tmp_path / "native", service)
+        identity = ui.runtime.begin_update(ui.caller, "skill-1")["review_id"]
+        await ui.flush()
+        posted = str(ui.posts[-1])
+        assert "Removed from this computer" in posted
+        assert "regular directory" not in posted
+        assert "catalog.install.0" in posted
+        await ui.click(identity, "catalog.install.0")
+        await ui.click(identity, "catalog.install.0")
+
+    asyncio.run(scenario())
+    assert service.applied == 1
+    assert target.is_dir() and _record(store)["state"] == "active"

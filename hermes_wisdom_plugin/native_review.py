@@ -24,6 +24,7 @@ from .errors import (
     ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
     WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
 )
+from .managed_target import RemovedOutsideWisdom
 from .native_context import NativeInvocation
 from .native_inspection import finding_pages, inspection_pages, sharing_checks, text_pages
 from .package import PackagePolicyError, SkillRefusal
@@ -1754,7 +1755,11 @@ class NativeReviewController:
         self, service: Any, invocation: NativeInvocation, skill_id: str, *,
         publisher_fact: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        plan = service.update_plan(skill_id)
+        try:
+            plan = service.update_plan(skill_id)
+        except RemovedOutsideWisdom as removed:
+            # Nothing is left to update: show the skill with its Reinstall control.
+            return self.request_catalog(service, invocation, "show", removed.slug)
         if plan.get("operation") != "update":
             raise WisdomValidationError("native update review is invalid")
         return self._insert(service, invocation, "update", {

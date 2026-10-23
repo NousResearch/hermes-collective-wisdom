@@ -1168,6 +1168,14 @@ def _human_render(  # pylint: disable=too-many-return-statements
     if isinstance(data.get("error"), str):
         return "Error: " + _text(data["error"])
     if command == "check":
+        if data.get("state") == "removed":
+            slug = _text(data.get("slug") or "<skill-name>")
+            return "\n".join((
+                "Update check",
+                f"Skill: {slug}",
+                f"State: {_text(data.get('reason') or 'removed')}",
+                f"Next step: hermes wisdom install {slug}",
+            ))
         return "\n".join((
             "Update check",
             f"Skill: {_text(data.get('slug') or 'This skill')}",
