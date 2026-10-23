@@ -18,7 +18,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .catalog_table import COLUMNS as CATALOG_COLUMNS
-from .catalog_table import installed_cell, one_line, version_cell
+from .catalog_table import installed_cell, one_line, page_bounds, version_cell
+from .catalog_table import PAGE_SIZE as CATALOG_PAGE_SIZE
 from .errors import (
     ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
     WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
@@ -500,41 +501,74 @@ def _catalog_facts(row: dict[str, Any], version: Any, detail: Any) -> list[str]:
     return facts
 
 
-def _catalog_view(plan: dict[str, Any], state: str) -> NativeView:
+_CATALOG_PAGE_ACTION = "catalog.page."
+
+
+def _catalog_entry(
+    row: dict[str, Any], index: int, command: str, plan: dict[str, Any],
+) -> tuple[NativeItem, NativeTableRow]:
+    """One listing row; Install carries the row's index into the whole listing."""
+    title = _skill_name(row)
+    if title == "Name unavailable" and command == "Versions":
+        title = _skill_name(plan)
+    detail = row.get("author_description") or row.get("description") or ""
+    version = row.get("version", row.get("latest_version"))
+    actions = []
+    status = row.get("installation_status")
+    if ((row.get("id") or row.get("skill_id")) and isinstance(status, dict)
+            and status.get("state") == "not_installed"):
+        actions.append(NativeAction("Install", f"catalog.install.{index}", primary=True))
+    if row.get("portal_url"):
+        actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
+    item = NativeItem(title, "\n".join(_catalog_facts(row, version, detail)) or "Published skill",
+                      actions)
+    return item, NativeTableRow(
+        (title, version_cell(version), installed_cell(status),
+         one_line(detail) or "No description"), title,
+        f"{version_cell(version)} · {_installed_label(row)}",
+        one_line(detail) or "No description",
+    )
+
+
+def _catalog_navigation(total: int, page: int, pages: int) -> tuple[str, list[NativeAction]]:
+    """The browse count and position, and Previous/Next between pages.
+
+    The controls are card actions on their own row: table layouts render card actions
+    beside the table's own controls, but not navigation actions."""
+    text = f" · {total} skill{'s' if total != 1 else ''}, newest first"
+    if pages > 1:
+        text += f" · page {page + 1} of {pages}"
+    actions = []
+    if page:
+        actions.append(NativeAction("Previous", f"{_CATALOG_PAGE_ACTION}{page - 1}", row=2))
+    if page + 1 < pages:
+        actions.append(NativeAction("Next", f"{_CATALOG_PAGE_ACTION}{page + 1}", row=2))
+    return text, actions
+
+
+def _catalog_view(plan: dict[str, Any], state: str, page: object = 0) -> NativeView:
+    """Browse pages through every skill, newest first; show and versions keep one card."""
     command = str(plan.get("command") or "browse").title()
-    items = []
-    rows: list[NativeTableRow] = []
-    for index, row in enumerate(_catalog_rows(plan.get("data"))[:5]):
-        title = _skill_name(row)
-        if title == "Name unavailable" and command == "Versions":
-            title = _skill_name(plan)
-        detail = row.get("author_description") or row.get("description") or ""
-        version = row.get("version", row.get("latest_version"))
-        facts = _catalog_facts(row, version, detail)
-        actions = []
-        skill_id = row.get("id") or row.get("skill_id")
-        status = row.get("installation_status")
-        if (skill_id and isinstance(status, dict)
-                and status.get("state") == "not_installed"):
-            actions.append(NativeAction("Install", f"catalog.install.{index}", primary=True))
-        if row.get("portal_url"):
-            actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
-        items.append(NativeItem(title, "\n".join(facts) or "Published skill", actions))
-        rows.append(NativeTableRow(
-            (title, version_cell(version), installed_cell(status),
-             one_line(detail) or "No description"), title,
-            f"{version_cell(version)} · {_installed_label(row)}",
-            one_line(detail) or "No description",
-        ))
-    if not items:
-        items = [NativeItem("No matching skills", "The catalog returned no results.")]
-    table = _catalog_table(rows, items) if command == "Browse" and rows else None
+    catalog = _catalog_rows(plan.get("data"))
+    page, pages = page_bounds(len(catalog), page) if command == "Browse" else (0, 1)
+    start = page * CATALOG_PAGE_SIZE
+    entries = [_catalog_entry(row, index, command, plan) for index, row in
+               enumerate(catalog[start:start + CATALOG_PAGE_SIZE], start=start)]
+    items = [item for item, _row in entries] or [
+        NativeItem("No matching skills", "The catalog returned no results.")]
+    rows = [row for _item, row in entries]
+    summary = f"{command}: " + (
+        _skill_name(plan) if command != "Browse" else _safe(plan.get("target"), "All skills")
+    )
+    navigation: list[NativeAction] = []
+    if command == "Browse" and catalog:
+        position, navigation = _catalog_navigation(len(catalog), page, pages)
+        summary += position
     return NativeView(
-        "Collective Wisdom catalog", f"{command}: " + (
-            _skill_name(plan) if command != "Browse" else _safe(plan.get("target"), "All skills")
-        ),
+        "Collective Wisdom catalog", summary,
         items, notice=(f"State: {state}" if state != "pending" else ""),
-        dismissed=state != "pending", table=table,
+        actions=navigation, dismissed=state != "pending",
+        table=_catalog_table(rows, items) if command == "Browse" and rows else None,
     )
 
 
@@ -1546,7 +1580,7 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
     if record.get("operation") in {"install", "update"} and state == "pending":
         return _installation_view(record)
     if record.get("operation") == "catalog":
-        return _catalog_view(plan, state)
+        return _catalog_view(plan, state, record.get("catalog_page", 0))
     if record.get("operation") == "settings":
         return _settings_view(record)
     if record.get("operation") == "share_status":
@@ -2094,6 +2128,21 @@ class NativeReviewController:
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(result)
 
+    def _turn_catalog_page(self, record: dict[str, Any], action: str) -> dict[str, Any]:
+        """Show one offered browse page; Install keeps its index into the whole listing."""
+        try:
+            target = int(action[len(_CATALOG_PAGE_ACTION):])
+        except ValueError as exc:
+            raise WisdomValidationError("Invalid catalog page") from exc
+        total = len(_catalog_rows(record["plan"].get("data")))
+        if page_bounds(total, target)[0] != target:
+            raise WisdomValidationError("Invalid catalog page")
+        result = {**record, "catalog_page": target, "display_ready": False,
+                  "updated_at": self.clock()}
+        if not self.state.compare_replace(record, result):
+            raise WisdomConflict("Collective Wisdom review changed; open it again")
+        return copy.deepcopy(result)
+
     def _navigate(
         self, record: dict[str, Any], action: str, *, package_files: Any = None,
     ) -> dict[str, Any]:
@@ -2228,6 +2277,8 @@ class NativeReviewController:
             return self._resume_kept(record, action, service, invocation, authority)
         if action.startswith(_PAGE_ACTION):
             return self._turn_page(record, action)
+        if action.startswith(_CATALOG_PAGE_ACTION) and record.get("operation") == "catalog":
+            return self._turn_catalog_page(record, action)
         if action == "defer" or action.startswith(("suggest.", "catalog.install.")):
             return self._act_special(
                 action, record, service, invocation, authority,

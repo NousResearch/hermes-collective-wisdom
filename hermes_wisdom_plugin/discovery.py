@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, cast
 
+from .catalog_table import newest_first
 from .errors import WisdomNotFound, WisdomValidationError
 from .portal_urls import portal_skill_url
 
@@ -80,7 +81,7 @@ class Discovery:
         return result
 
     def search_skills(self, query: str | None = None) -> list[dict[str, Any]]:
-        """Search authoritative discovery pages without inventing authority."""
+        """Search authoritative discovery pages without inventing authority, newest first."""
 
         skills: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -107,6 +108,7 @@ class Discovery:
         else:
             raise WisdomValidationError("Wisdom discovery exceeded the page limit")
 
+        skills = newest_first(skills)
         needle = str(query or "").strip().casefold()
         if not needle:
             return skills

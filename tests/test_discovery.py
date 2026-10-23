@@ -311,3 +311,17 @@ def test_portal_skill_url_carries_version_on_both_routes():
     assert portal_skill_url("https://p.example", "s1", org_slug=None,
                             organization_id="org 1", version=2) == (
         "https://p.example/wisdom/skills/s1?org_id=org+1&version=2")
+
+
+def test_search_lists_newest_publication_first_across_pages():
+    client = _Client()
+    client.pages = [
+        _page([_item(id="old", latest_published_at="2026-09-17T00:32:42.877Z"),
+               _item(id="undated")], "1"),
+        _page([_item(id="newest", latest_published_at="2026-10-22T17:21:16.842Z"),
+               _item(id="first-only", first_published_at="2026-10-01T08:00:00.000Z")]),
+    ]
+
+    result = _discovery(client).search_skills()
+
+    assert [item["id"] for item in result] == ["newest", "first-only", "old", "undated"]
