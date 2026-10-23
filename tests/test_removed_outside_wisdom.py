@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import io
 import shutil
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -20,7 +21,7 @@ from hermes_wisdom_plugin.native_review import project_view
 from hermes_wisdom_plugin.native_slack import blocks
 from hermes_wisdom_plugin.native_telegram import keyboard, rich_html
 from hermes_wisdom_plugin.package import PackagePolicyError, SkillRefusal
-from hermes_wisdom_plugin.terminal_ui import render_read_command
+from hermes_wisdom_plugin.terminal_ui import render_operation_outcome, render_read_command
 from hermes_wisdom_plugin.update_review import UpdateReviewer
 
 
@@ -30,6 +31,8 @@ def _installed(invocation_executor):
 
     def deactivate_install(installation_id, skill_id):
         client.deactivate_calls.append((installation_id, skill_id))
+        if getattr(client, "offline", False):
+            raise RuntimeError("offline")
         client.installation_rows = [
             row for row in client.installation_rows if row["skill_id"] != skill_id]
         return {"state": "inactive"}
@@ -353,3 +356,65 @@ def test_chat_update_of_a_removed_skill_offers_reinstall(invocation_executor, tm
     asyncio.run(scenario())
     assert service.applied == 1
     assert target.is_dir() and _record(store)["state"] == "active"
+
+
+# Uninstall -------------------------------------------------------------------
+
+def test_uninstall_of_a_removed_skill_completes_without_bytes(invocation_executor):
+    executor, store, target = _removed(invocation_executor)
+    client = executor.client
+
+    result = executor.uninstall("skill-1")
+
+    assert result == {
+        "uninstalled": True, "skill_id": "skill-1", "slug": "managed-skill",
+        "state": "inactive", "recoverable_path": None, "already_removed": True,
+    }
+    assert _record(store)["state"] == "inactive"
+    assert client.deactivate_calls == [("install-1", "skill-1")]
+    assert store.pending_operations() == []
+    assert not target.exists()
+    assert render_operation_outcome("uninstall", result) == (
+        "✅ managed-skill removed. It was already removed from this computer.")
+
+    assert executor.uninstall("skill-1") == result
+    assert client.deactivate_calls == [("install-1", "skill-1")]
+
+
+def test_uninstall_of_a_removed_skill_resumes_after_gateway_failure(invocation_executor):
+    executor, store, _target = _removed(invocation_executor)
+    client = executor.client
+    client.offline = True
+
+    pending = executor.uninstall("skill-1")
+
+    assert pending.get("pending") is True
+    assert len(store.pending_operations("skill-1")) == 1
+    client.offline = False
+    result = executor.uninstall("skill-1")
+    assert result["uninstalled"] is True and result["already_removed"] is True
+    assert store.pending_operations() == []
+    assert _record(store)["state"] == "inactive"
+
+
+def test_uninstall_refuses_a_file_planted_at_a_removed_target(invocation_executor):
+    executor, store, target = _removed(invocation_executor)
+    target.write_text("planted\n", encoding="utf-8")
+
+    with pytest.raises(PackagePolicyError):
+        executor.uninstall("skill-1")
+
+    assert store.pending_operations() == []
+    assert _record(store)["state"] == "active"
+    assert target.read_text(encoding="utf-8") == "planted\n"
+
+
+def test_uninstall_of_a_present_skill_still_moves_it_to_trash(invocation_executor):
+    executor, store, target = _installed(invocation_executor)
+
+    result = executor.uninstall("skill-1")
+
+    assert "already_removed" not in result
+    assert result["recoverable_path"] and (Path(result["recoverable_path"]) / "SKILL.md").is_file()
+    assert not target.exists() and _record(store)["state"] == "inactive"
+    assert render_operation_outcome("uninstall", result) == "✅ managed-skill removed"

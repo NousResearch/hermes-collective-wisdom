@@ -574,6 +574,8 @@ def render_operation_outcome(
         return partial_setup
     if key and name and complete and data.get(key) is True:
         verb = "removed" if kind == "uninstall" else key
+        if kind == "uninstall" and data.get("already_removed") is True:
+            return f"✅ {name} removed. It was already removed from this computer."
         return f"✅ {name} {verb}"
     if data.get("pending") is True:
         state = "pending"

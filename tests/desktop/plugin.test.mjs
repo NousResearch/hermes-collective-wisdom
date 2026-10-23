@@ -1165,6 +1165,28 @@ test('uninstall requires the exact installed snapshot and confirms its review id
   await mounted.cleanup()
 })
 
+test('uninstall review says a skill removed outside Wisdom is already gone', async () => {
+  const installation = {
+    skill_id: 'skill-1', slug: 'one', version: 1, state: 'removed', modified: false,
+    removed_outside_wisdom: true, status_text: 'Removed from this computer outside Wisdom'
+  }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return { ...bootstrap, installations: [installation] }
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/uninstall/review') return { review_id: 'uninstall-review', installation }
+    if (path === '/uninstall/confirm') return { uninstalled: true, skill_id: 'skill-1', already_removed: true, recoverable_path: null }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Installed'))
+  await click(button(mounted, 'Uninstall'))
+  assert.match(mounted.container.textContent, /Already removed from this computer\. Remove takes it off your installed skills\./)
+  await click(button(mounted, 'Remove'))
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one removed')
+  await mounted.cleanup()
+})
+
 test('pending install outcome keeps operation identity and is never announced as installed', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path === '/install/review') return installReview()

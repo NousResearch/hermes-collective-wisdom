@@ -422,7 +422,8 @@ function ReviewPanel({ acknowledgements, busy, cancelLabel, kind, onCancel, onCo
     kind === 'uninstall' ? jsxs('section', { className: 'space-y-1', children: [
       jsx('h4', { className: 'text-xs font-semibold', children: 'Installed copy to remove' }),
       jsx(KeyValue, { name: 'skill', value: label(review?.installation) }),
-      jsx(KeyValue, { name: 'version', value: review?.installation?.version })
+      jsx(KeyValue, { name: 'version', value: review?.installation?.version }),
+      review?.installation?.removed_outside_wisdom === true ? jsx('p', { className: 'text-xs', children: 'Already removed from this computer. Remove takes it off your installed skills.' }) : null
     ] }) : null,
     kind === 'install' || kind === 'update' ? jsx(Compatibility, { value: review?.compatibility }) : null,
     kind === 'install' || kind === 'update' ? jsx(CheckSummary, { title: 'Local scanner', check: review?.local_scan, authority: 'Local scan', compact: kind === 'install' }) : null,

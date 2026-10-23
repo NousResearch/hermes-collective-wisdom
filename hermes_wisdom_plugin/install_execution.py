@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -217,7 +218,10 @@ class InstallExecutor:
             if isinstance(result, dict):
                 return result
             raise PackagePolicyError("managed installation is already inactive")
-        target = self._validated_record_target(installation, owner)
+        already_removed = removed_outside_wisdom(self.host, installation, owner)
+        target = validate_managed_target(
+            self.host, installation, owner, require_tree=not already_removed,
+        )
         payload = {
             "owner": owner,
             "receipt": None,
@@ -228,6 +232,9 @@ class InstallExecutor:
             "version": int(installation.get("version") or 0),
             "content_hash": installation.get("content_hash"),
         }
+        if already_removed:
+            # Deleted outside Wisdom: there are no bytes to move to trash.
+            payload["already_removed"] = True
         for key in ("manifest_hash", "target_provenance"):
             if key in installation:
                 payload[key] = installation[key]
@@ -455,13 +462,15 @@ class InstallExecutor:
         )
 
     def _archive_uninstall(self, payload, owner, target, trash, may_apply) -> None:
-        trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if target.exists() and not trash.exists():
+            trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             _same_filesystem(target, trash.parent)
             self._assert_owner(owner)
             self._require_current(may_apply)
             _durable_replace(target, trash)
-        elif not trash.exists():
+        elif not trash.exists() and not (
+            payload.get("already_removed") is True and not os.path.lexists(target)
+        ):
             raise PackagePolicyError("managed uninstall bytes are unavailable")
         self._assert_owner(owner)
         self._require_current(may_apply)
@@ -495,6 +504,8 @@ class InstallExecutor:
             "state": state,
             "recoverable_path": str(trash),
         }
+        if payload.get("already_removed") is True and not trash.exists():
+            result.update(recoverable_path=None, already_removed=True)
         payload["result"] = result
         self.store.deactivate_install(payload["skill_id"], result)
         self.store.checkpoint(operation_id, payload=payload, stage="outcome_recorded")
@@ -631,9 +642,6 @@ class InstallExecutor:
         root = Path(self.host.skills_root).expanduser().absolute()
         _reject_existing_links(root)
         return root
-
-    def _validated_record_target(self, record: dict, owner: dict) -> Path:
-        return validate_managed_target(self.host, record, owner)
 
     def _validate_operation_paths(
         self,
