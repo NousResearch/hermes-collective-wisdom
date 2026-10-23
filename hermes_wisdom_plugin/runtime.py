@@ -1898,10 +1898,19 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         finally:
             self._close_service(service)
 
-    def _slash_native_review(self, invocation, command: str, args: list[str]):
+    def _slash_native_review(self, invocation, command: str, args: list[str]):  # pylint: disable=too-many-return-statements
+        from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+
         target = " ".join(args)
-        if command in {"suggest", "share"} and len(args) != 1:
-            return f"Usage: /wisdom {command} <local-skill>"
+        if command in {"suggest", "share", "uninstall"} and len(args) != 1:
+            noun = "skill-name" if command == "uninstall" else "local-skill"
+            return f"Usage: /wisdom {command} <{noun}>"
+        if command == "uninstall":
+            try:
+                return _native_review_reply(self.native.begin_uninstall(invocation, target))
+            except WisdomNotFound:
+                return (f"{target} is not installed from Collective Wisdom on this "
+                        "computer. Nothing has been changed.")
         effect_review = {
             "update": self.native.begin_update,
             "publish": self.native.begin_publication,

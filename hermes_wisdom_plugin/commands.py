@@ -1255,7 +1255,8 @@ def _slash_help() -> str:
     scope = _release_scope()
     private = [entry for entry, command in (
         ("/wisdom share <skill>", "share"), ("/wisdom top [page]", "top"),
-        ("/wisdom share-suggest", "share-suggest"), ("/wisdom settings", "settings"),
+        ("/wisdom share-suggest", "share-suggest"), ("/wisdom uninstall <skill>", "uninstall"),
+        ("/wisdom settings", "settings"),
         ("/wisdom mute", "mute"), ("/wisdom candidate <id>", "candidate"),
         ("/wisdom suggest <skill>", "suggest"), ("/wisdom publish <draft>", "publish"),
         ("/wisdom prepared <action>", "prepared"),
@@ -1276,7 +1277,7 @@ def _slash_help() -> str:
             *(("Private: " if index == 0 else "         ") + row
               for index, row in enumerate(rows)),
             "Terminal: /wisdom install | /wisdom installed | /wisdom check",
-            "          /wisdom update | /wisdom installed-setup | /wisdom uninstall",
+            "          /wisdom update | /wisdom installed-setup",
             "/wisdom help",
             "Private effects open a review when supported; terminal paths are shown.",
         )

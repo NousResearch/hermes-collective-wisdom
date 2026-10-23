@@ -1557,7 +1557,7 @@ def project_view(record: dict[str, Any]) -> NativeView:
     )
 
 
-def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
+def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements,too-many-branches
     terminal = _terminal_state_view(record)
     if terminal is not None:
         return terminal
@@ -1591,6 +1591,8 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
         return _settings_view(record)
     if record.get("operation") == "share_status":
         return _share_status_view(plan, state)
+    if record.get("operation") == "uninstall" and state == "pending":
+        return _uninstall_view(plan)
     authority, details = _authority_projection(record, plan)
     if record.get("operation") == "suggest":
         return _suggest_view(authority, state, record.get("result"))
@@ -1598,6 +1600,26 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
 
 
 _AWAITING_REVIEW = frozenset({"policy_review_required", "approval_rejected"})
+
+
+def _uninstall_view(plan: dict[str, Any]) -> NativeView:
+    """Confirm one removal; the record is the owner-bound, single-use authority."""
+    version = plan.get("version")
+    fields = [NativeField("Skill", _skill_name(plan))]
+    if isinstance(version, int) and not isinstance(version, bool):
+        fields.append(NativeField("Version", f"v{version}"))
+    happens = (
+        "It was already removed from this computer. Confirm takes it off your "
+        "installed skills." if plan.get("removed") is True else
+        "Its files move to recoverable trash on this computer and your agent "
+        "stops using it."
+    )
+    return NativeView(
+        "Uninstall skill", "", [NativeItem("What happens", happens)],
+        actions=[NativeAction("Confirm", "confirm", primary=True),
+                 NativeAction("Cancel", "cancel", destructive=True)],
+        fields=fields,
+    )
 
 
 def _share_status_view(plan: dict[str, Any], state: str) -> NativeView:
@@ -1770,6 +1792,22 @@ class NativeReviewController:
     def request_publication(self, service: Any, invocation: NativeInvocation, draft_id: str) -> dict[str, Any]:
         plan = service.publication_review(draft_id)
         return self._insert(service, invocation, "publish", plan)
+
+    def request_uninstall(self, service: Any, invocation: NativeInvocation, reference: str) -> dict[str, Any]:
+        """Open an owner-bound confirmation for removing one managed skill."""
+        skill_id = service.resolve_managed_skill(reference)
+        row = next((item for item in service.list_installations() if isinstance(item, dict)
+                    and item.get("skill_id") == skill_id
+                    and item.get("state") in {"active", "removed"}), None)
+        if row is None:
+            raise WisdomNotFound("Managed skill not found")
+        version = row.get("version")
+        return self._insert(service, invocation, "uninstall", {
+            "operation": "uninstall", "skill_id": skill_id,
+            "slug": row.get("slug") or reference,
+            "version": version if isinstance(version, int) else None,
+            "removed": row.get("state") == "removed", "allowed": True,
+        })
 
     def request_setup(self, service: Any, invocation: NativeInvocation, subject: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         skill_id, inspection = subject
