@@ -110,11 +110,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
+        plugin_id: str = "collective-wisdom",
     ):
         if state is None:
             raise TypeError("host PluginState is required")
         self.root = root
         self.profile = profile
+        self.plugin_id = plugin_id
         self.llm = llm
         self.config = config or {}
         self._get_config = get_config
@@ -388,6 +390,15 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         _require_current(may_apply)
         return result
+
+    def gateway_injection(self, *, apply_default: bool = False) -> dict[str, Any]:
+        """Report, and at setup default on, this plugin's chat-injection permission."""
+        from .gateway_injection import (  # pylint: disable=import-outside-toplevel
+            ensure_injection_default, injection_status,
+        )
+        if apply_default:
+            return ensure_injection_default(self.plugin_id, self.profile[0])
+        return injection_status(self.plugin_id)
 
     def status(self, *, include_operations=False):
         """Inspect local setup without enrolling or contacting the Gateway."""
@@ -1766,7 +1777,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             service = InvocationService(
                 self.root, self.profile, llm=self.llm, config=self.config,
                 get_config=self.get_config, set_config=self.set_config,
-                state=self.state,
+                state=self.state, plugin_id=self.plugin_id,
             )
             self._services.add(service)
             return service

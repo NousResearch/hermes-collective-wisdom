@@ -400,7 +400,7 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
                 if answer.strip().lower() not in {"y", "yes"}:
                     return 7
                 accepted = True
-            result = service.setup(accept_disclosure=accepted)
+            result = _with_injection(service.setup(accept_disclosure=accepted), service, True)
         elif command in {
             "status", "settings", "notifications", "mute", "inbox",
             "maintenance", "list", "browse", "show", "versions",
@@ -426,7 +426,10 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
         else:
             getattr(args, "_wisdom_parser").print_help()
             return 2
+        if command == "status":
+            result = _with_injection(result, service, False)
         _emit(result, as_json=as_json, command=command)
+        _emit_injection(result, service, as_json=as_json)
         if (command == "install" and isinstance(result, dict)
                 and isinstance(result.get("setup"), dict)
                 and result["setup"].get("state") != "passed"):
@@ -493,6 +496,24 @@ def _contribution_cli(args, service):
         return 0
     presentation = {**result, "skill_name": args.skill} if isinstance(result, dict) else result
     return _publication_result_exit(_suggest_human(presentation, service))
+
+
+def _with_injection(result: Any, service: Any, apply_default: bool) -> Any:
+    """Attach the chat-injection state; setup also turns it on when unset."""
+    read = getattr(service, "gateway_injection", None)
+    if not isinstance(result, dict) or not callable(read):
+        return result
+    return {**result, "gateway_injection": read(apply_default=apply_default)}
+
+
+def _emit_injection(result: Any, service: Any, *, as_json: bool) -> None:
+    status = result.get("gateway_injection") if isinstance(result, dict) else None
+    if as_json or not isinstance(status, dict):
+        return
+    from .gateway_injection import injection_text  # pylint: disable=import-outside-toplevel
+    profile = getattr(service, "profile", None)
+    name = str(profile[0] or "default") if isinstance(profile, tuple) and profile else "default"
+    print("\n" + injection_text(status, name))
 
 
 def _run_noninteractive_cli(  # pylint: disable=too-many-return-statements,too-many-branches

@@ -221,16 +221,17 @@ In scripts, `--yes` confirms a share; scanner warnings additionally need `--acce
 | Setting | Default | Purpose |
 |---|---|---|
 | `HERMES_SYNC_BASE_URL` or `sync.base_url` in `config.yaml` | `https://gateway-gateway.nousresearch.com` | The Collective Wisdom service. Change it only when your team runs its own. |
-| `plugins.entries.collective-wisdom.allow_gateway_injection` | `false` | Lets `/wisdom share-suggest` start its Hermes turn in the TUI, Desktop and messaging chats. The classic CLI chat does not need it. |
+| `plugins.entries.collective-wisdom.allow_gateway_injection` | `true` after `setup` | Lets Collective Wisdom start a Hermes turn in your TUI, Desktop and messaging chats (`/wisdom share-suggest`). The classic CLI chat does not need it. `setup` sets it only when it is unset; a value you wrote, `false` included, is kept. |
 | `plugins.entries.collective-wisdom.settings.qualification.allow_model_review` | unset | Set to `false` to stop share from sending a skill's `SKILL.md` to your model to propose a missing or too-long name or description. Unset allows it. |
 
 ```bash
-hermes config set plugins.entries.collective-wisdom.allow_gateway_injection true
+hermes config set plugins.entries.collective-wisdom.allow_gateway_injection false   # opt out
 hermes config set plugins.entries.collective-wisdom.settings.qualification.allow_model_review false
 ```
 
-Without that setting, `/wisdom share-suggest` replies with your ranked list and a ready-to-send prompt
-instead.
+`hermes wisdom status` shows whether chat turns are allowed and the command that changes it. Use
+`hermes -p <profile> config set ...` for a profile other than the default. With injection off,
+`/wisdom share-suggest` replies with your ranked list and a ready-to-send prompt instead.
 
 ## Access and roles
 
