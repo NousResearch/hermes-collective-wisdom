@@ -7,16 +7,19 @@ inventories and superseded reliable-delivery designs are intentionally omitted.
 
 The current release is manual skill sharing: a person chooses to share a skill, and
 teammates choose to install it. `hermes_wisdom_plugin/release_scope.py` names the
-surfaces the plugin registers (`ACTIVE = MANUAL_SHARING`).
+surfaces the plugin registers (`ACTIVE = AUTO_SUGGEST`: manual sharing plus
+automatic share suggestions).
 
 Registered: `hermes wisdom` setup, status, catalog, `top`, `share-suggest`,
 `share` and its preparation, publication and recovery commands, installation,
 updates, setup approval and uninstall; private `/wisdom` help, status, catalog,
 `top`, `share-suggest`, `share`, install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
-catalog, installed and contribute pages.
+catalog, installed and contribute pages. On a host with `ctx.side_question`, also
+`hermes wisdom suggestions`, private `/wisdom suggestions`, the `on_skill_lifecycle`,
+`post_tool_call` and `post_llm_call` hooks and the `wisdom_share_suggestion` tool.
 
-Implemented but not registered in this release: qualification capture and proactive
-Hermes sharing suggestions, proactive notices and recommendations, notification settings
+Implemented but not registered in this release: qualification capture and the
+candidate-based proactive sharing suggestions, proactive notices and recommendations, notification settings
 and mute, automatic update maintenance, the three model tools, the refinement
 auxiliary task, and model-written editorial copy. Preparation uses the skill's own
 name and description. Widening `ACTIVE` to `FULL` restores these surfaces; their
@@ -94,6 +97,54 @@ advisory lease, liveness registry, rescue queue, retry worker, synthetic continu
 or exact cross-device delivery cap. Opening a notice starts the ordinary explicit
 review. It never grants consent.
 
+## Automatic share suggestions
+
+`hermes_wisdom_plugin/auto_suggest.py` and `auto_suggest_card.py`. Registered only
+when the release scope has `auto_suggest` and the host offers `ctx.side_question`
+(Hermes with plugin side questions); otherwise nothing is registered and manual
+sharing is unchanged. `plugin.yaml` declares `capabilities: [llm.side_question]`.
+Hermes asks for that grant on install, enable and update (only when the declared set
+changed), on an interactive terminal only, and stores it as
+`plugins.entries.<id>.granted_capabilities`. Core issues side-question tokens only
+to a loaded plugin that declares and was granted it, and never on unattended turns.
+
+Cadence:
+
+1. Off when `skills.creation_nudge_interval <= 0`,
+   `auxiliary.background_review.enabled` is false, the plugin setting
+   `auto_suggest` is false, or `llm.side_question` is not granted.
+2. Candidates come only from `on_skill_lifecycle` facts with provenance `local` or
+   `agent_created` (never team-installed `org:skill` names, bundled or Hub skills):
+   created or patched in the session, or loaded and among the owner's top 30 by
+   usage. `InvocationService.share_candidate` must resolve the skill as the owner's
+   own and fingerprint it under the share path rules; skills already shared are
+   skipped (update suggestions are a separate policy layer).
+3. Fire point: `post_llm_call` of a later attended turn of the same session that
+   carries `side_question_token`, after at least `creation_nudge_interval` tool calls
+   (counted with `post_tool_call`) since the last check in that session. At most
+   `auto_suggest_daily_limit` (default 1) per profile per day; a skill revision
+   (content hash) is asked about once; a suppressed skill is never asked about.
+4. The token is redeemed on a daemon thread with a 20 s timeout. The question
+   carries only the skill's name, description and usage counts and asks for JSON
+   `{"share": bool, "reason": str}`; anything but the boolean `true` is no.
+5. Yes injects one user turn (origin for messaging, `session_key` for TUI/Desktop,
+   the REPL queue for the CLI) asking the model to call `wisdom_share_suggestion`.
+   That tool claims the one pending suggestion of the same conversation exactly
+   once and shows the card: a native Slack/Telegram card in private chats, or a
+   text card in the CLI, TUI and Desktop. When injection is denied or unavailable,
+   nothing is recorded as dismissed and no further attempt is made that day.
+
+The card offers exactly **Confirm share**, **Don't share** and **Never for this
+skill**. Confirm turns the card into the normal `/wisdom share` review in place;
+Don't share dismisses that content hash; Never suppresses the skill until
+`/wisdom suggestions allow <skill>`. Choices are owner-bound and applied once
+through the native review record; stale or forged controls are refused. Group chats
+never get a suggestion.
+
+Every step (candidate, asked, verdict, injected, shown, not shown, choice) is
+recorded with a timestamp in the plugin state key `wisdom-auto-suggest`, read by
+`hermes wisdom suggestions` and private `/wisdom suggestions`.
+
 ## Local state
 
 The plugin uses the host-injected PluginState namespace. Each retained domain owns a
@@ -102,7 +153,8 @@ small JSON record:
 - direct enrollment/setup/publication records;
 - qualification counters and candidates;
 - notice cursor and bounded offer markers;
-- explicit native review records; and
+- explicit native review records;
+- automatic share suggestion choices and decisions (`wisdom-auto-suggest`); and
 - managed install/update records owned by the install subsystem.
 
 Shared timestamps use one short aggregate read-modify-write lock. No network call,

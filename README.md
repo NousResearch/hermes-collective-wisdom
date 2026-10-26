@@ -86,6 +86,28 @@ you already shared are labelled **Shared**.
 top skills. Hermes answers with up to 10 ranked suggestions, each with a short reason and the exact
 command to share it. It never shares anything itself.
 
+### Suggestions from Hermes
+
+When Hermes creates or improves one of your own skills in a session, or uses one that ranks among
+your top skills, it may later ask itself whether your team would benefit from it. If the answer is
+yes, a short card appears in the same private chat (Slack DM, Telegram private chat, or your CLI,
+TUI or Desktop session) with three choices:
+
+- **Confirm share** opens the normal share review for that skill, in the same chat.
+- **Don't share** skips this version. A later edit may be suggested again.
+- **Never for this skill** stops suggestions for it. Undo with `/wisdom suggestions allow <skill>`.
+
+Hermes suggests at most one skill a day and asks about each version once. It never suggests skills
+that came with Hermes, from the Skills Hub or from your team, never in group chats, and never from
+scheduled jobs or subagents. Nothing is shared until you approve the share review.
+`/wisdom suggestions` (or `hermes wisdom suggestions`) lists what Hermes suggested and what you
+chose.
+
+This needs a Hermes release with plugin side questions, your approval of the `llm.side_question`
+capability (see [Configuration](#configuration)), and Hermes self-learning on
+(`skills.creation_nudge_interval` above 0 and `auxiliary.background_review.enabled` not false).
+Without any of these, Collective Wisdom works exactly as before and suggests nothing.
+
 ### Share a skill
 
 ```bash
@@ -204,6 +226,7 @@ shows the skill's new state.
 | `show <skill>`, `versions <skill>` | One skill and its published versions. |
 | `top` | Rank your own skills by usage (`--page`, `--per-page`, `--json`). |
 | `share-suggest` | Ask Hermes which of your skills are worth sharing (chat command). |
+| `suggestions [list\|dismiss\|never\|allow] [skill]` | Review Hermes's suggestions, or record Don't share, Never or allow for a skill. |
 | `share <skill>` | Review and share a skill or a new version. |
 | `install <skill>[@vN]` | Install an exact version; `--plan` reviews without installing. |
 | `installed`, `check <skill>` | Installed skills and update availability. |
@@ -222,16 +245,21 @@ In scripts, `--yes` confirms a share; scanner warnings additionally need `--acce
 |---|---|---|
 | `HERMES_SYNC_BASE_URL` or `sync.base_url` in `config.yaml` | `https://gateway-gateway.nousresearch.com` | The Collective Wisdom service. Change it only when your team runs its own. |
 | `plugins.entries.collective-wisdom.allow_gateway_injection` | `true` after `setup` | Lets Collective Wisdom start a Hermes turn in your TUI, Desktop and messaging chats (`/wisdom share-suggest`). The classic CLI chat does not need it. `setup` sets it only when it is unset; a value you wrote, `false` included, is kept. |
+| `plugins.entries.collective-wisdom.granted_capabilities` | asked on install, enable and update | Approve `llm.side_question` when Hermes asks, so Collective Wisdom can ask your session's agent whether a skill is worth sharing. Hermes asks only in an interactive terminal; otherwise run `hermes plugins enable collective-wisdom` there. Without it there are no suggestions. |
+| `plugins.entries.collective-wisdom.settings.auto_suggest` | `true` | Set to `false` to stop suggestions from Hermes. |
+| `plugins.entries.collective-wisdom.settings.auto_suggest_daily_limit` | `1` | Suggestions shown per profile per day; `0` stops them. |
 | `plugins.entries.collective-wisdom.settings.qualification.allow_model_review` | unset | Set to `false` to stop share from sending a skill's `SKILL.md` to your model to propose a missing or too-long name or description. Unset allows it. |
 
 ```bash
 hermes config set plugins.entries.collective-wisdom.allow_gateway_injection false   # opt out
 hermes config set plugins.entries.collective-wisdom.settings.qualification.allow_model_review false
+hermes config set plugins.entries.collective-wisdom.settings.auto_suggest false
 ```
 
 `hermes wisdom status` shows whether chat turns are allowed and the command that changes it. Use
 `hermes -p <profile> config set ...` for a profile other than the default. With injection off,
-`/wisdom share-suggest` replies with your ranked list and a ready-to-send prompt instead.
+`/wisdom share-suggest` replies with your ranked list and a ready-to-send prompt instead, and
+suggestions from Hermes are not shown in TUI, Desktop or messaging chats.
 
 ## Access and roles
 
@@ -281,9 +309,11 @@ Scripts in a package are never run during sharing, review or install.
   sends that skill's `SKILL.md` to your configured model provider to propose them. It does not when
   the copy is valid or the local checks find something that looks like a secret. Turn it off with
   `hermes config set plugins.entries.collective-wisdom.settings.qualification.allow_model_review false`.
-  No other command calls a model.
+  Suggestions from Hermes send one skill's name, description and usage counts to the model of the
+  session it was learned in, as a side question in that session. No other command calls a model.
 - **No background activity:** there is no telemetry, no polling and no background process. The plugin
-  acts only when you run a Collective Wisdom command.
+  acts when you run a Collective Wisdom command, and, for suggestions from Hermes, after a turn of
+  your own attended session.
 
 ## Troubleshooting
 
