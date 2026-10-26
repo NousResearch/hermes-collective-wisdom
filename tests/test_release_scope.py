@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import importlib.util
 import inspect
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -155,7 +156,7 @@ def test_owner_ranking_commands_ship_in_every_scope() -> None:
             assert scope.allows_cli(command) and scope.allows_slash(command)
 
 
-def test_cli_registers_manual_sharing_commands_only() -> None:
+def test_cli_registers_only_the_active_release_commands() -> None:
     leaves = _leaf_commands(_parser())
     top = {leaf.split()[0] for leaf in leaves}
     assert top == set(release_scope.ACTIVE.cli_commands)
@@ -195,8 +196,8 @@ def test_shared_chat_slash_rejects_hidden_commands(command) -> None:
 def test_slash_help_lists_no_hidden_commands() -> None:
     rendered = run_slash(parse_slash("help"), SimpleNamespace())
     assert "/wisdom share <skill>" in rendered
-    for command in HIDDEN_SLASH:
-        assert f"/wisdom {command}" not in rendered
+    for command in HIDDEN_SLASH:  # "/wisdom suggest" is hidden; "/wisdom suggestions" is not.
+        assert not re.search(rf"/wisdom {command}\b(?!-)", rendered)
 
 
 @pytest.mark.parametrize("command", HIDDEN_SLASH)

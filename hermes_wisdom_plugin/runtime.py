@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
-from .commands import PRIVATE_RANKING_COMMANDS, read_unavailable
+from .commands import PRIVATE_LOCAL_COMMANDS, read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
     describe_exception, redacted_message,
@@ -1878,7 +1878,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             # Native chats point to the terminal: enrollment binds this profile's
             # account and is accepted only in its owner's terminal (see setup).
             return SETUP_PROMPT
-        if command in PRIVATE_RANKING_COMMANDS:
+        if command in PRIVATE_LOCAL_COMMANDS:
             return self._slash_private_ranking(command, args, invocation, gateway_command)
         if invocation is not None:
             if command == "install":
@@ -1926,11 +1926,17 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
         route = private_route(invocation, gateway_command, session_surface())
         if route is None:
+            if command == "suggestions":
+                from .auto_suggest import suggestions_refusal  # pylint: disable=import-outside-toplevel
+                return suggestions_refusal()
             return refusal(command)
         service = self._service()
         try:
             if command == "top":
                 return slash_top(args, service)
+            if command == "suggestions":
+                from .auto_suggest import slash_suggestions  # pylint: disable=import-outside-toplevel
+                return slash_suggestions(args, service)
             return slash_share_suggest(
                 args, service, route, inject=self.inject_message, plugin_id=self.plugin_id,
                 profile=self.profile[0],

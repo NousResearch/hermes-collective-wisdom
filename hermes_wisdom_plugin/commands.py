@@ -73,6 +73,9 @@ MAX_PREPARED_PAYLOAD_BYTES = (
     + 1024 * 1024
 )
 PRIVATE_RANKING_COMMANDS = frozenset({"top", "share-suggest"})
+# Owner-private views answered only in a private or local session; unlike the
+# rankings, the suggestions log needs a set-up profile.
+PRIVATE_LOCAL_COMMANDS = PRIVATE_RANKING_COMMANDS | frozenset({"suggestions"})
 CONTRIBUTION_COMMANDS = frozenset({
     "candidate", "suggest", "share", "prepared", "publish", "publication",
 })
@@ -209,6 +212,11 @@ def build_parser(  # pylint: disable=too-many-statements,too-many-locals
     top.add_argument("--per-page", type=_page_size, default=10,
                      help="Skills per page, 1 to 50 (default 10)")
     add("share-suggest", "List your top skills and how to ask Hermes which to share")
+    if scope.allows_cli("suggestions"):
+        suggestions = add("suggestions", "Review or undo Hermes's automatic share suggestions")
+        suggestions.add_argument("suggestions_action", nargs="?", default="list",
+                                 choices=("list", "dismiss", "never", "allow"))
+        suggestions.add_argument("skill", nargs="?", default="")
     suggest = add("suggest", "Prepare one manually selected owner-private local draft")
     share = add("share", "Share one exact local skill with your team")
     share.add_argument("skill")
@@ -388,6 +396,9 @@ def run_cli(  # pylint: disable=too-many-branches,too-many-return-statements,too
             return _contribution_cli(args, service)
         if command in {"top", "share-suggest"}:
             return (run_top if command == "top" else run_share_suggest)(args, service)
+        if command == "suggestions":
+            from .auto_suggest import run_suggestions_cli  # pylint: disable=import-outside-toplevel
+            return run_suggestions_cli(args, service)
         if command == "setup":
             accepted = bool(args.accept_disclosure)
             if not accepted:
@@ -572,7 +583,7 @@ def run_slash(  # pylint: disable=too-many-branches,too-many-return-statements
         return "Could not parse /wisdom arguments."
     try:
         command, args = parsed
-        if not _release_scope().allows_slash(command) or command in PRIVATE_RANKING_COMMANDS:
+        if not _release_scope().allows_slash(command) or command in PRIVATE_LOCAL_COMMANDS:
             # Private rankings are routed by CommandRuntime before this shared-safe view.
             return _shared_chat_refusal(command)
         if command == "list":
@@ -1267,7 +1278,8 @@ def _slash_help() -> str:
     scope = _release_scope()
     private = [entry for entry, command in (
         ("/wisdom share <skill>", "share"), ("/wisdom top [page]", "top"),
-        ("/wisdom share-suggest", "share-suggest"), ("/wisdom settings", "settings"),
+        ("/wisdom share-suggest", "share-suggest"), ("/wisdom suggestions", "suggestions"),
+        ("/wisdom settings", "settings"),
         ("/wisdom mute", "mute"), ("/wisdom candidate <id>", "candidate"),
         ("/wisdom suggest <skill>", "suggest"), ("/wisdom publish <draft>", "publish"),
         ("/wisdom prepared <action>", "prepared"),
@@ -1304,6 +1316,9 @@ def slash_args_hint() -> str:
 
 
 def _shared_chat_refusal(command: str) -> str:
+    if command == "suggestions" and _release_scope().allows_slash(command):
+        from .auto_suggest import suggestions_refusal  # pylint: disable=import-outside-toplevel
+        return suggestions_refusal()
     if command in PRIVATE_RANKING_COMMANDS and _release_scope().allows_slash(command):
         return _private_refusal(command)
     return _unsupported_command()

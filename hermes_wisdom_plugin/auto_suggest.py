@@ -657,3 +657,50 @@ def run_suggestions(  # pylint: disable=too-many-return-statements,too-many-argu
         return f"Couldn't find your local skill {name}. Nothing was changed."
     store.dismiss(name, str(content_hash), source=source)
     return f"Not shared. Hermes won't suggest this version of {name} again."
+
+
+SUGGESTIONS_COMMAND = "suggestions"
+SUGGESTIONS_ACTIONS = ("list", "dismiss", "never", "allow")
+
+
+def suggestions_refusal() -> str:
+    """Refuse the suggestions log outside the owner's own sessions, naming no skill."""
+    return ("Your Collective Wisdom suggestions are private. Open /wisdom suggestions in a "
+            "private chat with Hermes; nothing was shown here.")
+
+
+def _service_store(service: Any) -> SuggestionStore:
+    return SuggestionStore(getattr(service, "_state"), Path(getattr(service, "root")))
+
+
+def _service_hash(service: Any) -> Callable[[str], str | None]:
+    def current(name: str) -> str | None:
+        facts = service.share_candidate(name)
+        return str(facts["content_hash"]) if isinstance(facts, dict) else None
+    return current
+
+
+def _service_run(service: Any, action: str, skill: str, source: str) -> str:
+    profile = getattr(service, "profile", ("default", None))[0]
+    return run_suggestions(
+        action, skill, _service_store(service), current_hash=_service_hash(service),
+        profile=profile, plugin_id=getattr(service, "plugin_id", "collective-wisdom"),
+        source=source,
+    )
+
+
+def slash_suggestions(args: list[str], service: Any) -> str:
+    """``/wisdom suggestions [action] [skill]`` in the owner's private session."""
+    if len(args) > 2 or (args and args[0].casefold() not in SUGGESTIONS_ACTIONS):
+        return SUGGESTIONS_USAGE
+    action = args[0].casefold() if args else "list"
+    return _service_run(service, action, args[1] if len(args) == 2 else "", "slash")
+
+
+def run_suggestions_cli(args: Any, service: Any) -> int:
+    """``hermes wisdom suggestions [action] [skill]``."""
+    action = str(getattr(args, "suggestions_action", "") or "list")
+    skill = str(getattr(args, "skill", "") or "")
+    text = _service_run(service, action, skill, "cli")
+    print(text)
+    return 2 if text == SUGGESTIONS_USAGE else 0
