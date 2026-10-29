@@ -18,6 +18,10 @@ CLI, TUI or Desktop session or a private Slack or Telegram chat. At most
 ``auto_suggest_daily_limit`` (default 1) suggestions are shown per profile per
 day, a skill revision is asked about once, and a skill the owner chose
 "Never for this skill" for is not suggested again until they allow it.
+
+Cadence follows core's ``post_llm_call`` ``review_signals`` when the host sends
+them (the skill review is due and background review is on); older hosts fall
+back to counting tool calls against ``skills.creation_nudge_interval``.
 """
 
 from __future__ import annotations
@@ -82,6 +86,20 @@ def host_supports(ctx: Any) -> bool:
     """Whether this Hermes can ask the session's own agent a side question."""
     return callable(getattr(ctx, "side_question", None)) and callable(
         getattr(ctx, "has_capability", None))
+
+
+def review_due(signals: Mapping[str, Any]) -> bool:
+    """Core's skill-review cadence from ``post_llm_call``'s ``review_signals``.
+
+    Due only when background review is on, the skill nudge interval is positive and
+    core decided the skill review is due on this turn (the same flag its own review uses).
+    """
+    try:
+        interval = int(signals.get("skill_nudge_interval") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (signals.get("background_review_enabled") is True and interval > 0
+            and signals.get("skill_review_due") is True)
 
 
 def _now_iso(clock: Callable[[], float]) -> str:
@@ -425,11 +443,10 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             state = self._sessions.get(session_id)
             if state is None or not state["candidates"] or self._busy:
                 return
-        interval = self.self_learning()
-        if interval <= 0 or self.setting(SETTING, True) is False:
+        if self.setting(SETTING, True) is False or not self._cadence_due(facts, state):
             return
         with self._lock:
-            if state["tools"] < interval:
+            if self._busy:
                 return
             state["tools"] = 0
             candidates = dict(state["candidates"])
@@ -444,6 +461,15 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         except Exception:  # pylint: disable=broad-exception-caught
             self._release()
             logger.warning("Collective Wisdom suggestion check could not start", exc_info=True)
+
+    def _cadence_due(self, facts: Mapping[str, Any], state: dict[str, Any]) -> bool:
+        """Core's review cadence when the host sends it; else this plugin's tool-call count."""
+        signals = facts.get("review_signals")
+        if isinstance(signals, Mapping):
+            return review_due(signals)
+        interval = self.self_learning()
+        with self._lock:
+            return 0 < interval <= state["tools"]
 
     def _release(self) -> None:
         with self._lock:
