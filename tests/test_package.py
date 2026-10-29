@@ -801,7 +801,7 @@ def test_after_install_note_names_setup_as_the_next_step():
     assert "uploads nothing" in note
 
 
-def test_after_install_and_readme_name_the_same_setup_exemptions():  # (Salt R1 S3)
+def test_after_install_and_readme_name_the_same_setup_exemptions():
     """Both install surfaces name every command that answers before setup."""
     import re  # pylint: disable=import-outside-toplevel
 

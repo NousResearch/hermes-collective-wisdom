@@ -74,7 +74,7 @@ def _notices(ui):
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 @pytest.mark.parametrize("control", LEGACY_CONTROLS)
-def test_stale_control_answers_once_without_effect(  # (Salt R1 #3)
+def test_stale_control_answers_once_without_effect(
     tmp_path, caplog, surface, control,
 ):
     async def scenario():
@@ -131,7 +131,7 @@ async def _raw_click(ui, value):
     "wi:agent:confirm:gone-record-1", "wi:agent:portal.draft:gone-record-1",
     "wi:agent:broken", "wi:agent::x",
 ])
-def test_missing_record_and_malformed_ids_are_stale(tmp_path, surface, value):  # (Salt R1 #3)
+def test_missing_record_and_malformed_ids_are_stale(tmp_path, surface, value):
     async def scenario():
         ui = surface(tmp_path, Service())
         await _raw_click(ui, value)
@@ -156,7 +156,7 @@ def test_unauthorized_clicker_gets_no_notice(tmp_path, surface):
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_real_failure_keeps_generic_message_without_exception_text(
     tmp_path, monkeypatch, caplog, surface,
-):  # (Salt R1 #3)
+):
     async def scenario():
         service = Service()
         ui, identity = await _candidate_card(surface(tmp_path, service))
@@ -180,7 +180,7 @@ def test_real_failure_keeps_generic_message_without_exception_text(
     asyncio.run(scenario())
 
 
-def test_slack_link_button_click_is_ignored(tmp_path, caplog):  # (Salt R1 #3)
+def test_slack_link_button_click_is_ignored(tmp_path, caplog):
     """Slack also posts block_actions for URL buttons; they are not callbacks."""
     async def scenario():
         ui = SlackHarness(tmp_path, Service())
@@ -206,7 +206,7 @@ def _resumed_share(tmp_path):
     return kernel, operation_id, ui
 
 
-def test_live_shaped_legacy_card_through_registered_slack_callback(  # (Salt R1 S1)
+def test_live_shaped_legacy_card_through_registered_slack_callback(
     tmp_path, caplog,
 ):
     async def scenario():
@@ -257,7 +257,7 @@ def _concurrent(count, work):
         return list(pool.map(run, range(count)))
 
 
-def test_two_simultaneous_share_clicks_publish_once(tmp_path):  # (Salt R1 S2)
+def test_two_simultaneous_share_clicks_publish_once(tmp_path):
     kernel = Kernel(tmp_path)
     _abandoned_private_draft(kernel)
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
@@ -274,7 +274,7 @@ def test_two_simultaneous_share_clicks_publish_once(tmp_path):  # (Salt R1 S2)
     assert kernel.client.state.calls["upload"] == 1
 
 
-def test_two_separately_resumed_cards_publish_once(tmp_path):  # (Salt R1 S2)
+def test_two_separately_resumed_cards_publish_once(tmp_path):
     kernel = Kernel(tmp_path)
     operation_id = _abandoned_private_draft(kernel)
     controller = NativeReviewController(ReviewState(JsonState(tmp_path), tmp_path))
@@ -300,7 +300,7 @@ def test_two_separately_resumed_cards_publish_once(tmp_path):  # (Salt R1 S2)
     assert kernel.publication.state.publication(operation_id)["status"] == "done"
 
 
-def test_two_simultaneous_slack_share_callbacks_publish_once(tmp_path, caplog):  # (Salt R1 S2)
+def test_two_simultaneous_slack_share_callbacks_publish_once(tmp_path, caplog):
     """Both clicks go through the registered Slack callback on separate threads."""
     async def post():
         kernel, _operation_id, ui = _resumed_share(tmp_path)

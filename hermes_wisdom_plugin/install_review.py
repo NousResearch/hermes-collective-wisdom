@@ -1,8 +1,7 @@
 """Hash-bound preparation and verification for manual Wisdom installs.
 
-The reference resolver and core plan/apply rechecks are extracted from Agent
-0924f7946b. Filesystem mutation and Gateway installation recording remain in a
-separate executor; this module only prepares an immutable owner-bound review.
+Filesystem mutation and Gateway installation recording remain in a separate
+executor; this module only prepares an immutable owner-bound review.
 """
 
 from __future__ import annotations

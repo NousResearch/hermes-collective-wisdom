@@ -114,7 +114,7 @@ def test_private_share_suggest_starts_a_normal_turn(  # pylint: disable=too-many
 
 
 def test_recommended_command_reaches_the_share_flow_on_its_own_surface(tmp_path, monkeypatch):
-    """Salt R1 B1: the suggested command must work where it was suggested."""
+    """The suggested command must work where it was suggested."""
     local = build_prompt(_items(1))
     assert "`hermes wisdom share my-skill`" in local
     shared = []

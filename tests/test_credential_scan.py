@@ -1,4 +1,4 @@
-"""Credential detector contracts extracted from the legacy share flow."""
+"""Credential detector contracts for the local pre-upload scan."""
 
 from __future__ import annotations
 

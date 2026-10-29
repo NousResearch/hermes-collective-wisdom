@@ -220,7 +220,7 @@ def _mutate_gateway_finding(kernel, **changes):
 def test_terminal_accept_warnings_never_acknowledges_findings_it_did_not_show(
     tmp_path, capsys,
 ):
-    """Salt R1 B1: evidence changed after the shown JSON result; nothing is submitted."""
+    """Evidence changed after the shown JSON result; nothing is submitted."""
     kernel = AdvisoryKernel(tmp_path)
     parser = argparse.ArgumentParser(prog="hermes wisdom")
     build_parser(parser)
@@ -284,7 +284,7 @@ def _emit_raises(_args, _result):
 def test_unwritten_gateway_result_is_never_recorded_as_shown(
     tmp_path, capsys, monkeypatch, failure,
 ):
-    """Salt R2 B1: the caller never received the findings; a fresh run publishes nothing."""
+    """The caller never received the findings; a fresh run publishes nothing."""
     kernel = AdvisoryKernel(tmp_path)
     parser = argparse.ArgumentParser(prog="hermes wisdom")
     build_parser(parser)
@@ -340,7 +340,7 @@ def test_mark_gateway_shown_accepts_only_evidence_this_process_rendered(tmp_path
 ])
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_acknowledge_requires_the_exact_rendered_gateway_evidence(tmp_path, surface, change):
-    """Salt R1 B2: evidence outside the displayed projection still changes the hash."""
+    """Evidence outside the displayed projection still changes the hash."""
     async def scenario():
         kernel = AdvisoryKernel(tmp_path)
         ui = surface(tmp_path, kernel)

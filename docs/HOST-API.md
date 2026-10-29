@@ -23,7 +23,7 @@ host development.
 ## Local development checkpoint — 2026-09-15
 
 A separately authorized, generic CLI/TUI presentation implementation now exists on
-Agent branch `shannonsands/plugin-local-presentation`, based on
+an unpublished Agent development branch based on
 `1ad89ac018f26a4f21817ebf37bb09f508656d63`. It provides
 `ctx.register_presentation_handler()` and correlated `rendered`, `not_rendered`,
 and `uncertain` receipts. It is not committed, published, or part of the pinned
@@ -33,8 +33,8 @@ The Wisdom plugin now optionally registers an interactive cadence consumer. It r
 owner-scoped assessment leases, policy checks and the Gateway reservation/outcome
 protocol, then requests literal local output. Registration is inert and older
 hosts retain manual inbox access. An uncertain result stops the batch without
-resending; untouched ready leases are released. Under the approved simplification,
-the consumer may now perform bounded production and assessment before delivery.
+resending; untouched ready leases are released.
+The consumer may perform bounded production and assessment before delivery.
 It consumes a single-use owner-bound capture of the real pre-LLM Python context;
 it does not invent model routing, inject messages, or grant approval. Local
 pre-LLM alone no longer assesses or claims work. See the
@@ -73,7 +73,7 @@ uses the existing install/update/setup kernels; unsupported hosts fail safely to
 the terminal handoff. See [the development TUI commands](../README.md#development-tui-review-and-actions).
 
 A partial command-only experiment on a rejected Agent PR is not a dependency.
-The 2026-09-12 simplification decision requires plugin-owned checks and unchanged
+The plugin requires plugin-owned checks and unchanged
 host command surfaces. Exhaust existing APIs for proactive delivery as well;
 report any insurmountable gap before proposing another Agent PR.
 Targeted re-audit: Agent `bf51fee548ceaa28d2c299a41c0f65066c04c061`.

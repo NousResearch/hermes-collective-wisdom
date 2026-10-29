@@ -42,7 +42,7 @@ MAX_SEGMENT_BYTES = 255
 REQUIRED_ROOT_FILES = frozenset({"SKILL.md", "skill.manifest.json"})
 # Gateway refuses every package path with one of these rules, whatever the
 # skill declares, so sharing refuses them locally first with a reason naming
-# the path. Mirrors gateway-gateway src/sync/packageValidator.ts
+# the path. Mirrors Team Gateway's package validator
 # (``WINDOWS_RESERVED_NAMES``, ``validateSegment``); see
 # tests/test_gateway_package_parity.py for the pinned revision.
 WINDOWS_RESERVED_NAMES = frozenset(
@@ -74,7 +74,7 @@ GENERATED_FILE_SUFFIXES = (".pyc",)
 LEFT_OUT_LABEL = "Left out (Hermes doesn't load these)"
 # Gateway refuses a package with any of these names, case-folded, in any path
 # segment ("prohibited active package directory": ``BLOCKED_PATH_SEGMENTS`` in
-# gateway-gateway src/sync/packageValidator.ts). Those Hermes also skips
+# Team Gateway's package validator). Those Hermes also skips
 # (GENERATED_SKILL_DIRS) are left out of a share when they are real
 # directories; every other occurrence, including the names Hermes loads
 # (hooks, .hooks, .gitlab, .circleci) and any case variant, is refused locally
@@ -365,7 +365,7 @@ def _refuse(source: str, path: str, rule: str) -> SkillRefusal:
 def _check_segment(segment: str, *, path: str, source: str) -> None:
     """Gateway's per-segment rules, on every package whatever it declares.
 
-    Mirrors ``validateSegment`` in gateway-gateway src/sync/packageValidator.ts
+    Mirrors ``validateSegment`` in Team Gateway's package validator
     (blocked names are ``_check_blocked_segment``), each with its own reason.
     """
 

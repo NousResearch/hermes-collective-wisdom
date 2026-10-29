@@ -1,8 +1,9 @@
 """Bounded verifier for the immutable Gateway OpenAPI contract.
 
 The OpenAPI snapshot is intentionally not checked into or packaged by this
-repository. Run this module directly with a pinned Gateway checkout, or use an
-authenticated GitHub API request in CI.
+repository. The check against the real artifact is opt-in: it runs only with a
+checkout of the Collective Wisdom service, passed as WISDOM_GATEWAY_DIR to
+pytest or as --gateway-dir when running this module directly.
 """
 
 from __future__ import annotations
@@ -12,8 +13,6 @@ import hashlib
 import json
 import os
 import subprocess
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -21,16 +20,8 @@ import pytest
 from hermes_wisdom_plugin.contract import CONTRACT_PIN
 
 
-GATEWAY_REPOSITORY = "NousResearch/gateway-gateway"
 OPENAPI_PATH = "openapi.json"
 MAX_OPENAPI_BYTES = 2 * 1024 * 1024
-
-
-def _read_bounded(response) -> bytes:
-    payload = response.read(MAX_OPENAPI_BYTES + 1)
-    if len(payload) > MAX_OPENAPI_BYTES:
-        raise ValueError(f"OpenAPI exceeds {MAX_OPENAPI_BYTES} bytes")
-    return payload
 
 
 def _openapi_from_checkout(gateway_dir: Path) -> bytes:
@@ -46,25 +37,6 @@ def _openapi_from_checkout(gateway_dir: Path) -> bytes:
         capture_output=True,
         timeout=30,
     ).stdout
-
-
-def _openapi_from_github(token: str) -> bytes:
-    revision = urllib.parse.quote(CONTRACT_PIN.gateway_commit, safe="")
-    url = (
-        f"https://api.github.com/repos/{GATEWAY_REPOSITORY}/contents/"
-        f"{OPENAPI_PATH}?ref={revision}"
-    )
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github.raw+json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "hermes-collective-wisdom-contract-verifier",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return _read_bounded(response)
 
 
 def verify_openapi(payload: bytes) -> dict[str, object]:
@@ -108,26 +80,12 @@ def test_pinned_openapi_when_gateway_checkout_is_configured() -> None:
 
 
 def main() -> int:
-    """Run the immutable OpenAPI check from a development or CI checkout."""
+    """Run the immutable OpenAPI check against a local service checkout."""
 
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--gateway-dir", type=Path)
-    source.add_argument(
-        "--github-token-env",
-        metavar="NAME",
-        help="environment variable holding a token with private repository read access",
-    )
+    parser.add_argument("--gateway-dir", type=Path, required=True)
     args = parser.parse_args()
-
-    if args.gateway_dir is not None:
-        payload = _openapi_from_checkout(args.gateway_dir)
-    else:
-        token = os.environ.get(args.github_token_env, "")
-        if not token:
-            parser.error(f"{args.github_token_env} is unset or empty")
-        payload = _openapi_from_github(token)
-
+    payload = _openapi_from_checkout(args.gateway_dir)
     print(json.dumps(verify_openapi(payload), sort_keys=True))
     return 0
 
