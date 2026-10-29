@@ -40,9 +40,18 @@ def _core_config(home: Path) -> Mapping[str, Any]:
         return loader() or {}
 
 
+def _method(ctx: Any, name: str) -> Callable[..., Any] | None:
+    value = getattr(ctx, name, None)
+    return value if callable(value) else None
+
+
 def build(ctx: Any, runtime: Any, profile: tuple[str, Path],
-          setting: Callable[[str, Any], Any]) -> AutoSuggest:
-    """Wire the controller to this plugin's host context and runtime."""
+          setting: Callable[[str, Any], Any], *, fork_task: str | None = None) -> AutoSuggest:
+    """Wire the controller to this plugin's host context and runtime.
+
+    ``ctx.fork_session`` and ``ctx.side_question`` are detected here, at register
+    time; which one runs is decided per turn by the capability the user granted.
+    """
     def candidate(name: str) -> dict[str, Any] | None:
         service = runtime._service()  # pylint: disable=protected-access
         try:
@@ -52,7 +61,9 @@ def build(ctx: Any, runtime: Any, profile: tuple[str, Path],
 
     return AutoSuggest(
         store=SuggestionStore(ctx.state, runtime.root),
-        side_question=ctx.side_question, has_capability=ctx.has_capability,
+        side_question=_method(ctx, "side_question"), has_capability=ctx.has_capability,
+        fork_session=_method(ctx, "fork_session"), fork_task=fork_task,
+        plugin_id=str(getattr(runtime, "plugin_id", "") or "collective-wisdom"),
         inject=getattr(ctx, "inject_message", None), setting=setting,
         self_learning=lambda: self_learning_interval(lambda: _core_config(profile[1])),
         candidate=candidate, session=host_session,

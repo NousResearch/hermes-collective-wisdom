@@ -31,7 +31,8 @@ class ReleaseScope:  # pylint: disable=too-many-instance-attributes
     model_copy: bool
     # Suggest sharing one of the owner's own skills after Hermes learns it
     # (auto_suggest.py). Its hooks and tool register only on a host with
-    # ctx.side_question; elsewhere this scope behaves like MANUAL_SHARING.
+    # ctx.fork_session or ctx.side_question; elsewhere this scope behaves like
+    # MANUAL_SHARING.
     auto_suggest: bool = False
 
     def allows_cli(self, command: str) -> bool:
@@ -96,16 +97,18 @@ MANUAL_SHARING = ReleaseScope(
 )
 
 # Manual sharing plus automatic share suggestions: the owner's own agent judges,
-# through ctx.side_question, whether a skill it just learned is worth sharing,
-# and the owner answers a three-choice card in their private chat. Nothing else
-# from FULL (notices, recommendations, settings reviews) is registered.
+# through a ctx.fork_session background fork (or ctx.side_question on hosts
+# without forks), whether a skill it just learned is worth sharing, and the owner
+# answers a three-choice card in their private chat. Nothing else from FULL
+# (notices, recommendations, settings reviews) is registered. The auxiliary task
+# routes the fork and registers only on a host with ctx.fork_session.
 AUTO_SUGGEST = ReleaseScope(
     name="auto-suggest",
     cli_commands=(*_MANUAL_CLI[:-1], "suggestions", "help"),
     slash_commands=_MANUAL_SLASH | frozenset({"suggestions"}),
     hooks=("pre_gateway_dispatch", "post_llm_call", "post_tool_call", "on_skill_lifecycle"),
     model_tools=("wisdom_share_suggestion",),
-    auxiliary_tasks=(),
+    auxiliary_tasks=("hermes_collective_wisdom_share_suggest",),
     desktop_route_groups=frozenset({"core"}),
     notification_settings=False,
     model_editorial=False,

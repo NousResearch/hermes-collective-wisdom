@@ -126,7 +126,7 @@ def test_host_without_side_question_registers_only_the_slash_dispatch_hook(
         manifest = yaml.safe_load((PROJECT_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
         assert manifest.get("provides_hooks") == list(release_scope.ACTIVE.hooks)
         assert manifest.get("provides_tools") == list(release_scope.ACTIVE.model_tools)
-        assert manifest.get("capabilities") == ["llm.side_question"]
+        assert manifest.get("capabilities") == ["llm.session_fork", "llm.side_question"]
         entries["unload"]()
     finally:
         _unload(module_name)
@@ -145,6 +145,41 @@ def test_side_question_host_registers_auto_suggest_hooks_and_tool(tmp_path, monk
             "pre_gateway_dispatch", "on_skill_lifecycle", "post_tool_call", "post_llm_call"]
         assert entries["tools"] == ["wisdom_share_suggestion"]
         assert not entries["auxiliary"]
+        entries["unload"]()
+    finally:
+        _unload(module_name)
+
+
+def test_fork_host_registers_the_suggestion_task_on_background_review(tmp_path, monkeypatch):
+    module_name, plugin = _load_root_plugin()
+    runtime_module = importlib.import_module(f"{module_name}.hermes_wisdom_plugin.runtime")
+    monkeypatch.setattr(runtime_module, "current_profile", lambda: ("default", tmp_path))
+    forks, tasks = [], []
+    entries, context = _context(
+        tmp_path, plugin_id="collective-wisdom", has_capability=lambda _name: True,
+        side_question=lambda *_a, **_k: None,
+        fork_session=lambda *args, **kwargs: forks.append((args, kwargs)),
+    )
+    handlers = []
+    context.register_auxiliary_task = lambda key, **kwargs: (
+        tasks.append((key, kwargs)) or entries["auxiliary"].append(key)
+        or SimpleNamespace(dispose=lambda: None))
+    context.register_tool = lambda **definition: (
+        handlers.append(definition["handler"]) or entries["tools"].append(definition["name"])
+        or SimpleNamespace(dispose=lambda: None))
+    try:
+        plugin.register(context)
+        assert entries["auxiliary"] == ["hermes_collective_wisdom_share_suggest"]
+        assert tasks[0][1]["inherit_from"] == "background_review"
+        assert entries["hooks"] == [
+            "pre_gateway_dispatch", "on_skill_lifecycle", "post_tool_call", "post_llm_call"]
+        assert entries["tools"] == ["wisdom_share_suggestion"]
+        controller = handlers[0].__self__
+        assert controller.fork_session is context.fork_session
+        assert controller.side_question is context.side_question
+        assert controller.fork_task == "hermes_collective_wisdom_share_suggest"
+        assert controller.fork_origin == "plugin_fork:collective-wisdom"
+        assert controller.mode() == "fork" and not forks
         entries["unload"]()
     finally:
         _unload(module_name)

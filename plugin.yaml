@@ -5,9 +5,12 @@ version: 0.1.0.dev0
 description: "Share, discover, install and manage team skills with Collective Wisdom."
 requires_hermes: ">=0.21.5"
 # Manual sharing plus automatic share suggestions (release_scope.AUTO_SUGGEST).
-# The suggestion hooks and tool register only on a Hermes with ctx.side_question
-# and need the llm.side_question capability, which the user approves on install,
-# enable or update. Notice and recommendation surfaces stay dormant.
+# The suggestion hooks and tool register only on a Hermes with ctx.fork_session
+# or ctx.side_question. A suggestion runs as a background fork of the session
+# agent when llm.session_fork is granted, else as one side question when
+# llm.side_question is granted, else not at all. The user approves both on
+# install, enable or update; Hermes releases that do not know llm.session_fork
+# ignore it. Notice and recommendation surfaces stay dormant.
 provides_hooks:
   - pre_gateway_dispatch
   - post_llm_call
@@ -16,4 +19,5 @@ provides_hooks:
 provides_tools:
   - wisdom_share_suggestion
 capabilities:
+  - llm.session_fork
   - llm.side_question

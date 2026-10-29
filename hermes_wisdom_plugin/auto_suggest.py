@@ -3,25 +3,33 @@
 Hermes reviews its own skills while it works (``skills.creation_nudge_interval``
 tool calls, ``auxiliary.background_review``). When one of the owner's local skills
 is created or patched in a session, or is used and ranks among the owner's top
-skills, a later attended turn of that session may ask the session's own agent,
-through ``ctx.side_question``, whether the skill is worth sharing. Only a yes
-starts a turn in the owner's private chat that asks the model to call
-``wisdom_share_suggestion``; the tool shows a card for that one pending
-suggestion with three choices. The model never picks what is suggested and
-cannot answer the card. Nothing is shared until the owner confirms the normal
-share review.
+skills, a later attended turn of that session may ask the session's own agent
+whether the skill is worth sharing, the same way Hermes runs its background review:
 
-Off unless every condition holds: the host has ``ctx.side_question`` and the
-user granted ``llm.side_question``; self-learning is on; the plugin setting
+- ``ctx.fork_session`` (``llm.session_fork``) first: a bounded background copy of
+  the session agent sees the candidates and may call ``wisdom_share_suggestion``
+  once, for one of them. That call records the suggestion and starts delivery.
+- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable: one
+  JSON verdict about the first candidate.
+- Otherwise off.
+
+A suggestion starts a turn in the owner's private chat that asks the model to call
+``wisdom_share_suggestion``; the tool shows a card for that one pending suggestion
+with three choices. Only this plugin's own fork may propose a skill; the live
+agent can only show a card that is already pending and cannot answer it. Nothing
+is shared until the owner confirms the normal share review.
+
+Cadence follows core's ``post_llm_call`` ``review_signals`` when the host sends
+them (the skill review is due and background review is on); older hosts fall
+back to counting tool calls against ``skills.creation_nudge_interval``.
+
+Off unless every condition holds: the host has one of the two methods and the
+user granted its capability; self-learning is on; the plugin setting
 ``auto_suggest`` is not false; the profile is set up; the turn is the owner's
 CLI, TUI or Desktop session or a private Slack or Telegram chat. At most
 ``auto_suggest_daily_limit`` (default 1) suggestions are shown per profile per
 day, a skill revision is asked about once, and a skill the owner chose
 "Never for this skill" for is not suggested again until they allow it.
-
-Cadence follows core's ``post_llm_call`` ``review_signals`` when the host sends
-them (the skill review is due and background review is on); older hosts fall
-back to counting tool calls against ``skills.creation_nudge_interval``.
 """
 
 from __future__ import annotations
@@ -48,6 +56,12 @@ from .top_skills import clean_text, is_messaging
 logger = logging.getLogger(__name__)
 
 CAPABILITY = "llm.side_question"
+FORK_CAPABILITY = "llm.session_fork"
+# The plugin's auxiliary task for the fork; it inherits core's background review routing.
+FORK_TASK = "hermes_collective_wisdom_share_suggest"
+FORK_MAX_ITERATIONS = 4
+FORK_TIMEOUT = 300.0
+FORK_CANDIDATES = 3
 HOOKS = ("post_llm_call", "post_tool_call", "on_skill_lifecycle")
 TOOL = "wisdom_share_suggestion"
 SETTING = "auto_suggest"
@@ -72,19 +86,30 @@ TOOL_SCHEMA = {
     "description": (
         "Show the owner the Collective Wisdom card for a skill Hermes suggested sharing. "
         "Call it only when a Collective Wisdom message asks you to, with that exact skill "
-        "name. It only displays a card: the owner chooses Confirm share, Don't share or "
-        "Never for this skill on it. It never shares, uploads or publishes anything."
+        "name (and, in a Collective Wisdom background check, a one-line reason). It only "
+        "displays a card: the owner chooses Confirm share, Don't share or Never for this "
+        "skill on it. It never shares, uploads or publishes anything."
     ),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["skill"],
-        "properties": {"skill": {"type": "string", "minLength": 1, "maxLength": _NAME_LIMIT}},
+        "properties": {
+            "skill": {"type": "string", "minLength": 1, "maxLength": _NAME_LIMIT},
+            "reason": {"type": "string", "maxLength": _REASON_LIMIT},
+        },
     },
 }
 
 
 def host_supports(ctx: Any) -> bool:
-    """Whether this Hermes can ask the session's own agent a side question."""
-    return callable(getattr(ctx, "side_question", None)) and callable(
+    """Whether this Hermes can fork the session agent or ask it a side question."""
+    return callable(getattr(ctx, "has_capability", None)) and (
+        callable(getattr(ctx, "fork_session", None))
+        or callable(getattr(ctx, "side_question", None)))
+
+
+def host_forks(ctx: Any) -> bool:
+    """Whether this Hermes offers ``ctx.fork_session`` (plugin session forks)."""
+    return callable(getattr(ctx, "fork_session", None)) and callable(
         getattr(ctx, "has_capability", None))
 
 
@@ -278,21 +303,50 @@ class SuggestionStore:
         return copy.deepcopy(max(rows, key=lambda row: row.get("created_at", 0))) if rows else None
 
 
+def _why(candidate: Mapping[str, Any]) -> str:
+    return {"created": "was just created", "patched": "was just improved",
+            "edited": "was just improved"}.get(str(candidate.get("action")),
+                                               "is one of my most used")
+
+
 def verdict_prompt(candidate: Mapping[str, Any]) -> str:
     """A short structured question about one skill, from its local facts only."""
-    why = {"created": "was just created", "patched": "was just improved",
-           "edited": "was just improved"}.get(str(candidate.get("action")),
-                                              "is one of my most used")
     return "\n".join((
         "Collective Wisdom check, answer with JSON only. One of my own Hermes skills "
-        f"{why} in this session. Would teammates in my organization benefit if I shared it "
-        "through Collective Wisdom? Answer no if it looks personal, specific to this machine "
-        "or project, unfinished, or likely to contain secrets.",
+        f"{_why(candidate)} in this session. Would teammates in my organization benefit if I "
+        "shared it through Collective Wisdom? Answer no if it looks personal, specific to this "
+        "machine or project, unfinished, or likely to contain secrets.",
         f"Skill: {_name(candidate.get('name'))}",
         f"Description: {clean_text(candidate.get('description')) or '(none)'}",
         f"Usage: {int(candidate.get('uses') or 0)} uses, {int(candidate.get('edits') or 0)} edits",
         'Reply with exactly: {"share": true or false, "reason": "<one short line>"}',
     ))
+
+
+def fork_prompt(candidates: list[Mapping[str, Any]]) -> str:
+    """The background fork's task: judge these skills, suggest at most one through the tool."""
+    lines = [
+        "Collective Wisdom background check. This is not a message to reply to, and nothing "
+        "here asks you to change files or run commands.",
+        "These are my own Hermes skills from this session:",
+    ]
+    lines.extend(
+        f"- {_name(item.get('name'))}: {_why(item)}. "
+        f"{clean_text(item.get('description')) or '(no description)'} "
+        f"({int(item.get('uses') or 0)} uses, {int(item.get('edits') or 0)} edits)"
+        for item in candidates
+    )
+    lines.extend((
+        "Using what you saw in this session, decide whether one of them would clearly help "
+        "teammates in my organization if I shared it through Collective Wisdom. Skip any that "
+        "look personal, specific to this machine or project, unfinished, or likely to contain "
+        "secrets.",
+        f"If one clearly qualifies, call {TOOL} once with its exact name as skill and a "
+        "one-line reason. Call it at most once and for at most one skill; if none qualifies, "
+        "call no tool. The tool only shows me a card to choose from; it never shares anything.",
+        "Finish with one short line.",
+    ))
+    return "\n".join(lines)
 
 
 _JSON_OBJECT = re.compile(r"\{.*?\}", re.DOTALL)
@@ -360,8 +414,8 @@ def self_learning_interval(load_config: Callable[[], Mapping[str, Any] | None]) 
 class AutoSuggest:  # pylint: disable=too-many-instance-attributes
     """Count, choose, ask and deliver; every dependency is injected."""
 
-    def __init__(  # pylint: disable=too-many-arguments
-        self, *, store: SuggestionStore, side_question: Callable[..., Any],
+    def __init__(  # pylint: disable=too-many-arguments,too-many-locals
+        self, *, store: SuggestionStore, side_question: Callable[..., Any] | None,
         has_capability: Callable[[str], bool], inject: Callable[..., Any] | None,
         setting: Callable[[str, Any], Any], self_learning: Callable[[], int],
         candidate: Callable[[str], dict[str, Any] | None],
@@ -371,9 +425,14 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         profile: str = "default", profile_current: Callable[[], bool] = lambda: True,
         start: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], float] = time.time,
+        fork_session: Callable[..., Any] | None = None, fork_task: str | None = None,
+        plugin_id: str = "collective-wisdom",
     ) -> None:
         self.store = store
         self.side_question = side_question
+        self.fork_session = fork_session
+        self.fork_task = fork_task
+        self.fork_origin = f"plugin_fork:{plugin_id}"
         self.has_capability = has_capability
         self.inject = inject
         self.setting = setting
@@ -388,6 +447,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self.clock = clock
         self._lock = threading.Lock()
         self._sessions: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._offer: dict[str, Any] | None = None  # The running fork's candidates.
         self._busy = False
         self._closed = False
 
@@ -396,10 +456,19 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         with self._lock:
             self._closed = True
             self._sessions.clear()
+            self._offer = None
 
     def available(self) -> bool:
         """Tool reachability for the host."""
         return not self._closed
+
+    def mode(self) -> str | None:
+        """How to ask: ``fork`` first, then ``side_question``, each only when granted."""
+        if self.fork_session is not None and self.has_capability(FORK_CAPABILITY):
+            return "fork"
+        if self.side_question is not None and self.has_capability(CAPABILITY):
+            return "side_question"
+        return None
 
     def _session_state(self, session_id: str) -> dict[str, Any]:
         state = self._sessions.pop(session_id, None) or {"tools": 0, "candidates": {}}
@@ -453,11 +522,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             self._busy = True
         try:
             route = self._route(facts)
-            if (route is None or not self.store.day_open(self._daily_limit())
-                    or not self.has_capability(CAPABILITY)):
+            mode = None if route is None else self.mode()
+            if route is None or mode is None or not self.store.day_open(self._daily_limit()):
                 self._release()
                 return
-            self.start(lambda: self._check(token, session_id, route, candidates))
+            check = self._fork_check if mode == "fork" else self._check
+            self.start(lambda: check(token, session_id, route, candidates))
         except Exception:  # pylint: disable=broad-exception-caught
             self._release()
             logger.warning("Collective Wisdom suggestion check could not start", exc_info=True)
@@ -515,8 +585,9 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             self.store.mark_seen(name, content_hash, "asked")
             self.store.record("asked", name, content_hash=content_hash)
             try:
-                answer = self.side_question(token, verdict_prompt(chosen),
-                                            timeout=SIDE_QUESTION_TIMEOUT)
+                ask = self.side_question
+                answer = ask(token, verdict_prompt(chosen),
+                             timeout=SIDE_QUESTION_TIMEOUT) if ask is not None else None
             except Exception:  # pylint: disable=broad-exception-caught
                 answer = None
             share, reason = parse_verdict(answer)
@@ -530,8 +601,18 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
 
     def _choose(self, session_id: str, candidates: dict[str, str]) -> dict[str, Any] | None:
         """The first viable candidate, created or patched skills before used ones."""
+        for found in self._viable(session_id, candidates, limit=1):
+            return found
+        return None
+
+    def _viable(self, session_id: str, candidates: dict[str, str], *,
+                limit: int) -> list[dict[str, Any]]:
+        """Up to ``limit`` viable candidates, created or patched skills before used ones."""
+        found: list[dict[str, Any]] = []
         ordered = sorted(candidates.items(), key=lambda item: item[1] not in _CREATED)
         for name, action in ordered:
+            if len(found) >= limit:
+                break
             facts = None if self.store.suppressed(name) else self.candidate(name)
             viable = (
                 isinstance(facts, dict) and not facts.get("shared")
@@ -546,16 +627,78 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                     state["candidates"].pop(name)  # Evaluated; a new fact re-adds it.
             if viable:
                 assert isinstance(facts, dict)
-                return {**facts, "name": name, "action": action}
-        return None
+                found.append({**facts, "name": name, "action": action})
+        return found
+
+    # Background fork -----------------------------------------------------------------------
+    def _fork_check(self, token: str, session_id: str, route: dict[str, Any],
+                    candidates: dict[str, str]) -> None:
+        """Fork the session agent over the viable candidates; it may suggest one."""
+        offer: dict[str, Any] | None = None
+        try:
+            offered = self._viable(session_id, candidates, limit=FORK_CANDIDATES)
+            if not offered:
+                return
+            for item in offered:
+                self.store.record("candidate", item["name"], action=item["action"],
+                                  content_hash=item["content_hash"], session_id=session_id)
+                self.store.record("asked", item["name"], content_hash=item["content_hash"],
+                                  via="fork")
+            offer = {"session_id": session_id, "route": route, "suggested": None,
+                     "closed": False, "skills": {item["name"]: item for item in offered},
+                     "expires_at": self.clock() + PENDING_TTL_SECONDS}
+            with self._lock:
+                self._offer = offer  # Before the fork starts: it may call the tool at once.
+            self._settle(offer, self._run_fork(token, offered))
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("Collective Wisdom suggestion fork failed", exc_info=True)
+        finally:
+            with self._lock:
+                if offer is not None:
+                    offer["closed"] = True
+                if self._offer is offer:
+                    self._offer = None
+            self._release()
+
+    def _run_fork(self, token: str, offered: list[dict[str, Any]]) -> str:
+        """Start the fork with only this plugin's tool and wait for its outcome."""
+        fork = self.fork_session
+        handle = None if fork is None else fork(
+            token, fork_prompt(offered), tools=(TOOL,), max_iterations=FORK_MAX_ITERATIONS,
+            task=self.fork_task, timeout=FORK_TIMEOUT,
+        )
+        if handle is None:
+            return "refused"
+        if not handle.wait(FORK_TIMEOUT + 30.0):
+            handle.cancel()  # Still deferred or stuck: give up; the next due turn may retry.
+        return str(getattr(handle, "outcome", "") or "error")
+
+    def _settle(self, offer: dict[str, Any], outcome: str) -> None:
+        """A finished fork judged every offered skill; an interrupted one judged none."""
+        with self._lock:
+            offer["closed"] = True
+            suggested = offer["suggested"]
+        for name, item in offer["skills"].items():
+            if name == suggested:
+                continue
+            if outcome == "ok":
+                self.store.mark_seen(name, item["content_hash"], "asked")
+                self.store.record("verdict", name, share=False, via="fork")
+                continue
+            self.store.record("not_asked", name, why=outcome)
+            with self._lock:  # Ask again on a later due turn of this session.
+                if not self._closed:
+                    pending = self._session_state(offer["session_id"])["candidates"]
+                    if pending.get(name) not in _CREATED:
+                        pending[name] = item["action"]
 
     def _deliver(self, chosen: dict[str, Any], reason: str, session_id: str,
-                 route: dict[str, Any]) -> None:
+                 route: dict[str, Any]) -> bool:
         name, content_hash = chosen["name"], chosen["content_hash"]
         if not self.store.reserve_today(self._daily_limit()):
             self.store.forget_seen(name, content_hash)
             self.store.record("not_shown", name, why="daily_limit")
-            return
+            return False
         suggestion = {
             "id": secrets.token_urlsafe(12), "skill": name,
             "description": clean_text(chosen.get("description")), "reason": reason,
@@ -572,17 +715,23 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                 accepted = False
         if accepted:
             self.store.record("injected", name, surface=route.get("platform"))
-            return
+            return True
         # Denied or unavailable: nothing was dismissed, and no retry today.
         self.store.set_pending_state(suggestion["id"], "undelivered")
         self.store.forget_seen(name, content_hash)
         self.store.block_today()
         self.store.record("not_shown", name, why="injection_unavailable")
+        return False
 
     # Model tool ----------------------------------------------------------------------------
     def tool(self, args: dict[str, Any], **kwargs: Any) -> str:
-        """Show the card for the one pending suggestion of this conversation."""
+        """In this plugin's fork, suggest one offered skill; live, show its pending card."""
         skill = _name(args.get("skill"))
+        origin = kwargs.get("turn_origin")
+        if origin is not None:
+            raw = args.get("reason")
+            reason = clean_text(raw, _REASON_LIMIT) if isinstance(raw, str) else ""
+            return self._suggest(skill, reason, str(origin), str(kwargs.get("session_id") or ""))
         suggestion: dict[str, Any] | None = None
         if skill and not self._closed:
             suggestion = self.store.claim_pending(
@@ -613,9 +762,38 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                             "its commands; the user chooses."),
         }, sort_keys=True)
 
+    def _offered(self, offer: dict[str, Any] | None, skill: str,
+                 session_id: str) -> dict[str, Any] | None:
+        """The facts of ``skill`` when the running fork may still suggest it; call locked."""
+        if offer is None or self._closed or offer["closed"] or offer["suggested"] is not None:
+            return None
+        if offer["expires_at"] <= self.clock() or session_id not in {"", offer["session_id"]}:
+            return None
+        return offer["skills"].get(skill)
+
+    def _suggest(self, skill: str, reason: str, origin: str, session_id: str) -> str:
+        """The fork's one suggestion: record it and start the normal delivery."""
+        if origin != self.fork_origin:
+            raise PermissionError(
+                "Only Collective Wisdom's own background check can suggest a skill.")
+        with self._lock:
+            offer = self._offer
+            item = self._offered(offer, skill, session_id)
+            if offer is None or item is None:
+                raise PermissionError(
+                    "Collective Wisdom can suggest only one of the skills it asked about, once.")
+            offer["suggested"] = skill
+        self.store.mark_seen(skill, item["content_hash"], "asked")
+        self.store.record("verdict", skill, share=True, reason=reason or None, via="fork")
+        shown = self._deliver(item, reason, offer["session_id"], offer["route"])
+        return json.dumps({
+            "status": "suggested" if shown else "not_shown", "executed": False,
+            "instruction": "Done. Don't call this tool again; finish with one short line.",
+        }, sort_keys=True)
+
 
 def _thread(work: Callable[[], None]) -> None:
-    """Redeem the side-question token off the turn thread; it blocks up to its timeout."""
+    """Ask off the turn thread: a side question blocks up to its timeout, a fork until done."""
     threading.Thread(target=work, name="wisdom-auto-suggest", daemon=True).start()
 
 
@@ -649,7 +827,8 @@ def _decision_label(row: Mapping[str, Any]) -> str:
                 "never": "you chose Never for this skill",
                 "allow": "you allowed suggestions again"}.get(str(row.get("choice")), event)
     return {"asked": "asked Hermes", "injected": "suggested in chat", "shown": "card shown",
-            "not_shown": "not shown (" + str(row.get("why") or "unavailable") + ")"}.get(
+            "not_shown": "not shown (" + str(row.get("why") or "unavailable") + ")",
+            "not_asked": "check stopped (" + str(row.get("why") or "unavailable") + ")"}.get(
                 event, event)
 
 
