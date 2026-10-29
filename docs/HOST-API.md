@@ -17,8 +17,8 @@ See [Architecture](ARCHITECTURE.md) and [Verification](TESTING.md).
 ## Historical host audits
 
 Audited against Agent `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
-See [SOURCES.md](SOURCES.md) for immutable source notation. The historical API
-inventory below describes those pinned hosts, not unpublished host development.
+The historical API inventory below describes those pinned hosts, not unpublished
+host development.
 
 ## Local development checkpoint — 2026-09-15
 
@@ -72,8 +72,7 @@ The host owns no Wisdom receipt or execution policy. Wisdom's `tui_actions.py`
 uses the existing install/update/setup kernels; unsupported hosts fail safely to
 the terminal handoff. See [the development TUI commands](../README.md#development-tui-review-and-actions).
 
-A partial command-only experiment exists on the rejected Agent PR #108645:
-[historical H1 evidence](verification/H1-commands.md). It is not a dependency.
+A partial command-only experiment on a rejected Agent PR is not a dependency.
 The 2026-09-12 simplification decision requires plugin-owned checks and unchanged
 host command surfaces. Exhaust existing APIs for proactive delivery as well;
 report any insurmountable gap before proposing another Agent PR.
@@ -163,7 +162,7 @@ An actual authorized request may use the host's existing refresh policy;
 visibility and completion must never initiate refresh or network work.
 
 The extracted plugin client uses explicit providers in tests. That does not
-complete workflow integration. The [account adapter](verification/F1-account.md)
+complete workflow integration. The account adapter
 now passes denial/expiry/profile-switch checks against unmodified upstream.
 It uses `get_provider_auth_state` and the existing host decoder, not a new API.
 CLI/slash registration now supports explicit terminal onboarding and safe
@@ -184,8 +183,7 @@ recoverable removal. Staging under `.hub/collective-wisdom` and trash under
 `.archive/collective-wisdom` use directories excluded by the actual host skill
 scanner; committed `_wisdom/<org>/<slug>` skills remain discoverable. Plain
 terminal confirmation does not use remembered tool approvals or private TUI
-modals. See [manual installation evidence](verification/manual-installation.md)
-for the tested boundaries and outstanding live acceptance.
+modals.
 
 ### H3: Post-Delivery and Idle-Session Integration
 

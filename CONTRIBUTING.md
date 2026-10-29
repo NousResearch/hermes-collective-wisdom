@@ -7,9 +7,8 @@ acceptance criteria, and intended write scope in the PR. Keep generic Hermes
 host changes in a separate upstream PR and link the dependency here.
 
 Copy coherent working code with its tests before adapting integration. Record
-source symbols and test dispositions in the slice's verification note. Separate
-mechanical extraction and adaptation into commits where practical; tasks share
-delivery PRs according to docs/FIRST-RELEASE.md, not one PR per feature. Each
+source symbols and test dispositions in the PR description. Separate
+mechanical extraction and adaptation into commits where practical. Each
 parallel worker owns a separate worktree and an exclusive write scope.
 
 Use `shannonsands/<feature>` for new development branches. Normal work should
@@ -36,8 +35,8 @@ For each feature, record the implementation commit/PR, automated command and
 result, and live evidence if applicable. A feature can be implemented but still
 await automated or live acceptance. A blocked check must name its dependency.
 
-Use an artifact in `docs/verification/` for evidence that needs more space.
-Exclude access tokens, private skill contents, personal identifiers, and raw
+Put evidence that needs more space in the PR description. Exclude access tokens,
+private skill contents, personal identifiers, and raw
 production logs. Git history is the audit trail; do not maintain duplicate
 status spreadsheets or detached feature lists.
 
