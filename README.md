@@ -103,10 +103,18 @@ scheduled jobs or subagents. Nothing is shared until you approve the share revie
 `/wisdom suggestions` (or `hermes wisdom suggestions`) lists what Hermes suggested and what you
 chose.
 
-This needs a Hermes release with plugin side questions, your approval of the `llm.side_question`
-capability (see [Configuration](#configuration)), and Hermes self-learning on
-(`skills.creation_nudge_interval` above 0 and `auxiliary.background_review.enabled` not false).
-Without any of these, Collective Wisdom works exactly as before and suggests nothing.
+Hermes checks at the same moments as its own background skill review, once enough of the session's
+work has accumulated (`skills.creation_nudge_interval`). On a Hermes release with plugin session
+forks, the check runs like that review: a background copy of your session's agent looks at the
+skills from the session and suggests at most one. It can call only the Collective Wisdom
+suggestion tool, and it stops when you send your next message. On a Hermes release with plugin side
+questions only, Hermes asks your session's agent about one skill instead.
+
+This needs your approval of the `llm.session_fork` or `llm.side_question` capability (see
+[Configuration](#configuration)), and Hermes self-learning on (`skills.creation_nudge_interval`
+above 0 and `auxiliary.background_review.enabled` not false). Hermes uses the session fork when you
+approved `llm.session_fork`, otherwise the side question when you approved `llm.side_question`.
+Without either, Collective Wisdom works exactly as before and suggests nothing.
 
 ### Share a skill
 
@@ -245,7 +253,8 @@ In scripts, `--yes` confirms a share; scanner warnings additionally need `--acce
 |---|---|---|
 | `HERMES_SYNC_BASE_URL` or `sync.base_url` in `config.yaml` | `https://gateway-gateway.nousresearch.com` | The Collective Wisdom service. Change it only when your team runs its own. |
 | `plugins.entries.collective-wisdom.allow_gateway_injection` | `true` after `setup` | Lets Collective Wisdom start a Hermes turn in your TUI, Desktop and messaging chats (`/wisdom share-suggest`). The classic CLI chat does not need it. `setup` sets it only when it is unset; a value you wrote, `false` included, is kept. |
-| `plugins.entries.collective-wisdom.granted_capabilities` | asked on install, enable and update | Approve `llm.side_question` when Hermes asks, so Collective Wisdom can ask your session's agent whether a skill is worth sharing. Hermes asks only in an interactive terminal; otherwise run `hermes plugins enable collective-wisdom` there. Without it there are no suggestions. |
+| `plugins.entries.collective-wisdom.granted_capabilities` | asked on install, enable and update | Approve `llm.session_fork` (a background copy of your session's agent, which sees the whole session including memory and spends tokens on your model) or `llm.side_question` (one question to that agent) when Hermes asks, so Collective Wisdom can check whether a skill is worth sharing. The session fork is used when both are approved. Hermes asks only in an interactive terminal; otherwise run `hermes plugins enable collective-wisdom` there. Without either there are no suggestions. Hermes releases without session forks ignore `llm.session_fork`. |
+| `auxiliary.hermes_collective_wisdom_share_suggest` | the session's model | The model the session-fork check runs on. Collective Wisdom registers it to inherit `auxiliary.background_review`; set `provider` and `model` here to route the check yourself. |
 | `plugins.entries.collective-wisdom.settings.auto_suggest` | `true` | Set to `false` to stop suggestions from Hermes. |
 | `plugins.entries.collective-wisdom.settings.auto_suggest_daily_limit` | `1` | Suggestions shown per profile per day; `0` stops them. |
 | `plugins.entries.collective-wisdom.settings.qualification.allow_model_review` | unset | Set to `false` to stop share from sending a skill's `SKILL.md` to your model to propose a missing or too-long name or description. Unset allows it. |
@@ -309,8 +318,11 @@ Scripts in a package are never run during sharing, review or install.
   sends that skill's `SKILL.md` to your configured model provider to propose them. It does not when
   the copy is valid or the local checks find something that looks like a secret. Turn it off with
   `hermes config set plugins.entries.collective-wisdom.settings.qualification.allow_model_review false`.
-  Suggestions from Hermes send one skill's name, description and usage counts to the model of the
-  session it was learned in, as a side question in that session. No other command calls a model.
+  Suggestions from Hermes run on the model of the session the skills were learned in: a background
+  copy of that session's agent (which sees the whole session, including memory) gets the names,
+  descriptions and usage counts of up to three of your skills and can call only the suggestion tool;
+  on Hermes releases without session forks, one skill's name, description and usage counts go to
+  that model as a side question. No other command calls a model.
 - **No background activity:** there is no telemetry, no polling and no background process. The plugin
   acts when you run a Collective Wisdom command, and, for suggestions from Hermes, after a turn of
   your own attended session.
