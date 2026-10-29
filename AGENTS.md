@@ -1,12 +1,12 @@
 # Agent Guide
 
-Read README.md, docs/FEATURES.md, and docs/MIGRATION.md before starting a slice.
+Read README.md, docs/FEATURES.md, and docs/ARCHITECTURE.md before starting a slice.
 
 ## Scope
 
 This is an external Hermes plugin, not a Codex plugin or an Agent fork. Keep
 Wisdom-specific code here. Generic host extensions require separate, small
-Hermes Agent PRs. Do not copy the original 80k-line PR wholesale.
+Hermes Agent PRs.
 
 Current delivery is stock-Agent-compatible native workflows plus external
 Desktop management pages using the existing authenticated plugin REST namespace.
@@ -14,7 +14,7 @@ No Hermes Agent source changes, native-session HTTP bridge, new daemon or separa
 authentication system. Dashboard/full six-surface parity are deferred.
 Offline tests do not replace installed Desktop or service acceptance.
 Work only on the requested slice; planning documents do not authorize the roadmap.
-Use `shannonsands/<feature>` for new branches.
+Use `feat/<topic>` or `fix/<topic>` for new branches.
 
 ## Implementation
 
@@ -35,9 +35,8 @@ Use `shannonsands/<feature>` for new branches.
 
 ## Delegation and Evidence
 
-The project owner requests gpt-5.6-luna for bounded investigation and
-gpt-5.6-sol for implementation. Delegate only disjoint, concrete work; review
-the result before integration. These roles do not replace live acceptance.
+Delegate only disjoint, concrete work; review the result before integration.
+Delegated work does not replace live acceptance.
 
 Update the feature's implementation, automated, and live status independently.
 Record commands, immutable revisions, results, and any blocked checks. Never
