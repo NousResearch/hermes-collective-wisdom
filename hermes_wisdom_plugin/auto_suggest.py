@@ -8,7 +8,8 @@ whether the skill is worth sharing, the same way Hermes runs its background revi
 
 - ``ctx.fork_session`` (``llm.session_fork``) first: a bounded background copy of
   the session agent sees the candidates and may call ``wisdom_share_suggestion``
-  once, for one of them. That call records the suggestion and starts delivery.
+  once, for one of them. That call records the suggestion; delivery starts when the
+  fork has ended.
 - ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable or the
   host refused it (then until restart): one
   JSON verdict about the first candidate.
@@ -680,6 +681,11 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                 self._offer = offer  # Before the fork starts: it may call the tool at once.
             outcome = self._run_fork(token, offered)
             self._settle(offer, outcome)
+            with self._lock:
+                suggested = offer["suggested"]
+            if suggested is not None:
+                self._deliver(offer["skills"][suggested], str(offer.get("reason") or ""),
+                              session_id, route)
             if outcome == "refused" and self._side_question_ready():
                 self._fork_refused = True
                 logger.info("Collective Wisdom: the host refused the suggestion fork; "
@@ -813,7 +819,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         return offer["skills"].get(skill)
 
     def _suggest(self, skill: str, reason: str, origin: str, session_id: str) -> str:
-        """The fork's one suggestion: record it and start the normal delivery."""
+        """The fork's one suggestion: record it; _fork_check delivers it after the fork."""
         if origin != self.fork_origin:
             raise PermissionError(
                 "Only Collective Wisdom's own background check can suggest a skill.")
@@ -824,11 +830,13 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                 raise PermissionError(
                     "Collective Wisdom can suggest only one of the skills it asked about, once.")
             offer["suggested"] = skill
+            offer["reason"] = reason
         self.store.mark_seen(skill, item["content_hash"], "asked")
         self.store.record("verdict", skill, share=True, reason=reason or None, via="fork")
-        shown = self._deliver(item, reason, offer["session_id"], offer["route"])
+        # Delivery waits until the fork has ended (see _fork_check): a turn started from inside
+        # the fork would inherit its context and cancel the fork that started it.
         return json.dumps({
-            "status": "suggested" if shown else "not_shown", "executed": False,
+            "status": "suggested", "executed": False,
             "instruction": "Done. Don't call this tool again; finish with one short line.",
         }, sort_keys=True)
 

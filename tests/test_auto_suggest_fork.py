@@ -59,6 +59,7 @@ class _Host(_Fake):
         self.handle_done = True
         self.origin = ORIGIN  # What core passes the plugin's tool inside the fork.
         self.live: AutoSuggest | None = None
+        self.injected_during_fork = -1  # Injections seen while the fork was still running.
 
     def fork_session(  # pylint: disable=too-many-arguments
         self, token, prompt, *, tools=(), max_iterations=8, input_budget=None, task=None,
@@ -78,6 +79,7 @@ class _Host(_Fake):
                     dict(args), turn_origin=self.origin, session_id="s1", task_id="t")))
             except PermissionError as error:
                 self.fork_results.append(error)
+        self.injected_during_fork = len(self.injected)
         handle = _Handle(self.fork_outcome, tuple(actions))
         handle.done = self.handle_done
         self.handles.append(handle)
@@ -126,6 +128,25 @@ def test_fork_is_chosen_over_side_question_with_only_the_wisdom_tool(tmp_path):
     assert "Review incident notes." in fork["prompt"] and "sha-i" not in fork["prompt"]
     assert host.fork_results[0]["status"] == "suggested"
     assert host.injected == [(approval_prompt("incident"), "user", {})]
+
+
+def test_the_suggestion_is_delivered_after_the_fork_ends(tmp_path):
+    host = _Host(tmp_path)
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    assert host.fork_results[0]["status"] == "suggested"
+    assert host.injected_during_fork == 0 and len(host.injected) == 1
+
+
+@pytest.mark.parametrize("outcome", ["cancelled", "timeout"])
+def test_a_suggestion_made_before_the_fork_was_interrupted_is_still_delivered(tmp_path, outcome):
+    host = _Host(tmp_path)
+    host.fork_outcome = outcome
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    assert len(host.injected) == 1 and host.store.seen("incident", "sha-i")
 
 
 def test_fork_suggestion_shows_the_same_card_as_before(tmp_path):
