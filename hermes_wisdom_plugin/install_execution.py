@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,7 +17,7 @@ from .errors import (
     WisdomValidationError,
 )
 from .package import PackagePolicyError
-from .managed_target import validate_managed_target
+from .managed_target import REMOVED_TEXT, removed_outside_wisdom, validate_managed_target
 from .package_application import (
     durable_replace as _durable_replace,
     install_package as _install_package,
@@ -137,9 +138,13 @@ class InstallExecutor:
         existing = self.store.installation(skill_id)
         if existing:
             self._require_record_owner(existing, owner)
-            if existing.get("state") == "active":
+            # A skill removed outside Wisdom reinstalls over its stale record; an
+            # uninstalled one left no tree. Either way nothing may be at the target.
+            if existing.get("state") == "active" and not removed_outside_wisdom(
+                self.host, existing, owner,
+            ):
                 raise PackagePolicyError("managed installation already exists")
-            target = self._validated_record_target(existing, owner)
+            target = validate_managed_target(self.host, existing, owner, require_tree=False)
             if target.exists() or target.is_symlink():
                 raise PackagePolicyError("inactive managed target still exists")
         _require_compatibility(plan, accept_partial)
@@ -213,7 +218,10 @@ class InstallExecutor:
             if isinstance(result, dict):
                 return result
             raise PackagePolicyError("managed installation is already inactive")
-        target = self._validated_record_target(installation, owner)
+        already_removed = removed_outside_wisdom(self.host, installation, owner)
+        target = validate_managed_target(
+            self.host, installation, owner, require_tree=not already_removed,
+        )
         payload = {
             "owner": owner,
             "receipt": None,
@@ -224,6 +232,9 @@ class InstallExecutor:
             "version": int(installation.get("version") or 0),
             "content_hash": installation.get("content_hash"),
         }
+        if already_removed:
+            # Deleted outside Wisdom: there are no bytes to move to trash.
+            payload["already_removed"] = True
         for key in ("manifest_hash", "target_provenance"):
             if key in installation:
                 payload[key] = installation[key]
@@ -253,7 +264,10 @@ class InstallExecutor:
                 continue
             operation = pending_by_skill.pop(item["skill_id"], None)
             if item.get("state") == "active" or operation:
-                result.append(self._installed_item(item, by_skill, operation))
+                result.append(self._installed_item(
+                    item, by_skill, operation,
+                    removed=not operation and removed_outside_wisdom(self.host, item, owner),
+                ))
         for skill_id, operation in pending_by_skill.items():
             payload = self._payload(operation)
             result.append(self._installed_item({
@@ -271,16 +285,26 @@ class InstallExecutor:
         return result
 
     @staticmethod
-    def _installed_item(item: dict, remote: dict, operation: dict | None) -> dict:
+    def _installed_item(
+        item: dict, remote: dict, operation: dict | None, *, removed: bool = False,
+    ) -> dict:
         server = remote.get(item["skill_id"], {})
         target = item.get("target_path")
+        flagged = {
+            # Read-only projection: the stored record stays active until the
+            # owner reinstalls or uninstalls, so a read never changes state.
+            "state": "removed", "removed_outside_wisdom": True,
+            "status_text": REMOVED_TEXT, "modified": False,
+        } if removed else {
+            "modified": not target
+            or _tree_hashes(Path(target)) != item.get("baseline"),
+        }
         return {
             **item,
             "latest_version": server.get("latest_version"),
             "skill_state": server.get("skill_state"),
             "effective_update_mode": server.get("update_mode"),
-            "modified": not target
-            or _tree_hashes(Path(target)) != item.get("baseline"),
+            **flagged,
             "pending_operation": (
                 {"kind": operation["kind"], "phase": operation["stage"]}
                 if operation
@@ -438,13 +462,15 @@ class InstallExecutor:
         )
 
     def _archive_uninstall(self, payload, owner, target, trash, may_apply) -> None:
-        trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if target.exists() and not trash.exists():
+            trash.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             _same_filesystem(target, trash.parent)
             self._assert_owner(owner)
             self._require_current(may_apply)
             _durable_replace(target, trash)
-        elif not trash.exists():
+        elif not trash.exists() and not (
+            payload.get("already_removed") is True and not os.path.lexists(target)
+        ):
             raise PackagePolicyError("managed uninstall bytes are unavailable")
         self._assert_owner(owner)
         self._require_current(may_apply)
@@ -478,6 +504,8 @@ class InstallExecutor:
             "state": state,
             "recoverable_path": str(trash),
         }
+        if payload.get("already_removed") is True and not trash.exists():
+            result.update(recoverable_path=None, already_removed=True)
         payload["result"] = result
         self.store.deactivate_install(payload["skill_id"], result)
         self.store.checkpoint(operation_id, payload=payload, stage="outcome_recorded")
@@ -614,9 +642,6 @@ class InstallExecutor:
         root = Path(self.host.skills_root).expanduser().absolute()
         _reject_existing_links(root)
         return root
-
-    def _validated_record_target(self, record: dict, owner: dict) -> Path:
-        return validate_managed_target(self.host, record, owner)
 
     def _validate_operation_paths(
         self,

@@ -685,7 +685,8 @@ def _managed_reference(service, reference):
     listing = getattr(service, "list_installations", None)
     rows = cast(list[dict[str, Any]], listing()) if callable(listing) else []
     matches = [row for row in rows if isinstance(row, dict)
-               and row.get("slug") == reference and row.get("state", "active") == "active"]
+               and row.get("slug") == reference
+               and row.get("state", "active") in {"active", "removed"}]
     if len(matches) > 1:
         raise WisdomConflict("Managed skill name is ambiguous; use an exact ID with --json")
     if matches:
@@ -1197,6 +1198,14 @@ def _human_render(  # pylint: disable=too-many-return-statements
     if isinstance(data.get("error"), str):
         return "Error: " + _text(data["error"])
     if command == "check":
+        if data.get("state") == "removed":
+            slug = _text(data.get("slug") or "<skill-name>")
+            return "\n".join((
+                "Update check",
+                f"Skill: {slug}",
+                f"State: {_text(data.get('reason') or 'removed')}",
+                f"Next step: hermes wisdom install {slug}",
+            ))
         return "\n".join((
             "Update check",
             f"Skill: {_text(data.get('slug') or 'This skill')}",
@@ -1277,6 +1286,7 @@ def _slash_help() -> str:
     private = [entry for entry, command in (
         ("/wisdom share <skill>", "share"), ("/wisdom top [page]", "top"),
         ("/wisdom share-suggest", "share-suggest"), ("/wisdom suggestions", "suggestions"),
+        ("/wisdom uninstall <skill>", "uninstall"),
         ("/wisdom settings", "settings"),
         ("/wisdom mute", "mute"), ("/wisdom candidate <id>", "candidate"),
         ("/wisdom suggest <skill>", "suggest"), ("/wisdom publish <draft>", "publish"),
@@ -1298,7 +1308,7 @@ def _slash_help() -> str:
             *(("Private: " if index == 0 else "         ") + row
               for index, row in enumerate(rows)),
             "Terminal: /wisdom install | /wisdom installed | /wisdom check",
-            "          /wisdom update | /wisdom installed-setup | /wisdom uninstall",
+            "          /wisdom update | /wisdom installed-setup",
             "/wisdom help",
             "Private effects open a review when supported; terminal paths are shown.",
         )

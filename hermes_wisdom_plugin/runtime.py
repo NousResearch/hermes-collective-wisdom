@@ -1662,8 +1662,9 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
 
         rows = self.list_installations()
         self.check_owner()
+        managed = {"active", "removed"}  # Removed outside Wisdom is still managed.
         matches = [row for row in rows if isinstance(row, dict)
-                   and row.get("state") == "active"
+                   and row.get("state") in managed
                    and row.get("slug") == reference]
         if len(matches) > 1:
             raise WisdomConflict("Managed skill name is ambiguous; inspect installed --json")
@@ -1672,7 +1673,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             if isinstance(skill_id, str) and skill_id:
                 return skill_id
             raise WisdomValidationError("Managed skill identity is unavailable")
-        if any(isinstance(row, dict) and row.get("state") == "active"
+        if any(isinstance(row, dict) and row.get("state") in managed
                and row.get("skill_id") == reference for row in rows):
             return reference
         raise WisdomNotFound("Managed skill not found")
@@ -1947,10 +1948,19 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         finally:
             self._close_service(service)
 
-    def _slash_native_review(self, invocation, command: str, args: list[str]):
+    def _slash_native_review(self, invocation, command: str, args: list[str]):  # pylint: disable=too-many-return-statements
+        from .errors import WisdomNotFound  # pylint: disable=import-outside-toplevel
+
         target = " ".join(args)
-        if command in {"suggest", "share"} and len(args) != 1:
-            return f"Usage: /wisdom {command} <local-skill>"
+        if command in {"suggest", "share", "uninstall"} and len(args) != 1:
+            noun = "skill-name" if command == "uninstall" else "local-skill"
+            return f"Usage: /wisdom {command} <{noun}>"
+        if command == "uninstall":
+            try:
+                return _native_review_reply(self.native.begin_uninstall(invocation, target))
+            except WisdomNotFound:
+                return (f"{target} is not installed from Collective Wisdom on this "
+                        "computer. Nothing has been changed.")
         effect_review = {
             "update": self.native.begin_update,
             "publish": self.native.begin_publication,

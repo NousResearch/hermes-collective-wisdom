@@ -1039,6 +1039,12 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             lambda service: self.reviews.request_update(service, invocation, skill_id),
         )
 
+    def begin_uninstall(self, invocation: NativeInvocation, skill_name: str):
+        return self._begin(
+            invocation,
+            lambda service: self.reviews.request_uninstall(service, invocation, skill_name),
+        )
+
     def begin_publication(self, invocation: NativeInvocation, draft_id: str):
         return self._begin(invocation, lambda service: self.reviews.request_publication(service, invocation, draft_id))
 

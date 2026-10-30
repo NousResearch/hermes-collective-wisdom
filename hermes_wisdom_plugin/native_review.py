@@ -24,6 +24,7 @@ from .errors import (
     ShareCopyError, SharePackagingError, StaleControlError, WisdomAuthError, WisdomConflict,
     WisdomNotFound, WisdomValidationError, describe_exception, redacted_message,
 )
+from .managed_target import RemovedOutsideWisdom
 from .native_context import NativeInvocation
 from .native_inspection import finding_pages, inspection_pages, sharing_checks, text_pages
 from .package import PackagePolicyError, SkillRefusal
@@ -308,6 +309,9 @@ def _local_installation_label(service: Any, plan: dict[str, Any]) -> dict[str, s
             if isinstance(rows, list):
                 for row in rows:
                     if (isinstance(row, dict) and row.get("skill_id") == plan.get("skill_id")
+                            and row.get("state") == "removed"):
+                        return {"state": "removed", "text": "Removed from this computer"}
+                    if (isinstance(row, dict) and row.get("skill_id") == plan.get("skill_id")
                             and row.get("state") == "active"):
                         return {"text": f"Installed v{_safe(row.get('version'), '?')}"}
                 return {"text": "No managed installation recorded"}
@@ -484,7 +488,7 @@ def _catalog_table(rows: list[NativeTableRow], items: list[NativeItem]) -> Nativ
             if action.url:
                 links.append(replace(action, label=f"Open {row.name}", row=1))
             else:
-                installs.append(replace(action, label=f"Install {row.name}"))
+                installs.append(replace(action, label=f"{action.label} {row.name}"))
     return NativeTable(CATALOG_COLUMNS, rows, [*installs, *links])
 
 
@@ -515,9 +519,11 @@ def _catalog_entry(
     version = row.get("version", row.get("latest_version"))
     actions = []
     status = row.get("installation_status")
-    if ((row.get("id") or row.get("skill_id")) and isinstance(status, dict)
-            and status.get("state") == "not_installed"):
-        actions.append(NativeAction("Install", f"catalog.install.{index}", primary=True))
+    state = status.get("state") if isinstance(status, dict) else None
+    if (row.get("id") or row.get("skill_id")) and state in {"not_installed", "removed"}:
+        # A skill removed outside Wisdom is installed again through the same review.
+        label = "Reinstall" if state == "removed" else "Install"
+        actions.append(NativeAction(label, f"catalog.install.{index}", primary=True))
     if row.get("portal_url"):
         actions.append(NativeAction("Open in Portal", url=_safe(row["portal_url"])))
     item = NativeItem(title, "\n".join(_catalog_facts(row, version, detail)) or "Published skill",
@@ -1564,7 +1570,7 @@ def project_view(record: dict[str, Any]) -> NativeView:
     )
 
 
-def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements
+def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-many-return-statements,too-many-branches
     terminal = _terminal_state_view(record)
     if terminal is not None:
         return terminal
@@ -1598,6 +1604,8 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
         return _settings_view(record)
     if record.get("operation") == "share_status":
         return _share_status_view(plan, state)
+    if record.get("operation") == "uninstall" and state == "pending":
+        return _uninstall_view(plan)
     authority, details = _authority_projection(record, plan)
     if record.get("operation") == "suggest":
         return _suggest_view(authority, state, record.get("result"))
@@ -1605,6 +1613,26 @@ def _project_view(record: dict[str, Any]) -> NativeView:  # pylint: disable=too-
 
 
 _AWAITING_REVIEW = frozenset({"policy_review_required", "approval_rejected"})
+
+
+def _uninstall_view(plan: dict[str, Any]) -> NativeView:
+    """Confirm one removal; the record is the owner-bound, single-use authority."""
+    version = plan.get("version")
+    fields = [NativeField("Skill", _skill_name(plan))]
+    if isinstance(version, int) and not isinstance(version, bool):
+        fields.append(NativeField("Version", f"v{version}"))
+    happens = (
+        "It was already removed from this computer. Confirm takes it off your "
+        "installed skills." if plan.get("removed") is True else
+        "Its files move to recoverable trash on this computer and your agent "
+        "stops using it."
+    )
+    return NativeView(
+        "Uninstall skill", "", [NativeItem("What happens", happens)],
+        actions=[NativeAction("Confirm", "confirm", primary=True),
+                 NativeAction("Cancel", "cancel", destructive=True)],
+        fields=fields,
+    )
 
 
 def _share_status_view(plan: dict[str, Any], state: str) -> NativeView:
@@ -1762,7 +1790,11 @@ class NativeReviewController:
         self, service: Any, invocation: NativeInvocation, skill_id: str, *,
         publisher_fact: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        plan = service.update_plan(skill_id)
+        try:
+            plan = service.update_plan(skill_id)
+        except RemovedOutsideWisdom as removed:
+            # Nothing is left to update: show the skill with its Reinstall control.
+            return self.request_catalog(service, invocation, "show", removed.slug)
         if plan.get("operation") != "update":
             raise WisdomValidationError("native update review is invalid")
         return self._insert(service, invocation, "update", {
@@ -1773,6 +1805,22 @@ class NativeReviewController:
     def request_publication(self, service: Any, invocation: NativeInvocation, draft_id: str) -> dict[str, Any]:
         plan = service.publication_review(draft_id)
         return self._insert(service, invocation, "publish", plan)
+
+    def request_uninstall(self, service: Any, invocation: NativeInvocation, reference: str) -> dict[str, Any]:
+        """Open an owner-bound confirmation for removing one managed skill."""
+        skill_id = service.resolve_managed_skill(reference)
+        row = next((item for item in service.list_installations() if isinstance(item, dict)
+                    and item.get("skill_id") == skill_id
+                    and item.get("state") in {"active", "removed"}), None)
+        if row is None:
+            raise WisdomNotFound("Managed skill not found")
+        version = row.get("version")
+        return self._insert(service, invocation, "uninstall", {
+            "operation": "uninstall", "skill_id": skill_id,
+            "slug": row.get("slug") or reference,
+            "version": version if isinstance(version, int) else None,
+            "removed": row.get("state") == "removed", "allowed": True,
+        })
 
     def request_setup(self, service: Any, invocation: NativeInvocation, subject: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         skill_id, inspection = subject

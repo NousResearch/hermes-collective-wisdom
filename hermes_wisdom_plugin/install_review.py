@@ -26,6 +26,7 @@ from .contract import (
     sha256_address,
 )
 from .discovery import Discovery
+from .managed_target import removed_outside_wisdom
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .package import PackagePolicyError, verify_content_files
 from .local_security import prepared_security_check
@@ -283,7 +284,8 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             raise PackagePolicyError("managed install state is unavailable") from exc
         if existing is not None and not isinstance(existing, dict):
             raise PackagePolicyError("managed install state is invalid")
-        if existing and existing.get("state") == "active" and check_existing:
+        removed = bool(existing) and removed_outside_wisdom(self.host, existing, owner)
+        if existing and existing.get("state") == "active" and check_existing and not removed:
             raise PackagePolicyError(
                 "skill is already managed; use the update workflow"
             )
@@ -311,6 +313,7 @@ class InstallReviewer:  # pylint: disable=too-few-public-methods
             raw_target = item.get("target_path")
             if (
                 item.get("state") == "active"
+                and not (removed and item.get("skill_id") == skill_id)
                 and isinstance(raw_target, str)
                 and Path(raw_target).expanduser().resolve() == target_resolved
             ):

@@ -222,7 +222,7 @@ shows the skill's new state.
 | Terminal | Every `hermes wisdom` command. |
 | Hermes CLI chat and TUI | Reads (`browse`, `show`, `versions`, `status`, `help`), `top` and `share-suggest` answer in place. Commands that change something reply with the terminal command to run. |
 | Hermes Desktop | A Collective Wisdom page with **Catalog**, **Installed** and **Contribute** tabs. In chat, `/wisdom browse` and `/wisdom show` open the catalog in a dialog with Install. |
-| Telegram private chat, Slack DM | Review and confirmation cards for share, install and update, catalog cards, `top` and `share-suggest`. Every card is bound to the person who started it. |
+| Telegram private chat, Slack DM | Review and confirmation cards for share, install, update and uninstall, catalog cards, `top` and `share-suggest`. Every card is bound to the person who started it. |
 | Group chats and channels | Private actions are refused with a pointer to a private chat. No skill names or files are shown. |
 | Other platforms | Use the terminal. |
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -11,6 +12,37 @@ from .package_application import reject_existing_links, reject_symlink_chain, wi
 
 _PUBLISHER_KIND = "publisher_source"
 _LOCAL_KIND = "local_source"
+
+# Shown wherever a managed install's files were deleted or moved by hand.
+REMOVED_TEXT = "Removed from this computer outside Wisdom"
+
+
+class RemovedOutsideWisdom(PackagePolicyError):
+    """A managed skill has no files to check, update or review any more."""
+
+    def __init__(self, slug: str, version: object = None) -> None:
+        self.slug = slug
+        self.version = version if isinstance(version, int) else None
+        super().__init__(
+            f"{slug} was removed from this computer outside Wisdom; "
+            f"install it again with: hermes wisdom install {slug}"
+        )
+
+
+def removed_outside_wisdom(host: Any, record: dict[str, Any], owner: dict[str, str]) -> bool:
+    """Whether an active managed install's validated target path no longer exists.
+
+    Only absence counts. A file, symlink or anything else at the path is not a
+    removal: it still fails the target validation every lifecycle path applies.
+    """
+
+    if not isinstance(record, dict) or record.get("state") != "active":
+        return False
+    try:
+        target = validate_managed_target(host, record, owner, require_tree=False)
+    except (AttributeError, OSError, PackagePolicyError, TypeError, ValueError):
+        return False
+    return not os.path.lexists(target)
 
 
 def validate_managed_target(

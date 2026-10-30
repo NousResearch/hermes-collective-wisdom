@@ -7,7 +7,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-from .managed_target import validate_managed_target
+from .managed_target import removed_outside_wisdom, validate_managed_target
 from .package import PackagePolicyError
 from .qualification import _eligible_path  # Reuse the profile-safe local skill resolver fence.
 
@@ -60,6 +60,12 @@ class CatalogInstallationStatus:  # pylint: disable=too-few-public-methods
 
     def _managed_status(self, record: dict[str, Any], latest: int | None) -> dict[str, Any]:
         version = _positive_version(record.get("version"))
+        if version is not None and removed_outside_wisdom(self.host, record, self.owner):
+            # Install is offered again; the stale record is replaced by that install.
+            return {
+                "state": "removed", "text": "Removed from this computer",
+                "installed_version": version, "latest_version": latest,
+            }
         if (
             record.get("state") != "active" or version is None
             or not self._record_target_available(record)

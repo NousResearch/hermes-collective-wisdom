@@ -911,6 +911,49 @@ test('catalog keeps native Install visible beside long descriptions at narrow wi
   await mounted.cleanup()
 })
 
+test('catalog offers Reinstall for a skill removed outside Wisdom through the same review', async () => {
+  const removed = { state: 'removed', text: 'Removed from this computer', installed_version: 1, latest_version: 2 }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills: [{ ...baseHandler(path, options, owner).skills[0], installation_status: removed }] }
+    if (path === '/install/review') {
+      assert.deepEqual(structuredClone(options.body), { view_id: 'view-remote-a-A', reference: 'skill-1@v2', accept_warnings: false })
+      return installReview()
+    }
+    if (path === '/install/confirm') return { installed: true, skill_id: 'skill-1', version: 2 }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+
+  assert.match(mounted.container.textContent, /Removed from this computer/)
+  assert.doesNotMatch(mounted.container.textContent, /Installation status unavailable/)
+  await click(button(mounted, 'Reinstall'))
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/review').length, 1)
+  assert.equal(loaded.calls.rest.filter(([path]) => path === '/install/confirm').length, 1)
+  assert.equal(loaded.calls.notify.at(-1)?.kind, 'success')
+  await mounted.cleanup()
+})
+
+test('installed rows flag a skill removed outside Wisdom without update controls', async () => {
+  const managed = { ...bootstrap, installations: [{
+    skill_id: 'skill-1', slug: 'one', version: 1, state: 'removed', modified: false,
+    removed_outside_wisdom: true, status_text: 'Removed from this computer outside Wisdom'
+  }] }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return managed
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Installed'))
+
+  assert.match(mounted.container.textContent, /Removed from this computer outside Wisdom · v1 was installed/)
+  assert.doesNotMatch(mounted.container.textContent, /Installed v1/)
+  assert.equal(button(mounted, 'Check for updates'), undefined)
+  assert.ok(button(mounted, 'Remove'))
+  await mounted.cleanup()
+})
+
 test('installed rows check first then expose exact Review update and local-edit protection', async () => {
   const managed = { ...bootstrap, installations: [{ skill_id: 'skill-1', slug: 'one', version: 1, modified: true, content_hash: hash('0') }] }
   const loaded = await loadPlugin((path, options, owner) => {
@@ -1117,6 +1160,28 @@ test('uninstall requires the exact installed snapshot and confirms its review id
   await click(button(mounted, 'Uninstall'))
   assert.match(mounted.container.textContent, /Installed copy to remove/)
   assert.doesNotMatch(mounted.container.textContent, new RegExp(hash('0')))
+  await click(button(mounted, 'Remove'))
+  assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one removed')
+  await mounted.cleanup()
+})
+
+test('uninstall review says a skill removed outside Wisdom is already gone', async () => {
+  const installation = {
+    skill_id: 'skill-1', slug: 'one', version: 1, state: 'removed', modified: false,
+    removed_outside_wisdom: true, status_text: 'Removed from this computer outside Wisdom'
+  }
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === '/views') return { view_id: `view-${owner.connectionId}-${owner.profile}` }
+    if (path === '/bootstrap') return { ...bootstrap, installations: [installation] }
+    if (path.startsWith('/catalog?')) return { skills: [] }
+    if (path === '/uninstall/review') return { review_id: 'uninstall-review', installation }
+    if (path === '/uninstall/confirm') return { uninstalled: true, skill_id: 'skill-1', already_removed: true, recoverable_path: null }
+    throw new Error(`unexpected ${path}`)
+  })
+  const mounted = await renderPage(loaded)
+  await click(button(mounted, 'Installed'))
+  await click(button(mounted, 'Uninstall'))
+  assert.match(mounted.container.textContent, /Already removed from this computer\. Remove takes it off your installed skills\./)
   await click(button(mounted, 'Remove'))
   assert.equal(loaded.calls.notify.at(-1)?.message, '✅ one removed')
   await mounted.cleanup()

@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from .terminal_ui import without_controls, _requirements_summary
+from .terminal_ui import removed_install_hint, without_controls, _requirements_summary
 
 
 _SUPPORTED_COMMANDS = frozenset({
@@ -20,6 +20,7 @@ _STATUS_STYLES = {
     "installed": "green",
     "not_installed": "yellow",
     "unmanaged_local": "yellow",
+    "removed": "yellow",
     "unavailable": "yellow",
 }
 
@@ -49,12 +50,13 @@ def _console(stream: TextIO) -> Console:
     )
 
 
-def _installation_status(row: dict[str, Any]) -> tuple[str, str | None]:
+def _installation_status(row: dict[str, Any], slug: object = None) -> tuple[str, str | None]:
     status = row.get("installation_status")
     if not isinstance(status, dict):
         return "Installation status unavailable", "yellow"
     value = status.get("text")
     label = value if isinstance(value, str) and value else "Installation status unavailable"
+    label += removed_install_hint(status, slug or row.get("slug"))
     state = str(status.get("state") or "").casefold()
     versions = (status.get("installed_version"), status.get("latest_version"))
     if state == "installed" and all(
@@ -187,7 +189,7 @@ def _show_table(value: object) -> Table:
         and row["version"] > 0
     ]
     table.add_row("Latest", _safe_text(f"v{max(numbers)}" if numbers else "Unknown", style="dim"))
-    status, status_style = _installation_status(data)
+    status, status_style = _installation_status(data, skill.get("slug"))
     table.add_row("Status", _safe_text(status, style=status_style))
     table.add_row("Checks", _review_checks(latest))
     table.add_row("Requirements", _safe_text(_requirements(latest.get("system_spec"))))
@@ -215,6 +217,8 @@ def _installed_table(value: object) -> Table:
         )
         state = row.get("state") or row.get("skill_state") or "unknown"
         state_style = "green" if str(state).casefold() in {"active", "published"} else "yellow"
+        if state == "removed":
+            state = row.get("status_text") or "Removed"
         update_mode = row.get("update_mode") or row.get("effective_update_mode") or "Unknown"
         table.add_row(
             _safe_text(name, style="bold"),

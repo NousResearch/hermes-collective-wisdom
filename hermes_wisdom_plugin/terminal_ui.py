@@ -574,6 +574,8 @@ def render_operation_outcome(
         return partial_setup
     if key and name and complete and data.get(key) is True:
         verb = "removed" if kind == "uninstall" else key
+        if kind == "uninstall" and data.get("already_removed") is True:
+            return f"✅ {name} removed. It was already removed from this computer."
         return f"✅ {name} {verb}"
     if data.get("pending") is True:
         state = "pending"
@@ -613,12 +615,20 @@ def _requirements_summary(requirements: dict[str, Any]) -> str:
     return "; ".join(parts) or "No special setup listed"
 
 
-def _installation_status_text(value: object) -> str:
+def _installation_status_text(value: object, slug: object = None) -> str:
     data = value if isinstance(value, dict) else {}
     status = data.get("installation_status")
     if isinstance(status, dict) and isinstance(status.get("text"), str):
-        return text(status["text"])
+        return text(status["text"]) + removed_install_hint(status, slug or data.get("slug"))
     return "Installation status unavailable"
+
+
+def removed_install_hint(status: object, slug: object) -> str:
+    """The terminal's way back for a skill whose files were removed outside Wisdom."""
+    if (isinstance(status, dict) and status.get("state") == "removed"
+            and isinstance(slug, str) and slug):
+        return " · install again: hermes wisdom install " + shlex.quote(without_controls(slug))
+    return ""
 
 
 def _render_skill_detail(data: dict[str, Any]) -> str:
@@ -642,7 +652,7 @@ def _render_skill_detail(data: dict[str, Any]) -> str:
         if isinstance(item, int) and not isinstance(item, bool) and item > 0
     ]
     lines.append(f"Latest: v{max(numbers) if numbers else '?'}")
-    lines.append(_installation_status_text(data))
+    lines.append(_installation_status_text(data, skill.get("slug")))
     for key, label in (("security_check", "Security"),
                        ("professionalism_check", "Professionalism")):
         check = latest.get(key)
@@ -715,9 +725,11 @@ def render_read_command(  # pylint: disable=too-many-locals,too-many-branches,to
         lines = ["Managed installations", f"Results: {len(rows)}"]
         for row in rows:
             if isinstance(row, dict):
+                removed = (" · " + text(row.get("status_text") or "Removed")
+                           if row.get("state") == "removed" else "")
                 lines.append(
                     f"  - {text(row.get('slug') or 'Unnamed skill')}"
-                    f" v{text(row.get('version') or '?')}"
+                    f" v{text(row.get('version') or '?')}{removed}"
                 )
         return "\n".join(lines)
     if isinstance(value, list):

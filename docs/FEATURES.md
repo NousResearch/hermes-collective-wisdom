@@ -13,7 +13,7 @@ automatic share suggestions).
 Registered: `hermes wisdom` setup, status, catalog, `top`, `share-suggest`,
 `share` and its preparation, publication and recovery commands, installation,
 updates, setup approval and uninstall; private `/wisdom` help, status, catalog,
-`top`, `share-suggest`, `share`, install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
+`top`, `share-suggest`, `share`, install, update and uninstall reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
 catalog, installed and contribute pages. On a host with `ctx.fork_session` or
 `ctx.side_question`, also
 `hermes wisdom suggestions`, private `/wisdom suggestions`, the `on_skill_lifecycle`,
