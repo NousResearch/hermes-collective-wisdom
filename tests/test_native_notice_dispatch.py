@@ -153,7 +153,7 @@ def _wire(runtime, platform, host, adapter):
 def _grant(runtime, platform, adapter, *, task_id="task-1", session_id="session-1"):
     invocation = NativeInvocation(
         platform=platform, profile="default", chat_type="private", chat_id="D1",
-        actor_id="U1", actor_name="Shannon", thread_id="", scope_id="W1",
+        actor_id="U1", actor_name="Alex", thread_id="", scope_id="W1",
         message_id="request-1", session_key=f"{platform}:D1:U1", adapter=adapter,
         host_session_id=session_id, task_id=task_id, turn_id="turn-1",
     )

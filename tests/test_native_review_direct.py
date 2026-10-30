@@ -26,7 +26,7 @@ from hermes_wisdom_plugin.review_state import ReviewState
 def invocation():
     return NativeInvocation(
         platform="slack", profile="default", chat_type="private", chat_id="C1",
-        actor_id="account-1", actor_name="Shannon", thread_id="", scope_id="",
+        actor_id="account-1", actor_name="Alex", thread_id="", scope_id="",
         message_id="M1", session_key="slack:C1", adapter=object(),
     )
 
@@ -311,7 +311,7 @@ def test_telegram_post_binds_the_sdk_returned_original_card(tmp_path: Path):
         adapter = SimpleNamespace(_bot=bot)
         caller = NativeInvocation(
             platform="telegram", profile="default", chat_type="private",
-            chat_id="123", actor_id="native-7", actor_name="Shannon",
+            chat_id="123", actor_id="native-7", actor_name="Alex",
             thread_id="", scope_id="", message_id="command-1",
             session_key="telegram:123:native-7", adapter=adapter,
         )
@@ -344,7 +344,7 @@ def test_telegram_callback_adapter_rejects_a_stale_original_card(tmp_path: Path)
     adapter = Adapter()
     caller = NativeInvocation(
         platform="telegram", profile="default", chat_type="private",
-        chat_id="123", actor_id="native-7", actor_name="Shannon",
+        chat_id="123", actor_id="native-7", actor_name="Alex",
         thread_id="", scope_id="", message_id="command-1",
         session_key="telegram:123:native-7", adapter=adapter,
     )
@@ -353,7 +353,7 @@ def test_telegram_callback_adapter_rejects_a_stale_original_card(tmp_path: Path)
     record = controller.request_install(service, caller, "skill-1")
     controller.bind_message(record["id"], caller, "77")
     query = SimpleNamespace(
-        from_user=SimpleNamespace(id="native-7", username="Shannon", first_name=""),
+        from_user=SimpleNamespace(id="native-7", username="Alex", first_name=""),
         message=SimpleNamespace(
             chat=SimpleNamespace(type="private"), chat_id=123,
             message_thread_id=None, message_id=78, get_bot=lambda: bot,
@@ -420,7 +420,7 @@ def test_runtime_unload_revokes_an_inflight_slack_effect(tmp_path: Path, monkeyp
 
         monkeypatch.setattr(service, "install_apply", apply)
         body = {
-            "user": {"id": "U_SLACK_NATIVE_USER", "name": "Shannon"},
+            "user": {"id": "U_SLACK_NATIVE_USER", "name": "Alex"},
             "channel": {"id": "C1"}, "team": {"id": "W1"},
             "message": {"ts": "card-1"}, "container": {"message_ts": "card-1"},
         }

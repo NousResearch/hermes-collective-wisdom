@@ -266,7 +266,7 @@ def test_shared_safe_slash_view_refuses_without_names() -> None:
 
 def _invocation(chat_type="private"):
     return SimpleNamespace(platform="telegram", chat_id="42", chat_type=chat_type,
-                           thread_id="", actor_id="7", actor_name="victor", scope_id="")
+                           thread_id="", actor_id="7", actor_name="alex", scope_id="")
 
 
 def test_private_route_matrix() -> None:
@@ -278,7 +278,7 @@ def test_private_route_matrix() -> None:
     assert private_route(None, False, tui)["session_key"] == "sk-1"
     assert private_route(_invocation(), False, local)["origin"] == {
         "platform": "telegram", "chat_id": "42", "chat_type": "private",
-        "user_id": "7", "user_name": "victor",
+        "user_id": "7", "user_name": "alex",
     }
     assert private_route(None, True, local) is None
     group = {"platform": "discord", "source": "", "chat_type": "group", "chat_id": "9"}

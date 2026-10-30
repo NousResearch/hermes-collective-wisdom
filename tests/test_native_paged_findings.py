@@ -128,7 +128,7 @@ def test_twenty_findings_page_to_acknowledge_then_share_once(tmp_path, surface):
 def _invocation():
     return NativeInvocation(
         platform="slack", profile="default", chat_type="private", chat_id="D1",
-        actor_id="U1", actor_name="Shannon", thread_id="", scope_id="",
+        actor_id="U1", actor_name="Alex", thread_id="", scope_id="",
         message_id="M1", session_key="slack:D1", adapter=object(),
     )
 

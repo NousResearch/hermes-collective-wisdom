@@ -106,7 +106,7 @@ def _event(adapter):
     source = SimpleNamespace(
         platform=SimpleNamespace(value="slack"), profile="default",
         chat_type="private", chat_id="D1", user_id="U_NATIVE",
-        user_name="Shannon", thread_id="", scope_id="W1",
+        user_name="Alex", thread_id="", scope_id="W1",
     )
     return SimpleNamespace(
         internal=False, source=source, message_id="request-1",
