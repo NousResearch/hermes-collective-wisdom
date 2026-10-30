@@ -3,8 +3,9 @@
 The package implements more than the current release offers. Hermes sharing
 suggestions, agent-led recommendations and notices, notification settings,
 automatic update maintenance, model tools and model-written editorial copy stay
-implemented and tested, but the manual skill-sharing release does not register
-them with the host. Widen ``ACTIVE`` deliberately when a release ships them.
+implemented and tested, but the current release registers only manual sharing
+plus automatic share suggestions. Widen ``ACTIVE`` deliberately when a release
+ships more.
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ class ReleaseScope:  # pylint: disable=too-many-instance-attributes
     # Propose a name/description with the owner's model only when the skill's
     # own copy cannot be shared as written. Independent of model_editorial.
     model_copy: bool
+    # Suggest sharing one of the owner's own skills after Hermes learns it
+    # (auto_suggest.py). Its hooks and tool register only on a host with
+    # ctx.side_question; elsewhere this scope behaves like MANUAL_SHARING.
+    auto_suggest: bool = False
 
     def allows_cli(self, command: str) -> bool:
         """Return whether ``hermes wisdom <command>`` is registered."""
@@ -90,7 +95,25 @@ MANUAL_SHARING = ReleaseScope(
     model_copy=True,
 )
 
-ACTIVE = MANUAL_SHARING
+# Manual sharing plus automatic share suggestions: the owner's own agent judges,
+# through ctx.side_question, whether a skill it just learned is worth sharing,
+# and the owner answers a three-choice card in their private chat. Nothing else
+# from FULL (notices, recommendations, settings reviews) is registered.
+AUTO_SUGGEST = ReleaseScope(
+    name="auto-suggest",
+    cli_commands=(*_MANUAL_CLI[:-1], "suggestions", "help"),
+    slash_commands=_MANUAL_SLASH | frozenset({"suggestions"}),
+    hooks=("pre_gateway_dispatch", "post_llm_call", "post_tool_call", "on_skill_lifecycle"),
+    model_tools=("wisdom_share_suggestion",),
+    auxiliary_tasks=(),
+    desktop_route_groups=frozenset({"core"}),
+    notification_settings=False,
+    model_editorial=False,
+    model_copy=True,
+    auto_suggest=True,
+)
+
+ACTIVE = AUTO_SUGGEST
 
 
 def active() -> ReleaseScope:

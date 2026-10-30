@@ -1528,6 +1528,18 @@ def _terminal_state_view(record: dict[str, Any]) -> NativeView | None:  # pylint
 _MUTE_NOTICE = "Mute changes recommendations for all skills."
 
 
+@dataclass(frozen=True, slots=True)
+class OperationCard:
+    """A card kept in its own module: its view and its owner-checked choice handler."""
+
+    view: Callable[[dict[str, Any]], NativeView]
+    act: Callable[..., dict[str, Any]]
+
+
+# Each such module registers itself on import, so this module never imports it.
+OPERATION_CARDS: dict[str, OperationCard] = {}
+
+
 def _released_actions(actions: list[NativeAction]) -> list[NativeAction]:
     return [action for action in actions
             if not (action.action or "").startswith("settings")]
@@ -1539,7 +1551,8 @@ def project_view(record: dict[str, Any]) -> NativeView:
     The same projection is the callback allowlist, so a control removed here
     cannot be invoked from an older card either.
     """
-    view = _project_view(record)
+    card = OPERATION_CARDS.get(str(record.get("operation") or ""))
+    view = card.view(record) if card is not None else _project_view(record)
     if release_scope().notification_settings:
         return view
     return replace(
@@ -1832,6 +1845,14 @@ class NativeReviewController:
         if not self.state.compare_replace(record, updated):
             raise WisdomConflict("Collective Wisdom review changed; open it again")
         return copy.deepcopy(updated)
+
+    def request_card(
+        self, service: Any, invocation: NativeInvocation, operation: str, plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Post a card whose view and choices live in ``OPERATION_CARDS``."""
+        if operation not in OPERATION_CARDS:
+            raise WisdomValidationError("Collective Wisdom card was not recognized")
+        return self._insert(service, invocation, operation, plan)
 
     @staticmethod
     def _candidate_local_review(record: dict[str, Any], service: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2246,6 +2267,9 @@ class NativeReviewController:
         if self.clock() >= record["expires_at"]:
             raise WisdomAuthError("Collective Wisdom review expired; open it again")
         _validate_offered_action(record, action)
+        card = OPERATION_CARDS.get(str(record.get("operation") or ""))
+        if card is not None:
+            return card.act(self, record, action, service, invocation)
         record = self._enrich_team_label(record, service, invocation, authority)
         return self._act_pending(record, action, service, invocation, authority, progress)
 

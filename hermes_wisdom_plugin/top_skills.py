@@ -136,7 +136,60 @@ def _profile_home(home: Path, override) -> Iterator[None]:
         reset_override(token)
 
 
-def collect_top_skills(  # pylint: disable=too-many-locals
+@dataclass(frozen=True, slots=True)
+class _Walk:
+    """One profile's local skill walk: what is hidden, team-installed or shared."""
+
+    skills_root: Path
+    usage: dict[str, Any]
+    hidden: set[str]
+    team: dict[str, set[str]]
+    shared: set[str]
+    not_owned: Callable[[str, dict[str, Any]], bool]
+    resolver: Callable[[str], Path | None]
+
+
+def _walk(api: Any, home: Path, installations: Iterable[dict[str, Any]],
+          published_paths: Iterable[str]) -> _Walk | None:
+    """Read usage and ownership once; call inside ``_profile_home``."""
+    usage = api.load_usage()
+    if not isinstance(usage, dict):
+        return None
+    skills_root = home / "skills"
+    team, shared = _managed_paths(installations)
+    shared |= {_resolved(path) for path in published_paths if path}
+    return _Walk(
+        skills_root=skills_root, usage=usage,
+        hidden=(set(_call(api, "list_archived_skill_names", ()))
+                | set(_call(api, "read_suppressed_names", ()))),
+        team=team, shared=shared, not_owned=_ownership_filter(api),
+        resolver=_skill_resolver(api, skills_root),
+    )
+
+
+def _owned(walk: _Walk, name: str, *, require_usage: bool) -> tuple[TopSkill, Path] | None:
+    """The owner's own shareable local skill ``name``, or ``None``."""
+    from .qualification import _eligible_path  # pylint: disable=import-outside-toplevel
+
+    record = walk.usage.get(name)
+    if record is None and not require_usage:
+        record = {}  # A just-created skill has no usage record yet.
+    if name in walk.hidden or not isinstance(record, dict) or walk.not_owned(name, record):
+        return None
+    uses, edits = _count(record.get("use_count")), _count(record.get("patch_count"))
+    if require_usage and not uses and not edits:
+        return None
+    path = _eligible_path(name, skills_root=walk.skills_root, skill_resolver=walk.resolver)
+    if path is None or _team_installed(walk.team, name, path):
+        return None
+    return TopSkill(
+        name=name, description=_description(path / "SKILL.md"),
+        uses=uses, edits=edits, last_used=_iso(record.get("last_used_at")),
+        shared=str(path) in walk.shared,
+    ), path
+
+
+def collect_top_skills(
     profile_home: Path,
     *,
     installations: Iterable[dict[str, Any]] = (),
@@ -153,47 +206,51 @@ def collect_top_skills(  # pylint: disable=too-many-locals
     override = _home_override()
     if api is None or override is None:
         return TopSkills("unavailable")
-    from .qualification import _eligible_path  # pylint: disable=import-outside-toplevel
-
     home = Path(profile_home).expanduser().absolute()
-    skills_root = home / "skills"
-    team, shared = _managed_paths(installations)
-    shared |= {_resolved(path) for path in published_paths if path}
     try:
         with _profile_home(home, override):
-            usage = api.load_usage()
-            if not isinstance(usage, dict):
+            walk = _walk(api, home, installations, published_paths)
+            if walk is None:
                 return TopSkills("unavailable")
-            hidden = (set(_call(api, "list_archived_skill_names", ()))
-                      | set(_call(api, "read_suppressed_names", ())))
-            not_owned = _ownership_filter(api)
-            items = []
             candidates = (
                 sorted({name for name, _md in api._iter_skill_mds(  # pylint: disable=protected-access
-                    skills_root, local_only=True)}) if skills_root.is_dir() else []
+                    walk.skills_root, local_only=True)}) if walk.skills_root.is_dir() else []
             )
-            resolver = _skill_resolver(api, skills_root)
-            for name in candidates:
-                record = usage.get(name)
-                if name in hidden or not isinstance(record, dict) or not_owned(name, record):
-                    continue
-                uses, edits = _count(record.get("use_count")), _count(record.get("patch_count"))
-                if not uses and not edits:
-                    continue
-                path = _eligible_path(name, skills_root=skills_root, skill_resolver=resolver)
-                if path is None or _team_installed(team, name, path):
-                    continue
-                items.append(TopSkill(
-                    name=name, description=_description(path / "SKILL.md"),
-                    uses=uses, edits=edits, last_used=_iso(record.get("last_used_at")),
-                    shared=str(path) in shared,
-                ))
+            items = [found[0] for name in candidates
+                     if (found := _owned(walk, name, require_usage=True)) is not None]
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("Collective Wisdom could not read skill usage (%s)", type(exc).__name__)
         logger.debug("Collective Wisdom skill usage failure", exc_info=True)
         return TopSkills("error")
     items.sort(key=rank_key)
     return TopSkills("ok" if items else "empty", tuple(items))
+
+
+def owner_skill(
+    profile_home: Path,
+    name: str,
+    *,
+    installations: Iterable[dict[str, Any]] = (),
+    published_paths: Iterable[str] = (),
+    usage_api: Callable[[], Any | None] | None = None,
+) -> tuple[TopSkill, Path] | None:
+    """One of the owner's own local skills by exact name, with or without usage.
+
+    The same ownership rules as ``collect_top_skills``: never bundled, Hub,
+    archived, team-installed or outside the profile's own skills tree.
+    """
+    api = (usage_api or load_usage_api)()
+    override = _home_override()
+    if api is None or override is None or not isinstance(name, str) or not name:
+        return None
+    home = Path(profile_home).expanduser().absolute()
+    try:
+        with _profile_home(home, override):
+            walk = _walk(api, home, installations, published_paths)
+            return None if walk is None else _owned(walk, name, require_usage=False)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Collective Wisdom could not read a local skill (%s)", type(exc).__name__)
+        return None
 
 
 def published_source_paths(direct_state: Any) -> list[str]:

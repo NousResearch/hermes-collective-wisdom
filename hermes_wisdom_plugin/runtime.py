@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from .account import HermesAccountAdapter
 from .client import AgentLedPolicyResponse, WisdomClient
-from .commands import PRIVATE_RANKING_COMMANDS, read_unavailable
+from .commands import PRIVATE_LOCAL_COMMANDS, read_unavailable
 from .errors import (
     WisdomAuthError, WisdomConflict, WisdomError, WisdomUnavailable, WisdomValidationError,
     describe_exception, redacted_message,
@@ -110,11 +110,13 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         config: dict[str, Any] | None = None,
         get_config: Callable[[str, Any], Any] | None = None,
         set_config: Callable[[str, Any], Any] | None = None,
+        plugin_id: str = "collective-wisdom",
     ):
         if state is None:
             raise TypeError("host PluginState is required")
         self.root = root
         self.profile = profile
+        self.plugin_id = plugin_id
         self.llm = llm
         self.config = config or {}
         self._get_config = get_config
@@ -388,6 +390,15 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         _require_current(may_apply)
         return result
+
+    def gateway_injection(self, *, apply_default: bool = False) -> dict[str, Any]:
+        """Report, and at setup default on, this plugin's chat-injection permission."""
+        from .gateway_injection import (  # pylint: disable=import-outside-toplevel
+            ensure_injection_default, injection_status,
+        )
+        if apply_default:
+            return ensure_injection_default(self.plugin_id, self.profile[0])
+        return injection_status(self.plugin_id)
 
     def status(self, *, include_operations=False):
         """Inspect local setup without enrolling or contacting the Gateway."""
@@ -1596,11 +1607,9 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         """Inspect private installation state only through the terminal entry."""
         return self._installation_services()[1].installed()
 
-    def top_skills(self):
-        """Rank this profile's own local skills from Hermes usage; no account needed."""
-        from .top_skills import (  # pylint: disable=import-outside-toplevel
-            collect_top_skills, published_source_paths,
-        )
+    def _ownership_inputs(self):
+        """Team installs and completed publications that make a skill not the owner's."""
+        from .top_skills import published_source_paths  # pylint: disable=import-outside-toplevel
 
         try:
             installations = self.installed.installations()
@@ -1610,9 +1619,42 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             published = published_source_paths(self._state.get("wisdom-core"))
         except (OSError, RuntimeError, TypeError, ValueError, AttributeError):
             published = []
-        return collect_top_skills(
-            self.profile[1], installations=installations, published_paths=published,
+        return {"installations": installations, "published_paths": published}
+
+    def top_skills(self):
+        """Rank this profile's own local skills from Hermes usage; no account needed."""
+        from .top_skills import collect_top_skills  # pylint: disable=import-outside-toplevel
+
+        return collect_top_skills(self.profile[1], **self._ownership_inputs())
+
+    def share_candidate(self, name: str) -> dict[str, Any] | None:
+        """Local facts for an automatic share suggestion, or ``None`` when unshareable.
+
+        Local only: the owner's own skill (never bundled, Hub or team-installed),
+        packageable under the same path rules a share applies, and its rank in
+        the same usage list ``/wisdom share-suggest`` offers.
+        """
+        from .package import source_fingerprint  # pylint: disable=import-outside-toplevel
+        from .top_skills import (  # pylint: disable=import-outside-toplevel
+            SUGGEST_LIMIT, collect_top_skills, owner_skill,
         )
+
+        inputs = self._ownership_inputs()
+        found = owner_skill(self.profile[1], name, **inputs)
+        if found is None:
+            return None
+        skill, path = found
+        try:
+            content_hash = source_fingerprint(path)
+        except (PackagePolicyError, OSError):
+            return None
+        ranking = collect_top_skills(self.profile[1], **inputs).items[:SUGGEST_LIMIT]
+        ranked = [item.name for item in ranking]
+        return {
+            "name": skill.name, "description": skill.description, "uses": skill.uses,
+            "edits": skill.edits, "last_used": skill.last_used, "shared": skill.shared,
+            "content_hash": content_hash, "top": skill.name in ranked,
+        }
 
     def resolve_managed_skill(self, reference):
         """Resolve an exact active managed name or ID for terminal setup/removal."""
@@ -1753,6 +1795,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
         self._services = set()
 
         self.registrations = []
+        # Set by register() only on a host that supports automatic suggestions.
+        self.auto_suggest: Any = None
         self.native = NativeSurfaceRuntime(
             self.root, profile[0], self._service, llm, spawn_task,
             installed_state=state,
@@ -1766,7 +1810,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             service = InvocationService(
                 self.root, self.profile, llm=self.llm, config=self.config,
                 get_config=self.get_config, set_config=self.set_config,
-                state=self.state,
+                state=self.state, plugin_id=self.plugin_id,
             )
             self._services.add(service)
             return service
@@ -1834,7 +1878,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
             # Native chats point to the terminal: enrollment binds this profile's
             # account and is accepted only in its owner's terminal (see setup).
             return SETUP_PROMPT
-        if command in PRIVATE_RANKING_COMMANDS:
+        if command in PRIVATE_LOCAL_COMMANDS:
             return self._slash_private_ranking(command, args, invocation, gateway_command)
         if invocation is not None:
             if command == "install":
@@ -1882,11 +1926,17 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
 
         route = private_route(invocation, gateway_command, session_surface())
         if route is None:
+            if command == "suggestions":
+                from .auto_suggest import suggestions_refusal  # pylint: disable=import-outside-toplevel
+                return suggestions_refusal()
             return refusal(command)
         service = self._service()
         try:
             if command == "top":
                 return slash_top(args, service)
+            if command == "suggestions":
+                from .auto_suggest import slash_suggestions  # pylint: disable=import-outside-toplevel
+                return slash_suggestions(args, service)
             return slash_share_suggest(
                 args, service, route, inject=self.inject_message, plugin_id=self.plugin_id,
                 profile=self.profile[0],

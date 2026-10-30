@@ -229,7 +229,8 @@ def test_unfinished_share_stops_point_to_the_chat_command(plan):
 
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 def test_portal_draft_is_unreachable_in_manual_sharing(tmp_path, surface):
-    assert release_scope.active() == release_scope.MANUAL_SHARING
+    assert release_scope.active() == release_scope.AUTO_SUGGEST
+    assert not release_scope.active().model_editorial
 
     class DraftService(Service):
         def publication_submit_private(self, *_args, **_kwargs):

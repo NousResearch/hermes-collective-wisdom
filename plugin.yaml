@@ -4,8 +4,16 @@ name: collective-wisdom
 version: 0.1.0.dev0
 description: "Share, discover, install and manage team skills with Collective Wisdom."
 requires_hermes: ">=0.21.5"
-# The manual skill-sharing release registers only the private /wisdom dispatch
-# hook. Suggestion, notice and model-tool surfaces are dormant; see
-# hermes_wisdom_plugin/release_scope.py.
+# Manual sharing plus automatic share suggestions (release_scope.AUTO_SUGGEST).
+# The suggestion hooks and tool register only on a Hermes with ctx.side_question
+# and need the llm.side_question capability, which the user approves on install,
+# enable or update. Notice and recommendation surfaces stay dormant.
 provides_hooks:
   - pre_gateway_dispatch
+  - post_llm_call
+  - post_tool_call
+  - on_skill_lifecycle
+provides_tools:
+  - wisdom_share_suggestion
+capabilities:
+  - llm.side_question

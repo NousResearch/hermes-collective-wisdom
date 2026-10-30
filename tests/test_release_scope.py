@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import importlib.util
 import inspect
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,19 +71,25 @@ def _unload(module_name: str) -> None:
             del sys.modules[loaded]
 
 
-def test_active_release_is_manual_sharing() -> None:
-    assert release_scope.active() is release_scope.MANUAL_SHARING
+def test_active_release_is_manual_sharing_plus_auto_suggest() -> None:
+    active = release_scope.active()
+    assert active is release_scope.AUTO_SUGGEST and active.auto_suggest
+    manual = release_scope.MANUAL_SHARING
+    assert set(active.cli_commands) - set(manual.cli_commands) == {"suggestions"}
+    assert active.slash_commands - manual.slash_commands == {"suggestions"}
+    assert set(active.hooks) - set(manual.hooks) == {
+        "post_llm_call", "post_tool_call", "on_skill_lifecycle"}
+    assert active.model_tools == ("wisdom_share_suggestion",)
+    assert (active.notification_settings, active.model_editorial) == (False, False)
 
 
-def test_registration_exposes_only_the_slash_dispatch_hook(tmp_path, monkeypatch) -> None:
-    module_name, plugin = _load_root_plugin()
-    runtime_module = importlib.import_module(f"{module_name}.hermes_wisdom_plugin.runtime")
-    monkeypatch.setattr(runtime_module, "current_profile", lambda: ("default", tmp_path))
+def _context(tmp_path, **extra):
     entries: dict = {"hooks": [], "tools": [], "auxiliary": []}
     state = JsonState(tmp_path / "plugin-data")
     state.data_dir = tmp_path / "plugin-data"
     handle = SimpleNamespace(dispose=lambda: None)
     context = SimpleNamespace(
+        **extra,
         state=state, llm=object(), spawn_task=lambda *_a, **_k: None,
         register_cli_command=lambda name, *_a: entries.update(cli=name) or handle,
         register_command=lambda name, _handler, **kwargs: entries.update(
@@ -96,6 +103,16 @@ def test_registration_exposes_only_the_slash_dispatch_hook(tmp_path, monkeypatch
         set_config=lambda *_a: None,
         on_unload=lambda callback: entries.update(unload=callback),
     )
+    return entries, context
+
+
+def test_host_without_side_question_registers_only_the_slash_dispatch_hook(
+    tmp_path, monkeypatch,
+) -> None:
+    module_name, plugin = _load_root_plugin()
+    runtime_module = importlib.import_module(f"{module_name}.hermes_wisdom_plugin.runtime")
+    monkeypatch.setattr(runtime_module, "current_profile", lambda: ("default", tmp_path))
+    entries, context = _context(tmp_path)
     try:
         plugin.register(context)
         assert entries["hooks"] == ["pre_gateway_dispatch"]
@@ -107,8 +124,27 @@ def test_registration_exposes_only_the_slash_dispatch_hook(tmp_path, monkeypatch
         assert "share" in hint and "top" in hint
         assert not any(token in hint.split() for token in HIDDEN_SLASH)
         manifest = yaml.safe_load((PROJECT_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
-        assert manifest.get("provides_hooks") == list(release_scope.MANUAL_SHARING.hooks)
-        assert manifest.get("provides_tools", []) == []
+        assert manifest.get("provides_hooks") == list(release_scope.ACTIVE.hooks)
+        assert manifest.get("provides_tools") == list(release_scope.ACTIVE.model_tools)
+        assert manifest.get("capabilities") == ["llm.side_question"]
+        entries["unload"]()
+    finally:
+        _unload(module_name)
+
+
+def test_side_question_host_registers_auto_suggest_hooks_and_tool(tmp_path, monkeypatch):
+    module_name, plugin = _load_root_plugin()
+    runtime_module = importlib.import_module(f"{module_name}.hermes_wisdom_plugin.runtime")
+    monkeypatch.setattr(runtime_module, "current_profile", lambda: ("default", tmp_path))
+    entries, context = _context(
+        tmp_path, side_question=lambda *_a, **_k: None, has_capability=lambda _name: True,
+    )
+    try:
+        plugin.register(context)
+        assert entries["hooks"] == [
+            "pre_gateway_dispatch", "on_skill_lifecycle", "post_tool_call", "post_llm_call"]
+        assert entries["tools"] == ["wisdom_share_suggestion"]
+        assert not entries["auxiliary"]
         entries["unload"]()
     finally:
         _unload(module_name)
@@ -120,10 +156,10 @@ def test_owner_ranking_commands_ship_in_every_scope() -> None:
             assert scope.allows_cli(command) and scope.allows_slash(command)
 
 
-def test_cli_registers_manual_sharing_commands_only() -> None:
+def test_cli_registers_only_the_active_release_commands() -> None:
     leaves = _leaf_commands(_parser())
     top = {leaf.split()[0] for leaf in leaves}
-    assert top == set(release_scope.MANUAL_SHARING.cli_commands)
+    assert top == set(release_scope.ACTIVE.cli_commands)
     assert "share" in top and "install" in top and "publication" in top
     assert not set(HIDDEN_CLI) & top
     assert "publication status" in leaves
@@ -160,8 +196,8 @@ def test_shared_chat_slash_rejects_hidden_commands(command) -> None:
 def test_slash_help_lists_no_hidden_commands() -> None:
     rendered = run_slash(parse_slash("help"), SimpleNamespace())
     assert "/wisdom share <skill>" in rendered
-    for command in HIDDEN_SLASH:
-        assert f"/wisdom {command}" not in rendered
+    for command in HIDDEN_SLASH:  # "/wisdom suggest" is hidden; "/wisdom suggestions" is not.
+        assert not re.search(rf"/wisdom {command}\b(?!-)", rendered)
 
 
 @pytest.mark.parametrize("command", HIDDEN_SLASH)
