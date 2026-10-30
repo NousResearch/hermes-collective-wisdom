@@ -423,3 +423,22 @@ def test_host_detection():
     forking = SimpleNamespace(has_capability=probe, fork_session=method)
     assert host_supports(forking) and host_forks(forking)
     assert not host_supports(SimpleNamespace(fork_session=method, side_question=method))
+
+
+def test_a_due_check_logs_why_it_showed_nothing(tmp_path, caplog):
+    host = _Host(tmp_path)
+    controller = host.build()
+    _learn(controller, "deploy", action="loaded")  # Only used, and not a top skill.
+    with caplog.at_level("INFO", logger="hermes_wisdom_plugin.auto_suggest"):
+        _turn(controller, signals=DUE)
+    assert "deploy not offered (loaded, only used, not a top skill)" in caplog.text
+    assert not host.forks
+
+
+def test_a_closed_day_is_logged(tmp_path, caplog):
+    host = _Host(tmp_path)
+    controller = host.build(setting=lambda key, default=None: 0 if key == "auto_suggest_daily_limit" else default)
+    _learn(controller)
+    with caplog.at_level("INFO", logger="hermes_wisdom_plugin.auto_suggest"):
+        _turn(controller, signals=DUE)
+    assert "suggestion check skipped: daily limit reached" in caplog.text and not host.forks

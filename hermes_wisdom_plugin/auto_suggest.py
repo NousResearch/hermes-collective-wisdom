@@ -129,6 +129,25 @@ def review_due(signals: Mapping[str, Any]) -> bool:
             and signals.get("skill_review_due") is True)
 
 
+def _not_viable(controller: "AutoSuggest", name: str, action: str, facts: Any,
+                suppressed: bool) -> str | None:
+    """Why ``name`` is not offered for a suggestion, or None when it is."""
+    if suppressed:
+        return "never for this skill"
+    if not isinstance(facts, dict):
+        return "not the owner's shareable skill"
+    if facts.get("shared"):
+        return "already shared"
+    if action not in _CREATED and facts.get("top") is not True:
+        return "only used, not a top skill"
+    if not facts.get("description") and controller.setting(
+            "qualification.allow_model_review", None) is False:
+        return "no description"
+    if controller.store.seen(name, str(facts.get("content_hash") or "")):
+        return "this revision was already asked about"
+    return None
+
+
 def _now_iso(clock: Callable[[], float]) -> str:
     return datetime.fromtimestamp(clock(), timezone.utc).isoformat(timespec="seconds")
 
@@ -532,9 +551,16 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         try:
             route = self._route(facts)
             mode = None if route is None else self.mode()
-            if route is None or mode is None or not self.store.day_open(self._daily_limit()):
+            skip = ("not the owner's private chat or local session" if route is None
+                    else "no granted way to ask" if mode is None
+                    else "daily limit reached" if not self.store.day_open(self._daily_limit())
+                    else None)
+            if skip is not None:
+                logger.info("Collective Wisdom suggestion check skipped: %s", skip)
                 self._release()
                 return
+            logger.info("Collective Wisdom suggestion check started (%s, %d skill(s))",
+                        mode, len(candidates))
             check = self._fork_check if mode == "fork" else self._check
             self.start(lambda: check(token, session_id, route, candidates))
         except Exception:  # pylint: disable=broad-exception-caught
@@ -643,14 +669,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         for name, action in ordered:
             if len(found) >= limit:
                 break
-            facts = None if self.store.suppressed(name) else self.candidate(name)
-            viable = (
-                isinstance(facts, dict) and not facts.get("shared")
-                and (action in _CREATED or facts.get("top") is True)
-                and (facts.get("description") or self.setting(
-                    "qualification.allow_model_review", None) is not False)
-                and not self.store.seen(name, str(facts.get("content_hash") or ""))
-            )
+            suppressed = self.store.suppressed(name)
+            facts = None if suppressed else self.candidate(name)
+            why = _not_viable(self, name, action, facts, suppressed)
+            viable = why is None
+            if why is not None:
+                logger.info("Collective Wisdom: %s not offered (%s, %s)", name, action, why)
             with self._lock:
                 state = self._sessions.get(session_id)
                 if state is not None and state["candidates"].get(name) == action:
