@@ -1,4 +1,4 @@
-"""Top skills against the real Hermes ``tools.skill_usage`` (Salt R1 SF-1, SF-6 R3).
+"""Top skills against the real Hermes ``tools.skill_usage``.
 
 Runs only when ``WISDOM_AGENT_DIR`` names a Hermes Agent source tree. The probe
 runs in a subprocess with a launch home that differs from the plugin profile, so

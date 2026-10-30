@@ -6,7 +6,6 @@ recursive-include tests/desktop *.mjs
 include desktop/plugin.js
 include package.json package-lock.json
 include dashboard/manifest.json dashboard/plugin_api.py
-include scripts/test_wisdom_offline_acceptance.py scripts/test-wisdom-cross-repo.sh
 include scripts/check_complexity.py scripts/install_complexity_hook.py scripts/complexity-baseline.json
 include .pre-commit-config.yaml
 include scripts/run_receipt_mutations.py

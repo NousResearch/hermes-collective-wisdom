@@ -20,6 +20,7 @@ from .errors import (
 from .native_context import InvocationCapture, NativeInvocation, adapter_profile
 from .native_context import message_id as posted_message_id
 from .native_review import NativeItem, NativeReviewController, NativeView, parse_callback
+from .auto_suggest_card import OPERATION as AUTO_SUGGEST_OPERATION, card_plan
 from .native_progress import PROGRESS_TIMEOUT, edit_progress
 from .package import PackagePolicyError
 from .terminal_ui import has_reviewable_warnings, render_operation_outcome
@@ -154,6 +155,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         self._native: dict[tuple[str, int], Any] = {}
         self._leases: dict[tuple[str, int], object] = {}
         self._loops: dict[tuple[str, int], asyncio.AbstractEventLoop] = {}
+        self._adapters: dict[tuple[str, int], Any] = {}
         self._turns: dict[
             tuple[str, str], tuple[float, NativeInvocation, dict[str, str], object]
         ] = {}
@@ -172,6 +174,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             self._native.clear()
             self._leases.clear()
             self._loops.clear()
+            self._adapters.clear()
             self._turns.clear()
             self._local_tools.clear()
 
@@ -534,7 +537,50 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             self._native[(platform, id(adapter))] = native
             self._leases[(platform, id(adapter))] = token
             self._loops[(platform, id(adapter))] = loop
+            self._adapters[(platform, id(adapter))] = adapter
         return token
+
+    def _profile_adapter(self, platform: str) -> Any | None:
+        """The wired adapter of ``platform`` bound to this plugin's profile."""
+        with self._lock:
+            adapters = [adapter for (name, _), adapter in self._adapters.items()
+                        if name == platform and not self._closed]
+        for adapter in adapters:
+            try:
+                if adapter_profile(adapter) == self.profile_name:
+                    return adapter
+            except PermissionError:
+                continue
+        return None
+
+    def auto_suggest_available(self, platform: str) -> bool:
+        """Whether a suggestion card can be posted on ``platform`` for this profile."""
+        return platform in {"slack", "telegram"} and self._profile_adapter(platform) is not None
+
+    def present_auto_suggest(
+        self, route: dict[str, Any], session_id: str, suggestion: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Queue the three-choice card in the private chat the suggestion was made for."""
+        platform = str(route.get("platform") or "")
+        adapter = self._profile_adapter(platform)
+        if adapter is None or str(route.get("chat_type") or "").casefold() not in {
+                "dm", "private", "im"}:
+            return {"state": "unavailable"}
+        invocation = NativeInvocation(
+            platform=platform, profile=self.profile_name,
+            chat_type=str(route.get("chat_type") or ""), chat_id=str(route.get("chat_id") or ""),
+            actor_id=str(route.get("user_id") or ""), actor_name="",
+            thread_id=str(route.get("thread_id") or ""), scope_id=str(route.get("scope_id") or ""),
+            message_id="", session_key=str(route.get("session_key") or ""), adapter=adapter,
+            host_session_id=session_id,
+        )
+        if not all((invocation.chat_id, invocation.actor_id, invocation.session_key)):
+            return {"state": "unavailable"}
+        return self._begin(
+            invocation,
+            lambda service: self.reviews.request_card(
+                service, invocation, AUTO_SUGGEST_OPERATION, card_plan(suggestion)),
+        )
 
     def _check_lease(self, platform: str, adapter: Any, token: object) -> None:
         with self._lock:

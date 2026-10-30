@@ -47,7 +47,7 @@ def event(*, args="update skill-1", command="wisdom", internal=False, user="U1",
           profile: str | None = "default", message="M1"):
     source = SimpleNamespace(
         platform=SimpleNamespace(value="slack"), profile=profile, chat_type="dm",
-        chat_id="D1", user_id=user, user_name="shannon", thread_id="T1",
+        chat_id="D1", user_id=user, user_name="alex", thread_id="T1",
         scope_id="W1",
     )
     return SimpleNamespace(

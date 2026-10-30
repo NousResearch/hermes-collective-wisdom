@@ -1,7 +1,7 @@
 """Thin owner-private coordinator for manually selected local contributions.
 
-Teammate-usefulness author-copy wording is adapted from `hbizi`'s work in
-shannonsands/hermes-agent#5 (d68368b7), under this repository's MIT license.
+Teammate-usefulness author-copy wording is adapted from work contributed by
+`hbizi` under this repository's MIT license.
 """
 
 from __future__ import annotations

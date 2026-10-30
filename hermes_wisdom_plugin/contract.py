@@ -27,8 +27,6 @@ class ContractPin:
     openapi_sha256: str
     manifest_schema_sha256: str
     canonical_vectors_sha256: str
-    requirements_pr: str
-    requirements_commit: str
 
 
 CONTRACT_PIN = ContractPin(
@@ -36,8 +34,6 @@ CONTRACT_PIN = ContractPin(
     openapi_sha256="7fde8069b1c892fdc4d5368835a4d5fe43cc78c3b203162edc6a67b80b04c7ed",
     manifest_schema_sha256="64d0010eada1d79fa16309e9fd715faf77b6186360ea0b095182b2bdaeec5714",
     canonical_vectors_sha256="eff9b596d1bd9c46eda287b7231b11c35e5c0ae3b193e645d5b0a421b7570974",
-    requirements_pr="NousResearch/gateway-gateway#215",
-    requirements_commit="d51078fd30ed461542dfbbf25a5b810b6b512036",
 )
 
 PACKAGE_MANIFEST_SCHEMA_VERSION = 1

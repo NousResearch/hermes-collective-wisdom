@@ -1,4 +1,4 @@
-"""Tests adapted from WisdomService discovery coverage at source revision 0924f7946b."""
+"""Owner-bound read-only discovery operations."""
 
 # pylint: disable=missing-class-docstring,missing-function-docstring,too-few-public-methods
 
@@ -287,7 +287,7 @@ def test_show_falls_back_to_slug_resolving_redirect_route(slug):
     )
 
 
-def test_show_reads_the_org_slug_inside_the_owner_checked_path():  # (Salt R1 #1)
+def test_show_reads_the_org_slug_inside_the_owner_checked_path():
     """A switch observed around the slug read fails closed instead of linking."""
     state = {"switched": False}
     def check_owner():

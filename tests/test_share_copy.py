@@ -392,7 +392,7 @@ _SECRET_COPY = "Rotates the deploy key AKIA" + "Q" * 16 + " for the team."
     ("Review incident\x07 notes with a checklist.", "control characters"),
     ("Review incident\u202e notes with a checklist.", "control characters"),
     (_SECRET_COPY, "something that looks like a secret"),
-    # Salt R2: bypasses that were accepted before normalization and the wider rules.
+    # Bypasses that were accepted before normalization, and the wider rules.
     ("See evil.example for details.", "a web address"),
     ("See example.com/path for details.", "a web address"),
     ("javascript:alert(1)", "a web address"),
@@ -573,7 +573,7 @@ def test_host_scan_finding_on_the_sent_bytes_blocks_the_proposal(tmp_path):
 
 
 def test_scanned_model_input_is_byte_for_byte_the_sent_input(tmp_path):
-    """Salt R2 S1: escaping, the truncation boundary and frontmatter values included."""
+    """Escaping, the truncation boundary and frontmatter values included."""
     from hermes_wisdom_plugin.editorial import (  # pylint: disable=import-outside-toplevel
         MAX_SKILL_CONTEXT_CHARS)
     description = 'Says "quoted" \\ backslash caf\u00e9 \u2713 </script> ' + "x" * 400

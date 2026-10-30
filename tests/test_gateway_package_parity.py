@@ -1,11 +1,11 @@
 """Sharing refuses, before any upload, every package Gateway's validator refuses.
 
-The lists and limits below are copied from gateway-gateway
-src/sync/packageValidator.ts and src/sync/wisdomPackagePolicy.ts at commit
-ba2b5ae9 (origin/main). Gateway answers a package that breaks one of them with
-HTTP 422 ``instruction_only_violation`` and no draft, so the plugin must refuse
-the same package locally with a reason naming the file. When Gateway changes a
-list, update hermes_wisdom_plugin/package.py and this file together.
+The lists and limits below are copied from Team Gateway's package validator
+and Wisdom package policy at revision ba2b5ae9. Gateway answers a package that
+breaks one of them with HTTP 422 ``instruction_only_violation`` and no draft,
+so the plugin must refuse the same package locally with a reason naming the
+file. When Gateway changes a list, update hermes_wisdom_plugin/package.py and
+this file together.
 """
 # pylint: disable=missing-function-docstring
 from __future__ import annotations
@@ -30,26 +30,26 @@ from hermes_wisdom_plugin.package import (
 )
 
 GATEWAY_REVISION = "ba2b5ae9"
-# packageValidator.ts BLOCKED_PATH_SEGMENTS (matched case-folded, any segment).
+# Gateway package validator: BLOCKED_PATH_SEGMENTS (matched case-folded, any segment).
 GATEWAY_BLOCKED_PATH_SEGMENTS = frozenset({
     ".circleci", ".git", ".github", ".gitlab", ".hooks", ".tox", ".venv",
     "__pycache__", "hooks", "node_modules", "venv",
 })
-# packageValidator.ts WINDOWS_RESERVED_NAMES (case-folded segment before the first dot).
+# Gateway package validator: WINDOWS_RESERVED_NAMES (case-folded segment before the first dot).
 GATEWAY_WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
     | {f"com{index}" for index in range(1, 10)}
     | {f"lpt{index}" for index in range(1, 10)}
 )
-# packageValidator.ts validateSegment: /[<>:"|?*]/u.
+# Gateway package validator: validateSegment: /[<>:"|?*]/u.
 GATEWAY_INVALID_CHARS = frozenset('<>:"|?*')
-# packageValidator.ts COMPILED_EXECUTABLE_MAGIC.
+# Gateway package validator: COMPILED_EXECUTABLE_MAGIC.
 GATEWAY_COMPILED_EXECUTABLE_MAGIC = frozenset({
     b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
     b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
     b"\x00asm",
 })
-# wisdomPackagePolicy.ts limits.
+# Gateway Wisdom package policy limits.
 GATEWAY_MAX_TOTAL_BYTES = 10 * 1024 * 1024
 GATEWAY_MAX_METADATA_BYTES = 2 * 1024 * 1024
 GATEWAY_MAX_TREE_DEPTH = 16

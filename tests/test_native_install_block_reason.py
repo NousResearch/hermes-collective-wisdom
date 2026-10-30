@@ -87,7 +87,7 @@ class Service:  # pylint: disable=too-many-instance-attributes
 def _invocation():
     return NativeInvocation(
         platform="slack", profile="default", chat_type="private", chat_id="C1",
-        actor_id="account-1", actor_name="Shannon", thread_id="", scope_id="",
+        actor_id="account-1", actor_name="Alex", thread_id="", scope_id="",
         message_id="M1", session_key="slack:C1", adapter=object(),
     )
 
