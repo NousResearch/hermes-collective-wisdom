@@ -10,7 +10,7 @@ from installed_test_support import JsonState
 
 from hermes_wisdom_plugin.auto_suggest import (
     CAPABILITY, AutoSuggest, SuggestionStore, approval_prompt, local_card, parse_verdict,
-    self_learning_interval, verdict_prompt,
+    review_due, self_learning_interval, verdict_prompt,
 )
 
 YES = '{"share": true, "reason": "Teams run incident reviews often."}'
@@ -285,3 +285,29 @@ def test_tool_queues_the_native_card_in_the_private_chat(tmp_path):
     assert result["status"] == "queued" and len(fake.presented) == 1
     route, session_id, suggestion = fake.presented[0]
     assert route["chat_id"] == "D1" and session_id == "s1" and suggestion["skill"] == "incident"
+
+
+DUE = {"skill_review_due": True, "background_review_enabled": True, "skill_nudge_interval": 10,
+       "tool_iterations_since_skill_review": 10, "memory_review_due": False,
+       "user_turns_since_memory_review": 0, "memory_nudge_interval": 10}
+
+
+@pytest.mark.parametrize(("signals", "asks"), [
+    (DUE, True),
+    ({**DUE, "skill_review_due": False}, False),
+    ({**DUE, "background_review_enabled": False}, False),
+    ({**DUE, "skill_nudge_interval": 0}, False),
+    ({**DUE, "skill_review_due": 1}, False),
+    ({}, False),
+])
+def test_review_signals_replace_the_tool_call_count(tmp_path, signals, asks):
+    fake = _Fake(tmp_path)
+    fake.interval = 0  # The config read and the plugin's own counter are not consulted.
+    controller = fake.controller()
+    _learn(controller)
+    for _ in range(50):
+        controller.on_tool_call(session_id="s1", tool_name="terminal")
+    controller.on_llm_call(session_id="s1", side_question_token="tok", platform="cli",
+                           review_signals=signals)
+    assert bool(fake.asked) is asks
+    assert review_due(signals) is asks

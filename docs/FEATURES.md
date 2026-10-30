@@ -14,9 +14,12 @@ Registered: `hermes wisdom` setup, status, catalog, `top`, `share-suggest`,
 `share` and its preparation, publication and recovery commands, installation,
 updates, setup approval and uninstall; private `/wisdom` help, status, catalog,
 `top`, `share-suggest`, `share`, install and update reviews with terminal handoffs; the private `/wisdom` dispatch hook; and the Desktop
-catalog, installed and contribute pages. On a host with `ctx.side_question`, also
+catalog, installed and contribute pages. On a host with `ctx.fork_session` or
+`ctx.side_question`, also
 `hermes wisdom suggestions`, private `/wisdom suggestions`, the `on_skill_lifecycle`,
-`post_tool_call` and `post_llm_call` hooks and the `wisdom_share_suggestion` tool.
+`post_tool_call` and `post_llm_call` hooks and the `wisdom_share_suggestion` tool;
+on a host with `ctx.fork_session`, also the auxiliary task
+`hermes_collective_wisdom_share_suggest`.
 
 Implemented but not registered in this release: qualification capture and the
 candidate-based proactive sharing suggestions, proactive notices and recommendations, notification settings
@@ -100,19 +103,36 @@ review. It never grants consent.
 ## Automatic share suggestions
 
 `hermes_wisdom_plugin/auto_suggest.py` and `auto_suggest_card.py`. Registered only
-when the release scope has `auto_suggest` and the host offers `ctx.side_question`
-(Hermes with plugin side questions); otherwise nothing is registered and manual
-sharing is unchanged. `plugin.yaml` declares `capabilities: [llm.side_question]`.
-Hermes asks for that grant on install, enable and update (only when the declared set
-changed), on an interactive terminal only, and stores it as
-`plugins.entries.<id>.granted_capabilities`. Core issues side-question tokens only
-to a loaded plugin that declares and was granted it, and never on unattended turns.
+when the release scope has `auto_suggest` and the host offers `ctx.fork_session`
+(Hermes with plugin session forks) or `ctx.side_question` (plugin side questions);
+otherwise nothing is registered and manual sharing is unchanged. Both methods are
+detected at register time. `plugin.yaml` declares
+`capabilities: [llm.session_fork, llm.side_question]`, so one consent prompt covers
+either path; Hermes releases without session forks ignore the unknown id. Hermes
+asks for the grants on install, enable and update (only when the declared set
+changed), on an interactive terminal only, and stores them as
+`plugins.entries.<id>.granted_capabilities`. Core issues the `post_llm_call`
+`side_question_token` (it backs one side question or one fork) only to a loaded
+plugin that declares and was granted one of them, and never on unattended turns.
+
+Which path runs is decided per turn, from the grants:
+
+| `ctx.fork_session` + `llm.session_fork` | `ctx.side_question` + `llm.side_question` | Path |
+|---|---|---|
+| yes | any | session fork |
+| no | yes | side question |
+| no | no | off |
+
+When the host refuses a fork (`fork_session` returns None), the same turn asks by side
+question when `llm.side_question` is granted, with the same token. A refused fork may already
+have spent that token: no answer then leaves the skill pending, not declined. The process uses
+the side question from then on; a restart tries the fork again.
 
 Cadence:
 
 1. Off when `skills.creation_nudge_interval <= 0`,
    `auxiliary.background_review.enabled` is false, the plugin setting
-   `auto_suggest` is false, or `llm.side_question` is not granted.
+   `auto_suggest` is false, or neither path above is available.
 2. Candidates come only from `on_skill_lifecycle` facts with provenance `local` or
    `agent_created` (never team-installed `org:skill` names, bundled or Hub skills):
    created or patched in the session, or loaded and among the owner's top 30 by
@@ -120,15 +140,35 @@ Cadence:
    own and fingerprint it under the share path rules; skills already shared are
    skipped (update suggestions are a separate policy layer).
 3. Fire point: `post_llm_call` of a later attended turn of the same session that
-   carries `side_question_token`, after at least `creation_nudge_interval` tool calls
+   carries `side_question_token`. When the hook also carries `review_signals`,
+   the check fires only on a turn where `skill_review_due` is true,
+   `background_review_enabled` is true and `skill_nudge_interval` is positive: the
+   exact decision core uses for its own skill review. Without `review_signals`
+   (older hosts) it fires after at least `creation_nudge_interval` tool calls
    (counted with `post_tool_call`) since the last check in that session. At most
    `auto_suggest_daily_limit` (default 1) per profile per day; a skill revision
    (content hash) is asked about once; a suppressed skill is never asked about.
-4. The token is redeemed on a daemon thread with a 20 s timeout. The question
-   carries only the skill's name, description and usage counts and asks for JSON
-   `{"share": bool, "reason": str}`; anything but the boolean `true` is no.
+4. Session fork: on a daemon thread, `ctx.fork_session(token, prompt,
+   tools=("wisdom_share_suggestion",), max_iterations=4, timeout=300,
+   task="hermes_collective_wisdom_share_suggest")`. The prompt lists up to three
+   viable candidates (name, why, description, usage counts) and asks the fork to
+   call the tool for at most one. The auxiliary task is registered with
+   `inherit_from="background_review"`; `auxiliary.hermes_collective_wisdom_share_suggest.*`
+   overrides it. Inside the fork the tool receives `turn_origin="plugin_fork:<id>"`
+   and only then may propose: only a skill the running fork was offered, and only
+   once per fork; any other origin, a second call or an unoffered skill is refused.
+   The proposal records a yes verdict with the fork's reason and goes to step 5. A
+   fork that ends `ok` without a proposal records no for every offered revision; a
+   `cancelled`, `timeout`, `budget_exhausted`, `refused:*`, `None` or still-`deferred`
+   fork (waited 330 s, then cancelled) records `not_asked` and leaves the skills for
+   a later due turn. Core cancels the fork when the session's next live turn starts.
+   Side question: the token is redeemed on a daemon thread with a 20 s timeout. The
+   question carries only the first candidate's name, description and usage counts
+   and asks for JSON `{"share": bool, "reason": str}`; anything but the boolean
+   `true` is no.
 5. Yes injects one user turn (origin for messaging, `session_key` for TUI/Desktop,
    the REPL queue for the CLI) asking the model to call `wisdom_share_suggestion`.
+   Called by the live agent (no `turn_origin`), the tool never proposes anything.
    That tool claims the one pending suggestion of the same conversation exactly
    once and shows the card: a native Slack/Telegram card in private chats, or a
    text card in the CLI, TUI and Desktop. When injection is denied or unavailable,
@@ -141,8 +181,8 @@ Don't share dismisses that content hash; Never suppresses the skill until
 through the native review record; stale or forged controls are refused. Group chats
 never get a suggestion.
 
-Every step (candidate, asked, verdict, injected, shown, not shown, choice) is
-recorded with a timestamp in the plugin state key `wisdom-auto-suggest`, read by
+Every step (candidate, asked, verdict, injected, shown, not shown, check stopped,
+choice) is recorded with a timestamp in the plugin state key `wisdom-auto-suggest`, read by
 `hermes wisdom suggestions` and private `/wisdom suggestions`.
 
 ## Local state

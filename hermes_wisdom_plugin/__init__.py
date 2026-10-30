@@ -3,9 +3,11 @@
 
 from typing import Any
 import asyncio
+import logging
 import shlex
 import threading
 
+logger = logging.getLogger(__name__)
 
 
 def _register_end_turn_awareness(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -228,14 +230,35 @@ def _register_local_awareness(  # pylint: disable=too-many-arguments,too-many-po
     )
 
 
+def _register_fork_task(ctx, runtime, scope) -> str | None:
+    """The auxiliary task the suggestion fork runs on, following core's background review."""
+    from .auto_suggest import FORK_TASK, host_forks  # pylint: disable=import-outside-toplevel
+
+    if FORK_TASK not in scope.auxiliary_tasks or not host_forks(ctx):
+        return None
+    try:
+        runtime.registrations.append(ctx.register_auxiliary_task(
+            FORK_TASK, display_name="Collective Wisdom share suggestions",
+            description=("Background check after a turn: is a skill just created, improved "
+                         "or used worth sharing with the team?"),
+            inherit_from="background_review",
+        ))
+    except (AttributeError, TypeError, ValueError):
+        logger.warning("Collective Wisdom could not register its suggestion task; the fork "
+                       "uses the session model", exc_info=True)
+        return None
+    return FORK_TASK
+
+
 def _register_auto_suggest(ctx, runtime, profile, scope, config_value) -> None:
-    """Automatic share suggestions, only where the host can ask a side question."""
+    """Automatic share suggestions, only where the host can fork or ask a side question."""
     from .auto_suggest import TOOL, TOOL_SCHEMA, host_supports  # pylint: disable=import-outside-toplevel
     from .auto_suggest_host import build  # pylint: disable=import-outside-toplevel
 
     if not scope.auto_suggest or not host_supports(ctx):
         return  # Older Hermes: no hooks, no tool; manual sharing is unchanged.
-    controller = build(ctx, runtime, profile, config_value)
+    fork_task = _register_fork_task(ctx, runtime, scope)
+    controller = build(ctx, runtime, profile, config_value, fork_task=fork_task)
     runtime.auto_suggest = controller
     for name, callback in (("on_skill_lifecycle", controller.on_skill_lifecycle),
                            ("post_tool_call", controller.on_tool_call),
