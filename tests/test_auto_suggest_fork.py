@@ -437,7 +437,8 @@ def test_a_due_check_logs_why_it_showed_nothing(tmp_path, caplog):
 
 def test_a_closed_day_is_logged(tmp_path, caplog):
     host = _Host(tmp_path)
-    controller = host.build(setting=lambda key, default=None: 0 if key == "auto_suggest_daily_limit" else default)
+    controller = host.build(
+        setting=lambda key, default=None: 0 if key == "auto_suggest_daily_limit" else default)
     _learn(controller)
     with caplog.at_level("INFO", logger="hermes_wisdom_plugin.auto_suggest"):
         _turn(controller, signals=DUE)

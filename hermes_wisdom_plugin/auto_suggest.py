@@ -132,20 +132,17 @@ def review_due(signals: Mapping[str, Any]) -> bool:
 def _not_viable(controller: "AutoSuggest", name: str, action: str, facts: Any,
                 suppressed: bool) -> str | None:
     """Why ``name`` is not offered for a suggestion, or None when it is."""
-    if suppressed:
-        return "never for this skill"
-    if not isinstance(facts, dict):
-        return "not the owner's shareable skill"
-    if facts.get("shared"):
-        return "already shared"
-    if action not in _CREATED and facts.get("top") is not True:
-        return "only used, not a top skill"
-    if not facts.get("description") and controller.setting(
-            "qualification.allow_model_review", None) is False:
-        return "no description"
-    if controller.store.seen(name, str(facts.get("content_hash") or "")):
-        return "this revision was already asked about"
-    return None
+    if suppressed or not isinstance(facts, dict):
+        return "never for this skill" if suppressed else "not the owner's shareable skill"
+    checks = (
+        (bool(facts.get("shared")), "already shared"),
+        (action not in _CREATED and facts.get("top") is not True, "only used, not a top skill"),
+        (not facts.get("description") and controller.setting(
+            "qualification.allow_model_review", None) is False, "no description"),
+        (controller.store.seen(name, str(facts.get("content_hash") or "")),
+         "this revision was already asked about"),
+    )
+    return next((why for failed, why in checks if failed), None)
 
 
 def _now_iso(clock: Callable[[], float]) -> str:
