@@ -13,7 +13,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from test_auto_suggest import DUE, SLACK_DM, _Fake
+from test_auto_suggest import DUE, SLACK_DM, YES, _Fake
 
 from hermes_wisdom_plugin.auto_suggest import (
     CAPABILITY, FORK_CAPABILITY, FORK_TASK, TOOL, AutoSuggest,
@@ -240,8 +240,48 @@ def test_a_fork_still_deferred_after_the_wait_is_cancelled(tmp_path):
     assert ("not_asked", "incident") in _events(host) and not controller._busy
 
 
-def test_fork_refused_by_the_host_asks_again_later(tmp_path):
+def test_fork_refused_by_the_host_falls_back_to_the_side_question(tmp_path):
     host = _Host(tmp_path)
+    host.fork_returns_none = True  # An older or differently configured core.
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    assert len(host.forks) == 1 and len(host.asked) == 1  # Same turn, same token.
+    assert host.asked[0][0] == "tok"
+    assert host.injected == [(approval_prompt("incident"), "user", {})]
+    assert controller.mode() == "side_question"
+
+
+def test_after_a_refused_fork_later_turns_use_the_side_question(tmp_path):
+    host = _Host(tmp_path)
+    host.fork_returns_none = True
+    host.answer = None  # The refused fork spent the token: no answer this turn.
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    assert len(host.forks) == 1 and len(host.asked) == 1 and not host.injected
+    assert not host.store.seen("incident", "sha-i")  # Still pending, not a "no".
+    assert ("not_asked", "incident") in _events(host)
+    host.answer = YES
+    host.fork_returns_none = False  # Not asked again in this process.
+    _turn(controller, signals=DUE, token="tok2")
+    assert len(host.forks) == 1 and len(host.asked) == 2
+    assert host.injected == [(approval_prompt("incident"), "user", {})]
+
+
+def test_a_new_process_tries_the_fork_again(tmp_path):
+    host = _Host(tmp_path)
+    host.fork_returns_none = True
+    first = host.build()
+    _learn(first)
+    _turn(first, signals=DUE)
+    host.fork_returns_none = False
+    assert host.build().mode() == "fork"
+
+
+def test_refused_fork_without_the_side_question_grant_asks_again_later(tmp_path):
+    host = _Host(tmp_path)
+    host.granted = {FORK_CAPABILITY}
     host.fork_returns_none = True
     controller = host.build()
     _learn(controller)

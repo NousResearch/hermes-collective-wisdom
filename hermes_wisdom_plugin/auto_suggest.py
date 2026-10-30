@@ -9,7 +9,8 @@ whether the skill is worth sharing, the same way Hermes runs its background revi
 - ``ctx.fork_session`` (``llm.session_fork``) first: a bounded background copy of
   the session agent sees the candidates and may call ``wisdom_share_suggestion``
   once, for one of them. That call records the suggestion and starts delivery.
-- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable: one
+- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable or the
+  host refused it (then until restart): one
   JSON verdict about the first candidate.
 - Otherwise off.
 
@@ -450,6 +451,9 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self._offer: dict[str, Any] | None = None  # The running fork's candidates.
         self._busy = False
         self._closed = False
+        # The host refused a fork (an older or differently configured core): ask by side
+        # question from then on in this process. A restart tries the fork again.
+        self._fork_refused = False
 
     def close(self) -> None:
         """Forget in-memory counters; later hooks do nothing."""
@@ -463,8 +467,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         return not self._closed
 
     def mode(self) -> str | None:
-        """How to ask: ``fork`` first, then ``side_question``, each only when granted."""
-        if self.fork_session is not None and self.has_capability(FORK_CAPABILITY):
+        """How to ask: ``fork`` first, then ``side_question``, each only when granted.
+
+        After the host refused a fork, the side question is used until the process restarts.
+        """
+        if (self.fork_session is not None and not self._fork_refused
+                and self.has_capability(FORK_CAPABILITY)):
             return "fork"
         if self.side_question is not None and self.has_capability(CAPABILITY):
             return "side_question"
@@ -576,28 +584,49 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
     def _check(self, token: str, session_id: str, route: dict[str, Any],
                candidates: dict[str, str]) -> None:
         try:
-            chosen = self._choose(session_id, candidates)
-            if chosen is None:
-                return
-            name, content_hash = chosen["name"], chosen["content_hash"]
-            self.store.record("candidate", name, action=chosen["action"],
-                              content_hash=content_hash, session_id=session_id)
-            self.store.mark_seen(name, content_hash, "asked")
-            self.store.record("asked", name, content_hash=content_hash)
-            try:
-                ask = self.side_question
-                answer = ask(token, verdict_prompt(chosen),
-                             timeout=SIDE_QUESTION_TIMEOUT) if ask is not None else None
-            except Exception:  # pylint: disable=broad-exception-caught
-                answer = None
-            share, reason = parse_verdict(answer)
-            self.store.record("verdict", name, share=share, reason=reason or None)
-            if share:
-                self._deliver(chosen, reason, session_id, route)
+            self._ask(token, session_id, route, candidates)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning("Collective Wisdom suggestion check failed", exc_info=True)
         finally:
             self._release()
+
+    def _side_question_ready(self) -> bool:
+        return self.side_question is not None and bool(self.has_capability(CAPABILITY))
+
+    def _ask(self, token: str, session_id: str, route: dict[str, Any],
+             candidates: dict[str, str], *, keep_on_silence: bool = False) -> None:
+        """One side-question verdict about the first viable candidate; deliver when yes.
+
+        ``keep_on_silence``: no answer leaves the skill pending for a later due turn instead
+        of counting as "no" (used after a refused fork, which may have spent the token).
+        """
+        chosen = self._choose(session_id, candidates)
+        if chosen is None:
+            return
+        name, content_hash = chosen["name"], chosen["content_hash"]
+        self.store.record("candidate", name, action=chosen["action"],
+                          content_hash=content_hash, session_id=session_id)
+        self.store.mark_seen(name, content_hash, "asked")
+        self.store.record("asked", name, content_hash=content_hash)
+        try:
+            ask = self.side_question
+            answer = ask(token, verdict_prompt(chosen),
+                         timeout=SIDE_QUESTION_TIMEOUT) if ask is not None else None
+        except Exception:  # pylint: disable=broad-exception-caught
+            answer = None
+        if answer is None and keep_on_silence:
+            self.store.forget_seen(name, content_hash)
+            self.store.record("not_asked", name, why="no_answer")
+            with self._lock:
+                if not self._closed:
+                    pending = self._session_state(session_id)["candidates"]
+                    if pending.get(name) not in _CREATED:
+                        pending[name] = chosen["action"]
+            return
+        share, reason = parse_verdict(answer)
+        self.store.record("verdict", name, share=share, reason=reason or None)
+        if share:
+            self._deliver(chosen, reason, session_id, route)
 
     def _choose(self, session_id: str, candidates: dict[str, str]) -> dict[str, Any] | None:
         """The first viable candidate, created or patched skills before used ones."""
@@ -649,7 +678,19 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                      "expires_at": self.clock() + PENDING_TTL_SECONDS}
             with self._lock:
                 self._offer = offer  # Before the fork starts: it may call the tool at once.
-            self._settle(offer, self._run_fork(token, offered))
+            outcome = self._run_fork(token, offered)
+            self._settle(offer, outcome)
+            if outcome == "refused" and self._side_question_ready():
+                self._fork_refused = True
+                logger.info("Collective Wisdom: the host refused the suggestion fork; "
+                            "using the side question until restart")
+                with self._lock:
+                    offer["closed"] = True
+                    if self._offer is offer:
+                        self._offer = None
+                self._ask(token, session_id, route, {
+                    name: item["action"] for name, item in offer["skills"].items()},
+                    keep_on_silence=True)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning("Collective Wisdom suggestion fork failed", exc_info=True)
         finally:

@@ -123,6 +123,11 @@ Which path runs is decided per turn, from the grants:
 | no | yes | side question |
 | no | no | off |
 
+When the host refuses a fork (`fork_session` returns None), the same turn asks by side
+question when `llm.side_question` is granted, with the same token. A refused fork may already
+have spent that token: no answer then leaves the skill pending, not declined. The process uses
+the side question from then on; a restart tries the fork again.
+
 Cadence:
 
 1. Off when `skills.creation_nudge_interval <= 0`,

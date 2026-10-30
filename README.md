@@ -114,6 +114,8 @@ This needs your approval of the `llm.session_fork` or `llm.side_question` capabi
 [Configuration](#configuration)), and Hermes self-learning on (`skills.creation_nudge_interval`
 above 0 and `auxiliary.background_review.enabled` not false). Hermes uses the session fork when you
 approved `llm.session_fork`, otherwise the side question when you approved `llm.side_question`.
+If Hermes refuses the session fork, Collective Wisdom asks by side question instead until the
+gateway restarts.
 Without either, Collective Wisdom works exactly as before and suggests nothing.
 
 ### Share a skill
