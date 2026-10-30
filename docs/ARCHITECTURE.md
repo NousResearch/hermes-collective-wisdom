@@ -1,8 +1,8 @@
 # Architecture
 
 Current scope: a replacement-only external plugin on unmodified Hermes Agent.
-See [Features](FEATURES.md) for workflows, [Migration](MIGRATION.md) for removed
-responsibilities and [Verification](TESTING.md) for evidence levels.
+See [Features](FEATURES.md) for workflows and [Verification](TESTING.md) for
+evidence levels.
 
 ## Ownership
 

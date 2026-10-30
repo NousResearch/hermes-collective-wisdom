@@ -1,9 +1,7 @@
 """Bounded CLI and shared-chat-safe text commands for Collective Wisdom.
 
-The CLI dispatch shape is extracted from ``hermes_cli/subcommands/wisdom.py``
-and the read-only projections from ``gateway/wisdom_command.py``, both at
-``0924f7946b937c2ed02d083fc26752d577c54b3b``. Host registration, service
-construction, native callbacks, and all mutations remain outside this module.
+Host registration, service construction, native callbacks, and all mutations
+remain outside this module.
 """
 # pylint: disable=too-many-lines
 

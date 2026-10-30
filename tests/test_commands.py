@@ -1672,7 +1672,7 @@ def _native_invocation(platform="slack", *, adapter=None, message_id="command-1"
     return NativeInvocation(
         platform=platform, profile="default", chat_type="private",
         chat_id="C1" if platform == "slack" else "123", actor_id="native-user",
-        actor_name="Shannon", thread_id="", scope_id="W1" if platform == "slack" else "",
+        actor_name="Alex", thread_id="", scope_id="W1" if platform == "slack" else "",
         message_id=message_id, session_key=f"{platform}:private", adapter=adapter or object(),
     )
 

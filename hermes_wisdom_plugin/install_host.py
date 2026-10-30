@@ -1,6 +1,5 @@
 """Read-only Hermes host adapter for manual Wisdom install review.
 
-Compatibility detection is extracted from Agent 0924f7946b's static detector.
 Security and target decisions bind narrowly to the audited bf51 Hermes host;
 this module deliberately does not import the destructive Hub installer API.
 """

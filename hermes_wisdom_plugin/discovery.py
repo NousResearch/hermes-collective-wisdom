@@ -1,9 +1,7 @@
 """Owner-bound read-only Collective Wisdom discovery operations.
 
-Extracted from ``hermes_wisdom/service.py`` at
-``0924f7946b937c2ed02d083fc26752d577c54b3b`` (methods beginning at lines
-2292, 2375, 2413, 2468, and 2500). Local installation and compatibility reads
-from the original service are deliberately outside this kernel.
+Local installation and compatibility reads are deliberately outside this
+kernel.
 """
 
 from __future__ import annotations

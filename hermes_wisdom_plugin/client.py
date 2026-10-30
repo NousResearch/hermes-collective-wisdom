@@ -898,7 +898,6 @@ class WisdomClient:
     def _decode_version_content(
         response: VersionContent,
     ) -> tuple[VersionContent, list[tuple[str, str, bytes]]]:
-        # Adapted from Hermes Agent hermes_wisdom/client.py at 0924f7946b.
         decoded: list[tuple[str, str, bytes]] = []
         for item in response.files:
             try:

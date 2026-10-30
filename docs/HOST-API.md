@@ -17,13 +17,13 @@ See [Architecture](ARCHITECTURE.md) and [Verification](TESTING.md).
 ## Historical host audits
 
 Audited against Agent `31d0a2428e9db346d6781da66f5b37ff3e12def2`.
-See [SOURCES.md](SOURCES.md) for immutable source notation. The historical API
-inventory below describes those pinned hosts, not unpublished host development.
+The historical API inventory below describes those pinned hosts, not unpublished
+host development.
 
 ## Local development checkpoint — 2026-09-15
 
 A separately authorized, generic CLI/TUI presentation implementation now exists on
-Agent branch `shannonsands/plugin-local-presentation`, based on
+an unpublished Agent development branch based on
 `1ad89ac018f26a4f21817ebf37bb09f508656d63`. It provides
 `ctx.register_presentation_handler()` and correlated `rendered`, `not_rendered`,
 and `uncertain` receipts. It is not committed, published, or part of the pinned
@@ -33,8 +33,8 @@ The Wisdom plugin now optionally registers an interactive cadence consumer. It r
 owner-scoped assessment leases, policy checks and the Gateway reservation/outcome
 protocol, then requests literal local output. Registration is inert and older
 hosts retain manual inbox access. An uncertain result stops the batch without
-resending; untouched ready leases are released. Under the approved simplification,
-the consumer may now perform bounded production and assessment before delivery.
+resending; untouched ready leases are released.
+The consumer may perform bounded production and assessment before delivery.
 It consumes a single-use owner-bound capture of the real pre-LLM Python context;
 it does not invent model routing, inject messages, or grant approval. Local
 pre-LLM alone no longer assesses or claims work. See the
@@ -72,9 +72,8 @@ The host owns no Wisdom receipt or execution policy. Wisdom's `tui_actions.py`
 uses the existing install/update/setup kernels; unsupported hosts fail safely to
 the terminal handoff. See [the development TUI commands](../README.md#development-tui-review-and-actions).
 
-A partial command-only experiment exists on the rejected Agent PR #108645:
-[historical H1 evidence](verification/H1-commands.md). It is not a dependency.
-The 2026-09-12 simplification decision requires plugin-owned checks and unchanged
+A partial command-only experiment on a rejected Agent PR is not a dependency.
+The plugin requires plugin-owned checks and unchanged
 host command surfaces. Exhaust existing APIs for proactive delivery as well;
 report any insurmountable gap before proposing another Agent PR.
 Targeted re-audit: Agent `bf51fee548ceaa28d2c299a41c0f65066c04c061`.
@@ -163,7 +162,7 @@ An actual authorized request may use the host's existing refresh policy;
 visibility and completion must never initiate refresh or network work.
 
 The extracted plugin client uses explicit providers in tests. That does not
-complete workflow integration. The [account adapter](verification/F1-account.md)
+complete workflow integration. The account adapter
 now passes denial/expiry/profile-switch checks against unmodified upstream.
 It uses `get_provider_auth_state` and the existing host decoder, not a new API.
 CLI/slash registration now supports explicit terminal onboarding and safe
@@ -184,8 +183,7 @@ recoverable removal. Staging under `.hub/collective-wisdom` and trash under
 `.archive/collective-wisdom` use directories excluded by the actual host skill
 scanner; committed `_wisdom/<org>/<slug>` skills remain discoverable. Plain
 terminal confirmation does not use remembered tool approvals or private TUI
-modals. See [manual installation evidence](verification/manual-installation.md)
-for the tested boundaries and outstanding live acceptance.
+modals.
 
 ### H3: Post-Delivery and Idle-Session Integration
 

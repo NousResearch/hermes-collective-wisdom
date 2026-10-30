@@ -1173,7 +1173,7 @@ def test_editorial_overlay_round_trips_flow_metadata_comments_quotes_and_crlf(
     original = (
         '\ufeff---\r\nname: "reviewed-skill" # keep name comment\r\n'
         'description: "Review: incident notes."\r\n'
-        'metadata: {hermes: {custom: "keep"}, owner: "Shannon"}\r\n'
+        'metadata: {hermes: {custom: "keep"}, owner: "Alex"}\r\n'
         'unknown: "quoted value"\r\n---\r\n# Body\r\n'
     )
     skill_md.write_text(original, encoding="utf-8", newline="")
@@ -1195,7 +1195,7 @@ def test_editorial_overlay_round_trips_flow_metadata_comments_quotes_and_crlf(
     assert updated.count("metadata:") == 1
     assert updated.count("hermes:") == 1
     assert 'custom: "keep"' in updated
-    assert 'owner: "Shannon"' in updated
+    assert 'owner: "Alex"' in updated
     assert "editorial_name: Incident Review" in updated
     assert "editorial_description: Review incident notes with a checklist." in updated
     assert "\n" not in updated.replace("\r\n", "")

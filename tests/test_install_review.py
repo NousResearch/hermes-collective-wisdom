@@ -4,7 +4,7 @@
 # pylint: disable=missing-class-docstring,missing-function-docstring,too-few-public-methods
 # pylint: disable=duplicate-code
 
-# Ported 0924f7946b cases: exact-version URLs, latest selection,
+# Covers exact-version URLs, latest selection,
 # manifest/spec binding, and apply-time hash/generation rechecks.
 
 from __future__ import annotations

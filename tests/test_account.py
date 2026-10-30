@@ -99,7 +99,7 @@ def test_organization_slug_requires_the_bound_organisation(monkeypatch, organisa
     assert len(calls) == (1 if expected else 2)
 
 
-def test_cached_slug_is_not_served_after_account_switch(monkeypatch):  # (Salt R1 #1)
+def test_cached_slug_is_not_served_after_account_switch(monkeypatch):
     """A cached slug is revalidated against the bound owner; a switch fails closed."""
     reader = Reader(snapshot())
     adapter = HermesAccountAdapter.current(_read_snapshot=reader, _clock=lambda: NOW)

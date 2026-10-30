@@ -1,4 +1,4 @@
-"""Salt R2 S2: every chat table cell stays on one row and renders literally."""
+"""Every chat table cell stays on one row and renders literally."""
 # pylint: disable=missing-function-docstring
 from __future__ import annotations
 

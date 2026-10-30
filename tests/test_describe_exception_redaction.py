@@ -1,4 +1,4 @@
-"""Failure-log redaction over host-redactor and fallback paths (Salt R1 #2)."""
+"""Failure-log redaction over host-redactor and fallback paths."""
 # pylint: disable=missing-function-docstring
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ MODES = {"fallback": _no_host, "strict-host": _identity_host, "legacy-host": _le
 
 @pytest.mark.parametrize("mode", sorted(MODES))
 @pytest.mark.parametrize("name,raw,secrets", CASES, ids=[case[0] for case in CASES])
-def test_describe_exception_masks_every_credential_shape(  # (Salt R1 #2)
+def test_describe_exception_masks_every_credential_shape(
     monkeypatch, mode, name, raw, secrets,
 ):
     MODES[mode](monkeypatch)
@@ -128,7 +128,7 @@ def _host_dirs():
 
 @pytest.mark.parametrize("host_dir", _host_dirs() or [None])
 @pytest.mark.parametrize("name,raw,secrets", CASES, ids=[case[0] for case in CASES])
-def test_real_host_redactor_with_plugin_masking(  # (Salt R1 #2)
+def test_real_host_redactor_with_plugin_masking(
     monkeypatch, host_dir, name, raw, secrets,
 ):
     """Runs against real Hermes checkouts named in WISDOM_HOST_AGENT_DIRS."""

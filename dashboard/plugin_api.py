@@ -92,7 +92,8 @@ class _ProfileScopedRoute(APIRoute):
     Desktop's authenticated REST bridge supplies ``?profile=``. The host
     resolver validates that profile and installs a request-local home override;
     owner/account identity still comes only from that scoped host state. On a
-    host that already ships PR #108678 this is an idempotent nested scope.
+    host that already scopes plugin routes by profile this is an idempotent
+    nested scope.
     """
 
     def get_route_handler(self):

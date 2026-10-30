@@ -1,8 +1,6 @@
 """Strict parser for the existing hash-covered setup guidance document.
 
-Format and behavior are selectively extracted from Agent 0924f7946b's
-``agent_led/setup_document.py`` and setup guidance models. Publisher prose is
-data only; parsing it never grants execution authority.
+Publisher prose is data only; parsing it never grants execution authority.
 """
 
 from __future__ import annotations
