@@ -20,6 +20,9 @@ You stay in control at every step:
 - Hermes Agent 0.21.5 or newer.
 - A Nous account in a team that has Collective Wisdom enabled. Personal accounts do not have access.
 - Linux or macOS for installing skills. Windows is not supported for managed skill installation.
+- Plugins loaded in the Hermes process (`plugins.isolation: in_process`, the default). The native
+  Slack and Telegram cards need the Hermes process, so with `plugins.isolation: host` Hermes does not
+  load Collective Wisdom.
 
 ## Install
 
