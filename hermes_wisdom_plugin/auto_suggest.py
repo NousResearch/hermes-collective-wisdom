@@ -116,18 +116,23 @@ def host_forks(ctx: Any) -> bool:
         getattr(ctx, "has_capability", None))
 
 
-def review_due(signals: Mapping[str, Any]) -> bool:
+def review_due(signals: Any) -> bool:
     """Core's skill-review cadence from ``post_llm_call``'s ``review_signals``.
 
     Due only when background review is on, the skill nudge interval is positive and
     core decided the skill review is due on this turn (the same flag its own review uses).
+    A missing key, a value of another type or an unreadable mapping means not due.
     """
-    try:
-        interval = int(signals.get("skill_nudge_interval") or 0)
-    except (TypeError, ValueError):
+    if not isinstance(signals, Mapping):
         return False
-    return (signals.get("background_review_enabled") is True and interval > 0
-            and signals.get("skill_review_due") is True)
+    try:
+        interval = signals.get("skill_nudge_interval", 0)
+        enabled = signals.get("background_review_enabled", False)
+        due = signals.get("skill_review_due", False)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+    return (enabled is True and due is True and isinstance(interval, int)
+            and not isinstance(interval, bool) and interval > 0)
 
 
 def _not_viable(controller: "AutoSuggest", name: str, action: str, facts: Any,
@@ -567,9 +572,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             logger.warning("Collective Wisdom suggestion check could not start", exc_info=True)
 
     def _cadence_due(self, facts: Mapping[str, Any], state: dict[str, Any]) -> bool:
-        """Core's review cadence when the host sends it; else this plugin's tool-call count."""
+        """Core's review cadence when the host sends it; else this plugin's tool-call count.
+
+        Signals the host sent but this plugin cannot read mean not due, never the counter.
+        """
         signals = facts.get("review_signals")
-        if isinstance(signals, Mapping):
+        if signals is not None:
             return review_due(signals)
         interval = self.self_learning()
         with self._lock:

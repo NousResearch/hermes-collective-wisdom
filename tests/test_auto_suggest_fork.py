@@ -363,6 +363,37 @@ def test_review_signals_decide_the_cadence(tmp_path, signals, fires):
     assert review_due(signals) is fires
 
 
+class _UnreadableSignals(dict):
+    """A mapping whose reads fail, as a later core's mapping type might."""
+
+    def get(self, key, default=None):
+        raise RuntimeError(f"cannot read {key}")
+
+
+@pytest.mark.parametrize("signals", [
+    {},
+    {"skill_review_due": True},
+    {"skill_review_due": True, "background_review_enabled": True},
+    {**DUE, "skill_nudge_interval": "5"},
+    {**DUE, "skill_nudge_interval": True},
+    {**DUE, "skill_nudge_interval": 2.5},
+    {**DUE, "skill_nudge_interval": None},
+    {**DUE, "skill_review_due": 1},
+    {**DUE, "background_review_enabled": "true"},
+    [("skill_review_due", True)],
+    "due",
+    7,
+    _UnreadableSignals(DUE),
+])
+def test_unreadable_review_signals_mean_not_due_and_never_raise(tmp_path, signals):
+    host = _Host(tmp_path)
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=signals, tools=50)  # Signals were sent: the counter is not used.
+    assert not host.forks and not host.asked and not controller._busy
+    assert review_due(signals) is False
+
+
 def test_review_signals_replace_the_plugin_counter_and_config_read(tmp_path):
     host = _Host(tmp_path)
     host.interval = 0  # Would turn the counter path off; the signals win.
