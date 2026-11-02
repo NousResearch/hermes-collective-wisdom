@@ -9,7 +9,9 @@ input_budget, task, timeout)`` returns a handle (``done``, ``outcome``, ``result
 
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +57,7 @@ class _Host(_Fake):
         self.fork_results: list = []
         self.fork_outcome = "ok"
         self.fork_returns_none = False
+        self.fork_raises: Exception | None = None
         self.handles: list[_Handle] = []
         self.handle_done = True
         self.origin = ORIGIN  # What core passes the plugin's tool inside the fork.
@@ -68,6 +71,8 @@ class _Host(_Fake):
         self.forks.append({"token": token, "prompt": prompt, "tools": tuple(tools),
                            "max_iterations": max_iterations, "input_budget": input_budget,
                            "task": task, "timeout": timeout})
+        if self.fork_raises is not None:
+            raise self.fork_raises
         if self.fork_returns_none:
             return None
         assert self.live is not None
@@ -298,6 +303,34 @@ def test_a_new_process_tries_the_fork_again(tmp_path):
     _turn(first, signals=DUE)
     host.fork_returns_none = False
     assert host.build().mode() == "fork"
+
+
+class _HostUnsupported(RuntimeError):
+    """What an isolated plugin host raises for ``ctx.fork_session``."""
+
+
+@pytest.mark.parametrize("error", [_HostUnsupported("no forks in the plugin host"),
+                                   ValueError("bad"), TypeError("changed signature")])
+def test_a_fork_call_that_raises_is_a_refused_fork(tmp_path, error):
+    host = _Host(tmp_path)
+    host.fork_raises = error
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    assert len(host.forks) == 1 and len(host.asked) == 1  # Same turn, same token.
+    assert host.injected == [(approval_prompt("incident"), "user", {})]
+    assert controller.mode() == "side_question" and not controller._busy
+
+
+def test_no_fork_handle_outlives_the_check(tmp_path):
+    host = _Host(tmp_path)
+    controller = host.build()
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    handle = weakref.ref(host.handles.pop())
+    gc.collect()
+    assert handle() is None, "the controller keeps no fork handle after the check"
+    assert len(host.injected) == 1
 
 
 def test_refused_fork_without_the_side_question_grant_asks_again_later(tmp_path):

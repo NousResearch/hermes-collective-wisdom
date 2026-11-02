@@ -10,8 +10,8 @@ whether the skill is worth sharing, the same way Hermes runs its background revi
   the session agent sees the candidates and may call ``wisdom_share_suggestion``
   once, for one of them. That call records the suggestion; delivery starts when the
   fork has ended.
-- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable or the
-  host refused it (then until restart): one
+- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable, or the host
+  refused it or could not start it (then until restart): one
   JSON verdict about the first candidate.
 - Otherwise off.
 
@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
+from .session_fork import REFUSED, ForkRunner
 from .setup_lock import managed_operation_guard
 from .share_suggest import _inject, hermes_command
 from .top_command import private_route
@@ -449,6 +450,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self.store = store
         self.side_question = side_question
         self.fork_session = fork_session
+        self._forks = ForkRunner()
         self.fork_task = fork_task
         self.fork_origin = f"plugin_fork:{plugin_id}"
         self.has_capability = has_capability
@@ -707,7 +709,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             if suggested is not None:
                 self._deliver(offer["skills"][suggested], str(offer.get("reason") or ""),
                               session_id, route)
-            if outcome == "refused" and self._side_question_ready():
+            if outcome == REFUSED and self._side_question_ready():
                 self._fork_refused = True
                 logger.info("Collective Wisdom: the host refused the suggestion fork; "
                             "using the side question until restart")
@@ -729,17 +731,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             self._release()
 
     def _run_fork(self, token: str, offered: list[dict[str, Any]]) -> str:
-        """Start the fork with only this plugin's tool and wait for its outcome."""
-        fork = self.fork_session
-        handle = None if fork is None else fork(
-            token, fork_prompt(offered), tools=(TOOL,), max_iterations=FORK_MAX_ITERATIONS,
-            task=self.fork_task, timeout=FORK_TIMEOUT,
-        )
-        if handle is None:
-            return "refused"
-        if not handle.wait(FORK_TIMEOUT + 30.0):
-            handle.cancel()  # Still deferred or stuck: give up; the next due turn may retry.
-        return str(getattr(handle, "outcome", "") or "error")
+        """Run the fork with only this plugin's tool; its outcome (``refused`` when none ran)."""
+        return self._forks.run(
+            self.fork_session, token, fork_prompt(offered), wait=FORK_TIMEOUT + 30.0,
+            tools=(TOOL,), max_iterations=FORK_MAX_ITERATIONS, task=self.fork_task,
+            timeout=FORK_TIMEOUT,
+        )["outcome"]
 
     def _settle(self, offer: dict[str, Any], outcome: str) -> None:
         """A finished fork judged every offered skill; an interrupted one judged none."""
