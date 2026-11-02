@@ -21,6 +21,7 @@ from hermes_wisdom_plugin.auto_suggest import (
     CAPABILITY, FORK_CAPABILITY, FORK_TASK, TOOL, AutoSuggest,
     approval_prompt, host_forks, host_supports, local_card, review_due,
 )
+from hermes_wisdom_plugin.session_fork import REFUSED
 
 ORIGIN = "plugin_fork:collective-wisdom"
 
@@ -471,6 +472,61 @@ def test_closed_controller_refuses_the_fork_tool(tmp_path):
     controller.close()
     with pytest.raises(PermissionError):
         controller.tool({"skill": "incident"}, turn_origin=ORIGIN, session_id="s1")
+
+
+class _UnloadedWhileRunning(_Handle):
+    """A queued or running fork; the plugin unloads while the check waits on it."""
+
+    def __init__(self, outcome, actions, unload, events):
+        super().__init__(outcome, actions)
+        self.done = False
+        self.unload, self.events = unload, events
+
+    def wait(self, timeout=None):
+        self.events.append("wait")
+        self.unload()
+        return self.done
+
+    def cancel(self):
+        self.events.append("cancel")
+        self.cancelled_by_plugin = True
+        self.done, self.outcome = True, "cancelled"
+
+
+@pytest.mark.parametrize("outcome", ["deferred", "running"])
+def test_unload_cancels_the_plugins_queued_or_running_fork(tmp_path, outcome):
+    host = _Host(tmp_path)
+    controller = host.build()
+    events: list[str] = []
+
+    def unload():
+        events.append("unload")
+        controller.close()
+        events.append("unloaded")
+
+    def fork(token, prompt, **options):
+        plain = host.fork_session(token, prompt, **options)  # The fork suggests "incident".
+        return _UnloadedWhileRunning(outcome, plain.actions, unload, events)
+
+    controller.fork_session = fork
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    assert events == ["wait", "unload", "cancel", "unloaded"], "cancelled by the unload itself"
+    assert not host.injected, "an unloaded plugin starts no turn"
+    assert not host.asked and not controller._busy
+    assert not host.store.seen("incident", "sha-i")  # Asked again after a reload.
+    assert ("not_shown", "incident") in _events(host)
+    assert controller._forks.running() == 0
+
+
+def test_after_unload_no_fork_starts(tmp_path):
+    host = _Host(tmp_path)
+    controller = host.build()
+    _learn(controller)
+    controller.close()
+    _turn(controller, signals=DUE)
+    assert controller._forks.run(host.fork_session, "tok", "p", wait=1.0)["outcome"] == REFUSED
+    assert not host.forks and not host.asked and not host.injected
 
 
 def test_host_detection():
