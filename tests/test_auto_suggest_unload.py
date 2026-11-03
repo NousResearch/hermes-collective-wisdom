@@ -61,6 +61,29 @@ def test_unload_during_delivery_injects_nothing_and_rolls_back(tmp_path, boundar
     assert not controller._busy
 
 
+def test_an_unload_after_a_reservation_that_crossed_midnight_gives_that_day_back(tmp_path):
+    host = _Host(tmp_path)
+    controller = host.build()
+    store = host.store
+    reserve, before = store.reserve_today, store.clock
+
+    def reserve_after_midnight(limit):
+        store.clock = lambda: before() + 86400.0  # midnight passes between the two clock reads
+        reserved = reserve(limit)
+        controller.close()
+        return reserved
+
+    store.reserve_today = reserve_after_midnight
+    _learn(controller)
+    _turn(controller, signals=DUE)
+    snapshot, reasons = _state(host)
+    assert not host.injected
+    assert snapshot["pending"] == {}
+    assert snapshot["day"]["date"] == auto_suggest._day(store.clock)
+    assert int(snapshot["day"].get("shown") or 0) == 0, "the day that was counted is given back"
+    assert reasons == ["unloaded"]
+
+
 def test_delivery_without_unload_is_unchanged(tmp_path):
     host = _Host(tmp_path)
     controller = host.build()

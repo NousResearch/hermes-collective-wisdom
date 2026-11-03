@@ -276,15 +276,16 @@ class SuggestionStore:
             return limit > 0
         return not day.get("blocked") and int(day.get("shown") or 0) < limit
 
-    def reserve_today(self, limit: int) -> bool:
-        """Atomically count one suggestion against today's limit."""
+    def reserve_today(self, limit: int) -> str | None:
+        """Atomically count one suggestion against today's limit; the day it was counted on, or
+        ``None`` when the limit is reached. Give it back with ``unreserve`` on that same day."""
         with self.change() as value:
             today = _day(self.clock)
             day = value["day"] if value["day"].get("date") == today else {"date": today}
             if day.get("blocked") or int(day.get("shown") or 0) >= limit:
-                return False
+                return None
             value["day"] = {**day, "shown": int(day.get("shown") or 0) + 1}
-            return True
+            return today
 
     def block_today(self) -> None:
         """No more attempts today (delivery was denied or unavailable)."""
@@ -794,8 +795,8 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         name, content_hash = chosen["name"], chosen["content_hash"]
         if self._closed:  # Unloaded while asking: start no turn; ask again after a reload.
             return self._unloaded(name, content_hash)
-        reserved_day = _day(self.clock)
-        if not self.store.reserve_today(self._daily_limit()):
+        reserved_day = self.store.reserve_today(self._daily_limit())
+        if reserved_day is None:
             self.store.forget_seen(name, content_hash)
             self.store.record("not_shown", name, why="daily_limit")
             return False
