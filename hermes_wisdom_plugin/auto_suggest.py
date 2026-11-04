@@ -10,8 +10,8 @@ whether the skill is worth sharing, the same way Hermes runs its background revi
   the session agent sees the candidates and may call ``wisdom_share_suggestion``
   once, for one of them. That call records the suggestion; delivery starts when the
   fork has ended.
-- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable or the
-  host refused it (then until restart): one
+- ``ctx.side_question`` (``llm.side_question``) when the fork is unavailable, or the host
+  refused it or could not start it (then until restart): one
   JSON verdict about the first candidate.
 - Otherwise off.
 
@@ -31,8 +31,10 @@ user granted its capability; self-learning is on; the plugin setting
 CLI, TUI or Desktop session or a private Slack or Telegram chat. At most
 ``auto_suggest_daily_limit`` (default 1) suggestions are shown per profile per
 day, a skill revision is asked about once, and a skill the owner chose
-"Never for this skill" for is not suggested again until they allow it.
+"Never for this skill" for is not suggested again until they allow it. Once
+the plugin starts unloading, no suggestion turn starts.
 """
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -50,6 +52,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
+from .delivery_fence import DeliveryFence
+from .session_fork import REFUSED, ForkRunner
 from .setup_lock import managed_operation_guard
 from .share_suggest import _inject, hermes_command
 from .top_command import private_route
@@ -71,6 +75,7 @@ DAILY_LIMIT_SETTING = "auto_suggest_daily_limit"
 DEFAULT_DAILY_LIMIT = 1
 PENDING_TTL_SECONDS = 30 * 60
 SIDE_QUESTION_TIMEOUT = 20.0
+CLOSE_DELIVERY_WAIT = 5.0  # Unload waits this long for an inject the host already started.
 NATIVE_PLATFORMS = frozenset({"slack", "telegram"})
 LOCAL_SURFACES = frozenset({"cli", "tui", "desktop"})
 _CREATED = frozenset({"created", "patched", "edited"})
@@ -115,18 +120,23 @@ def host_forks(ctx: Any) -> bool:
         getattr(ctx, "has_capability", None))
 
 
-def review_due(signals: Mapping[str, Any]) -> bool:
+def review_due(signals: Any) -> bool:
     """Core's skill-review cadence from ``post_llm_call``'s ``review_signals``.
 
     Due only when background review is on, the skill nudge interval is positive and
     core decided the skill review is due on this turn (the same flag its own review uses).
+    A missing key, a value of another type or an unreadable mapping means not due.
     """
-    try:
-        interval = int(signals.get("skill_nudge_interval") or 0)
-    except (TypeError, ValueError):
+    if not isinstance(signals, Mapping):
         return False
-    return (signals.get("background_review_enabled") is True and interval > 0
-            and signals.get("skill_review_due") is True)
+    try:
+        interval = signals.get("skill_nudge_interval", 0)
+        enabled = signals.get("background_review_enabled", False)
+        due = signals.get("skill_review_due", False)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+    return (enabled is True and due is True and isinstance(interval, int)
+            and not isinstance(interval, bool) and interval > 0)
 
 
 def _not_viable(controller: "AutoSuggest", name: str, action: str, facts: Any,
@@ -266,15 +276,16 @@ class SuggestionStore:
             return limit > 0
         return not day.get("blocked") and int(day.get("shown") or 0) < limit
 
-    def reserve_today(self, limit: int) -> bool:
-        """Atomically count one suggestion against today's limit."""
+    def reserve_today(self, limit: int) -> str | None:
+        """Atomically count one suggestion against today's limit; the day it was counted on, or
+        ``None`` when the limit is reached. Give it back with ``unreserve`` on that same day."""
         with self.change() as value:
             today = _day(self.clock)
             day = value["day"] if value["day"].get("date") == today else {"date": today}
             if day.get("blocked") or int(day.get("shown") or 0) >= limit:
-                return False
+                return None
             value["day"] = {**day, "shown": int(day.get("shown") or 0) + 1}
-            return True
+            return today
 
     def block_today(self) -> None:
         """No more attempts today (delivery was denied or unavailable)."""
@@ -282,6 +293,14 @@ class SuggestionStore:
             today = _day(self.clock)
             day = value["day"] if value["day"].get("date") == today else {"date": today}
             value["day"] = {**day, "blocked": True}
+
+    def unreserve(self, suggestion_id: str, day: str) -> None:
+        """Undo a delivery that never started: drop its pending row and its count on ``day``."""
+        with self.change() as value:
+            value["pending"].pop(suggestion_id, None)
+            counted = value["day"]
+            if counted.get("date") == day and int(counted.get("shown") or 0) > 0:
+                value["day"] = {**counted, "shown": int(counted["shown"]) - 1}
 
     # Pending suggestions waiting for the model's tool call.
     def add_pending(self, suggestion: dict[str, Any]) -> None:
@@ -449,6 +468,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self.store = store
         self.side_question = side_question
         self.fork_session = fork_session
+        self._forks = ForkRunner()
         self.fork_task = fork_task
         self.fork_origin = f"plugin_fork:{plugin_id}"
         self.has_capability = has_capability
@@ -464,6 +484,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self.start = start or _thread
         self.clock = clock
         self._lock = threading.Lock()
+        self._fence = DeliveryFence()  # No inject starts once close() has begun.
         self._sessions: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._offer: dict[str, Any] | None = None  # The running fork's candidates.
         self._busy = False
@@ -473,11 +494,22 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self._fork_refused = False
 
     def close(self) -> None:
-        """Forget in-memory counters; later hooks do nothing."""
+        """Forget in-memory counters and cancel this plugin's forks; later hooks do nothing.
+
+        No inject starts once close() has begun; it waits up to ``CLOSE_DELIVERY_WAIT`` seconds
+        for one the host was already running (see DeliveryFence).
+        """
+        self._fence.shut()
         with self._lock:
             self._closed = True
             self._sessions.clear()
             self._offer = None
+        cancelled = self._forks.cancel_all()
+        if cancelled:
+            logger.info("Collective Wisdom: cancelled %d suggestion fork(s) on unload", cancelled)
+        if not self._fence.drain(CLOSE_DELIVERY_WAIT):
+            logger.warning("Collective Wisdom: unloaded while the host was still injecting a "
+                           "suggestion it received before unload")
 
     def available(self) -> bool:
         """Tool reachability for the host."""
@@ -565,9 +597,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             logger.warning("Collective Wisdom suggestion check could not start", exc_info=True)
 
     def _cadence_due(self, facts: Mapping[str, Any], state: dict[str, Any]) -> bool:
-        """Core's review cadence when the host sends it; else this plugin's tool-call count."""
+        """Core's review cadence when the host sends it; else this plugin's tool-call count.
+
+        Signals the host sent but this plugin cannot read mean not due, never the counter.
+        """
         signals = facts.get("review_signals")
-        if isinstance(signals, Mapping):
+        if signals is not None:
             return review_due(signals)
         interval = self.self_learning()
         with self._lock:
@@ -707,7 +742,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             if suggested is not None:
                 self._deliver(offer["skills"][suggested], str(offer.get("reason") or ""),
                               session_id, route)
-            if outcome == "refused" and self._side_question_ready():
+            if outcome == REFUSED and self._side_question_ready() and not self._closed:
                 self._fork_refused = True
                 logger.info("Collective Wisdom: the host refused the suggestion fork; "
                             "using the side question until restart")
@@ -729,17 +764,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             self._release()
 
     def _run_fork(self, token: str, offered: list[dict[str, Any]]) -> str:
-        """Start the fork with only this plugin's tool and wait for its outcome."""
-        fork = self.fork_session
-        handle = None if fork is None else fork(
-            token, fork_prompt(offered), tools=(TOOL,), max_iterations=FORK_MAX_ITERATIONS,
-            task=self.fork_task, timeout=FORK_TIMEOUT,
-        )
-        if handle is None:
-            return "refused"
-        if not handle.wait(FORK_TIMEOUT + 30.0):
-            handle.cancel()  # Still deferred or stuck: give up; the next due turn may retry.
-        return str(getattr(handle, "outcome", "") or "error")
+        """Run the fork with only this plugin's tool; its outcome (``refused`` when none ran)."""
+        return self._forks.run(
+            self.fork_session, token, fork_prompt(offered), wait=FORK_TIMEOUT + 30.0,
+            tools=(TOOL,), max_iterations=FORK_MAX_ITERATIONS, task=self.fork_task,
+            timeout=FORK_TIMEOUT,
+        )["outcome"]
 
     def _settle(self, offer: dict[str, Any], outcome: str) -> None:
         """A finished fork judged every offered skill; an interrupted one judged none."""
@@ -763,7 +793,10 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
     def _deliver(self, chosen: dict[str, Any], reason: str, session_id: str,
                  route: dict[str, Any]) -> bool:
         name, content_hash = chosen["name"], chosen["content_hash"]
-        if not self.store.reserve_today(self._daily_limit()):
+        if self._closed:  # Unloaded while asking: start no turn; ask again after a reload.
+            return self._unloaded(name, content_hash)
+        reserved_day = self.store.reserve_today(self._daily_limit())
+        if reserved_day is None:
             self.store.forget_seen(name, content_hash)
             self.store.record("not_shown", name, why="daily_limit")
             return False
@@ -775,12 +808,17 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             "expires_at": self.clock() + PENDING_TTL_SECONDS,
         }
         self.store.add_pending(suggestion)
+        if not self._fence.enter():  # Unloaded since the check above: undo the reservation.
+            self.store.unreserve(suggestion["id"], reserved_day)
+            return self._unloaded(name, content_hash)
         accepted = False
-        if callable(self.inject):
-            try:
+        try:
+            if callable(self.inject):
                 accepted = _inject(self.inject, approval_prompt(name), route)
-            except Exception:  # pylint: disable=broad-exception-caught
-                accepted = False
+        except Exception:  # pylint: disable=broad-exception-caught
+            accepted = False
+        finally:
+            self._fence.leave()
         if accepted:
             self.store.record("injected", name, surface=route.get("platform"))
             return True
@@ -789,6 +827,12 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self.store.forget_seen(name, content_hash)
         self.store.block_today()
         self.store.record("not_shown", name, why="injection_unavailable")
+        return False
+
+    def _unloaded(self, name: str, content_hash: str) -> bool:
+        """No turn after unload; the revision is asked about again after a reload."""
+        self.store.forget_seen(name, content_hash)
+        self.store.record("not_shown", name, why="unloaded")
         return False
 
     # Model tool ----------------------------------------------------------------------------

@@ -181,6 +181,9 @@ def test_fork_host_registers_the_suggestion_task_on_background_review(tmp_path, 
         assert controller.fork_origin == "plugin_fork:collective-wisdom"
         assert controller.mode() == "fork" and not forks
         entries["unload"]()
+        assert controller._forks.run(  # pylint: disable=protected-access
+            context.fork_session, "tok", "p", wait=1.0)["outcome"] == "refused"
+        assert not forks, "on_unload closes the fork runner: nothing new starts"
     finally:
         _unload(module_name)
 

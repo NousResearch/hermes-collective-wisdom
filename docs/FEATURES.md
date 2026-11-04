@@ -123,10 +123,12 @@ Which path runs is decided per turn, from the grants:
 | no | yes | side question |
 | no | no | off |
 
-When the host refuses a fork (`fork_session` returns None), the same turn asks by side
+When the host refuses a fork (`fork_session` returns None or raises), the same turn asks by side
 question when `llm.side_question` is granted, with the same token. A refused fork may already
 have spent that token: no answer then leaves the skill pending, not declined. The process uses
-the side question from then on; a restart tries the fork again.
+the side question from then on; a restart tries the fork again. The isolated plugin host
+(`plugins.isolation: host`) does not load the plugin at all: `register_platform_handler` and
+`register_telegram_handler` raise there, before any suggestion hook is registered.
 
 Cadence:
 
