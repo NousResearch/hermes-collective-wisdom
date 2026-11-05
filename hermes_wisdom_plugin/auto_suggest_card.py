@@ -125,3 +125,85 @@ def _confirm(controller: Any, record: dict[str, Any], service: Any,
 
 
 OPERATION_CARDS[OPERATION] = OperationCard(auto_suggest_view, act_auto_suggest)
+
+
+# The same card in the Desktop chat (the plugin's ``::wisdom-share{id="..."}`` directive).
+# The suggestion row in the SuggestionStore is the card's only record; the copy is the
+# messaging card's, projected from ``auto_suggest_view``.
+DESKTOP_SOURCE = "desktop"
+DESKTOP_CHOICES = {SHARE: "share", DISMISS: "dismiss", NEVER: "never"}
+
+
+def _desktop_open(store: SuggestionStore, row: dict[str, Any]) -> bool:
+    return (row.get("state") == "presented" and row.get("expires_at", 0) > store.clock()
+            and not store.suppressed(str(row.get("skill") or "")))
+
+
+def _desktop_record(store: SuggestionStore, row: dict[str, Any]) -> dict[str, Any]:
+    """The native record ``auto_suggest_view`` projects for this suggestion row."""
+    plan = card_plan(row)
+    if _desktop_open(store, row):
+        return {"state": "pending", "plan": plan}
+    if row.get("state") == "dismissed":
+        return {"state": "completed", "plan": plan, "result": {"choice": "dismiss"}}
+    if row.get("state") == "never" or store.suppressed(plan["skill_name"]):
+        return {"state": "completed", "plan": plan, "result": {"choice": "never"}}
+    return {"state": "closed", "plan": plan}
+
+
+def _view_json(view: NativeView) -> dict[str, Any]:
+    return {
+        "title": view.title, "summary": view.summary, "notice": view.notice,
+        "items": [{"title": item.title, "detail": item.detail} for item in view.items],
+        "actions": [{"label": action.label, "choice": DESKTOP_CHOICES.get(action.action or "", ""),
+                     "primary": action.primary} for action in view.actions],
+    }
+
+
+def desktop_card(store: SuggestionStore, row: dict[str, Any]) -> dict[str, Any]:
+    """The card the Desktop chat shows for one suggestion row, in the messaging card's words."""
+    if row.get("state") == "confirmed":
+        # Surface-specific: on Desktop the share review opens on the Collective Wisdom page.
+        name = _safe(clean_text(row.get("skill"), 64))
+        return {"state": "confirmed", "draft_id": str(row.get("draft_id") or ""), "skill": name,
+                **_view_json(NativeView(
+                    "Hermes Collective Wisdom", f"{name}: you chose Confirm share.",
+                    notice="Nothing is shared until you approve the share review."))}
+    record = _desktop_record(store, row)
+    return {"state": "pending" if record["state"] == "pending" else "settled",
+            **_view_json(auto_suggest_view(record))}
+
+
+def desktop_answer(store: SuggestionStore, row: dict[str, Any], choice: str,
+                   prepare: Any) -> dict[str, Any]:
+    """Apply one owner choice from the Desktop card exactly once.
+
+    Don't share and Never write what ``/wisdom suggestions dismiss|never`` write. Confirm share
+    prepares the private draft through ``prepare(skill)`` (the Desktop share path), keeps it
+    on the row, and the plugin opens its review; a failed preparation leaves the card open.
+    """
+    if choice not in DESKTOP_CHOICES.values():
+        raise WisdomValidationError("Collective Wisdom action was not recognized")
+    suggestion_id, name = str(row["id"]), str(row.get("skill") or "")
+    content_hash = str(row.get("content_hash") or "")
+    claimed = {"dismiss": "dismissed", "never": "never", "share": "preparing"}[choice]
+    if not _desktop_open(store, row) or store.transition(
+            suggestion_id, "presented", claimed) is None:
+        raise WisdomConflict("Collective Wisdom suggestion is no longer open")
+    if choice == "dismiss":
+        store.dismiss(name, content_hash, source=DESKTOP_SOURCE)
+    elif choice == "never":
+        store.set_suppressed(name, True, source=DESKTOP_SOURCE)
+    else:
+        try:
+            draft = prepare(name)
+            draft_id = str((draft or {}).get("draft_id") or "")
+            if not draft_id:
+                raise WisdomValidationError("Collective Wisdom draft was not prepared")
+        except Exception:
+            store.transition(suggestion_id, "preparing", "presented")
+            raise
+        store.transition(suggestion_id, "preparing", "confirmed", draft_id=draft_id)
+        store.record("choice", name, choice="share", source=DESKTOP_SOURCE)
+    current = store.get(suggestion_id)
+    return desktop_card(store, current if current is not None else row)

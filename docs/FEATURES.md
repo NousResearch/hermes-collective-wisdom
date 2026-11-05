@@ -173,7 +173,13 @@ Cadence:
    Called by the live agent (no `turn_origin`), the tool never proposes anything.
    That tool claims the one pending suggestion of the same conversation exactly
    once and shows the card: a native Slack/Telegram card in private chats, or a
-   text card in the CLI, TUI and Desktop. When injection is denied or unavailable,
+   text card in the CLI, TUI and Desktop. On Desktop, while the Desktop plugin has checked
+   in for the profile (`POST /suggestions/desktop-card`, every 4 minutes, valid 10), the tool
+   instead returns the transcript directive `::wisdom-share{id="<id>"}`; the plugin renders it
+   as the same three-choice card, with the messaging card's copy, bound to the chat the
+   suggestion was made in (`GET /suggestions/{id}`, `POST /suggestions/{id}/choice`, route
+   group `suggestions`; the candidates tab stays off). Confirm share prepares the private
+   draft and opens its review on the Collective Wisdom page. When injection is denied or unavailable,
    nothing is recorded as dismissed and no further attempt is made that day.
 
 The card offers exactly **Confirm share**, **Don't share** and **Never for this

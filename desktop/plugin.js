@@ -23,11 +23,18 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
+// Areas newer than the oldest supported Desktop are read from the namespace: a named import of
+// an export the host lacks would stop the whole plugin from loading.
+import * as pluginSdk from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const WISDOM_ROUTE = '/collective-wisdom'
 const ROOT_KEY = ['collective-wisdom']
+// The model writes `::wisdom-share{id="..."}` when the backend knows this plugin renders it.
+const SHARE_DIRECTIVE = 'wisdom-share'
+const SUGGESTION_ID = /^[A-Za-z0-9_-]{8,64}$/
+const CHECK_IN_MS = 4 * 60 * 1000
 
 const text = value => (value == null ? '' : String(value))
 const label = item => {
@@ -46,6 +53,8 @@ const isAuthError = error => error?.status === 401 || error?.statusCode === 401 
 // Electron IPC may preserve only the HTTP error message, not statusCode.
 const isUnavailable = error => error?.status === 503 || error?.statusCode === 503 || /\b503\b/.test(text(error?.message))
 const UNAVAILABLE_MESSAGE = 'Collective Wisdom is temporarily unavailable.'
+// errors.STALE_CONTROL_MESSAGE, the line Slack and Telegram show for a control no longer offered.
+const STALE_CONTROL_MESSAGE = 'This control is no longer available. Run /wisdom share <skill> again.'
 
 function ReadFailure({ error, onRetry, title }) {
   return jsxs('div', { className: 'space-y-3', children: [
@@ -1021,6 +1030,11 @@ function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) 
     setReview(null)
     setOutcome(null)
   }
+  // A chat card's Confirm share prepared this draft: open it like Resume.
+  useShareHandoff(lifecycle, () => {
+    const offered = shareHandoff.take(lifecycle)
+    if (offered?.draft_id) acceptDraft({ draft_id: offered.draft_id, name: offered.name })
+  })
   const prepareCandidate = useCurrentMutation(client, lifecycle, async item => ({
     ...await client.rest(`/candidates/${encodeURIComponent(item.event_id)}/prepare`, {
       method: 'POST', body: requestBody(viewId)
@@ -1217,6 +1231,101 @@ function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) 
   ] })
 }
 
+// Confirm share on a chat card prepares the private draft; the page opens its review the same
+// way Resume opens a saved draft. Bound to the connection and profile that prepared it.
+const shareHandoff = {
+  value: null,
+  listeners: new Set(),
+  offer(value) { this.value = value; for (const listener of this.listeners) listener() },
+  matches(identity) {
+    return Boolean(this.value && this.value.connectionId === identity.connectionId && this.value.profile === identity.profile)
+  },
+  take(identity) {
+    if (!this.matches(identity)) return null
+    const value = this.value
+    this.value = null
+    return value
+  },
+  subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+}
+
+function useShareHandoff(identity, onOffer) {
+  const latest = useRef(onOffer)
+  latest.current = onOffer
+  useEffect(() => {
+    const check = () => { if (shareHandoff.matches(identity)) latest.current() }
+    check()
+    return shareHandoff.subscribe(check)
+  }, [identity.connectionId, identity.profile])
+}
+
+function SuggestionCardView({ busy, card, onChoose, onOpen }) {
+  const items = Array.isArray(card?.items) ? card.items : []
+  const actions = Array.isArray(card?.actions) ? card.actions : []
+  return jsxs('section', { 'data-testid': 'wisdom-share-card', className: 'my-2 max-w-xl space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
+    jsx('h3', { className: 'text-sm font-semibold text-(--ui-text-primary)', children: text(card?.title) }),
+    card?.summary ? jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: text(card.summary) }) : null,
+    ...items.map((item, index) => jsxs('div', { className: 'space-y-1', children: [
+      jsx('div', { className: 'text-sm font-medium', children: text(item?.title) }),
+      ...text(item?.detail).split('\n').filter(Boolean).map((line, at) =>
+        jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: line }, at))
+    ] }, index)),
+    actions.length ? jsx('div', { className: 'flex flex-wrap gap-2 pt-1', children: actions.map(action =>
+      jsx(Button, { disabled: busy, onClick: () => onChoose(action.choice), size: 'sm', type: 'button', variant: action.primary ? 'default' : 'secondary', children: text(action.label) }, action.choice)
+    ) }) : null,
+    card?.state === 'confirmed' && onOpen
+      ? jsx(Button, { onClick: onOpen, size: 'sm', type: 'button', variant: 'secondary', children: 'Open share review' }) : null,
+    card?.notice ? jsx('p', { className: 'text-xs text-(--ui-text-quaternary)', children: text(card.notice) }) : null
+  ] })
+}
+
+function ShareSuggestionCard({ attrs, client, sessionId, streaming }) {
+  const connectionId = useValue(host.state.connectionId) || ''
+  const profile = useValue(host.state.profile) || 'default'
+  const gateway = useValue(host.state.gateway) || 'unknown'
+  const tracker = useRef({ generation: 0, gateway: null, manualGeneration: -1, mounted: true, signature: null }).current
+  tracker.mounted = true
+  const lifecycle = { ...lifecycleFor({ connectionId, profile }, gateway, 0, tracker), mounted: () => tracker.mounted }
+  useEffect(() => () => { tracker.mounted = false }, [tracker])
+  const [answered, setAnswered] = useState(null)
+  // Attributes are model output: only an id of the shape the backend issues is used. Hosts before
+  // the owning-chat prop omit sessionId; the focused chat is used and the backend still refuses
+  // any chat other than the one the suggestion was made in.
+  const id = typeof attrs?.id === 'string' && SUGGESTION_ID.test(attrs.id) ? attrs.id : null
+  const owner = sessionId === undefined
+    ? host.state.focusedStoredSessionId?.get?.() || host.state.focusedSessionId?.get?.()
+    : sessionId
+  const session = typeof owner === 'string' && owner ? owner : null
+  const ready = !streaming && Boolean(id && session && connectionId) && gateway === 'open' && client.active()
+  const key = ['share-card', lifecycle.key, session, id]
+  // A fresh owner-bound view for each read and each answer: the card can sit in the transcript
+  // longer than a view lives.
+  const freshView = async () => (await client.rest('/views', { method: 'POST' })).view_id
+  const card = useQuery(queryOptions(key, async () => client.rest(
+    `/suggestions/${encodeURIComponent(id)}?view_id=${encodeURIComponent(await freshView())}&session_id=${encodeURIComponent(session)}`
+  ), ready))
+  const openReview = value => {
+    shareHandoff.offer({ connectionId, profile, draft_id: value.draft_id, name: text(value.skill) })
+    host.navigate(WISDOM_ROUTE)
+  }
+  const choose = useCurrentMutation(client, lifecycle, async choice => client.rest(`/suggestions/${encodeURIComponent(id)}/choice`, {
+    method: 'POST', body: requestBody(await freshView(), { session_id: session, choice })
+  }), value => {
+    setAnswered(value)
+    if (value?.state === 'confirmed' && value.draft_id) openReview(value)
+  }, "Couldn't complete that. Please try again.", () => card.refetch())
+  if (!ready) return null
+  // Unknown here, another chat's or no longer current: the messaging cards' stale-control line.
+  if (card.error) return jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: isUnavailable(card.error) ? UNAVAILABLE_MESSAGE : STALE_CONTROL_MESSAGE })
+  const shown = answered || card.data
+  if (!shown) return null
+  return jsx(SuggestionCardView, {
+    busy: choose.isPending, card: shown,
+    onChoose: choice => { if (['share', 'dismiss', 'never'].includes(choice)) choose.mutate(choice) },
+    onOpen: shown.state === 'confirmed' && shown.draft_id ? () => openReview(shown) : null
+  })
+}
+
 function Enrollment({ client, lifecycle, viewId }) {
   const queryClient = useQueryClient()
   const [accepted, setAccepted] = useState(false)
@@ -1324,6 +1433,7 @@ function WisdomPage({ client }) {
   tracker.mounted = true
   const lifecycle = { ...lifecycleFor({ connectionId, profile }, gateway, manualGeneration, tracker), mounted: () => tracker.mounted }
   const [tab, setTab] = useState('catalog')
+  useShareHandoff({ connectionId, profile }, () => setTab('contribute'))
   const available = client.active() && Boolean(connectionId) && gateway === 'open'
   const view = useQuery(queryOptions(['view', lifecycle.key], () => client.rest('/views', { method: 'POST' }), available))
   const bootstrap = useQuery(queryOptions(['bootstrap', lifecycle.key], () => client.rest('/bootstrap'), available))
@@ -1430,12 +1540,29 @@ export default {
       return null
     }
     ctx.onDispose(() => { active = false; slashDialog.close() })
-    ctx.registerMany([
+    const contributions = [
       { id: 'page', area: ROUTES_AREA, data: { path: WISDOM_ROUTE }, render: () => jsx(WisdomPage, { client }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'library', label: 'Wisdom', path: WISDOM_ROUTE } },
       { id: 'open', area: PALETTE_AREA, data: { id: 'collective-wisdom.open', label: 'Collective Wisdom: Open', keywords: ['wisdom', 'skills', 'catalog', 'install', 'contribute'], run: () => host.navigate(WISDOM_ROUTE) } },
       { id: 'slash-dialog', area: COMPOSER_AREAS.top, render: () => jsx(WisdomDialogHost, { client }) },
       { id: 'slash-middleware', area: COMPOSER_AREAS.middleware, order: 40, data: { handler: openDiscovery } }
-    ])
+    ]
+    // Hosts with transcript directives render the share suggestion card in the chat. The backend
+    // sends the directive only while this check-in is fresh; elsewhere it sends the text card.
+    const directiveArea = typeof pluginSdk.TRANSCRIPT_DIRECTIVE_AREA === 'string' ? pluginSdk.TRANSCRIPT_DIRECTIVE_AREA : null
+    if (directiveArea) {
+      contributions.push({ id: 'share-card', area: directiveArea, data: {
+        name: SHARE_DIRECTIVE,
+        render: props => jsx(ShareSuggestionCard, { attrs: props?.attrs, client, sessionId: props?.sessionId, streaming: props?.streaming === true })
+      } })
+      const timers = { handle: null }
+      const checkIn = () => { if (active) client.rest('/suggestions/desktop-card', { method: 'POST' }).catch(() => undefined) }
+      const renew = () => { checkIn(); timers.handle = active ? setTimeout(renew, CHECK_IN_MS) : null }
+      renew()
+      // Plugin REST follows the active profile: declare the card to a newly selected one at once.
+      const unlisten = host.state.profile?.subscribe?.(checkIn)
+      ctx.onDispose(() => { clearTimeout(timers.handle); if (typeof unlisten === 'function') unlisten() })
+    }
+    ctx.registerMany(contributions)
   }
 }
