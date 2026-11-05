@@ -75,7 +75,7 @@ FULL = ReleaseScope(
     ),
     model_tools=("wisdom_inbox", "wisdom_inspect", "present_wisdom_consent"),
     auxiliary_tasks=("hermes_collective_wisdom_refinement",),
-    desktop_route_groups=frozenset({"core", "candidates", "notices", "settings"}),
+    desktop_route_groups=frozenset({"core", "candidates", "notices", "settings", "suggestions"}),
     notification_settings=True,
     model_editorial=True,
     model_copy=True,
@@ -109,7 +109,8 @@ AUTO_SUGGEST = ReleaseScope(
     hooks=("pre_gateway_dispatch", "post_llm_call", "post_tool_call", "on_skill_lifecycle"),
     model_tools=("wisdom_share_suggestion",),
     auxiliary_tasks=("hermes_collective_wisdom_share_suggest",),
-    desktop_route_groups=frozenset({"core"}),
+    # "suggestions": the Desktop chat card for a suggestion, not the candidates tab.
+    desktop_route_groups=frozenset({"core", "suggestions"}),
     notification_settings=False,
     model_editorial=False,
     model_copy=True,

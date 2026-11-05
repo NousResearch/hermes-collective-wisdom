@@ -87,6 +87,14 @@ _MAX_DECISIONS = 200
 _MAX_PENDING = 20
 _NAME_LIMIT = 64
 _REASON_LIMIT = 160
+# A card shown in the Desktop chat stays open as long as a native review card.
+CARD_TTL_SECONDS = 24 * 60 * 60
+DESKTOP_DIRECTIVE = "wisdom-share"
+# The Desktop plugin declares it renders the directive for this profile, renewed every few
+# minutes. It lives in plugin state, not memory: the Desktop REST backend and the agent plugin
+# are separate module instances.
+DESKTOP_CHECK_IN_KEY = "wisdom-desktop-card"
+DESKTOP_CHECK_IN_TTL = 10 * 60
 
 TOOL_SCHEMA = {
     "name": TOOL,
@@ -175,7 +183,7 @@ def _own_skill(facts: Mapping[str, Any]) -> str | None:
     return name if str(facts.get("provenance") or "") in _OWN_PROVENANCE else None
 
 
-class SuggestionStore:
+class SuggestionStore:  # pylint: disable=too-many-public-methods
     """Durable choices and decisions in this profile's plugin state."""
 
     def __init__(self, state: Any, root: Path, *, clock: Callable[[], float] = time.time):
@@ -333,6 +341,41 @@ class SuggestionStore:
                     return copy.deepcopy(row)
         return None
 
+    def keep_open(self, suggestion_id: str, until: float) -> None:
+        """Keep a shown card answerable until ``until`` (a Desktop chat card)."""
+        with self.change() as value:
+            row = value["pending"].get(suggestion_id)
+            if isinstance(row, dict):
+                row["expires_at"] = until
+
+    def get(self, suggestion_id: str) -> dict[str, Any] | None:
+        """One suggestion by id."""
+        row = self._load()["pending"].get(suggestion_id)
+        return copy.deepcopy(row) if isinstance(row, dict) else None
+
+    def transition(self, suggestion_id: str, expected: str, state: str,
+                   **fields: Any) -> dict[str, Any] | None:
+        """Move one suggestion from ``expected`` to ``state`` atomically; None when it was not
+        in ``expected`` (already answered, or answered elsewhere)."""
+        with self.change() as value:
+            row = value["pending"].get(suggestion_id)
+            if not isinstance(row, dict) or row.get("state") != expected:
+                return None
+            row.update(fields, state=state)
+            return copy.deepcopy(row)
+
+    # The Desktop plugin's declaration that it renders the chat card for this profile.
+    def desktop_check_in(self, *, ttl: float = DESKTOP_CHECK_IN_TTL) -> None:
+        """Record that the Desktop card renderer is present, for ``ttl`` seconds."""
+        self.state.set(DESKTOP_CHECK_IN_KEY, {"until": self.clock() + ttl})
+
+    def desktop_card_ready(self) -> bool:
+        """Whether the Desktop plugin declared, recently enough, that it renders the card."""
+        value = self.state.get(DESKTOP_CHECK_IN_KEY)
+        until = value.get("until") if isinstance(value, dict) else None
+        return (isinstance(until, (int, float)) and not isinstance(until, bool)
+                and until > self.clock())
+
     def latest(self, skill: str) -> dict[str, Any] | None:
         """The newest pending or shown suggestion for ``skill``."""
         rows = [row for row in self._load()["pending"].values()
@@ -431,6 +474,11 @@ def local_card(suggestion: Mapping[str, Any], profile: str = "default") -> str:
         "Nothing is shared until you approve the share review.",
     ))
     return "\n".join(lines)
+
+
+def desktop_directive(suggestion_id: str) -> str:
+    """The transcript line the Desktop plugin renders as this suggestion's card."""
+    return f'::{DESKTOP_DIRECTIVE}{{id="{suggestion_id}"}}'
 
 
 def self_learning_interval(load_config: Callable[[], Mapping[str, Any] | None]) -> int:
@@ -868,6 +916,15 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                                 "user in one short sentence; do not share anything yourself."),
             }, sort_keys=True)
         self.store.record("shown", skill, surface=route.get("platform") or "local")
+        if route.get("platform") == "desktop" and self.store.desktop_card_ready():
+            self.store.keep_open(suggestion["id"], self.clock() + CARD_TTL_SECONDS)
+            return json.dumps({
+                "status": "shown", "executed": False,
+                "card": desktop_directive(suggestion["id"]),
+                "instruction": ("Put the card line exactly as written alone on its own line of "
+                                "your reply, and add one short sentence. Do not share anything "
+                                "yourself; the user chooses on the card."),
+            }, sort_keys=True)
         return json.dumps({
             "status": "shown", "executed": False, "card": local_card(suggestion, self.profile),
             "instruction": ("Show the user the card text exactly as written. Do not run any of "
@@ -988,7 +1045,8 @@ def suggestions_refusal() -> str:
             "private chat with Hermes; nothing was shown here.")
 
 
-def _service_store(service: Any) -> SuggestionStore:
+def suggestion_store(service: Any) -> SuggestionStore:
+    """This profile's suggestion store, from an InvocationService."""
     return SuggestionStore(getattr(service, "_state"), Path(getattr(service, "root")))
 
 
@@ -1002,7 +1060,7 @@ def _service_hash(service: Any) -> Callable[[str], str | None]:
 def _service_run(service: Any, action: str, skill: str, source: str) -> str:
     profile = getattr(service, "profile", ("default", None))[0]
     return run_suggestions(
-        action, skill, _service_store(service), current_hash=_service_hash(service),
+        action, skill, suggestion_store(service), current_hash=_service_hash(service),
         profile=profile, plugin_id=getattr(service, "plugin_id", "collective-wisdom"),
         source=source,
     )
