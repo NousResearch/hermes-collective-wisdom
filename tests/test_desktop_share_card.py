@@ -22,6 +22,8 @@ from hermes_wisdom_plugin.auto_suggest import (
     local_card, run_suggestions,
 )
 from hermes_wisdom_plugin.desktop_api import build_router
+from hermes_wisdom_plugin.errors import ShareCopyError
+from hermes_wisdom_plugin.package import SkillRefusal
 
 SESSION = "desktop-session-1"
 KEY = "stored-session-1"
@@ -91,6 +93,7 @@ class _Service:
         self.profile = ("default", root)
         self.prepared: list[str] = []
         self.fail = False
+        self.publication: dict | None = None
 
     def native_owner(self):
         return {"account_id": "a", "installation_id": "i"}
@@ -99,9 +102,13 @@ class _Service:
         del allow_model_review
         assert may_apply is not None and may_apply() is True
         if self.fail:
-            raise ValueError("preparation failed")
+            raise self.fail if isinstance(self.fail, Exception) else ValueError("failed")
         self.prepared.append(skill_name)
         return {"state": "prepared", "draft_id": "local:draft-1", "skill_id": "incident"}
+
+    def draft_publication(self, draft_id):
+        assert draft_id == "local:draft-1"
+        return self.publication
 
     def close(self):
         return None
@@ -236,7 +243,8 @@ def test_confirm_share_prepares_the_private_draft_once(tmp_path):
     assert service.prepared == ["incident"]
     assert answered["state"] == "confirmed" and answered["draft_id"] == "local:draft-1"
     assert answered["skill"] == "incident" and answered["actions"] == []
-    assert answered["notice"] == "Nothing is shared until you approve the share review."
+    assert answered["summary"] == "incident: you chose Share." and answered["notice"] == ""
+    assert answered["handling"]["open"].startswith("Shared with your team right away")
     row = store.get("sugg-0001")
     assert row["state"] == "confirmed" and row["draft_id"] == "local:draft-1"
     assert store.snapshot()["decisions"][-1] == {
@@ -277,3 +285,69 @@ def test_settled_cards_show_the_messaging_closing_lines(tmp_path, case):
     }[case]
     assert card["summary"] == expected
     assert _choose(http, "share").status_code == 409 and not service.prepared
+
+
+def test_cancel_on_the_in_card_review_keeps_the_draft_once(tmp_path):
+    service = _Service(tmp_path)
+    store = _pending(service)
+    http = _app(service)
+    assert _choose(http, "keep").status_code == 409  # Only after Share.
+    _choose(http, "share")
+    kept = _choose(http, "keep").json()
+    assert kept["state"] == "settled" and kept["actions"] == []
+    assert kept["items"] == [{"title": "Draft kept", "detail": (
+        "This skill is still a local draft. Nothing was shared. "
+        "Resume it from Contribute in Collective Wisdom.")}]
+    assert store.get("sugg-0001")["kept"] is True
+    assert _choose(http, "keep").status_code == 409
+    assert _card(http).json() == kept  # A reloaded chat shows the same.
+
+
+@pytest.mark.parametrize(("publication", "title", "detail"), [
+    ({"state": "done", "publication_state": "published"}, "Published", "Available to your team."),
+    ({"state": "done", "publication_state": "pending_moderation"}, "Waiting for team review",
+     "Submitted for review; not available to your team yet. Check publication status for "
+     "the decision."),
+])
+def test_reloaded_card_shows_how_the_in_card_share_ended(tmp_path, publication, title, detail):
+    service = _Service(tmp_path)
+    _pending(service)
+    http = _app(service)
+    _choose(http, "share")
+    assert _card(http).json()["state"] == "confirmed"  # Not submitted yet: the review again.
+    service.publication = publication
+    card = _card(http).json()
+    assert card["state"] == "settled" and card["actions"] == []
+    assert card["items"] == [{"title": title, "detail": detail}]
+
+
+def test_reloaded_card_sends_a_gateway_review_to_the_findings_page(tmp_path):
+    service = _Service(tmp_path)
+    _pending(service)
+    http = _app(service)
+    _choose(http, "share")
+    service.publication = {"state": "pending", "phase": "policy_review_required",
+                           "review_required": "gateway_advisory"}
+    card = _card(http).json()
+    assert card["state"] == "review_required" and card["draft_id"] == "local:draft-1"
+    assert card["items"][0]["detail"] == "This skill needs a security review before it is shared."
+
+
+@pytest.mark.parametrize("error", [
+    SkillRefusal("SKILL.md: hooks/ is a folder Team Gateway refuses."),
+    ShareCopyError("The description is empty."),
+])
+def test_refused_preparation_stays_in_the_card_with_retry(tmp_path, error):
+    service = _Service(tmp_path)
+    store = _pending(service)
+    service.fail = error
+    http = _app(service)
+    card = _choose(http, "share").json()
+    assert card["state"] == "attention" and card["title"] == "Skill needs attention"
+    assert str(error) in card["items"][0]["detail"]
+    assert [(row["label"], row["choice"], row["primary"]) for row in card["actions"]] == [
+        ("Retry", "share", True)]
+    assert "Nothing has been uploaded." in card["notice"]
+    assert store.get("sugg-0001")["state"] == "presented"
+    service.fail = False
+    assert _choose(http, "share").json()["state"] == "confirmed"

@@ -135,10 +135,12 @@ class PreparedReviewBody(ViewBody):
 
 
 class SuggestionBody(ViewBody):
-    """Answer one automatic share suggestion from its card in this Desktop chat."""
+    """Answer one automatic share suggestion from its card in this Desktop chat.
+
+    ``keep`` is the in-card share review's Cancel: the private draft stays unshared."""
 
     session_id: str = Field(min_length=1, max_length=256)
-    choice: str = Field(pattern=r"^(share|dismiss|never)$")
+    choice: str = Field(pattern=r"^(share|dismiss|never|keep)$")
 
 
 @dataclass(slots=True)
@@ -516,7 +518,7 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         """The card for one automatic share suggestion made in this Desktop chat."""
         self._require_view(service, view_id)
         store, row = _suggestion(service, suggestion_id, session_id)
-        return desktop_card(store, row)
+        return desktop_card(store, row, _row_publication(service, row))
 
     def answer_suggestion(  # pylint: disable=too-many-arguments
         self, service: Any, view_id: str, suggestion_id: str, session_id: str, *, choice: str,
@@ -718,6 +720,13 @@ def _suggestion(service: Any, suggestion_id: str, session_id: str):
             or session_id not in {row.get("session_id"), route.get("session_key")}):
         raise WisdomNotFound("Collective Wisdom suggestion not found")
     return store, row
+
+
+def _row_publication(service: Any, row: dict[str, Any]) -> dict[str, Any] | None:
+    """The submitted outcome of a shared suggestion's draft, so a reloaded card shows it."""
+    if row.get("state") != "confirmed" or row.get("kept") or not row.get("draft_id"):
+        return None
+    return service.draft_publication(str(row["draft_id"]))
 
 
 def _add_suggestion_routes(router, api, invoke):

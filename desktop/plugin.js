@@ -55,6 +55,7 @@ const isUnavailable = error => error?.status === 503 || error?.statusCode === 50
 const UNAVAILABLE_MESSAGE = 'Collective Wisdom is temporarily unavailable.'
 // errors.STALE_CONTROL_MESSAGE, the line Slack and Telegram show for a control no longer offered.
 const STALE_CONTROL_MESSAGE = 'This control is no longer available. Run /wisdom share <skill> again.'
+const CHOICE_FAILED = "Couldn't complete that. Please try again."
 
 function ReadFailure({ error, onRetry, title }) {
   return jsxs('div', { className: 'space-y-3', children: [
@@ -308,6 +309,56 @@ function warningIdentity(value) {
     line: Number.isInteger(item.line) ? item.line : null,
     message: text(item.message), summary: text(item.summary), detail: text(item.detail)
   })))
+}
+
+const draftInspect = (client, viewId, draftId) =>
+  client.rest(`/drafts/${encodeURIComponent(draftId)}?view_id=${encodeURIComponent(viewId)}`)
+const draftReview = (client, viewId, draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
+  method: 'POST', body: requestBody(viewId, { reviewed_hashes: hashes })
+})
+
+// The exact share review of one private draft, shared by Contribute and the chat card: inspect
+// its bytes, re-run the local checks, then freeze the publication review for those bytes.
+// stopAtWarnings: report scanner warnings ({ warnings: true }) instead of requiring an
+// acknowledgement here; only the Contribute page shows the findings to acknowledge.
+async function sharingReview(client, viewId, draft, { warningAccepted = false, stopAtWarnings = false } = {}) {
+  const inspected = await draftInspect(client, viewId, draft.draft_id)
+  const localReview = await draftReview(client, viewId, draft.draft_id, inspected.expected_hashes)
+  const warnings = hasReviewableWarnings(localReview)
+  if (warnings && stopAtWarnings) return { warnings: true }
+  if (warnings && !safeWarningFindings(localReview).length) {
+    throw new Error('Draft kept: scanner warning details are unavailable; acknowledgement is blocked.')
+  }
+  if (warnings && !warningAccepted) {
+    throw new Error('Acknowledge the displayed scanner warnings for this exact package before continuing.')
+  }
+  const reviewed = await client.rest('/publication/review', {
+    method: 'POST',
+    body: requestBody(viewId, { draft_id: draft.draft_id, accept_warnings: warnings && warningAccepted })
+  })
+  if (warnings && warningIdentity(localReview) !== warningIdentity(reviewed)) {
+    throw new Error('The scanner findings changed during review. Inspect and acknowledge the updated exact warnings.')
+  }
+  const expected = inspected?.expected_hashes
+  if (!isObject(expected) || !isObject(reviewed?.hashes) || !['content', 'author_description', 'package_manifest'].every(key => expected[key] === reviewed.hashes[key])) {
+    throw new Error('Prepared bytes changed between inspection and publication review.')
+  }
+  return {
+    ...reviewed,
+    name: label(draft),
+    author_description: inspected.author_description,
+    drafted_description: inspected.author_description,
+    files: inspected.files,
+    operation: 'publication'
+  }
+}
+
+// The line a completed share ends on (Contribute's toast, the chat card's outcome); null when
+// the service did not report a clean published or submitted result.
+function sharedMessage(result, name) {
+  if (name === 'Name unavailable' || result?.state !== 'done' || !['published', 'pending_moderation'].includes(result?.publication_state) ||
+    result?.managed_enrollment?.state === 'not_linked') return null
+  return result.publication_state === 'published' ? `✅ ${name} shared` : `${name} submitted for team review`
 }
 
 function reviewProblems(review, kind, acknowledgements = {}) {
@@ -1050,10 +1101,8 @@ function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) 
       method: 'POST', body: requestBody(viewId, { skill_name: skillName.trim() })
     }), name: skillName.trim()
   }), acceptDraft, 'Share preparation failed — nothing was uploaded or shared')
-  const inspectDraft = async () => client.rest(`/drafts/${encodeURIComponent(draft.draft_id)}?view_id=${encodeURIComponent(viewId)}`)
-  const reviewPrepared = (draftId, hashes) => client.rest(`/drafts/${encodeURIComponent(draftId)}/review`, {
-    method: 'POST', body: requestBody(viewId, { reviewed_hashes: hashes })
-  })
+  const inspectDraft = () => draftInspect(client, viewId, draft.draft_id)
+  const reviewPrepared = (draftId, hashes) => draftReview(client, viewId, draftId, hashes)
   const inspect = useCurrentMutation(client, lifecycle, async () => {
     const inspected = await inspectDraft()
     const reviewed = await reviewPrepared(draft.draft_id, inspected.expected_hashes)
@@ -1092,35 +1141,7 @@ function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) 
   }, 'Could not save and re-review the prepared draft')
   const publicationReview = useCurrentMutation(client, lifecycle, async () => {
     if (dirty) throw new Error('Save and re-review or discard unsaved edits before continuing.')
-    const inspected = await inspectDraft()
-    const localReview = await reviewPrepared(draft.draft_id, inspected.expected_hashes)
-    const warnings = hasReviewableWarnings(localReview)
-    const details = safeWarningFindings(localReview)
-    if (warnings && !details.length) {
-      throw new Error('Draft kept: scanner warning details are unavailable; acknowledgement is blocked.')
-    }
-    if (warnings && !warningAccepted) {
-      throw new Error('Acknowledge the displayed scanner warnings for this exact package before continuing.')
-    }
-    const reviewed = await client.rest('/publication/review', {
-      method: 'POST',
-      body: requestBody(viewId, { draft_id: draft.draft_id, accept_warnings: warnings && warningAccepted })
-    })
-    if (warnings && warningIdentity(localReview) !== warningIdentity(reviewed)) {
-      throw new Error('The scanner findings changed during review. Inspect and acknowledge the updated exact warnings.')
-    }
-    const expected = inspected?.expected_hashes
-    if (!isObject(expected) || !isObject(reviewed?.hashes) || !['content', 'author_description', 'package_manifest'].every(key => expected[key] === reviewed.hashes[key])) {
-      throw new Error('Prepared bytes changed between inspection and publication review.')
-    }
-    return {
-      ...reviewed,
-      name: label(draft),
-      author_description: inspected.author_description,
-      drafted_description: inspected.author_description,
-      files: inspected.files,
-      operation: 'publication'
-    }
+    return sharingReview(client, viewId, draft, { warningAccepted })
   }, value => { setOutcome(null); setReview(value) }, 'Could not prepare the publication review')
   const publish = useCurrentMutation(client, lifecycle, async current => ({
     result: await client.rest('/publication/confirm', {
@@ -1130,8 +1151,9 @@ function Contributions({ client, lifecycle, viewId, shareSuggestions = false }) 
   }), ({ result, name }) => {
     setReview(null)
     const named = { ...(result || { state: 'unknown' }), name }
-    if (name !== 'Name unavailable' && result?.state === 'done' && ['published', 'pending_moderation'].includes(result?.publication_state) && result?.managed_enrollment?.state !== 'not_linked') {
-      host.notify({ kind: 'success', message: result.publication_state === 'published' ? `✅ ${name} shared` : `${name} submitted for team review` })
+    const shared = sharedMessage(result, name)
+    if (shared) {
+      host.notify({ kind: 'success', message: shared })
     } else {
       setOutcome(named)
     }
@@ -1259,7 +1281,7 @@ function useShareHandoff(identity, onOffer) {
   }, [identity.connectionId, identity.profile])
 }
 
-function SuggestionCardView({ busy, card, onChoose, onOpen }) {
+function SuggestionCardView({ busy, card, children, onChoose, onFindings }) {
   const items = Array.isArray(card?.items) ? card.items : []
   const actions = Array.isArray(card?.actions) ? card.actions : []
   const control = action => jsx(Button, { disabled: busy, onClick: () => onChoose(action.choice), size: action.link ? 'inline' : 'sm', type: 'button', variant: action.link ? 'link' : action.primary ? 'default' : 'secondary', children: text(action.label) }, action.choice)
@@ -1273,13 +1295,72 @@ function SuggestionCardView({ busy, card, onChoose, onOpen }) {
       ...text(item?.detail).split('\n').filter(Boolean).map((line, at) =>
         jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: line }, at))
     ] }, index)),
+    children,
     card?.prompt ? jsx('p', { className: 'text-sm text-(--ui-text-primary)', children: text(card.prompt) }) : null,
     buttons.length ? jsx('div', { className: 'flex flex-wrap justify-end gap-2 pt-1', children: buttons.map(control) }) : null,
     links.length ? jsx('div', { className: 'flex justify-end', children: links.map(control) }) : null,
-    card?.state === 'confirmed' && onOpen
-      ? jsx(Button, { onClick: onOpen, size: 'sm', type: 'button', variant: 'secondary', children: 'Open share review' }) : null,
+    onFindings ? jsx(FindingsHandoff, { busy, onFindings }) : null,
     card?.notice ? jsx('p', { className: 'text-xs text-(--ui-text-quaternary)', children: text(card.notice) }) : null
   ] })
+}
+
+// The one way out of the chat: scanner findings are acknowledged on the Collective Wisdom page.
+function FindingsHandoff({ busy, onFindings }) {
+  return jsxs('div', { className: 'space-y-2', children: [
+    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: 'This skill needs a security review before it is shared.' }),
+    jsx('div', { className: 'flex justify-end pt-1', children:
+      jsx(Button, { disabled: busy, onClick: onFindings, size: 'sm', type: 'button', children: 'View and acknowledge findings' }) })
+  ] })
+}
+
+const fileCount = files => Array.isArray(files) ? `${files.length} file${files.length === 1 ? '' : 's'}` : 'Unavailable'
+
+// Share on the suggestion card, completed in the card: the same exact review Contribute runs
+// (sharingReview + reviewProblems + /publication/confirm), shown as the messaging share card's
+// lines. Only scanner warnings leave the chat, for the page that shows them to acknowledge.
+function InCardShare({ busy, card, client, freshView, lifecycle, onDone, onFindings, onKeep }) {
+  const name = text(card.skill)
+  const review = useQuery(queryOptions(['share-card-review', lifecycle.key, card.draft_id], async () => {
+    // The receipt is bound to the view that froze it; Share confirms through the same view.
+    const viewId = await freshView()
+    return { ...await sharingReview(client, viewId, { draft_id: card.draft_id, name }, { stopAtWarnings: true }), view_id: viewId }
+  }))
+  const publish = useCurrentMutation(client, lifecycle, current => client.rest('/publication/confirm', {
+    method: 'POST', body: requestBody(current.view_id, { receipt: current.receipt })
+  }), async result => {
+    const shared = sharedMessage(result, name)
+    if (shared) host.notify({ kind: 'success', message: shared })
+    await onDone()
+  }, 'Publication was not completed', () => { review.refetch(); onDone() })
+  const value = review.data
+  const working = busy || publish.isPending || review.isFetching
+  const header = { title: card.title, summary: card.summary }
+  if (review.isPending) return jsx(SuggestionCardView, { busy: true, card: { ...header, notice: 'Preparing the share review. Nothing has been uploaded.' } })
+  if (value?.warnings) return jsx(SuggestionCardView, { busy: working, card: header, onFindings })
+  if (review.error) {
+    return jsx(SuggestionCardView, { busy: working, card: { ...header, notice: 'Nothing has been uploaded.' }, children: jsxs('div', { className: 'space-y-2', children: [
+      jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: isUnavailable(review.error) ? UNAVAILABLE_MESSAGE : "Couldn't prepare the share review." }),
+      jsxs('div', { className: 'flex justify-end gap-2 pt-1', children: [
+        jsx(Button, { disabled: working, onClick: onKeep, size: 'sm', type: 'button', variant: 'secondary', children: 'Cancel' }),
+        jsx(Button, { disabled: working, onClick: () => review.refetch(), size: 'sm', type: 'button', children: 'Try again' })
+      ] })
+    ] }) })
+  }
+  const problems = reviewProblems(value, 'publication')
+  const handling = card.handling?.[value?.publication_mode] || 'Publication policy unavailable.'
+  return jsx(SuggestionCardView, { busy: working, card: { title: '📤 Share skill', summary: text(value?.drafted_description || value?.description || value?.author_description) || 'Description unavailable' }, children: jsxs('div', { className: 'space-y-2', children: [
+    jsxs('div', { className: 'space-y-1', children: [
+      jsx(KeyValue, { name: 'Skill', value: label(value) }),
+      jsx(KeyValue, { name: 'Files', value: fileCount(value?.files) }),
+      jsx(KeyValue, { name: 'Checks', value: problems.length ? 'Not ready to share' : '🔒 Passed' })
+    ] }),
+    problems.length ? jsx(StringList, { items: problems }) : null,
+    jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: problems.length ? 'Nothing has been uploaded.' : handling }),
+    jsxs('div', { className: 'flex justify-end gap-2 pt-1', children: [
+      jsx(Button, { disabled: working, onClick: onKeep, size: 'sm', type: 'button', variant: 'secondary', children: 'Cancel' }),
+      jsx(Button, { disabled: working || problems.length > 0, loading: publish.isPending, onClick: () => publish.mutate(value), size: 'sm', type: 'button', children: 'Share' })
+    ] })
+  ] }) })
 }
 
 function ShareSuggestionCard({ attrs, client, sessionId, streaming }) {
@@ -1311,21 +1392,26 @@ function ShareSuggestionCard({ attrs, client, sessionId, streaming }) {
     shareHandoff.offer({ connectionId, profile, draft_id: value.draft_id, name: text(value.skill) })
     host.navigate(WISDOM_ROUTE)
   }
+  const [failed, setFailed] = useState(false)
   const choose = useCurrentMutation(client, lifecycle, async choice => client.rest(`/suggestions/${encodeURIComponent(id)}/choice`, {
     method: 'POST', body: requestBody(await freshView(), { session_id: session, choice })
-  }), value => {
-    setAnswered(value)
-    if (value?.state === 'confirmed' && value.draft_id) openReview(value)
-  }, "Couldn't complete that. Please try again.", () => card.refetch())
+  }), value => { setFailed(false); setAnswered(value) }, CHOICE_FAILED, () => { setFailed(true); card.refetch() })
+  // After a share or a failed one, the server's card says how it ended (reloads see the same).
+  const reread = async () => { setAnswered(null); await card.refetch() }
   if (!ready) return null
   // Unknown here, another chat's or no longer current: the messaging cards' stale-control line.
   if (card.error) return jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: isUnavailable(card.error) ? UNAVAILABLE_MESSAGE : STALE_CONTROL_MESSAGE })
-  const shown = answered || card.data
-  if (!shown) return null
+  const loaded = answered || card.data
+  if (!loaded) return null
+  // A failed answer says so in the card, which stays answerable.
+  const shown = failed ? { ...loaded, notice: CHOICE_FAILED } : loaded
+  if (shown.state === 'confirmed' && shown.draft_id) {
+    return jsx(InCardShare, { busy: choose.isPending, card: shown, client, freshView, lifecycle, onFindings: () => openReview(shown), onKeep: () => choose.mutate('keep'), onDone: reread })
+  }
   return jsx(SuggestionCardView, {
     busy: choose.isPending, card: shown,
     onChoose: choice => { if (['share', 'dismiss', 'never'].includes(choice)) choose.mutate(choice) },
-    onOpen: shown.state === 'confirmed' && shown.draft_id ? () => openReview(shown) : null
+    onFindings: shown.state === 'review_required' && shown.draft_id ? () => openReview(shown) : null
   })
 }
 

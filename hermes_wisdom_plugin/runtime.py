@@ -948,6 +948,15 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self.check_owner()
         return result
 
+    def draft_publication(self, draft_id):
+        """The retained publication outcome of one local draft; None before it was submitted."""
+        self._installation_owner()
+        assert self._direct_state is not None
+        operation = self._direct_state.publication_for_draft(str(draft_id))
+        if operation is None:
+            return None
+        return self._publication_service().status(str(operation["id"]))
+
     def _named_local_state(self):
         """Read one owner-fenced snapshot for terminal name resolution only."""
         owner = self._installation_owner()

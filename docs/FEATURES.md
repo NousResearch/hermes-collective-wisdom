@@ -178,8 +178,14 @@ Cadence:
    instead returns the transcript directive `::wisdom-share{id="<id>"}`; the plugin renders it
    as the same three-choice card, with the messaging card's copy, bound to the chat the
    suggestion was made in (`GET /suggestions/{id}`, `POST /suggestions/{id}/choice`, route
-   group `suggestions`; the candidates tab stays off). Confirm share prepares the private
-   draft and opens its review on the Collective Wisdom page. When injection is denied or unavailable,
+   group `suggestions`; the candidates tab stays off). Share prepares the private draft and
+   the card walks its share review in place, through the Contribute page's own review routes:
+   skill, description, files and checks with Cancel and **Share**; Share publishes and the card
+   settles to the outcome, Cancel keeps the draft (choice `keep`). Only scanner warnings leave
+   the chat: the card says the skill needs a security review and offers **View and acknowledge
+   findings**, which opens the draft on the Collective Wisdom page. A skill that cannot be
+   shared as written says why in the card, with Retry. A reloaded chat shows the same state
+   (review, kept, or the retained publication outcome). When injection is denied or unavailable,
    nothing is recorded as dismissed and no further attempt is made that day.
 
 The card asks "Share it with your team?" and offers exactly **Not now** and **Share**
