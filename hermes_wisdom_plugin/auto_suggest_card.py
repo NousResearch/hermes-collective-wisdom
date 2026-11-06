@@ -1,8 +1,8 @@
 """The Slack/Telegram card for one automatic share suggestion.
 
-Three choices, bound to the owner's private chat: Confirm share turns this card
-into the normal share review in place (package, scanner findings, acknowledge,
-exact consent); Don't share dismisses this revision; Never for this skill stops
+Three choices, bound to the owner's private chat: Share turns this card into the
+normal share review in place (package, scanner findings, acknowledge, exact
+consent); Not now dismisses this revision; Don't ask again for this skill stops
 suggestions for it until the owner allows it again. The callback allowlist is
 the projected view, so an old or forged control is refused.
 """
@@ -24,7 +24,9 @@ OPERATION = "auto_suggest"
 SHARE = "autosuggest.share"
 DISMISS = "autosuggest.dismiss"
 NEVER = "autosuggest.never"
-CONTROLS = (("Confirm share", SHARE), ("Don't share", DISMISS), ("Never for this skill", NEVER))
+CONTROLS = (("Share", SHARE), ("Not now", DISMISS), ("Don't ask again for this skill", NEVER))
+LABELS = dict((action, label) for label, action in CONTROLS)
+QUESTION = "Share it with your team?"
 
 
 def card_plan(suggestion: dict[str, Any]) -> dict[str, Any]:
@@ -62,10 +64,11 @@ def auto_suggest_view(record: dict[str, Any]) -> NativeView:
         "📤 Share this skill?",
         f"Hermes thinks {name} could help your team.",
         [NativeItem(name, "\n".join(detail), literal_detail=True)],
-        actions=[NativeAction("Confirm share", SHARE, primary=True),
-                 NativeAction("Don't share", DISMISS),
-                 NativeAction("Never for this skill", NEVER, row=1)],
-        notice="Nothing is shared until you approve the share review.",
+        # Not now, then Share rightmost; Don't ask again is a quiet link below them.
+        actions=[NativeAction(LABELS[DISMISS], DISMISS, align="right"),
+                 NativeAction(LABELS[SHARE], SHARE, primary=True, align="right"),
+                 NativeAction(LABELS[NEVER], NEVER, row=1, link=True, align="right")],
+        prompt=QUESTION,
     )
 
 
@@ -154,9 +157,11 @@ def _desktop_record(store: SuggestionStore, row: dict[str, Any]) -> dict[str, An
 def _view_json(view: NativeView) -> dict[str, Any]:
     return {
         "title": view.title, "summary": view.summary, "notice": view.notice,
+        "prompt": view.prompt,
         "items": [{"title": item.title, "detail": item.detail} for item in view.items],
         "actions": [{"label": action.label, "choice": DESKTOP_CHOICES.get(action.action or "", ""),
-                     "primary": action.primary} for action in view.actions],
+                     "primary": action.primary, "link": action.link}
+                    for action in view.actions],
     }
 
 
@@ -167,7 +172,7 @@ def desktop_card(store: SuggestionStore, row: dict[str, Any]) -> dict[str, Any]:
         name = _safe(clean_text(row.get("skill"), 64))
         return {"state": "confirmed", "draft_id": str(row.get("draft_id") or ""), "skill": name,
                 **_view_json(NativeView(
-                    "Hermes Collective Wisdom", f"{name}: you chose Confirm share.",
+                    "Hermes Collective Wisdom", f"{name}: you chose {LABELS[SHARE]}.",
                     notice="Nothing is shared until you approve the share review."))}
     record = _desktop_record(store, row)
     return {"state": "pending" if record["state"] == "pending" else "settled",

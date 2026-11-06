@@ -31,7 +31,7 @@ user granted its capability; self-learning is on; the plugin setting
 CLI, TUI or Desktop session or a private Slack or Telegram chat. At most
 ``auto_suggest_daily_limit`` (default 1) suggestions are shown per profile per
 day, a skill revision is asked about once, and a skill the owner chose
-"Never for this skill" for is not suggested again until they allow it. Once
+"Don't ask again for this skill" for is not suggested again until they allow it. Once
 the plugin starts unloading, no suggestion turn starts.
 """
 # pylint: disable=too-many-lines
@@ -102,7 +102,7 @@ TOOL_SCHEMA = {
         "Show the owner the Collective Wisdom card for a skill Hermes suggested sharing. "
         "Call it only when a Collective Wisdom message asks you to, with that exact skill "
         "name (and, in a Collective Wisdom background check, a one-line reason). It only "
-        "displays a card: the owner chooses Confirm share, Don't share or Never for this "
+        "displays a card: the owner chooses Share, Not now or Don't ask again for this "
         "skill on it. It never shares, uploads or publishes anything."
     ),
     "parameters": {
@@ -468,10 +468,9 @@ def local_card(suggestion: Mapping[str, Any], profile: str = "default") -> str:
         lines.append(f"Hermes's reason: {clean_text(suggestion['reason'], _REASON_LIMIT)}")
     lines.extend((
         "", "Choose one:",
-        f"  Confirm share: run `{hermes_command(profile)} wisdom share {quoted}` in your terminal",
-        f"  Don't share: /wisdom suggestions dismiss {quoted}",
-        f"  Never for this skill: /wisdom suggestions never {quoted}",
-        "Nothing is shared until you approve the share review.",
+        f"  Share: run `{hermes_command(profile)} wisdom share {quoted}` in your terminal",
+        f"  Not now: /wisdom suggestions dismiss {quoted}",
+        f"  Don't ask again for this skill: /wisdom suggestions never {quoted}",
     ))
     return "\n".join(lines)
 
@@ -994,8 +993,8 @@ def _decision_label(row: Mapping[str, Any]) -> str:
     if event == "verdict":
         return "Hermes said " + ("share" if row.get("share") else "don't share")
     if event == "choice":
-        return {"share": "you chose Confirm share", "dismiss": "you chose Don't share",
-                "never": "you chose Never for this skill",
+        return {"share": "you chose Share", "dismiss": "you chose Not now",
+                "never": "you chose Don't ask again for this skill",
                 "allow": "you allowed suggestions again"}.get(str(row.get("choice")), event)
     return {"asked": "asked Hermes", "injected": "suggested in chat", "shown": "card shown",
             "not_shown": "not shown (" + str(row.get("why") or "unavailable") + ")",

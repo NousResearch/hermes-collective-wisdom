@@ -254,7 +254,7 @@ def test_tool_shows_the_card_once_for_the_pending_suggestion(tmp_path):
     shown = json.loads(controller.tool({"skill": "incident"}, session_id="s1"))
     assert shown["status"] == "shown" and shown["executed"] is False
     card = shown["card"]
-    for line in ("Confirm share", "Don't share", "Never for this skill"):
+    for line in ("Share:", "Not now:", "Don't ask again for this skill:"):
         assert line in card
     latest = fake.store.latest("incident")
     assert latest is not None and card == local_card(latest, "default")

@@ -161,9 +161,11 @@ def test_pending_card_carries_the_messaging_card_copy(tmp_path):
     assert card["summary"] == "Hermes thinks incident could help your team."
     assert card["items"] == [{"title": "incident", "detail": (
         "Review incident notes.\nHermes's reason: Teams run incident reviews often.")}]
-    assert [(row["label"], row["choice"]) for row in card["actions"]] == [
-        ("Confirm share", "share"), ("Don't share", "dismiss"), ("Never for this skill", "never")]
-    assert card["notice"] == "Nothing is shared until you approve the share review."
+    assert [(row["label"], row["choice"], row["primary"], row["link"])
+            for row in card["actions"]] == [
+        ("Not now", "dismiss", False, False), ("Share", "share", True, False),
+        ("Don't ask again for this skill", "never", False, True)]
+    assert card["prompt"] == "Share it with your team?" and card["notice"] == ""
 
 
 @pytest.mark.parametrize("case", ["unknown", "other_session", "messaging", "no_view"])

@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class NativeAction:
+class NativeAction:  # pylint: disable=too-many-instance-attributes
     label: str
     action: str | None = None
     primary: bool = False
@@ -57,6 +57,11 @@ class NativeAction:
     destructive: bool = False
     # Global controls sharing a row render side by side; rows render in order.
     row: int = 0
+    # A tertiary control shown as a plain text link where the surface has one (Telegram rich
+    # messages); its label is never shortened. ``align`` places its row ("right") where the
+    # surface can align rows.
+    link: bool = False
+    align: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +127,8 @@ class NativeView:  # pylint: disable=too-many-instance-attributes
     dismissed: bool = False
     fields: list[NativeField] = field(default_factory=list)
     table: NativeTable | None = None
+    # A plain question shown last, just above the controls.
+    prompt: str = ""
 
     def to_text(self) -> str:
         lines = [self.title]
@@ -149,6 +156,8 @@ class NativeView:  # pylint: disable=too-many-instance-attributes
             lines.extend(f"{action.label}: {action.url}" for action in item.actions if action.url)
         if self.notice:
             lines.extend(("", self.notice))
+        if self.prompt:
+            lines.extend(("", self.prompt))
         lines.extend(f"{action.label}: {action.url}" for action in self.actions if action.url)
         return "\n".join(lines)
 
@@ -355,6 +364,18 @@ def action_label(label: object) -> str:
     """Bound a control label so no native button ever overflows."""
     text = " ".join(str(label or "").split())
     return text if len(text) <= MAX_ACTION_LABEL else text[:MAX_ACTION_LABEL - 1].rstrip() + "…"
+
+
+# Slack's button text limit; a link-style control is a sentence and renders whole.
+MAX_LINK_LABEL = 75
+
+
+def control_label(action: NativeAction) -> str:
+    """The label a surface shows for ``action``: bounded, a link up to ``MAX_LINK_LABEL``."""
+    if not action.link:
+        return action_label(action.label)
+    text = " ".join(str(action.label or "").split())
+    return text if len(text) <= MAX_LINK_LABEL else text[:MAX_LINK_LABEL - 1].rstrip() + "…"
 
 
 def _catalog_version(service: Any, plan: dict[str, Any]) -> int | None:

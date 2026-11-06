@@ -7,8 +7,9 @@ const harness = () => globalThis.__wisdomHarness
 const pendingCard = {
   state: 'pending', title: '📤 Share this skill?', summary: 'Hermes thinks incident could help your team.',
   items: [{ title: 'incident', detail: "Review incident notes.\nHermes's reason: Teams need it." }],
-  actions: [{ label: 'Confirm share', choice: 'share', primary: true }, { label: "Don't share", choice: 'dismiss', primary: false }, { label: 'Never for this skill', choice: 'never', primary: false }],
-  notice: 'Nothing is shared until you approve the share review.'
+  prompt: 'Share it with your team?',
+  actions: [{ label: 'Not now', choice: 'dismiss', primary: false, link: false }, { label: 'Share', choice: 'share', primary: true, link: false }, { label: "Don't ask again for this skill", choice: 'never', primary: false, link: true }],
+  notice: ''
 }
 const settled = summary => ({ state: 'settled', title: 'Not shared', summary, items: [], actions: [], notice: '' })
 const ID = 'sugg-abcdef123'
@@ -54,16 +55,32 @@ test('share directive registers and checks in only when the SDK has the area', a
   loaded.dispose()
 })
 
+test('pending card asks the question with Not now, Share and a right-aligned link', async () => {
+  const loaded = await harness().loadPlugin(cardHandler(), withArea)
+  const mounted = await mountDirective(loaded, { attrs: { id: ID }, sessionId: 'chat-7', streaming: false, source: '' })
+  const card = mounted.container.querySelector('[data-testid="wisdom-share-card"]')
+  const question = [...card.querySelectorAll('p')].find(item => item.textContent === 'Share it with your team?')
+  assert.ok(question, 'question line is shown')
+  assert.doesNotMatch(card.textContent, /Nothing is shared until/)
+  const [row, linkRow] = [...card.querySelectorAll('div.justify-end')]
+  assert.deepEqual([...row.querySelectorAll('button')].map(item => item.textContent), ['Not now', 'Share'])
+  assert.deepEqual([...linkRow.querySelectorAll('button')].map(item => [item.textContent, item.dataset.variant]), [["Don't ask again for this skill", 'link']])
+  assert.ok(question.compareDocumentPosition(row) & 4, 'question comes before the buttons')
+  await mounted.cleanup()
+  loaded.dispose()
+})
+
 test('pending card renders the messaging copy and three actions bound to the owning chat', async () => {
   const choices = []
   const loaded = await harness().loadPlugin(cardHandler({ choice: body => { choices.push(body); return settled("Hermes won't suggest this version of incident again.") } }), withArea)
   const mounted = await mountDirective(loaded, { attrs: { id: ID }, sessionId: 'chat-7', streaming: false, source: '' })
   assert.match(mounted.container.textContent, /📤 Share this skill\?/)
   assert.match(mounted.container.textContent, /Hermes's reason: Teams need it\./)
-  assert.deepEqual(buttons(mounted).map(item => item.textContent), ['Confirm share', "Don't share", 'Never for this skill'])
+  assert.deepEqual(buttons(mounted).map(item => [item.textContent, item.dataset.variant]), [
+    ['Not now', 'secondary'], ['Share', 'default'], ["Don't ask again for this skill", 'link']])
   const read = loaded.calls.rest.find(([path]) => path.startsWith(`/suggestions/${ID}?`))[0]
   assert.match(read, /session_id=chat-7/)
-  await harness().click(buttons(mounted)[1])
+  await harness().click(buttons(mounted)[0])
   assert.equal(choices.length, 1)
   assert.equal(choices[0].choice, 'dismiss')
   assert.equal(choices[0].session_id, 'chat-7')
@@ -74,7 +91,7 @@ test('pending card renders the messaging copy and three actions bound to the own
 })
 
 test('Never and Confirm share call the choice route; Confirm opens the draft review page', async () => {
-  for (const [index, choice] of [[2, 'never'], [0, 'share']]) {
+  for (const [index, choice] of [[2, 'never'], [1, 'share']]) {
     const sent = []
     const loaded = await harness().loadPlugin(cardHandler({ choice: body => {
       sent.push(body.choice)

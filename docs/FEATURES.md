@@ -182,10 +182,13 @@ Cadence:
    draft and opens its review on the Collective Wisdom page. When injection is denied or unavailable,
    nothing is recorded as dismissed and no further attempt is made that day.
 
-The card offers exactly **Confirm share**, **Don't share** and **Never for this
-skill**. Confirm turns the card into the normal `/wisdom share` review in place;
-Don't share dismisses that content hash; Never suppresses the skill until
-`/wisdom suggestions allow <skill>`. Choices are owner-bound and applied once
+The card asks "Share it with your team?" and offers exactly **Not now** and **Share**
+(primary, rightmost) in one right-aligned row, with **Don't ask again for this skill** as a
+text link below. Telegram rich messages render that link as a borderless `style="link"`
+button and right-align both rows; the plain Telegram keyboard and Slack, which have neither,
+show it as a normal button on its own row. Share turns the card into the normal
+`/wisdom share` review in place; Not now dismisses that content hash; Don't ask again
+suppresses the skill until `/wisdom suggestions allow <skill>`. Choices are owner-bound and applied once
 through the native review record; stale or forged controls are refused. Group chats
 never get a suggestion.
 

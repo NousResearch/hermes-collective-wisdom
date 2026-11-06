@@ -1262,6 +1262,9 @@ function useShareHandoff(identity, onOffer) {
 function SuggestionCardView({ busy, card, onChoose, onOpen }) {
   const items = Array.isArray(card?.items) ? card.items : []
   const actions = Array.isArray(card?.actions) ? card.actions : []
+  const control = action => jsx(Button, { disabled: busy, onClick: () => onChoose(action.choice), size: action.link ? 'inline' : 'sm', type: 'button', variant: action.link ? 'link' : action.primary ? 'default' : 'secondary', children: text(action.label) }, action.choice)
+  const buttons = actions.filter(action => !action.link)
+  const links = actions.filter(action => action.link)
   return jsxs('section', { 'data-testid': 'wisdom-share-card', className: 'my-2 max-w-xl space-y-2 rounded-[4px] border border-(--ui-stroke-secondary) p-3', children: [
     jsx('h3', { className: 'text-sm font-semibold text-(--ui-text-primary)', children: text(card?.title) }),
     card?.summary ? jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: text(card.summary) }) : null,
@@ -1270,9 +1273,9 @@ function SuggestionCardView({ busy, card, onChoose, onOpen }) {
       ...text(item?.detail).split('\n').filter(Boolean).map((line, at) =>
         jsx('p', { className: 'text-xs leading-5 text-(--ui-text-tertiary)', children: line }, at))
     ] }, index)),
-    actions.length ? jsx('div', { className: 'flex flex-wrap gap-2 pt-1', children: actions.map(action =>
-      jsx(Button, { disabled: busy, onClick: () => onChoose(action.choice), size: 'sm', type: 'button', variant: action.primary ? 'default' : 'secondary', children: text(action.label) }, action.choice)
-    ) }) : null,
+    card?.prompt ? jsx('p', { className: 'text-sm text-(--ui-text-primary)', children: text(card.prompt) }) : null,
+    buttons.length ? jsx('div', { className: 'flex flex-wrap justify-end gap-2 pt-1', children: buttons.map(control) }) : null,
+    links.length ? jsx('div', { className: 'flex justify-end', children: links.map(control) }) : null,
     card?.state === 'confirmed' && onOpen
       ? jsx(Button, { onClick: onOpen, size: 'sm', type: 'button', variant: 'secondary', children: 'Open share review' }) : null,
     card?.notice ? jsx('p', { className: 'text-xs text-(--ui-text-quaternary)', children: text(card.notice) }) : null

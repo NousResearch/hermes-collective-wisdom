@@ -94,11 +94,12 @@ command to share it. It never shares anything itself.
 When Hermes creates or improves one of your own skills in a session, or uses one that ranks among
 your top skills, it may later ask itself whether your team would benefit from it. If the answer is
 yes, a short card appears in the same private chat (Slack DM, Telegram private chat, or your CLI,
-TUI or Desktop session) with three choices:
+TUI or Desktop session) that asks "Share it with your team?" with three choices:
 
-- **Confirm share** opens the normal share review for that skill, in the same chat.
-- **Don't share** skips this version. A later edit may be suggested again.
-- **Never for this skill** stops suggestions for it. Undo with `/wisdom suggestions allow <skill>`.
+- **Share** opens the normal share review for that skill, in the same chat.
+- **Not now** skips this version. A later edit may be suggested again.
+- **Don't ask again for this skill** (a link below the buttons) stops suggestions for it. Undo
+  with `/wisdom suggestions allow <skill>`.
 
 Hermes suggests at most one skill a day and asks about each version once. It never suggests skills
 that came with Hermes, from the Skills Hub or from your team, never in group chats, and never from
@@ -239,7 +240,7 @@ shows the skill's new state.
 | `show <skill>`, `versions <skill>` | One skill and its published versions. |
 | `top` | Rank your own skills by usage (`--page`, `--per-page`, `--json`). |
 | `share-suggest` | Ask Hermes which of your skills are worth sharing (chat command). |
-| `suggestions [list\|dismiss\|never\|allow] [skill]` | Review Hermes's suggestions, or record Don't share, Never or allow for a skill. |
+| `suggestions [list\|dismiss\|never\|allow] [skill]` | Review Hermes's suggestions, or record Not now, Don't ask again or allow for a skill. |
 | `share <skill>` | Review and share a skill or a new version. |
 | `install <skill>[@vN]` | Install an exact version; `--plan` reviews without installing. |
 | `installed`, `check <skill>` | Installed skills and update availability. |

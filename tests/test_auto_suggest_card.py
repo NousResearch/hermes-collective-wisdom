@@ -11,7 +11,7 @@ from test_restored_native_flow import Service
 from hermes_wisdom_plugin.auto_suggest import SuggestionStore
 from hermes_wisdom_plugin.auto_suggest_card import DISMISS, NEVER, SHARE
 
-LABELS = ["Confirm share", "Don't share", "Never for this skill"]
+LABELS = ["Not now", "Share", "Don't ask again for this skill"]
 
 
 def _suggestion(ui):
@@ -49,9 +49,10 @@ def test_card_renders_exactly_three_choices(tmp_path, surface):
         ui = surface(tmp_path, Service())
         identity = await _card(ui)
         assert _rendered_labels(ui, ui.posts[-1]) == LABELS
-        assert [action.action for action in ui.view(identity).actions] == [SHARE, DISMISS, NEVER]
+        assert [action.action for action in ui.view(identity).actions] == [DISMISS, SHARE, NEVER]
         assert "incident" in str(ui.posts[-1])
-        assert "Nothing is shared until you approve the share review." in str(ui.posts[-1])
+        assert "Nothing is shared until you approve the share review." not in str(ui.posts[-1])
+        assert "Share it with your team?" in str(ui.posts[-1])
         ui.runtime.close()
     asyncio.run(scenario())
 

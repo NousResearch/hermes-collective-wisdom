@@ -44,8 +44,9 @@ function Primitive({ as = 'div', children, loading: _loading, size: _size, varia
   return React.createElement(as, props, children)
 }
 
-function Button(props) {
-  return React.createElement(Primitive, { ...props, as: 'button' })
+// The real SDK Button stamps its variant as data-variant; the harness does the same.
+function Button({ variant = 'default', ...props }) {
+  return React.createElement(Primitive, { ...props, as: 'button', 'data-variant': variant })
 }
 
 function Input(props) {
