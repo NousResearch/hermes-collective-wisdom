@@ -15,9 +15,11 @@ whether the skill is worth sharing, the same way Hermes runs its background revi
   JSON verdict about the first candidate.
 - Otherwise off.
 
-A suggestion starts a turn in the owner's private chat that asks the model to call
-``wisdom_share_suggestion``; the tool shows a card for that one pending suggestion
-with three choices. Only this plugin's own fork may propose a skill; the live
+A suggestion is shown as a card for that one pending suggestion with three choices. On a
+host with ``ctx.post_card`` and the ``conversation.cards`` grant the card is posted into the
+conversation directly, with no model turn (``card_delivery``). Otherwise it starts a turn in
+the owner's private chat that asks the model to call ``wisdom_share_suggestion``, and the tool
+shows the card. Only this plugin's own fork may propose a skill; the live
 agent can only show a card that is already pending and cannot answer it. Nothing
 is shared until the owner confirms the normal share review.
 
@@ -52,6 +54,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
+from .card_delivery import POSTED as POSTED_CARD
+from .card_delivery import REFUSED as CARD_REFUSED
+from .card_delivery import CardPoster
 from .delivery_fence import DeliveryFence
 from .session_fork import REFUSED, ForkRunner
 from .setup_lock import managed_operation_guard
@@ -475,6 +480,12 @@ def local_card(suggestion: Mapping[str, Any], profile: str = "default") -> str:
     return "\n".join(lines)
 
 
+def chat_card_line(suggestion: Mapping[str, Any]) -> str:
+    """The text core records for a native Slack/Telegram card (shown to people, not the model)."""
+    return (f"Hermes thinks {_name(suggestion.get('skill'))} could help your team. "
+            "Share it with your team?")
+
+
 def desktop_directive(suggestion_id: str) -> str:
     """The transcript line the Desktop plugin renders as this suggestion's card."""
     return f'::{DESKTOP_DIRECTIVE}{{id="{suggestion_id}"}}'
@@ -510,7 +521,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         start: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], float] = time.time,
         fork_session: Callable[..., Any] | None = None, fork_task: str | None = None,
-        plugin_id: str = "collective-wisdom",
+        plugin_id: str = "collective-wisdom", cards: CardPoster | None = None,
     ) -> None:
         self.store = store
         self.side_question = side_question
@@ -520,6 +531,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         self.fork_origin = f"plugin_fork:{plugin_id}"
         self.has_capability = has_capability
         self.inject = inject
+        self.cards = cards
         self.setting = setting
         self.self_learning = self_learning
         self.candidate = candidate
@@ -840,13 +852,14 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
     def _deliver(self, chosen: dict[str, Any], reason: str, session_id: str,
                  route: dict[str, Any]) -> bool:
         name, content_hash = chosen["name"], chosen["content_hash"]
-        if self._closed:  # Unloaded while asking: start no turn; ask again after a reload.
+        if self._closed:  # Unloaded while asking: post nothing; ask again after a reload.
             return self._unloaded(name, content_hash)
         reserved_day = self.store.reserve_today(self._daily_limit())
         if reserved_day is None:
             self.store.forget_seen(name, content_hash)
             self.store.record("not_shown", name, why="daily_limit")
             return False
+        by_card = self._cards_ready(route)
         suggestion = {
             "id": secrets.token_urlsafe(12), "skill": name,
             "description": clean_text(chosen.get("description")), "reason": reason,
@@ -854,27 +867,77 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             "state": "pending", "created_at": self.clock(),
             "expires_at": self.clock() + PENDING_TTL_SECONDS,
         }
+        if by_card:  # Answerable from the moment core may show it.
+            suggestion.update(state="presented", expires_at=self.clock() + (
+                CARD_TTL_SECONDS if route.get("platform") == "desktop" else PENDING_TTL_SECONDS))
         self.store.add_pending(suggestion)
         if not self._fence.enter():  # Unloaded since the check above: undo the reservation.
             self.store.unreserve(suggestion["id"], reserved_day)
             return self._unloaded(name, content_hash)
-        accepted = False
         try:
-            if callable(self.inject):
-                accepted = _inject(self.inject, approval_prompt(name), route)
-        except Exception:  # pylint: disable=broad-exception-caught
-            accepted = False
+            outcome = self._show(suggestion, route, by_card=by_card)
         finally:
             self._fence.leave()
-        if accepted:
+        if outcome == "injected":
             self.store.record("injected", name, surface=route.get("platform"))
+            return True
+        if outcome in {"posted", "uncertain"}:
+            self.store.record("shown", name, surface=route.get("platform") or "local",
+                              via="card", uncertain=True if outcome == "uncertain" else None)
             return True
         # Denied or unavailable: nothing was dismissed, and no retry today.
         self.store.set_pending_state(suggestion["id"], "undelivered")
         self.store.forget_seen(name, content_hash)
         self.store.block_today()
-        self.store.record("not_shown", name, why="injection_unavailable")
+        self.store.record("not_shown", name, why=outcome or "injection_unavailable")
         return False
+
+    def _cards_ready(self, route: Mapping[str, Any]) -> bool:
+        """Whether this suggestion is posted as a card (no model turn) instead of a turn."""
+        return (self.cards is not None and bool(route.get("session_key"))
+                and self.cards.ready())
+
+    def _show(self, suggestion: dict[str, Any], route: dict[str, Any], *,
+              by_card: bool) -> str | None:
+        """``posted``/``uncertain`` (a card, no model turn), ``injected`` (the older hosts'
+        turn), ``card_unavailable`` or None (nothing reached the owner)."""
+        outcome = self._post(suggestion, route) if by_card else CARD_REFUSED
+        if outcome != CARD_REFUSED:
+            return outcome
+        if by_card:  # Core wrote nothing: fall back to the turn the tool answers.
+            logger.info("Collective Wisdom: card refused; asking with a suggestion turn")
+            self.store.transition(suggestion["id"], "presented", "pending",
+                                  expires_at=self.clock() + PENDING_TTL_SECONDS)
+        try:
+            accepted = callable(self.inject) and _inject(
+                self.inject, approval_prompt(suggestion["skill"]), route)
+        except Exception:  # pylint: disable=broad-exception-caught
+            accepted = False
+        return "injected" if accepted else None
+
+    def _post(self, suggestion: dict[str, Any], route: dict[str, Any]) -> str:
+        """Show the card with no model turn: ``posted``, ``uncertain``, ``refused`` (core wrote
+        nothing, so the turn may still be used) or ``card_unavailable`` (no native card)."""
+        assert self.cards is not None
+        session_key = str(route["session_key"])
+        if route.get("kind") != "messaging":
+            desktop = route.get("platform") == "desktop"
+            return self.cards.post(
+                suggestion["id"], local_card(suggestion, self.profile), session_key=session_key,
+                directive={"name": DESKTOP_DIRECTIVE, "attrs": {"id": suggestion["id"]}}
+                if desktop else None)
+        # Slack/Telegram: this plugin sends the native card; core records the line for the model.
+        try:
+            delivery = self.present(route, suggestion["session_id"], suggestion)
+        except Exception:  # pylint: disable=broad-exception-caught
+            delivery = None
+        if not isinstance(delivery, dict) or delivery.get("state") != "queued":
+            return "card_unavailable"
+        if self.cards.post(suggestion["id"], chat_card_line(suggestion),
+                           session_key=session_key) == CARD_REFUSED:
+            logger.info("Collective Wisdom: the suggestion card was sent but not recorded in "
+                        "the session history")
+        return POSTED_CARD
 
     def _unloaded(self, name: str, content_hash: str) -> bool:
         """No turn after unload; the revision is asked about again after a reload."""

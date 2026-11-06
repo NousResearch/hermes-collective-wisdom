@@ -168,8 +168,12 @@ Cadence:
    question carries only the first candidate's name, description and usage counts
    and asks for JSON `{"share": bool, "reason": str}`; anything but the boolean
    `true` is no.
-5. Yes injects one user turn (origin for messaging, `session_key` for TUI/Desktop,
-   the REPL queue for the CLI) asking the model to call `wisdom_share_suggestion`.
+5. Yes delivers the suggestion. On a Hermes with plugin conversation cards
+   (`ctx.post_card`, feature-detected at register time) whose user granted
+   `conversation.cards`, the suggestion is posted as a card and no model turn runs
+   (see "Posted cards" below). Otherwise it injects one user turn (origin for
+   messaging, `session_key` for TUI/Desktop, the REPL queue for the CLI) asking the
+   model to call `wisdom_share_suggestion`.
    Called by the live agent (no `turn_origin`), the tool never proposes anything.
    That tool claims the one pending suggestion of the same conversation exactly
    once and shows the card: a native Slack/Telegram card in private chats, or a
@@ -197,6 +201,42 @@ show it as a normal button on its own row. Share turns the card into the normal
 suppresses the skill until `/wisdom suggestions allow <skill>`. Choices are owner-bound and applied once
 through the native review record; stale or forged controls are refused. Group chats
 never get a suggestion.
+
+### Posted cards (no model turn)
+
+`hermes_wisdom_plugin/card_delivery.py` (`CardPoster`) wraps the host's
+`ctx.post_card(card, *, session_key)` and is ready only when the host has the method and
+`has_capability("conversation.cards")` is true; `plugin.yaml` declares that capability, and
+Hermes releases without it ignore the id. When ready and the route has a `session_key`,
+`AutoSuggest._deliver` stores the suggestion already `presented` (the Desktop card stays open
+24 hours, others 30 minutes) and, inside the same unload fence and after the same daily-limit
+reservation:
+
+| Surface | What is posted |
+|---|---|
+| Desktop / Webapp | `{id, text: local_card, directive: {name: "wisdom-share", attrs: {id}}}`; the Desktop plugin renders the same three-choice card it renders for the tool's directive (`GET /suggestions/{id}`, `POST /suggestions/{id}/choice`) |
+| TUI / classic CLI with a session key | `{id, text: local_card}` (core prints it) |
+| Slack / Telegram private chat | the native card through `present_auto_suggest` (this plugin's adapters), then `{id, text: "Hermes thinks <skill> could help your team. Share it with your team?"}` so core records the card in the session history; core sends nothing to the platform |
+
+The decision is recorded as `shown` with the surface and `via: "card"`. A card core refused
+(`ok: false`, any error but `timeout`, or a raise) was not written: the row goes back to
+`pending` and today's injected turn runs instead. A `timeout` may have been written, so it is
+recorded `shown` with `uncertain: true` and not delivered a second way. A native card that
+could not be sent records `not_shown` (`card_unavailable`) and blocks retries that day, as a
+denied injection does. Hosts without `ctx.post_card`, without the grant, or a classic CLI
+session with no session key keep the injected turn and the tool path unchanged. A card is
+display-only: the model is told only that Collective Wisdom posted a card with that id
+(`[collective-wisdom posted a card <id>]`) and never reads its text or attrs; no model call
+remains on this path.
+Ordering is core's: the card waits at the session's turn boundary and does not stop the
+background review.
+
+`CardPoster` is the seam for every card raised by background work, not only share
+suggestions. Install suggestions raised from the background skill review are session-bound
+and post through it the same way (their own directive and record). Promotion suggestions from
+the curator run outside any conversation and need owner targeting, which core does not offer
+yet; until it does they have no delivery, and `CardPoster.post` refuses a call with no
+`session_key`.
 
 Every step (candidate, asked, verdict, injected, shown, not shown, check stopped,
 choice) is recorded with a timestamp in the plugin state key `wisdom-auto-suggest`, read by

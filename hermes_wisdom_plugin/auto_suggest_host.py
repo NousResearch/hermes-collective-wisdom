@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .auto_suggest import AutoSuggest, SuggestionStore, self_learning_interval
+from .card_delivery import CardPoster
 from .gateway_endpoint import host_config_loader
 from . import runtime as _runtime
 from .top_skills import _home_override, _profile_home, session_surface
@@ -49,8 +50,8 @@ def build(ctx: Any, runtime: Any, profile: tuple[str, Path],
           setting: Callable[[str, Any], Any], *, fork_task: str | None = None) -> AutoSuggest:
     """Wire the controller to this plugin's host context and runtime.
 
-    ``ctx.fork_session`` and ``ctx.side_question`` are detected here, at register
-    time; which one runs is decided per turn by the capability the user granted.
+    ``ctx.fork_session``, ``ctx.side_question`` and ``ctx.post_card`` are detected here, at
+    register time; which one runs is decided per turn by the capability the user granted.
     """
     def candidate(name: str) -> dict[str, Any] | None:
         service = runtime._service()  # pylint: disable=protected-access
@@ -65,6 +66,7 @@ def build(ctx: Any, runtime: Any, profile: tuple[str, Path],
         fork_session=_method(ctx, "fork_session"), fork_task=fork_task,
         plugin_id=str(getattr(runtime, "plugin_id", "") or "collective-wisdom"),
         inject=getattr(ctx, "inject_message", None), setting=setting,
+        cards=CardPoster(_method(ctx, "post_card"), ctx.has_capability),
         self_learning=lambda: self_learning_interval(lambda: _core_config(profile[1])),
         candidate=candidate, session=host_session,
         native_available=runtime.native.auto_suggest_available,

@@ -8,9 +8,12 @@ requires_hermes: ">=0.21.5"
 # The suggestion hooks and tool register only on a Hermes with ctx.fork_session
 # or ctx.side_question. A suggestion runs as a background fork of the session
 # agent when llm.session_fork is granted, else as one side question when
-# llm.side_question is granted, else not at all. The user approves both on
-# install, enable or update; Hermes releases that do not know llm.session_fork
-# ignore it. Notice and recommendation surfaces stay dormant.
+# llm.side_question is granted, else not at all. When the host offers
+# ctx.post_card and conversation.cards is granted, a suggestion is posted as a
+# card with no model turn; otherwise it starts one injected turn. The user
+# approves these on install, enable or update; Hermes releases that do not know
+# llm.session_fork or conversation.cards ignore them. Notice and recommendation
+# surfaces stay dormant.
 provides_hooks:
   - pre_gateway_dispatch
   - post_llm_call
@@ -21,3 +24,4 @@ provides_tools:
 capabilities:
   - llm.session_fork
   - llm.side_question
+  - conversation.cards
