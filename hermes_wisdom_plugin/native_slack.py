@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from .native_context import NativeInvocation, adapter_profile
 from .native_review import (
-    SLACK_SECTION_LIMIT, NativeView, action_label, callback_value, slack_section_text,
+    SLACK_SECTION_LIMIT, NativeView, callback_value, control_label, slack_section_text,
 )
 
 _MAX_ITEMS = 5
@@ -49,7 +49,7 @@ def _action_blocks(
             continue
         button: dict[str, Any] = {
             "type": "button",
-            "text": {"type": "plain_text", "text": action_label(action.label), "emoji": True},
+            "text": {"type": "plain_text", "text": control_label(action), "emoji": True},
         }
         if action.url:
             button["url"] = action.url
@@ -155,6 +155,7 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
         and all(len(item.detail) <= SLACK_SECTION_LIMIT
                 for item in view.items if item.literal_detail)
         and (not view.notice or _section_is_lossless(view.notice))
+        and (not view.prompt or _section_is_lossless(view.prompt))
     )
     rendered: list[dict[str, Any]] = [{
         "type": "header",
@@ -192,10 +193,21 @@ def blocks(view: NativeView, record_id: str) -> list[dict[str, Any]]:
     if view.notice:
         rendered.append({"type": "context", "elements": [{"type": "mrkdwn",
             "text": slack_section_text(view.notice)}]})
-    actions = _action_blocks(
-        view.actions, record_id, row="global", allow_primary=approval_is_lossless,
-    )
-    if actions and len(rendered) > 1:
+    if view.prompt:
+        rendered.append({"type": "section", "text": {
+            "type": "mrkdwn", "text": slack_section_text(view.prompt)}})
+    if any(action.link for action in view.actions):
+        # Block Kit has no link-style button: the link gets its own row below the buttons.
+        actions = [block for row, group in enumerate((
+            [action for action in view.actions if not action.link],
+            [action for action in view.actions if action.link],
+        )) for block in _action_blocks(group, record_id, row=f"global{row or ''}",
+                                       allow_primary=approval_is_lossless)]
+    else:
+        actions = _action_blocks(
+            view.actions, record_id, row="global", allow_primary=approval_is_lossless,
+        )
+    if actions and len(rendered) > 1 and not view.prompt:
         rendered.append({"type": "divider"})
     rendered.extend(actions)
     return rendered[:50]

@@ -68,6 +68,21 @@ def test_invocation_service_exposes_owner_fenced_prepared_listing():
     assert calls == ["owner", "check"]
 
 
+def test_draft_publication_reads_the_retained_outcome_of_one_draft(tmp_path):
+    state = DirectState(JsonState(tmp_path), tmp_path)
+    service = cast(Any, InvocationService.__new__(InvocationService))
+    service._installation_owner = lambda: None  # pylint: disable=protected-access
+    service._direct_state = state  # pylint: disable=protected-access
+    statuses = []
+    service._publication_service = lambda: SimpleNamespace(  # pylint: disable=protected-access
+        status=lambda operation_id: statuses.append(operation_id) or {"state": "done"})
+    assert service.draft_publication("draft-1") is None and not statuses
+    with state.change() as value:
+        value["publications"]["op-1"] = {"id": "op-1", "local_draft_id": "draft-1"}
+    assert service.draft_publication("draft-1") == {"state": "done"}
+    assert statuses == ["op-1"]
+
+
 def test_reviewer_lists_only_current_owner_and_rejects_owner_change(tmp_path):
     state = DirectState(JsonState(tmp_path), tmp_path)
     state.save_draft({"id": "draft-1", "slug": "incident-helper", "state": "prepared",

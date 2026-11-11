@@ -173,13 +173,28 @@ Cadence:
    Called by the live agent (no `turn_origin`), the tool never proposes anything.
    That tool claims the one pending suggestion of the same conversation exactly
    once and shows the card: a native Slack/Telegram card in private chats, or a
-   text card in the CLI, TUI and Desktop. When injection is denied or unavailable,
+   text card in the CLI, TUI and Desktop. On Desktop, while the Desktop plugin has checked
+   in for the profile (`POST /suggestions/desktop-card`, every 4 minutes, valid 10), the tool
+   instead returns the transcript directive `::wisdom-share{id="<id>"}`; the plugin renders it
+   as the same three-choice card, with the messaging card's copy, bound to the chat the
+   suggestion was made in (`GET /suggestions/{id}`, `POST /suggestions/{id}/choice`, route
+   group `suggestions`; the candidates tab stays off). Share prepares the private draft and
+   the card walks its share review in place, through the Contribute page's own review routes:
+   skill, description, files and checks with Cancel and **Share**; Share publishes and the card
+   settles to the outcome, Cancel keeps the draft (choice `keep`). Only scanner warnings leave
+   the chat: the card says the skill needs a security review and offers **View and acknowledge
+   findings**, which opens the draft on the Collective Wisdom page. A skill that cannot be
+   shared as written says why in the card, with Retry. A reloaded chat shows the same state
+   (review, kept, or the retained publication outcome). When injection is denied or unavailable,
    nothing is recorded as dismissed and no further attempt is made that day.
 
-The card offers exactly **Confirm share**, **Don't share** and **Never for this
-skill**. Confirm turns the card into the normal `/wisdom share` review in place;
-Don't share dismisses that content hash; Never suppresses the skill until
-`/wisdom suggestions allow <skill>`. Choices are owner-bound and applied once
+The card asks "Share it with your team?" and offers exactly **Not now** and **Share**
+(primary, rightmost) in one right-aligned row, with **Don't ask again for this skill** as a
+text link below. Telegram rich messages render that link as a borderless `style="link"`
+button and right-align both rows; the plain Telegram keyboard and Slack, which have neither,
+show it as a normal button on its own row. Share turns the card into the normal
+`/wisdom share` review in place; Not now dismisses that content hash; Don't ask again
+suppresses the skill until `/wisdom suggestions allow <skill>`. Choices are owner-bound and applied once
 through the native review record; stale or forged controls are refused. Group chats
 never get a suggestion.
 

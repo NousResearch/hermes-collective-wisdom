@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .auto_suggest import suggestion_store
+from .auto_suggest_card import desktop_answer, desktop_card
 from .errors import (
     WisdomAuthError,
     WisdomConflict,
@@ -130,6 +132,15 @@ class PreparedReviewBody(ViewBody):
     """Re-run local checks for one exact saved prepared package."""
 
     reviewed_hashes: dict[str, str]
+
+
+class SuggestionBody(ViewBody):
+    """Answer one automatic share suggestion from its card in this Desktop chat.
+
+    ``keep`` is the in-card share review's Cancel: the private draft stays unshared."""
+
+    session_id: str = Field(min_length=1, max_length=256)
+    choice: str = Field(pattern=r"^(share|dismiss|never|keep)$")
 
 
 @dataclass(slots=True)
@@ -502,6 +513,24 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
             may_apply=lambda: self.current(service, view_id),
         )
 
+    def suggestion(self, service: Any, view_id: str, suggestion_id: str,
+                   session_id: str) -> dict[str, Any]:
+        """The card for one automatic share suggestion made in this Desktop chat."""
+        self._require_view(service, view_id)
+        store, row = _suggestion(service, suggestion_id, session_id)
+        return desktop_card(store, row, _row_publication(service, row))
+
+    def answer_suggestion(  # pylint: disable=too-many-arguments
+        self, service: Any, view_id: str, suggestion_id: str, session_id: str, *, choice: str,
+    ) -> dict[str, Any]:
+        """Confirm share, Don't share or Never, once; Confirm prepares the private draft."""
+        self._require_view(service, view_id)
+        store, row = _suggestion(service, suggestion_id, session_id)
+        result = desktop_answer(
+            store, row, choice, lambda name: self.prepare_draft(service, view_id, name))
+        self._require_view(service, view_id)
+        return result
+
     def candidates(self, service: Any, view_id: str) -> dict[str, Any]:
         """Read current local candidates without granting publication authority."""
         self._require_view(service, view_id)
@@ -680,6 +709,45 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         with self._lock:
             self._reviews.pop(review_id, None)
         return self._named_outcome(result, review.snapshot)
+
+
+def _suggestion(service: Any, suggestion_id: str, session_id: str):
+    """This profile's suggestion store and one row, only for the chat it was made in."""
+    store = suggestion_store(service)
+    row = store.get(str(suggestion_id))
+    route = (row or {}).get("route") or {}
+    if (row is None or not session_id or route.get("platform") != "desktop"
+            or session_id not in {row.get("session_id"), route.get("session_key")}):
+        raise WisdomNotFound("Collective Wisdom suggestion not found")
+    return store, row
+
+
+def _row_publication(service: Any, row: dict[str, Any]) -> dict[str, Any] | None:
+    """The submitted outcome of a shared suggestion's draft, so a reloaded card shows it."""
+    if row.get("state") != "confirmed" or row.get("kept") or not row.get("draft_id"):
+        return None
+    return service.draft_publication(str(row["draft_id"]))
+
+
+def _add_suggestion_routes(router, api, invoke):
+    from fastapi import Query  # pylint: disable=import-outside-toplevel
+
+    @router.post("/suggestions/desktop-card")
+    def suggestion_check_in():
+        # The Desktop plugin renders the card in this profile's chats; renewed while it runs.
+        return invoke(lambda service: (suggestion_store(service).desktop_check_in(),
+                                       {"ready": True})[1])
+
+    @router.get("/suggestions/{suggestion_id}")
+    def suggestion_card(suggestion_id: str,
+                        view_id: str = Query(min_length=8, max_length=128),
+                        session_id: str = Query(min_length=1, max_length=256)):
+        return invoke(lambda service: api.suggestion(service, view_id, suggestion_id, session_id))
+
+    @router.post("/suggestions/{suggestion_id}/choice")
+    def suggestion_choice(suggestion_id: str, body: SuggestionBody):
+        return invoke(lambda service: api.answer_suggestion(
+            service, body.view_id, suggestion_id, body.session_id, choice=body.choice))
 
 
 def _add_candidate_routes(router, api, invoke):
@@ -953,6 +1021,8 @@ def build_router(  # pylint: disable=too-many-locals
 
     if "candidates" in release_scope().desktop_route_groups:
         _add_candidate_routes(router, api, invoke)
+    if "suggestions" in release_scope().desktop_route_groups:
+        _add_suggestion_routes(router, api, invoke)
 
     @router.get("/drafts")
     def draft_list(view_id: str = Query(min_length=8, max_length=128)):

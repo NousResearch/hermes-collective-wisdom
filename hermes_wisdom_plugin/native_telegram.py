@@ -10,7 +10,7 @@ from typing import Any
 
 from .native_context import NativeInvocation, adapter_profile
 from .native_review import (
-    NativeItem, NativeView, action_label, callback_value, telegram_view_text,
+    NativeItem, NativeView, callback_value, control_label, telegram_view_text,
 )
 
 
@@ -94,6 +94,8 @@ def _structured_html(view: NativeView) -> str:
                      for action in item.actions if action.url)
     if view.notice:
         lines.extend(("", f"<i>{html.escape(view.notice)}</i>"))
+    if view.prompt:
+        lines.extend(("", html.escape(view.prompt)))
     lines.extend(f"{html.escape(action.label)}: {html.escape(action.url)}"
                  for action in view.actions if action.url)
     return "\n".join(lines)
@@ -139,7 +141,7 @@ def _plain_fallback_view(view: NativeView) -> NativeView:
 
 
 def _rich_button(action: Any, record_id: str) -> str:
-    label = _escaped(action_label(action.label), 300)
+    label = _escaped(control_label(action), 300)
     if action.url:
         return (
             '<tg-button type="url" url="'
@@ -150,7 +152,8 @@ def _rich_button(action: Any, record_id: str) -> str:
         return ""
     style = (
         ' style="danger"' if action.destructive
-        else ' style="primary"' if action.primary else ""
+        else ' style="primary"' if action.primary
+        else ' style="link"' if action.link else ""
     )
     return (
         f'<tg-button type="callback_data"{style} data="'
@@ -162,8 +165,9 @@ def _rich_button(action: Any, record_id: str) -> str:
 def _rich_row(actions: list[Any], record_id: str) -> str:
     controls = [_rich_button(action, record_id) for action in actions]
     controls = [control for control in controls if control]
+    align = "right" if any(action.align == "right" for action in actions) else "left"
     return (
-        '<tg-button-row align="left">' + " ".join(controls) + "</tg-button-row>"
+        f'<tg-button-row align="{align}">' + " ".join(controls) + "</tg-button-row>"
         if controls else ""
     )
 
@@ -259,6 +263,8 @@ def rich_html(view: NativeView, record_id: str) -> str:
         )
     if view.notice:
         parts.append(f"<p><i>{_escaped(view.notice, 2_000)}</i></p>")
+    if view.prompt:
+        parts.append(f"<p>{_escaped(view.prompt, 1_000)}</p>")
     actions = _rich_rows(view.actions, record_id)
     if actions:
         parts.append(actions)
@@ -288,7 +294,7 @@ def rich_html_is_lossless(view: NativeView, record_id: str) -> bool:
             _rich_table(view) in rendered
             and all(_rich_button(action, record_id) in rendered for action in controls)
         )
-    values = [view.title, view.summary, view.notice]
+    values = [view.title, view.summary, view.notice, view.prompt]
     values.extend(value for item in view.items for value in (item.preamble, item.title))
     controls = [*view.navigation_actions, *view.actions]
     controls.extend(action for item in view.items for action in item.actions)
@@ -330,7 +336,7 @@ def _button(button_type: Any, action: Any, record_id: str) -> Any:
         else {"callback_data": callback_value(record_id, action.action or "")}
     )
     style = "danger" if action.destructive else "primary" if action.primary else None
-    label = action_label(action.label)
+    label = control_label(action)
     if style:
         try:
             return button_type(label, style=style, **values)

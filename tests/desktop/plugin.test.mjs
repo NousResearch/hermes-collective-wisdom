@@ -44,8 +44,9 @@ function Primitive({ as = 'div', children, loading: _loading, size: _size, varia
   return React.createElement(as, props, children)
 }
 
-function Button(props) {
-  return React.createElement(Primitive, { ...props, as: 'button' })
+// The real SDK Button stamps its variant as data-variant; the harness does the same.
+function Button({ variant = 'default', ...props }) {
+  return React.createElement(Primitive, { ...props, as: 'button', 'data-variant': variant })
 }
 
 function Input(props) {
@@ -122,7 +123,8 @@ async function loadPlugin(restHandler, initial = {}) {
     useMutation,
     useQuery,
     useQueryClient,
-    useValue(source) { return React.useSyncExternalStore(source.subscribe, source.get, source.get) }
+    useValue(source) { return React.useSyncExternalStore(source.subscribe, source.get, source.get) },
+    ...(initial.sdk || {})
   }
   const context = vm.createContext({ console, setTimeout, clearTimeout, URLSearchParams })
   const source = await readFile(PLUGIN_URL, 'utf8')
@@ -1977,3 +1979,7 @@ test('v0 Desktop offers no Portal draft review path anywhere in the plugin', asy
     assert.equal(forbidden.test(source), false, `desktop/plugin.js must not reference ${forbidden}`)
   }
 })
+
+// The Desktop chat share card, on the same harness.
+globalThis.__wisdomHarness = { React, QueryClient, QueryClientProvider, createRoot, act, settle, click, loadPlugin, baseHandler }
+await import('./share-card.cases.mjs')
