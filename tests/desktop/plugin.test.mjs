@@ -766,6 +766,22 @@ test('desktop slash dialog offers local updates and blocks unavailable installs'
   await mounted.cleanup()
 })
 
+test('catalog page View shows the skill in place of the list, and Back returns to it', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  const mounted = await renderPage(loaded)
+  assert.ok(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'))
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Details — one/)
+  assert.match(mounted.container.textContent, /Version history/)
+  assert.equal(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'), null, 'the list gives way to the details')
+  assert.equal(mounted.container.querySelector('input[aria-label="Search shared skills"]'), null)
+  assert.ok(button(mounted, 'Install'), 'the skill keeps its Install action in the details')
+  await click(button(mounted, 'Back'))
+  assert.ok(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'))
+  assert.doesNotMatch(mounted.container.textContent, /Details — /)
+  await mounted.cleanup()
+})
+
 test('catalog page shows unavailable status without offering an install fallback', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2 }] }
