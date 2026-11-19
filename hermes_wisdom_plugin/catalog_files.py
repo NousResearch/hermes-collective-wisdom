@@ -73,9 +73,14 @@ class CatalogFiles:
             states = [("prepared", {"target": None, "staging": "new"}),
                       ("files_committed", {"target": "new", "staging": None})]
         elif self.action == "update":
-            states = [("prepared", {"target": "old", "staging": "new", "recovery": None}),
-                      ("old_preserved", {"target": None, "staging": "new", "recovery": "old"}),
-                      ("files_committed", {"target": "new", "staging": None, "recovery": "old"})]
+            if self.journal.get("phase") in {"before_rollback", "rolled_back"}:
+                states = [("old_preserved", {"target": None, "staging": "new", "recovery": "old"}),
+                          ("rolled_back", {"target": "old", "staging": "new", "recovery": None})]
+            else:
+                states = [("prepared", {"target": "old", "staging": "new", "recovery": None}),
+                          ("old_preserved", {"target": None, "staging": "new", "recovery": "old"}),
+                          ("files_committed", {"target": "new", "staging": None,
+                                               "recovery": "old"})]
         else:
             old = "old" if self.old is not None else None
             states = [("prepared", {"target": old, "recovery": None}),
@@ -84,7 +89,9 @@ class CatalogFiles:
                    "before_old_preserved": {"prepared", "old_preserved"},
                    "old_preserved": {"old_preserved"},
                    "before_files_committed": {"prepared", "old_preserved", "files_committed"},
-                   "files_committed": {"files_committed"}}
+                   "files_committed": {"files_committed"},
+                   "before_rollback": {"old_preserved", "rolled_back"},
+                   "rolled_back": {"rolled_back"}}
         for phase, state in states:
             if (phase in allowed.get(self.journal.get("phase"), set())
                     and all(self._matches(key, identity) for key, identity in state.items())):
@@ -98,8 +105,17 @@ class CatalogFiles:
         same_filesystem(self.paths[source], self.paths[destination].parent)
         self.save("before_" + phase)
         durable_replace(self.paths[source], self.paths[destination])
-        self.save(phase)
+        self.save("rolled_back" if phase == "rollback" else phase)
         self.phase = self.validate()
+
+    def refuse(self, check):
+        """Abort an unfinished swap under the same admission, retaining completed swaps."""
+        if self.action != "update":
+            raise PackagePolicyError("catalog rollback is update-only")
+        if self.phase == "old_preserved":
+            self._rename("recovery", "target", "rollback", check)
+        self.validate()
+        return self.phase == "files_committed"
 
     def apply(self, check):
         """Complete only the remaining rename prefix; never replay an applied rename."""

@@ -163,6 +163,8 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         return self._resume(operation, payload, may_apply, verified)
 
 
+    # Resume intentionally lists journal phases and terminal refusal exits in one sequence.
+    # pylint: disable=too-many-return-statements
     def _resume(self, row, payload, may_apply, verified=None):  # pylint: disable=too-many-branches
         operation_id = str(row["id"])
         owner = self._owner()
@@ -174,6 +176,10 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         paths = self._paths(operation_id, payload)
         target = Path(payload["target_path"])
         staging, recovery = paths["staging_path"], paths["recovery_path"]
+        if payload.get("catalog_refused"):
+            if not payload.get("catalog_local_committed"):
+                return self._catalog_refusal(operation_id, payload, owner, paths, may_apply)
+            return self.catalog.reject(operation_id, payload, self.store, self.receipts)
         if self._catalog_reconciling(payload, target):
             return self._reconcile(operation_id, payload, owner, target, recovery, may_apply)
         old = payload["local_snapshot"]
@@ -195,6 +201,8 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             try:
                 verified = self.reviewer.verify(payload, recovery_phase=stage)
             except UpdateAuthorityRejected:
+                if self.catalog is not None:
+                    return self._catalog_refusal(operation_id, payload, owner, paths, may_apply)
                 return self._reject(operation_id, payload, owner)
         self._require_current(may_apply)
         if target_hashes != new and not (self.catalog is not None and payload.get("catalog_files")):
@@ -227,6 +235,24 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             self.store.checkpoint(operation_id, stage="local_committed")
         return self._reconcile(operation_id, payload, owner, target, recovery, may_apply)
 
+
+    def _catalog_refusal(self, operation_id, payload, owner, paths, may_apply):
+        """Never invoke legacy quarantine for a catalog operation, including recovery."""
+        payload["catalog_refused"] = True
+        self.store.checkpoint(operation_id, payload)
+        if not payload.get("catalog_files"):
+            # No catalog write intent exists, hence no filesystem effect is authorized.
+            return self.catalog.reject(operation_id, payload, self.store, self.receipts)
+        with self.catalog.commit(operation_id, payload, self.store, paths={
+            "target": Path(payload["target_path"]), "staging": paths["staging_path"],
+            "recovery": paths["recovery_path"],
+        }) as files:
+            def current():
+                self._assert_owner(owner)
+                self._require_current(may_apply)
+            if files.refuse(current):
+                self._record_local_installation(payload, owner)
+        return self.catalog.reject(operation_id, payload, self.store, self.receipts)
 
     def _catalog_reconciling(self, payload, target):
         """A committed local phase can only reconcile, never swap files again."""
