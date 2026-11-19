@@ -61,6 +61,8 @@ class UninstallReviewer:  # pylint: disable=too-few-public-methods
             "skill_id": skill_id, "slug": record["slug"], "version": record["version"],
             "content_hash": record["content_hash"], "target_path": str(target),
             "installation": copy.deepcopy(record), "local_snapshot": snapshot,
+            "files": [{"path": path, "size": (target / path).stat().st_size}
+                      for path in snapshot or {}],
         })
 
     def verify(self, plan):

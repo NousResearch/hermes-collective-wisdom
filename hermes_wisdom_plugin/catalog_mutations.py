@@ -69,24 +69,46 @@ class CatalogMutation:
         )} | {"operation_id": operation_id})
 
     @contextmanager
-    def commit(self, operation_id, payload, store):
-        """Core derives and locks the target; repeat provider byte checks inside."""
+    def commit(self, operation_id, payload, store, *, paths):
+        """Core locks the target before checking exact operation-bound rename evidence."""
+        from .catalog_files import CatalogFiles  # pylint: disable=import-outside-toplevel
         self._bind(operation_id)
-        with self.api.commit(self.admission, operation_id) as commit:
-            relative = (commit.get("target_relative_path") if isinstance(commit, dict)
-                        else commit.target_relative_path)
-            target = Path(payload["target_path"])
-            if target.relative_to(self.host.skills_root).as_posix() != relative:
+        recovery = (getattr(self.api, "recover", None)
+                    if payload.get("catalog_files") is not None else None)
+        hold = recovery(operation_id) if callable(recovery) else self.api.commit(
+            self.admission, operation_id)
+        with hold as commit:
+            if (Path(payload["target_path"]).relative_to(self.host.skills_root).as_posix()
+                    != commit.target_relative_path):
                 raise PackagePolicyError("catalog target changed after review")
-            actual = tree_hashes(target)
-            expected = None if self.action == "install" else self.plan.get("local_snapshot")
-            if actual != expected or (self.action == "install" and target.is_symlink()):
-                raise PackagePolicyError("managed bytes changed after review")
-            yield
+            revision = None
+            try:
+                files = CatalogFiles(self, operation_id, payload, store, paths)
+                reconciled = callable(recovery) and files.phase in {
+                    "files_committed", "rolled_back"}
+                if callable(recovery):
+                    if reconciled:
+                        expected = files.old if files.phase == "rolled_back" else files.new
+                        revision = digest(expected) if expected is not None else None
+                        if revision != commit.observed_revision:
+                            raise PackagePolicyError("catalog recovery digest changed after review")
+                    else:
+                        commit.decide({"kind": "retry_effect"})
+            except PackagePolicyError:
+                if callable(recovery):
+                    from .catalog_recovery import abandon  # pylint: disable=import-outside-toplevel
+                    abandon(self, commit, operation_id, payload, store)
+                raise
+            yield files
+            files.validate()
+            record = store.installation(payload["skill_id"])
+            if reconciled:
+                commit.decide({"kind": "reconciled", "journal_digest": revision,
+                               "result": self.operation(operation_id, record)})
+            else:
+                commit.settle(self.operation(operation_id, record))
             payload["catalog_local_committed"] = True
             store.checkpoint(operation_id, payload=payload)
-            record = store.installation(payload["skill_id"])
-            commit.settle(self.operation(operation_id, record))
 
     def reject(self, operation_id, payload, store, receipts):
         """Final Gateway refusal never performs a compensating filesystem mutation."""

@@ -460,14 +460,16 @@ class InstallExecutor:  # pylint: disable=too-many-instance-attributes
         if self.catalog is not None:
             if not payload.get("catalog_local_committed"):
                 verified = authorize()
-                if not staging.exists():
-                    _write_staging(staging, verified.files, payload["baseline"])
+                if not payload.get("catalog_files"):
+                    if not staging.exists():
+                        _write_staging(staging, verified.files, payload["baseline"])
                 # Scanner/network authorization has finished before core takes its hold.
-                _require_scan(self.host.scan(staging), verified.plan.get("local_scan"),
+                scan_path = staging if staging.exists() else target
+                _require_scan(self.host.scan(scan_path), verified.plan.get("local_scan"),
                               _accepted_scan_warning(verified.plan))
-                with self.catalog.commit(operation_id, payload, self.store):
-                    _install_package(staging, target, payload["baseline"],
-                                     lambda _path: self._require_current(may_apply))
+                with self.catalog.commit(operation_id, payload, self.store,
+                                         paths={"target": target, "staging": staging}) as files:
+                    files.apply(lambda: self._require_current(may_apply))
                     self.store.record_install(self._install_record(payload, owner))
             elif _tree_hashes(target) != payload["baseline"]:
                 raise PackagePolicyError("managed bytes changed during Gateway reconciliation")
@@ -562,8 +564,11 @@ class InstallExecutor:  # pylint: disable=too-many-instance-attributes
         """Keep catalog-specific admission separate from the native sequence."""
         if self.catalog is not None:
             if not payload.get("catalog_local_committed"):
-                with self.catalog.commit(operation_id, payload, self.store):
-                    self._archive_uninstall(payload, owner, target, trash, may_apply)
+                with self.catalog.commit(operation_id, payload, self.store,
+                                         paths={"target": target, "recovery": trash}) as files:
+                    files.apply(lambda: self._require_current(may_apply))
+                    self._assert_owner(owner)
+                    self.store.deactivate_install(payload["skill_id"])
             elif os.path.lexists(target):
                 raise PackagePolicyError("managed target changed during Gateway reconciliation")
         else:

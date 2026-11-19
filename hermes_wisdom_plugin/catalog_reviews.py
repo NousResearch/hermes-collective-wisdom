@@ -134,8 +134,10 @@ def project_review(plan, action, source, host, *, review_id, token, now):
                    for row in plan.get("files") or []]
         complete = complete and len(changes) <= 2000
     if action == "uninstall":
-        changes = [{"path": path, "size": (target / path).stat().st_size, "change": "remove"}
-                   for path in (plan.get("local_snapshot") or {})]
+        changes = ([{"path": row["path"], "size": row["size"], "change": "remove"}
+                    for row in plan["files"]] if "files" in plan else [
+                        {"path": path, "size": (target / path).stat().st_size, "change": "remove"}
+                        for path in (plan.get("local_snapshot") or {})])
     confirmable = allowed and complete
     return {
         "review_id": review_id, "action": action, "identifier": source + ":" + plan["skill_id"],

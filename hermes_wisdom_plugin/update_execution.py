@@ -197,7 +197,7 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             except UpdateAuthorityRejected:
                 return self._reject(operation_id, payload, owner)
         self._require_current(may_apply)
-        if target_hashes != new:
+        if target_hashes != new and not (self.catalog is not None and payload.get("catalog_files")):
             self._prepare_staging(staging, verified, payload)
 
         def before_preserve() -> None:
@@ -212,14 +212,16 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             before_preserve()
 
         self._approve_catalog_staging(payload, staging, approve_staged)
-        hold = (self.catalog.commit(operation_id, payload, self.store)
+        hold = (self.catalog.commit(operation_id, payload, self.store,
+                                    paths={"target": target, "staging": staging,
+                                           "recovery": recovery})
                 if self.catalog is not None else nullcontext())
-        with hold:
-            _replace_package(
-                (staging, target, recovery), (old, new),
-                (lambda _path: before_preserve()) if self.catalog is not None else approve_staged,
-                before_preserve,
-            )
+        with hold as files:
+            if self.catalog is not None:
+                files.apply(before_preserve)
+            else:
+                _replace_package((staging, target, recovery), (old, new),
+                                 approve_staged, before_preserve)
             self._preserve_copy(payload, recovery, operation_id, owner)
             self._record_local_installation(payload, owner)
             self.store.checkpoint(operation_id, stage="local_committed")
