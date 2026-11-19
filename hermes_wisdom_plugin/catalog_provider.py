@@ -7,7 +7,7 @@ from .catalog_mutations import CatalogMutation
 from .catalog_reviews import CatalogReviews
 from .errors import WisdomValidationError
 from .setup_lock import managed_operation_guard
-from .skill_catalog import endpoint
+from .skill_catalog import endpoint, digest, _ID
 
 
 class CatalogProvider(CatalogReviews):
@@ -16,6 +16,45 @@ class CatalogProvider(CatalogReviews):
     def __init__(self, *args, mutations=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.mutations = mutations
+
+    @endpoint("ids", "cursor")
+    def check(self, request):
+        """Discover updates via the existing authoritative checker without review or writes."""
+        ids = request.get("ids")
+        if (type(ids) is not list or len(ids) > 100
+                or any(type(value) is not str or not _ID.fullmatch(value) for value in ids)
+                or len(set(ids)) != len(ids)):
+            raise WisdomValidationError("invalid ids")
+        with self.opened() as (service, owner):
+            scope = digest([self._scope(request, owner, "check"), ids])
+            if request.get("cursor") is not None:
+                return self._page(request, scope)
+            rows = {row["skill_id"]: row for row in service.installed.installations(owner=owner)
+                    if row.get("state") == "active"
+                    and (row.get("target_provenance") or {}).get("kind") != "publisher_source"}
+            if any(value not in rows for value in ids):
+                raise WisdomValidationError("unknown installation")
+            selected = ids or sorted(rows)
+            items = []
+            for skill_id in selected:
+                local = self.installation(rows[skill_id], owner)
+                if local["managed_state"] != "installed":
+                    state = "removed" if local["managed_state"] == "removed" else "unavailable"
+                    checked = {"state": state, "latest_version": None}
+                else:
+                    checked = service.check_update(skill_id)
+                    state = checked["state"]
+                state = {"unverifiable": "unavailable", "taken_down": "blocked",
+                         "archived": "blocked"}.get(state, state)
+                if state not in {"current", "update_available", "removed", "pending", "blocked"}:
+                    state = "unavailable"
+                latest = checked.get("latest_version")
+                items.append({"identifier": local["identifier"],
+                              "installed_version": local["installed_version"],
+                              "latest_version": str(latest) if type(latest) is int else None,
+                              "state": state,
+                              "installation_revision": local["installation_revision"]})
+            return self._page(request, scope, items)
 
     @endpoint("operation_id")
     def operation(self, request):
