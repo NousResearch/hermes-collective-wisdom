@@ -10,7 +10,8 @@ def test_desktop_removal_retains_receipt_before_confirmation(tmp_path):
     row = {"skill_id": "skill-1", "slug": "demo", "version": 1}
     service = SimpleNamespace(
         profile=("default", tmp_path), native_owner=lambda: {"owner": "one"},
-        list_installations=lambda: [row], catalog_mutations=object(),
+        list_installations=lambda: [row], catalog_available=lambda: True,
+        catalog_mutations=object(),
         uninstall_plan=lambda skill: events.append(("review", skill)) or {"receipt": "receipt-1"},
         uninstall_apply=lambda receipt, **_kwargs: events.append(("apply",
             receipt)) or {"uninstalled": True},
@@ -29,7 +30,8 @@ def test_native_removal_retains_exact_receipt_before_card():
 
     events = []
     service = SimpleNamespace(
-        catalog_mutations=object(), resolve_managed_skill=lambda ref: ref,
+        catalog_available=lambda: True, catalog_mutations=object(),
+        resolve_managed_skill=lambda ref: ref,
         list_installations=lambda: [{"skill_id": "skill-1", "slug": "demo", "version": 1,
                                      "state": "active"}],
         uninstall_plan=lambda _skill: events.append("review") or {"receipt": "native-receipt"},
@@ -50,7 +52,8 @@ def test_cli_removal_reviews_before_prompt(monkeypatch):
 
     events = []
     service = SimpleNamespace(
-        catalog_mutations=object(), resolve_managed_skill=lambda name: name,
+        catalog_available=lambda: True, catalog_mutations=object(),
+        resolve_managed_skill=lambda name: name,
         uninstall_plan=lambda skill: events.append("review") or {"receipt": skill + "-receipt"},
         uninstall_apply=events.append,
         uninstall=lambda *_a: events.append("raw writer"),

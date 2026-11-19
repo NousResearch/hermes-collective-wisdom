@@ -1843,7 +1843,7 @@ class NativeReviewController:
         if row is None:
             raise WisdomNotFound("Managed skill not found")
         removal = (service.uninstall_plan(skill_id)
-                   if getattr(service, "catalog_mutations", None) is not None else None)
+                   if getattr(service, "catalog_available", lambda: False)() else None)
         version = row.get("version")
         return self._insert(service, invocation, "uninstall", {
             **({"catalog_uninstall_receipt": removal["receipt"]} if removal else {}),

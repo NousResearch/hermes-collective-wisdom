@@ -669,7 +669,7 @@ def read_unavailable(parsed: tuple[str, list[str]]) -> str | None:
 def _uninstall_cli(args, service):
     """Preserve the reference terminal-only recoverable removal confirmation."""
     plan = (service.uninstall_plan(_managed_reference(service, args.skill_id))
-            if getattr(service, "catalog_mutations", None) is not None else None)
+            if getattr(service, "catalog_available", lambda: False)() else None)
     if not args.yes:
         if args.json or not sys.stdin.isatty():
             raise PackagePolicyError("noninteractive uninstall requires --yes")

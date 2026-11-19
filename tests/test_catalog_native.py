@@ -169,7 +169,7 @@ def test_raw_uninstall_refuses_facade_bypass_before_effect(tmp_path):
     from test_uninstall_review import _installed
 
     executor, store, client, _owner, target = _installed(tmp_path)
-    executor.admitter = NativeCatalog(SimpleNamespace(admit_native=lambda *_a: None),
+    executor.admitter = NativeCatalog(SimpleNamespace(admit_native=lambda *_a: {"live": True}),
                                       "collective-wisdom", executor.host)
     with pytest.raises(PackagePolicyError, match="review"):
         executor.uninstall("skill-1")

@@ -15,6 +15,11 @@ class NativeCatalog:
         self.plugin_key = plugin_key
         self.host = host
 
+    def available(self):
+        """Facade existence alone does not mean this plugin owns a live catalog."""
+        from .catalog_presence import catalog_live  # pylint: disable=import-outside-toplevel
+        return catalog_live(self.api, self.plugin_key)
+
     def admit(self, executor, plan, action, choices, *, payload=None, operation_id=None):
         # pylint: disable=too-many-arguments
         """Reserve exact native authority, retaining its replay input in the journal."""

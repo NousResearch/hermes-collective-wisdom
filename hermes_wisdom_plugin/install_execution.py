@@ -234,7 +234,9 @@ class InstallExecutor:  # pylint: disable=too-many-instance-attributes
         may_apply: Callable[[], bool] | None = None,
     ) -> dict:
         """Move a managed tree to recoverable storage and reconcile removal."""
-        if self.admitter is not None:
+        if self.catalog is not None or (
+            self.admitter is not None and self.admitter.available()
+        ):
             raise PackagePolicyError("catalog removal requires an exact uninstall review")
         self._require_current(may_apply)
         with managed_operation_guard(Path(self.store.root), skill_id):

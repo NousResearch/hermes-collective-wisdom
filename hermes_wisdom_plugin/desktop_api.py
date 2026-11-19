@@ -678,7 +678,7 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         review_id = "wir_" + secrets.token_hex(20)
         snapshot = deepcopy(installation)
         plan = (service.uninstall_plan(skill_id)
-                if getattr(service, "catalog_mutations", None) is not None else None)
+                if getattr(service, "catalog_available", lambda: False)() else None)
         with self._lock:
             self._reviews[review_id] = _Review(
                 view_id=view_id,

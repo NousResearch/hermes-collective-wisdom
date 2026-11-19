@@ -442,6 +442,11 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self._catalog_executor(executor)
         return reviewer, executor
 
+    def catalog_available(self):
+        """Feature presentation follows live ownership, not the optional facade's existence."""
+        from .catalog_presence import catalog_live  # pylint: disable=import-outside-toplevel
+        return catalog_live(getattr(self, "catalog_mutations", None), self.plugin_id)
+
     def _catalog_executor(self, executor):
         """One optional core facade also covers independently loaded Desktop services."""
         api = getattr(self, "catalog_mutations", None)
