@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contract import org_directory_name
+from .catalog_completion import finish_native
 from .errors import (
     WisdomAuthError,
     WisdomConflict,
@@ -61,7 +62,7 @@ def _install_record(
     return record
 
 
-class InstallExecutor:
+class InstallExecutor:  # pylint: disable=too-many-instance-attributes
     """Apply reviewed installs through one guarded synchronous operation."""
 
     def __init__(
@@ -72,6 +73,7 @@ class InstallExecutor:
         reviewer: Any,
         host: Any,
         owner: Callable[[], dict],
+        *, catalog=None,
     ) -> None:
         self.client = client
         self.store = store
@@ -79,6 +81,8 @@ class InstallExecutor:
         self.reviewer = reviewer
         self.host = host
         self.owner = owner
+        self.catalog = catalog
+        self.admitter = None
 
     _require_current = staticmethod(_require_current)
     _payload = staticmethod(_operation_payload)
@@ -130,6 +134,11 @@ class InstallExecutor:
             raise PackagePolicyError(
                 "another install receipt is already pending for this skill"
             )
+        if self.admitter is not None:
+            self.admitter.resume(
+                self, operation, self.receipts.load(receipt, allow_started=True),
+                "install", {"accept_partial": payload.get("accepted_partial", False)})
+            payload = self._payload(self.store.operation(operation["id"]))
         self.receipts.start(receipt, str(operation["id"]))
         return self._resume_install(operation, payload, may_apply, call_gateway=False)
 
@@ -169,7 +178,11 @@ class InstallExecutor:
             "baseline": dict(verified.baseline),
             "accepted_partial": bool(accept_partial),
         }
-        operation_id = self.store.begin("install", skill_id, payload, stage="prepared")
+        operation_id = (self.admitter.admit(self, plan, "install", {
+            "accept_partial": accept_partial,
+        }, payload=payload) if self.admitter is not None and self.catalog is None else None)
+        operation_id = self.store.begin("install", skill_id, payload, stage="prepared",
+                                        **({"operation_id": operation_id} if operation_id else {}))
         self.receipts.start(receipt, operation_id)
         operation = self.store.operation(operation_id)
         if operation is None:
@@ -180,6 +193,40 @@ class InstallExecutor:
             operation, payload, may_apply, call_gateway=True, verified=verified
         )
 
+    def uninstall_reviewed(self, receipt, *, receipts=None, may_apply=None):
+        """Consume exact durable removal authority, replaying terminal results first."""
+        from .uninstall_review import (  # pylint: disable=import-outside-toplevel
+            UninstallReceipts, UninstallReviewer,
+        )
+        receipts = receipts or UninstallReceipts(self.store, self.owner)
+        plan = receipts.load(receipt, allow_started=True)
+        with managed_operation_guard(Path(self.store.root), plan["skill_id"]):
+            completed = receipts.verified_outcome(receipt)
+            if completed is not None:
+                return completed
+            pending = self.store.pending_operations(plan["skill_id"])
+            if pending:
+                operation = pending[0]
+                if (operation.get("kind") != "uninstall"
+                        or self._payload(operation).get("receipt") != receipt):
+                    raise PackagePolicyError("another managed operation is pending for this skill")
+                if self.admitter is not None:
+                    self.admitter.resume(self, operation, plan, "uninstall", {})
+                    operation = self.store.operation(operation["id"])
+                receipts.start(receipt, operation["id"])
+                result = self._resume_uninstall(
+                    operation, self._payload(operation), may_apply, call_gateway=False,
+                )
+            else:
+                UninstallReviewer(self.store, receipts, self.host, self.owner).verify(plan)
+                admitted = (self.admitter.admit(self, plan, "uninstall", {})
+                            if self.admitter is not None and self.catalog is None else None)
+                result = self._uninstall(plan["skill_id"], may_apply, receipt=receipt,
+                                         uninstall_receipts=receipts, operation_id=admitted)
+            if result.get("uninstalled") is True:
+                receipts.complete(receipt, result)
+            return result
+
     def uninstall(
         self,
         skill_id: str,
@@ -187,6 +234,8 @@ class InstallExecutor:
         may_apply: Callable[[], bool] | None = None,
     ) -> dict:
         """Move a managed tree to recoverable storage and reconcile removal."""
+        if self.admitter is not None:
+            raise PackagePolicyError("catalog removal requires an exact uninstall review")
         self._require_current(may_apply)
         with managed_operation_guard(Path(self.store.root), skill_id):
             return self._uninstall(skill_id, may_apply)
@@ -195,6 +244,7 @@ class InstallExecutor:
         self,
         skill_id: str,
         may_apply: Callable[[], bool] | None,
+        *, receipt=None, uninstall_receipts=None, operation_id=None,
     ) -> dict:
         owner = self._owner()
         self._require_current(may_apply)
@@ -224,7 +274,7 @@ class InstallExecutor:
         )
         payload = {
             "owner": owner,
-            "receipt": None,
+            "receipt": receipt,
             "skill_id": skill_id,
             "slug": _safe_segment(installation.get("slug"), "skill slug"),
             "target_path": str(target),
@@ -232,17 +282,27 @@ class InstallExecutor:
             "version": int(installation.get("version") or 0),
             "content_hash": installation.get("content_hash"),
         }
+        self._uninstall_metadata(payload, installation, already_removed)
+        operation_id = self.store.begin("uninstall", skill_id, payload, stage="prepared",
+                                        **({"operation_id": operation_id} if operation_id else {}))
+        if uninstall_receipts is not None:
+            uninstall_receipts.start(receipt, operation_id)
+        operation = self.store.operation(operation_id)
+        if operation is None:
+            raise PackagePolicyError("uninstall operation is unavailable")
+        return self._resume_uninstall(operation, payload, may_apply, call_gateway=True)
+
+    def _uninstall_metadata(self, payload, installation, already_removed):
+        """Keep catalog-specific admission separate from the native sequence."""
         if already_removed:
             # Deleted outside Wisdom: there are no bytes to move to trash.
             payload["already_removed"] = True
         for key in ("manifest_hash", "target_provenance"):
             if key in installation:
                 payload[key] = installation[key]
-        operation_id = self.store.begin("uninstall", skill_id, payload, stage="prepared")
-        operation = self.store.operation(operation_id)
-        if operation is None:
-            raise PackagePolicyError("uninstall operation is unavailable")
-        return self._resume_uninstall(operation, payload, may_apply, call_gateway=True)
+        if self.catalog is not None and getattr(self.catalog, "native", None) is not None:
+            payload["catalog_native"] = self.catalog.native
+
 
     def installed(self) -> list[dict]:
         """Merge owner-local integrity and pending state with current Gateway facts."""
@@ -314,6 +374,8 @@ class InstallExecutor:
             "ready_to_use": None,
         }
 
+    # Same terminal and pending recovery stages as update, kept together for audit.
+    # pylint: disable=too-many-return-statements
     def _resume_install(
         self, operation, payload, may_apply, *, call_gateway, verified=None
     ) -> dict:
@@ -332,9 +394,7 @@ class InstallExecutor:
             if not isinstance(result, dict):
                 raise PackagePolicyError("install recovery outcome is missing")
             self._require_current(may_apply)
-            self.receipts.complete(payload["receipt"], result)
-            self.store.finish(operation_id, result, stage="complete")
-            return result
+            return finish_native(self, operation_id, payload, result)
         if stage != "prepared":
             raise PackagePolicyError(f"unsupported install recovery stage: {stage}")
 
@@ -355,14 +415,7 @@ class InstallExecutor:
             self._require_current(may_apply)
             return current
 
-        if _tree_hashes(target) != payload["baseline"]:
-            verified = authorize()
-            if not staging.exists():
-                _write_staging(staging, verified.files, payload["baseline"])
-            _install_package(staging, target, payload["baseline"], authorize)
-        self._assert_owner(owner)
-        self._require_current(may_apply)
-        self.store.record_install(self._install_record(payload, owner))
+        self._install_local(operation_id, payload, owner, staging, target, authorize, may_apply)
 
         if not call_gateway:
             known, remote = self._inspect_remote(payload["skill_id"], owner)
@@ -392,6 +445,8 @@ class InstallExecutor:
             raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
             if _permanent_gateway_error(exc):
+                if self.catalog is not None:
+                    return self.catalog.reject(operation_id, payload, self.store, self.receipts)
                 self._quarantine_rejected(operation_id, payload, target, owner)
                 raise
             return self._pending_result(payload, operation_id, exc)
@@ -399,6 +454,34 @@ class InstallExecutor:
             operation_id, payload, owner, target,
             _field(server, "effective_update_mode"), may_apply,
         )
+
+    def _install_local(self, operation_id, payload, owner, staging, target, authorize, may_apply):
+        """Keep catalog-specific admission separate from the native sequence."""
+        if self.catalog is not None:
+            if not payload.get("catalog_local_committed"):
+                verified = authorize()
+                if not staging.exists():
+                    _write_staging(staging, verified.files, payload["baseline"])
+                # Scanner/network authorization has finished before core takes its hold.
+                _require_scan(self.host.scan(staging), verified.plan.get("local_scan"),
+                              _accepted_scan_warning(verified.plan))
+                with self.catalog.commit(operation_id, payload, self.store):
+                    _install_package(staging, target, payload["baseline"],
+                                     lambda _path: self._require_current(may_apply))
+                    self.store.record_install(self._install_record(payload, owner))
+            elif _tree_hashes(target) != payload["baseline"]:
+                raise PackagePolicyError("managed bytes changed during Gateway reconciliation")
+        else:
+            if _tree_hashes(target) != payload["baseline"]:
+                verified = authorize()
+                if not staging.exists():
+                    _write_staging(staging, verified.files, payload["baseline"])
+                _install_package(staging, target, payload["baseline"], authorize)
+            self._assert_owner(owner)
+            self._require_current(may_apply)
+            self.store.record_install(self._install_record(payload, owner))
+
+
 
     def _complete_install(self, operation_id, payload, owner, target, mode, may_apply):
         result = self._success_result(payload, target, mode)
@@ -408,10 +491,16 @@ class InstallExecutor:
         })
         self.store.checkpoint(operation_id, payload=payload, stage="outcome_recorded")
         self._require_current(may_apply)
+        if self.catalog is not None:
+            self.catalog.retain(operation_id, self.store)
         self.receipts.complete(payload["receipt"], result)
         self.store.finish(operation_id, result, stage="complete")
+        if self.catalog is not None:
+            self.catalog.settle(operation_id, self.store)
         return result
 
+    # The durable removal stages intentionally remain one auditable sequence.
+    # pylint: disable=too-many-return-statements
     def _resume_uninstall(
         self, operation, payload, may_apply, *, call_gateway
     ) -> dict:
@@ -428,7 +517,7 @@ class InstallExecutor:
                 stage, operation_id, payload, may_apply
             )
 
-        self._archive_uninstall(payload, owner, target, trash, may_apply)
+        self._uninstall_local(operation_id, payload, owner, target, trash, may_apply)
 
         if not call_gateway:
             known, remote = self._inspect_remote(payload["skill_id"], owner)
@@ -456,10 +545,31 @@ class InstallExecutor:
             elif not _permanent_gateway_error(exc):
                 return self._pending_result(payload, operation_id, exc, uninstall=True)
             else:
-                raise
+                return self._refuse_uninstall(operation_id, payload, exc)
         return self._complete_uninstall(
             operation_id, payload, trash, _field(server, "state"), may_apply
         )
+
+    def _refuse_uninstall(self, operation_id, payload, error):
+        """Only catalog reconciliation retains a refused removal as terminal."""
+        if self.catalog is None:
+            raise error
+        from .uninstall_review import UninstallReceipts  # pylint: disable=import-outside-toplevel
+        return self.catalog.reject(operation_id, payload, self.store,
+                                   UninstallReceipts(self.store, self.owner))
+
+    def _uninstall_local(self, operation_id, payload, owner, target, trash, may_apply):
+        """Keep catalog-specific admission separate from the native sequence."""
+        if self.catalog is not None:
+            if not payload.get("catalog_local_committed"):
+                with self.catalog.commit(operation_id, payload, self.store):
+                    self._archive_uninstall(payload, owner, target, trash, may_apply)
+            elif os.path.lexists(target):
+                raise PackagePolicyError("managed target changed during Gateway reconciliation")
+        else:
+            self._archive_uninstall(payload, owner, target, trash, may_apply)
+
+
 
     def _archive_uninstall(self, payload, owner, target, trash, may_apply) -> None:
         if target.exists() and not trash.exists():
@@ -483,7 +593,11 @@ class InstallExecutor:
         if not isinstance(result, dict):
             raise PackagePolicyError("uninstall recovery outcome is missing")
         self._require_current(may_apply)
+        if self.catalog is not None:
+            self.catalog.retain(operation_id, self.store, failed=result.get("rejected") is True)
         self.store.finish(operation_id, result, stage="complete")
+        if self.catalog is not None:
+            self.catalog.settle(operation_id, self.store, failed=result.get("rejected") is True)
         return result
 
     def _inspect_remote(self, skill_id, owner) -> tuple[bool, dict | None]:
@@ -510,7 +624,11 @@ class InstallExecutor:
         self.store.deactivate_install(payload["skill_id"], result)
         self.store.checkpoint(operation_id, payload=payload, stage="outcome_recorded")
         self._require_current(may_apply)
+        if self.catalog is not None:
+            self.catalog.retain(operation_id, self.store)
         self.store.finish(operation_id, result, stage="complete")
+        if self.catalog is not None:
+            self.catalog.settle(operation_id, self.store)
         return result
 
     def _quarantine_rejected(
