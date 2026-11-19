@@ -60,6 +60,60 @@ def scan_verdict(plan):
     return verdict if verdict in {"safe", "caution", "dangerous", "unknown"} else "unknown"
 
 
+def _incoming_inventory(plan):
+    """Keep known file facts without treating missing inventory as an empty package."""
+    rows = plan.get("files")
+    if type(rows) is not list:
+        return {}, False
+    inventory, complete = {}, True
+    for row in rows:
+        if type(row) is not dict or type(row.get("path")) is not str or not row["path"]:
+            complete = False
+            continue
+        path = row["path"]
+        if path in inventory:
+            complete = False
+        inventory[path] = row
+        size = row.get("size")
+        if type(size) is not int or not 0 <= size <= 9007199254740991:
+            complete = False
+    return inventory, complete
+
+
+def _update_changes(plan):  # pylint: disable=too-many-locals
+    """Review the actual old/incoming union, including removals and executable intent."""
+    incoming, complete = _incoming_inventory(plan)
+    snapshot = plan.get("local_snapshot")
+    if type(snapshot) is not dict:
+        snapshot, complete = {}, False
+    old = {path: identity for path, identity in snapshot.items()
+           if type(path) is str and path and type(identity) is str and identity}
+    complete = complete and len(old) == len(snapshot)
+    identities = {}
+    for path, row in incoming.items():
+        identity, mode = row.get("hash"), row.get("mode")
+        if type(identity) is not str or not identity or mode not in ("file", "exec"):
+            complete = False
+            continue
+        identities[path] = ("exec:" if mode == "exec" else "") + identity
+    if "baseline" in plan and plan["baseline"] != identities:
+        complete = False
+    paths = sorted(old.keys() | incoming.keys())
+    complete = complete and len(paths) <= 2000
+    changes = []
+    for path in paths[:2000]:
+        if path not in incoming:
+            changes.append({"path": path, "size": 0, "change": "remove"})
+            continue
+        size = incoming[path].get("size")
+        if type(size) is not int or not 0 <= size <= 9007199254740991:
+            continue
+        change = "add" if path not in old else (
+            "unchanged" if old[path] == identities.get(path) else "replace")
+        changes.append({"path": path, "size": size, "change": change})
+    return changes, complete
+
+
 def project_review(plan, action, source, host, *, review_id, token, now):
     # pylint: disable=too-many-arguments,too-many-locals
     """Pure projection; native exceptional choices do not imply generic consent."""
@@ -69,12 +123,16 @@ def project_review(plan, action, source, host, *, review_id, token, now):
     existing = plan.get("previous_installation") or plan.get("installation")
     found = findings(plan)
     required = [row["id"] for row in found if row["acknowledgement_required"]]
-    complete = len(plan.get("files") or []) <= 2000 and len(found) <= 1000
+    complete = len(found) <= 1000
     allowed = plan.get("allowed", True) is True
     policy = "block" if not allowed else "acknowledge" if required else "allow"
-    changes = [{"path": row["path"], "size": row["size"],
-                "change": "add" if action == "install" else "replace"}
-               for row in plan.get("files") or []]
+    if action == "update":
+        changes, inventory_complete = _update_changes(plan)
+        complete = complete and inventory_complete
+    else:
+        changes = [{"path": row["path"], "size": row["size"], "change": "add"}
+                   for row in plan.get("files") or []]
+        complete = complete and len(changes) <= 2000
     if action == "uninstall":
         changes = [{"path": path, "size": (target / path).stat().st_size, "change": "remove"}
                    for path in (plan.get("local_snapshot") or {})]
