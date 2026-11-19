@@ -151,12 +151,13 @@ class _View:
 
 
 @dataclass(slots=True)
-class _Review:
+class _Review:  # pylint: disable=too-many-instance-attributes
     view_id: str
     kind: str
     subject: str
     snapshot: dict[str, Any]
     expires_at: float
+    receipt: str | None = None
     files_changed: bool = False
     setup_claimed: bool = False
 
@@ -676,12 +677,15 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
             raise WisdomNotFound("managed installation not found")
         review_id = "wir_" + secrets.token_hex(20)
         snapshot = deepcopy(installation)
+        plan = (service.uninstall_plan(skill_id)
+                if getattr(service, "catalog_mutations", None) is not None else None)
         with self._lock:
             self._reviews[review_id] = _Review(
                 view_id=view_id,
                 kind="uninstall",
                 subject=skill_id,
                 snapshot=snapshot,
+                receipt=plan["receipt"] if plan else None,
                 expires_at=view.expires_at,
             )
         return {"review_id": review_id, "installation": snapshot}
@@ -703,9 +707,13 @@ class DesktopWorkflowApi:  # pylint: disable=too-many-public-methods
         self._require_view(service, view_id)
         if current != review.snapshot:
             raise WisdomConflict("managed installation changed; review it again")
-        result = service.uninstall(
-            review.subject, may_apply=lambda: self.current(service, view_id)
-        )
+        if review.receipt is not None:
+            result = service.uninstall_apply(
+                review.receipt, may_apply=lambda: self.current(service, view_id))
+        else:
+            result = service.uninstall(
+                review.subject, may_apply=lambda: self.current(service, view_id)
+            )
         with self._lock:
             self._reviews.pop(review_id, None)
         return self._named_outcome(result, review.snapshot)

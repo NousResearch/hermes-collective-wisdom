@@ -129,6 +129,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         self._direct_state = None
         self._qualification = None
         self._closed = False
+        self.catalog_mutations = None
 
     def notification_config(self) -> dict[str, Any]:
         """Read current profile notification settings through the public host API."""
@@ -438,7 +439,15 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         reviewer = InstallReviewer(self.client, store, receipts, host, self._installation_owner)
         executor = InstallExecutor(self.client, store, receipts, reviewer,
                                    host, self._installation_owner)
+        self._catalog_executor(executor)
         return reviewer, executor
+
+    def _catalog_executor(self, executor):
+        """One optional core facade also covers independently loaded Desktop services."""
+        api = getattr(self, "catalog_mutations", None)
+        if api is not None:
+            from .catalog_native import NativeCatalog  # pylint: disable=import-outside-toplevel
+            executor.admitter = NativeCatalog(api, self.plugin_id, executor.host)
 
     def _setup_services(self):
         from .direct_services import SetupService  # pylint: disable=import-outside-toplevel
@@ -471,6 +480,7 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
         executor = UpdateExecutor(
             self.client, store, receipts, reviewer, host, self._installation_owner
         )
+        self._catalog_executor(executor)
         return reviewer, executor
 
     def _contribution_reviewer(self):
@@ -1687,6 +1697,24 @@ class InvocationService:  # pylint: disable=too-many-public-methods,too-many-ins
             return reference
         raise WisdomNotFound("Managed skill not found")
 
+    def uninstall_plan(self, skill_id):
+        """Persist the current removal bytes before any human confirmation."""
+        from .uninstall_review import (  # pylint: disable=import-outside-toplevel
+            UninstallReceipts, UninstallReviewer,
+        )
+        executor = self._installation_services()[1]
+        receipts = UninstallReceipts(executor.store, executor.owner)
+        return UninstallReviewer(
+            executor.store, receipts, executor.host, executor.owner,
+        ).plan(skill_id)
+
+    def uninstall_apply(self, receipt, *, may_apply=None):
+        """Consume durable removal authority with exact byte verification."""
+        result = self._installation_services()[1].uninstall_reviewed(receipt, may_apply=may_apply)
+        self.check_owner()
+        _require_current(may_apply)
+        return result
+
     def uninstall(
         self, skill_id, *, may_apply: Callable[[], bool] | None = None
     ):
@@ -1822,6 +1850,7 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 get_config=self.get_config, set_config=self.set_config,
                 state=self.state, plugin_id=self.plugin_id,
             )
+            service.catalog_mutations = getattr(self, "catalog_mutations", None)
             self._services.add(service)
             return service
 
