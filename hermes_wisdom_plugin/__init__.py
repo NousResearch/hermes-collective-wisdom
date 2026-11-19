@@ -306,6 +306,9 @@ def register(ctx: Any) -> None:
         state=ctx.state, inject_message=getattr(ctx, "inject_message", None),
         plugin_id=str(getattr(ctx, "plugin_id", "") or "collective-wisdom"),
     )
+    from .catalog_registration import register_catalog  # pylint: disable=import-outside-toplevel
+    register_catalog(ctx, runtime)
+    runtime.catalog_mutations = getattr(ctx, "skill_catalog_mutations", None)
     lifecycle = LifecycleBridge(
         ctx.state.data_dir, profile, state=ctx.state, llm=ctx.llm, get_config=config_value,
     )
@@ -344,8 +347,7 @@ def register(ctx: Any) -> None:
             ctx, runtime, lifecycle, profile, awareness_turns, awareness_lock, poll_lock,
             offer_turns,
         )
-    ctx.register_platform_handler("slack", runtime.native.wire_slack)
-    ctx.register_telegram_handler(runtime.native.wire_telegram)
+    _register_optional_native(ctx, runtime)
     runtime.registrations.extend(register_native_tools(
         ctx, runtime, tuple(name for name in scope.model_tools if name != AUTO_SUGGEST_TOOL),
     ))
@@ -359,3 +361,21 @@ def register(ctx: Any) -> None:
     )
     if registration is not None:
         runtime.registrations.append(registration)
+
+def _register_optional_native(ctx, runtime):
+    """Keep catalog-specific admission separate from the native sequence."""
+    try:
+        from hermes_cli.plugin_host_wire import (  # pylint: disable=import-outside-toplevel
+            PluginHostUnsupported,
+        )
+        unsupported = (PluginHostUnsupported,)
+    except ImportError:
+        unsupported = ()
+    try:
+        ctx.register_platform_handler("slack", runtime.native.wire_slack)
+    except unsupported:
+        pass  # The hosted HTTP catalog does not need native SDK handlers.
+    try:
+        ctx.register_telegram_handler(runtime.native.wire_telegram)
+    except unsupported:
+        pass
