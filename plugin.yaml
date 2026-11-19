@@ -21,3 +21,5 @@ provides_tools:
 capabilities:
   - llm.session_fork
   - llm.side_question
+  # Optional: older hosts or an ungranted capability keep the existing Wisdom UI.
+  - skills.catalog

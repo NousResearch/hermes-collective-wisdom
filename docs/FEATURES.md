@@ -28,6 +28,25 @@ auxiliary task, and model-written editorial copy. Preparation uses the skill's o
 name and description. Widening `ACTIVE` to `FULL` restores these surfaces; their
 tests run under the `full_release_scope` fixture.
 
+## Optional Team skill-catalog provider
+
+With `ctx.register_skill_catalog` and an explicit `skills.catalog` grant, the plugin registers
+one `team` provider for Desktop Capabilities → Skills and authenticated HTTP. No registrar or no
+grant means no new source or changed legacy behavior. No `hermes skills` CLI leaves are added.
+
+Discovery, exact preview and local installed state use existing Wisdom services. Generic review,
+confirm, reviewed and operation status retain the same native receipt and full finding binding.
+Uninstall also has a durable owner-bound review. Local commit uses the core mutation facade;
+Gateway reconciliation runs after the writer hold is released. Pending outcomes carry a local
+revision and no terminal outcome, and completed operations replay without touching reused paths.
+Native Wisdom effects enter the same facade when available.
+
+Known ineligibility hides the source; Gateway failure reports unavailable. Disable makes installs
+ordinary local skills. Re-enable claims only unchanged owned trees, leaving edited copies, missing
+trees and replacements alone. Author-source enrollment is metadata-only, not a catalog claim.
+An edited catalog update returns a refused outcome with archive/rename guidance; automatic
+second-target preservation is deferred. Setup approval remains independent of installation.
+
 ## Supported workflows
 
 - Enroll, inspect entitlement, and accept the explicit data-use disclosure.
