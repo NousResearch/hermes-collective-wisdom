@@ -116,6 +116,7 @@ def executor(tmp_path):
         "skill_id": "skill-1", "slug": "managed-skill", "from_version": 1,
         "version": 2, "content_hash": "sha256:new",
         "baseline": {"SKILL.md": _hash(V2)}, "previous_content_hash": "sha256:old",
+        "files": [{"path": "SKILL.md", "mode": "file", "hash": _hash(V2), "size": len(V2)}],
         "previous_baseline": {"SKILL.md": _hash(V1)},
         "previous_installation": previous, "target_path": str(target),
         "local_snapshot": {"SKILL.md": _hash(V1)},

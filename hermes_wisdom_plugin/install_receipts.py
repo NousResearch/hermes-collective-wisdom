@@ -26,6 +26,7 @@ class InstallReceipts:
     JOURNAL_KIND = "install"
     KEY_PREFIX = "install_receipt:"
     LABEL = "Install"
+    REVIEW_SECONDS = REVIEW_SECONDS
 
     def __init__(self, store, owner, *, clock=time.time):
         self.store = store
@@ -45,7 +46,7 @@ class InstallReceipts:
         value = {
             **copy.deepcopy(plan), "receipt": receipt, "operation": self.OPERATION,
             "owner": copy.deepcopy(owner), "created_at": now,
-            "expires_at": now + REVIEW_SECONDS,
+            "expires_at": now + self.REVIEW_SECONDS,
         }
         try:
             size = len(json.dumps(value, ensure_ascii=True, allow_nan=False).encode())

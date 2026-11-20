@@ -67,7 +67,7 @@ def _notification_config() -> dict:
 
 def _service() -> InvocationService:
     """Resolve profile home and owner afresh for each authenticated request."""
-    return InvocationService(
+    service = InvocationService(
         _context.state.data_dir,
         current_profile(),
         config=_notification_config(),
@@ -75,6 +75,8 @@ def _service() -> InvocationService:
         set_config=_context.set_config,
         state=_context.state,
     )
+    service.catalog_mutations = getattr(_context, "skill_catalog_mutations", None)
+    return service
 
 
 def _enabled() -> bool:

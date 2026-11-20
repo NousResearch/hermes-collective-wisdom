@@ -203,7 +203,8 @@ class InstalledState:
             review["result"] = _copy(result)
 
     def begin(
-        self, kind: str, skill_id: str, payload: dict[str, Any], *, stage: str = "prepared"
+        self, kind: str, skill_id: str, payload: dict[str, Any], *, stage: str = "prepared",
+        operation_id: str | None = None,
     ) -> str:
         """Persist a replacement-created operation before its first filesystem effect."""
 
@@ -218,7 +219,9 @@ class InstalledState:
                 ):
                     return str(same["id"])
                 raise WisdomConflict("Another managed operation is pending for this skill")
-            operation_id = uuid.uuid4().hex
+            operation_id = operation_id or uuid.uuid4().hex
+            if operation_id in value["operations"]:
+                raise WisdomConflict("Managed operation identity already exists")
             now = datetime.now(timezone.utc).isoformat()
             value["operations"][operation_id] = {
                 "id": operation_id, "kind": kind, "skill_id": skill_id,

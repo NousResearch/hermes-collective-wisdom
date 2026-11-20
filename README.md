@@ -20,9 +20,9 @@ You stay in control at every step:
 - Hermes Agent 0.21.5 or newer.
 - A Nous account in a team that has Collective Wisdom enabled. Personal accounts do not have access.
 - Linux or macOS for installing skills. Windows is not supported for managed skill installation.
-- Plugins loaded in the Hermes process (`plugins.isolation: in_process`, the default). The native
-  Slack and Telegram cards need the Hermes process, so with `plugins.isolation: host` Hermes does not
-  load Collective Wisdom.
+- Native Slack and Telegram cards need the Hermes process. Under `plugins.isolation: host`,
+  supported host surfaces may still load, but the optional Slack/Telegram registrations are skipped.
+  The Team Skills catalog also requires a host that provides its registrar and mutation facade.
 
 ## Install
 
@@ -76,6 +76,25 @@ the reply names the terminal command: setup is accepted only in the terminal.
 hermes wisdom status          # "active" when the profile is enrolled
 hermes wisdom browse          # your team's shared skills; empty until someone shares
 ```
+
+## Team skills in Capabilities → Skills
+
+On a Hermes host with the experimental skill-catalog API, granting `skills.catalog` adds
+**Team skills** to the existing Skills catalog in Desktop and its authenticated HTTP API.
+Search and preview read the same team library as `hermes wisdom browse`. Install, update and
+uninstall use Wisdom's exact-version reviews, scanner acknowledgements and durable receipts,
+not the Skills Hub installer. Setup commands remain a separate approval.
+
+A signed-out account, personal account or team without access has no Team source. A Gateway
+outage is shown as unavailable, not an empty library. Older hosts, or hosts where the capability
+is not granted, retain the existing Wisdom commands and management pages unchanged. This
+integration does not change `hermes skills` CLI commands.
+
+Disabling the plugin leaves its files as ordinary local skills. Re-enabling only reclaims
+unchanged trees still matching Wisdom's records; it never deletes or overwrites local replacements.
+An author's published source stays an ordinary local row. Catalog updates with local edits are
+refused: archive or rename the edited copy in Skills, then review the update again. The catalog
+does not automatically write a second preservation copy.
 
 ## What you can do
 

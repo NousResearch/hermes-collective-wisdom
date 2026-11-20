@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import shutil
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from .catalog_completion import finish_native
 from .errors import WisdomAuthError, WisdomConflict, WisdomNotFound, WisdomValidationError
 from .install_execution import (
     _accepted_scan_warning,
@@ -50,7 +52,9 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
     _payload = staticmethod(_operation_payload)
     _install_record = staticmethod(_install_record)
 
-    def __init__(self, client, store, receipts, reviewer, host, owner) -> None:
+    def __init__(self, client, store, receipts, reviewer, host, owner, *, catalog=None) -> None:
+        self.catalog = catalog
+        self.admitter = None
         self.client, self.store, self.receipts = client, store, receipts
         self.reviewer, self.host, self.owner = reviewer, host, owner
 
@@ -113,11 +117,30 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
                 raise PackagePolicyError("another managed operation is pending for this skill")
             self._matches_plan(payload, plan)
             self._require_current(may_apply)
+            if self.admitter is not None:
+                self.admitter.resume(self, row, plan, "update", dict(plan.get("policy") or {}))
+                payload = self._payload(self.store.operation(row["id"]))
             self._ready_operation(row, payload, receipt)
             return self._resume(row, payload, may_apply)
         completed = self.receipts.outcome(receipt)
         if completed is not None:
             return completed
+        return self._begin_update(plan, owner, receipt, skill_id, may_apply)
+
+    def _begin_update(self, plan, owner, receipt, skill_id, may_apply):
+        """Keep catalog-specific admission separate from the native sequence."""
+        if self.catalog is None and self.admitter is not None:
+            # Native choices enter the same facade before the zero-write refusal.
+            native_payload = {**dict(plan), "owner": owner, "receipt": receipt}
+            native_id = self.admitter.admit(self, plan, "update", dict(plan.get("policy") or {}),
+                                            payload=native_payload)
+        else:
+            native_payload, native_id = dict(plan), None
+        if self.catalog is not None and self.catalog.refuse_local_edits(plan):
+            operation_id = self.store.begin(
+                "update", skill_id, native_payload, stage="prepared",
+                **({"operation_id": native_id} if native_id else {}))
+            return self.catalog.refuse(operation_id, native_payload, self.store, self.receipts)
         verified = self.reviewer.verify(plan)
         if not verified.plan.get("allowed"):
             raise PackagePolicyError("reviewed update is not allowed")
@@ -128,13 +151,20 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             raise PackagePolicyError("reviewed edited-copy action does not authorize replacement")
         self._require_current(may_apply)
         payload = {**dict(verified.plan), "owner": owner, "receipt": receipt}
-        operation_id = self.store.begin("update", skill_id, payload, stage="prepared")
+        if "catalog_native" in native_payload:
+            payload["catalog_native"] = native_payload["catalog_native"]
+        operation_id = native_id
+        operation_id = self.store.begin("update", skill_id, payload, stage="prepared",
+                                        **({"operation_id": operation_id} if operation_id else {}))
         operation = self.store.operation(operation_id)
         if not isinstance(operation, dict):
             raise PackagePolicyError("update recovery journal is missing")
         self._ready_operation(operation, payload, receipt)
         return self._resume(operation, payload, may_apply, verified)
 
+
+    # Resume intentionally lists journal phases and terminal refusal exits in one sequence.
+    # pylint: disable=too-many-return-statements
     def _resume(self, row, payload, may_apply, verified=None):  # pylint: disable=too-many-branches
         operation_id = str(row["id"])
         owner = self._owner()
@@ -146,6 +176,12 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         paths = self._paths(operation_id, payload)
         target = Path(payload["target_path"])
         staging, recovery = paths["staging_path"], paths["recovery_path"]
+        if payload.get("catalog_refused"):
+            if not payload.get("catalog_local_committed"):
+                return self._catalog_refusal(operation_id, payload, owner, paths, may_apply)
+            return self.catalog.reject(operation_id, payload, self.store, self.receipts)
+        if self._catalog_reconciling(payload, target):
+            return self._reconcile(operation_id, payload, owner, target, recovery, may_apply)
         old = payload["local_snapshot"]
         new = payload["baseline"]
         target_hashes, recovery_hashes = _tree_hashes(target), _tree_hashes(recovery)
@@ -165,9 +201,11 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             try:
                 verified = self.reviewer.verify(payload, recovery_phase=stage)
             except UpdateAuthorityRejected:
+                if self.catalog is not None:
+                    return self._catalog_refusal(operation_id, payload, owner, paths, may_apply)
                 return self._reject(operation_id, payload, owner)
         self._require_current(may_apply)
-        if target_hashes != new:
+        if target_hashes != new and not (self.catalog is not None and payload.get("catalog_files")):
             self._prepare_staging(staging, verified, payload)
 
         def before_preserve() -> None:
@@ -181,17 +219,65 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             )
             before_preserve()
 
-        _replace_package(
-            (staging, target, recovery), (old, new), approve_staged, before_preserve
-        )
-        self._preserve_copy(payload, recovery, operation_id, owner)
+        self._approve_catalog_staging(payload, staging, approve_staged)
+        hold = (self.catalog.commit(operation_id, payload, self.store,
+                                    paths={"target": target, "staging": staging,
+                                           "recovery": recovery})
+                if self.catalog is not None else nullcontext())
+        with hold as files:
+            if self.catalog is not None:
+                files.apply(before_preserve)
+            else:
+                _replace_package((staging, target, recovery), (old, new),
+                                 approve_staged, before_preserve)
+            self._preserve_copy(payload, recovery, operation_id, owner)
+            self._record_local_installation(payload, owner)
+            self.store.checkpoint(operation_id, stage="local_committed")
+        return self._reconcile(operation_id, payload, owner, target, recovery, may_apply)
 
+
+    def _catalog_refusal(self, operation_id, payload, owner, paths, may_apply):
+        """Never invoke legacy quarantine for a catalog operation, including recovery."""
+        payload["catalog_refused"] = True
+        self.store.checkpoint(operation_id, payload)
+        if not payload.get("catalog_files"):
+            # No catalog write intent exists, hence no filesystem effect is authorized.
+            return self.catalog.reject(operation_id, payload, self.store, self.receipts)
+        with self.catalog.commit(operation_id, payload, self.store, paths={
+            "target": Path(payload["target_path"]), "staging": paths["staging_path"],
+            "recovery": paths["recovery_path"],
+        }) as files:
+            def current():
+                self._assert_owner(owner)
+                self._require_current(may_apply)
+            if files.refuse(current):
+                self._record_local_installation(payload, owner)
+        return self.catalog.reject(operation_id, payload, self.store, self.receipts)
+
+    def _catalog_reconciling(self, payload, target):
+        """A committed local phase can only reconcile, never swap files again."""
+        if self.catalog is None or not payload.get("catalog_local_committed"):
+            return False
+        if _tree_hashes(target) != payload["baseline"]:
+            raise PackagePolicyError("managed bytes changed during Gateway reconciliation")
+        return True
+
+    def _record_local_installation(self, payload, owner):
+        """Keep catalog-specific admission separate from the native sequence."""
         installation = self.store.installation(payload["skill_id"], owner=owner)
-        if not isinstance(installation, dict) or installation.get("version") != payload["version"]:
+        if (not isinstance(installation, dict)
+                or installation.get("version") != payload["version"]):
             self._assert_owner(owner)
             self.store.record_install(self._install_record(payload, owner))
-        self.store.checkpoint(operation_id, stage="local_committed")
-        return self._reconcile(operation_id, payload, owner, target, recovery, may_apply)
+
+
+    def _approve_catalog_staging(self, payload, staging, approve_staged):
+        """Keep catalog-specific admission separate from the native sequence."""
+        if self.catalog is not None:
+            if payload["preservation"]["action"] != "none":
+                raise PackagePolicyError("catalog update needs separate preservation authority")
+            approve_staged(staging)
+
 
     def _prepare_staging(self, staging: Path, verified, payload: dict) -> None:
         if verified is None or not verified.files:
@@ -217,6 +303,8 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
                 mode = _field(server, "effective_update_mode")
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 if _terminal_rejection(exc):
+                    if self.catalog is not None and payload.get("catalog_local_committed"):
+                        return self.catalog.reject(operation_id, payload, self.store, self.receipts)
                     self._reject(operation_id, payload, owner)
                     raise
                 return self._pending(payload, operation_id,
@@ -308,9 +396,7 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
         result = payload.get("result")
         if not isinstance(result, dict):
             raise PackagePolicyError("completed update outcome is missing")
-        self.receipts.complete(payload["receipt"], result)
-        self.store.finish(operation_id, result, stage="complete")
-        return result
+        return finish_native(self, operation_id, payload, result)
 
     def _preserve_copy(self, payload, recovery, operation_id, owner):
         preservation = payload["preservation"]
