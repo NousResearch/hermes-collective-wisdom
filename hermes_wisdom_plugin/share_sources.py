@@ -6,6 +6,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
+from ruamel.yaml import YAMLError
+
 from .editorial import _overlay_frontmatter
 from .errors import WisdomNotFound
 from .package import SkillRefusal
@@ -28,6 +30,9 @@ def _safe_sources(root: Path):
     for pattern in ("*/SKILL.md", "*/*/SKILL.md"):
         for markdown in sorted(root.glob(pattern)):
             relative = markdown.relative_to(root)
+            if any(part.startswith(".") or part in {"_org", "_wisdom", "node_modules"}
+                   for part in relative.parts[:-1]):
+                continue
             if any(root.joinpath(*relative.parts[:index]).is_symlink()
                    for index in range(1, len(relative.parts) + 1)):
                 continue
@@ -55,23 +60,27 @@ class ShareSources:
         discover = getattr(host, "skill_search_roots", None)
         self.roots = discover() if callable(discover) else [(1, local)]
         self._names: dict[str, list[tuple[int, Path]]] = defaultdict(list)
+        self._canonical: set[str] = set()
         for tier, root in self.roots:
             for source in _safe_sources(Path(root)):
                 try:
                     declared = _overlay_frontmatter(source).get("name")
-                except (OSError, ValueError):
+                except (OSError, ValueError, YAMLError):
                     declared = None
                 aliases = {source.name}
                 if isinstance(declared, str) and declared.strip():
                     aliases.add(declared.strip())
+                    self._canonical.add(declared.strip())
+                else:
+                    self._canonical.add(source.name)
                 for alias in aliases:
                     entry = (tier, source)
                     if entry not in self._names[alias]:
                         self._names[alias].append(entry)
 
     def names(self) -> list[str]:
-        """All aliases, including ambiguous ones which resolve() will refuse."""
-        return sorted(self._names)
+        """Canonical names, including ambiguous ones which resolve() will refuse."""
+        return sorted(self._canonical)
 
     def resolve(self, name: str) -> Path:
         """Pick only the highest-precedence tier's single safe source."""

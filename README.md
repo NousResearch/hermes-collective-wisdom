@@ -128,6 +128,12 @@ Without either, Collective Wisdom works exactly as before and suggests nothing.
 hermes wisdom share <skill>
 ```
 
+Sharing searches your profile's skills folder, `skills.create_dir` and
+`skills.external_dirs` in Hermes's precedence order. Flat and category/skill
+folders are supported. Symlinked skill folders and `SKILL.md` files are refused,
+and duplicate names within one tier must be resolved before sharing.
+Installing a teammate's skill still writes only to this profile's skills folder.
+
 Share builds the exact package and shows one review: the team, who will see it, the version, the
 description, every file, and the local security checks. You can open a file, edit the description or
 the files, then choose **Share** or cancel. In a private Telegram chat or Slack DM, `/wisdom share

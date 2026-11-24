@@ -18,7 +18,8 @@ from hermes_wisdom_plugin.runtime import CommandRuntime
 
 
 def _expected(name, roots):
-    return f"`{name}` isn't a local skill on this profile. Hermes searches: {', '.join(map(str, roots))}."
+    return (f"`{name}` isn't a local skill on this profile. "
+            f"Hermes searches: {', '.join(map(str, roots))}.")
 
 
 def test_missing_source_reports_all_search_roots(tmp_path, monkeypatch):
@@ -52,7 +53,8 @@ def test_direct_cli_unknown_source_keeps_actionable_message(tmp_path, capsys):
     build_parser(parser)
     args = parser.parse_args(["share", "unknown-skill", "--yes", "--json"])
     assert run_cli(args, service) == 1
-    assert _expected("unknown-skill", [service.reviewer.host.skills_root]) in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert _expected("unknown-skill", [service.reviewer.host.skills_root]) in output
 
 
 def test_desktop_unknown_source_returns_specific_404(tmp_path):
@@ -78,6 +80,8 @@ def test_desktop_unknown_source_returns_specific_404(tmp_path):
     app.include_router(build_router(Service))
     with TestClient(app) as http:
         view = http.post("/views").json()["view_id"]
-        response = http.post("/drafts/prepare", json={"view_id": view, "skill_name": "unknown-skill"})
+        response = http.post("/drafts/prepare", json={
+            "view_id": view, "skill_name": "unknown-skill"})
     assert response.status_code == 404, response.text
-    assert json.loads(response.text)["detail"] == _expected("unknown-skill", [value.host.skills_root])
+    detail = json.loads(response.text)["detail"]
+    assert detail == _expected("unknown-skill", [value.host.skills_root])

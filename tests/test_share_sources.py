@@ -103,6 +103,52 @@ def test_declared_name_and_folder_alias_resolve_same_source(tmp_path, monkeypatc
     assert value.source("folder-name") == source
 
 
+def test_external_source_runs_one_shot_share_without_copying(tmp_path, monkeypatch, capsys):
+    import argparse  # pylint: disable=import-outside-toplevel
+    import json  # pylint: disable=import-outside-toplevel
+    from test_share_command import ShareCli  # pylint: disable=import-outside-toplevel
+    from hermes_wisdom_plugin.commands import build_parser, run_cli  # pylint: disable=import-outside-toplevel
+
+    service = ShareCli(tmp_path)
+    source = tmp_path / "external" / "category" / service.source.name
+    source.parent.mkdir(parents=True)
+    service.source.rename(source)
+    _roots(monkeypatch, service.reviewer.host, [
+        (1, service.reviewer.host.skills_root), (3, tmp_path / "external")])
+    parser = argparse.ArgumentParser()
+    build_parser(parser)
+    assert run_cli(parser.parse_args(["share", source.name, "--yes", "--json"]), service) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "shared"
+    assert service.client.state.calls["publish"] == 1
+    assert (source / "SKILL.md").is_file()
+    assert not service.source.exists()
+
+
+def test_sharing_external_source_keeps_install_review_profile_local(tmp_path, monkeypatch):
+    from test_install_review import Host, _reviewer  # pylint: disable=import-outside-toplevel
+
+    value, local, _binding = reviewer(tmp_path)
+    local.rename(local.with_name("other-local"))
+    (local.with_name("other-local") / "SKILL.md").write_text("# Other local skill\n")
+    external = tmp_path / "shared"
+    source = _skill(external, "category/reviewed-skill")
+    _roots(monkeypatch, value.host, [(1, value.host.skills_root), (3, external)])
+    value.prepare("reviewed-skill", allow_model_review=False)
+    install_host = Host(tmp_path / "profile")
+    _reviewer(tmp_path, host=install_host).plan("skill-1")
+    assert install_host.targets
+    assert all(path.is_relative_to(value.host.skills_root) for path in install_host.targets)
+    assert all(not path.is_relative_to(external) for path in install_host.targets)
+    assert (source / "SKILL.md").is_file()
+
+
+def test_unrelated_malformed_frontmatter_does_not_block_sharing(tmp_path):
+    value, source, _binding = reviewer(tmp_path)
+    broken = _skill(value.host.skills_root, "broken", "broken")
+    (broken / "SKILL.md").write_text("---\nname: [\n---\n# Broken\n")
+    assert value.source("reviewed-skill") == source
+
+
 def test_host_uses_profile_root_and_excludes_project_roots(tmp_path, monkeypatch):
     host = InstallationHost(tmp_path)
     calls = []
