@@ -30,6 +30,8 @@ BOUND: list = []
 def _host_home_override(monkeypatch):
     """Stand in for hermes_constants' context-local home override."""
     BOUND.clear()
+    # Unit usage fixtures must not inherit a real host imported by earlier probes.
+    monkeypatch.setattr(top_skills, "hermes_search_roots", lambda local: [(1, local)])
     monkeypatch.setattr(top_skills, "_home_override", lambda: (
         lambda home: BOUND.append(("set", home)) or len(BOUND),
         lambda token: BOUND.append(("reset", token)),

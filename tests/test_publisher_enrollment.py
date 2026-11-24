@@ -439,7 +439,7 @@ def test_named_enrollment_rejects_unknown_local_skill_without_effects(tmp_path: 
     )
     before = tree_hashes(source)
 
-    with pytest.raises(WisdomNotFound, match="local skill not found"):
+    with pytest.raises(WisdomNotFound, match="isn't a local skill on this profile"):
         recovered.enroll("unknown-skill")
 
     assert tree_hashes(source) == before
