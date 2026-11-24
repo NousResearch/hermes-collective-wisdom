@@ -37,6 +37,16 @@ def _safe_sources(root: Path):
                 yield resolved
 
 
+class LocalSkillNotFound(WisdomNotFound):
+    """Plugin-authored source lookup failure, safe to show unlike remote 404s."""
+
+    def __init__(self, name: str, roots: list[tuple[int, Path]]) -> None:
+        searched = ", ".join(str(root) for _tier, root in roots)
+        super().__init__(
+            f"`{name}` isn't a local skill on this profile. Hermes searches: {searched}."
+        )
+
+
 class ShareSources:
     """Resolve share names by Hermes tier, refusing same-tier ambiguity."""
 
@@ -66,12 +76,12 @@ class ShareSources:
     def resolve(self, name: str) -> Path:
         """Pick only the highest-precedence tier's single safe source."""
         if not isinstance(name, str) or not name:
-            raise WisdomNotFound("local skill not found")
+            raise LocalSkillNotFound(name, self.roots)
         if name != name.strip() or "/" in name or "\\" in name or name in {".", ".."}:
-            raise WisdomNotFound("local skill not found")
+            raise LocalSkillNotFound(name, self.roots)
         candidates = self._names.get(name, [])
         if not candidates:
-            raise WisdomNotFound("local skill not found")
+            raise LocalSkillNotFound(name, self.roots)
         tier = min(item[0] for item in candidates)
         paths = sorted({path for found_tier, path in candidates if found_tier == tier})
         if len(paths) != 1:

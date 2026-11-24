@@ -29,6 +29,7 @@ from .errors import (
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError, SkillRefusal
 from .release_scope import active as release_scope
+from .share_sources import LocalSkillNotFound
 
 
 def _require_current(may_apply: Callable[[], bool] | None) -> None:
@@ -1897,6 +1898,8 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 reply = self._slash_native_review(invocation, command, args)
                 if reply is not None:
                     return reply
+            except LocalSkillNotFound as exc:
+                return redacted_message(exc, limit=4096)
             except SkillRefusal as exc:
                 # The skill's own files break a rule (plugin-authored text):
                 # say exactly why. Anything else, including Gateway-supplied
