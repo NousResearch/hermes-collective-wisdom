@@ -276,35 +276,10 @@ class ContributionReviewer:  # pylint: disable=too-few-public-methods
         return rows
 
     def source(self, skill_name: str) -> Path:
-        """Resolve one unique safe profile-local skill source by its local name."""
+        """Resolve a safe skill through the host's non-project search roots."""
+        from .share_sources import ShareSources  # pylint: disable=import-outside-toplevel
 
-        if not isinstance(skill_name, str) or not skill_name.strip():
-            raise WisdomNotFound("local skill not found")
-        if skill_name != skill_name.strip() or "/" in skill_name or "\\" in skill_name:
-            raise WisdomNotFound("local skill not found")
-        if skill_name in {".", ".."}:
-            raise WisdomNotFound("local skill not found")
-        root = Path(getattr(self.host, "skills_root", ""))
-        if not root.is_dir() or root.is_symlink():
-            raise WisdomNotFound("local skill not found")
-        candidates: list[Path] = []
-        for skill_md in root.glob("*/SKILL.md"):
-            if skill_md.parent.name == skill_name:
-                candidates.append(skill_md.parent)
-        for skill_md in root.glob("*/*/SKILL.md"):
-            if skill_md.parent.name == skill_name:
-                candidates.append(skill_md.parent)
-        safe: list[Path] = []
-        root_resolved = root.resolve()
-        for candidate in candidates:
-            if candidate.is_symlink() or (candidate / "SKILL.md").is_symlink():
-                continue
-            resolved = candidate.resolve()
-            if resolved != root_resolved and resolved.is_relative_to(root_resolved):
-                safe.append(resolved)
-        if len(safe) != 1:
-            raise WisdomNotFound("local skill not found")
-        return safe[0]
+        return ShareSources(self.host).resolve(skill_name)
 
     def _result(  # pylint: disable=too-many-locals
         self,
