@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
@@ -113,7 +114,14 @@ def test_tui_posts_the_text_card_without_a_directive(tmp_path):
 
 def test_private_slack_chat_sends_the_native_card_and_records_one_line(tmp_path):
     host, cards, controller = _build(tmp_path, surface=SLACK_DM)
+    completion = Future()
+    def present(route, session_id, suggestion):
+        host.present(route, session_id, suggestion)
+        return {"state": "queued", "completion": completion}
+    controller.present = present
     _suggest(controller, platform="slack")
+    assert not cards.posted
+    completion.set_result("delivered")
     assert not host.injected
     assert len(host.presented) == 1 and len(cards.posted) == 1
     route, session_id, suggestion = host.presented[0]

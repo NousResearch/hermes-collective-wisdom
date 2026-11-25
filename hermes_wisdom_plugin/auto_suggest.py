@@ -43,6 +43,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from concurrent.futures import Future
 import re
 import secrets
 import shlex
@@ -54,7 +55,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from .card_delivery import POSTED as POSTED_CARD
 from .card_delivery import REFUSED as CARD_REFUSED
 from .card_delivery import CardPoster
 from .delivery_fence import DeliveryFence
@@ -864,7 +864,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             "id": secrets.token_urlsafe(12), "skill": name,
             "description": clean_text(chosen.get("description")), "reason": reason,
             "content_hash": content_hash, "session_id": session_id, "route": route,
-            "state": "pending", "created_at": self.clock(),
+            "state": "pending", "created_at": self.clock(), "reserved_day": reserved_day,
             "expires_at": self.clock() + PENDING_TTL_SECONDS,
         }
         if by_card:  # Answerable from the moment core may show it.
@@ -878,9 +878,10 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
             outcome = self._show(suggestion, route, by_card=by_card)
         finally:
             self._fence.leave()
-        if outcome == "injected":
-            self.store.record("injected", name, surface=route.get("platform"))
-            return True
+        if outcome in {"delivering", "injected"}:
+            if outcome == "injected":
+                self.store.record("injected", name, surface=route.get("platform"))
+            return True  # A queued native send owns its final bookkeeping.
         if outcome in {"posted", "uncertain"}:
             self.store.record("shown", name, surface=route.get("platform") or "local",
                               via="card", uncertain=True if outcome == "uncertain" else None)
@@ -926,18 +927,51 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                 suggestion["id"], local_card(suggestion, self.profile), session_key=session_key,
                 directive={"name": DESKTOP_DIRECTIVE, "attrs": {"id": suggestion["id"]}}
                 if desktop else None)
-        # Slack/Telegram: this plugin sends the native card; core records the line for the model.
+        # Slack/Telegram: core records a history line only after the native send succeeds.
         try:
             delivery = self.present(route, suggestion["session_id"], suggestion)
         except Exception:  # pylint: disable=broad-exception-caught
             delivery = None
         if not isinstance(delivery, dict) or delivery.get("state") != "queued":
             return "card_unavailable"
-        if self.cards.post(suggestion["id"], chat_card_line(suggestion),
-                           session_key=session_key) == CARD_REFUSED:
-            logger.info("Collective Wisdom: the suggestion card was sent but not recorded in "
-                        "the session history")
-        return POSTED_CARD
+        self._watch_native(suggestion, delivery, by_card=True)
+        return "delivering"
+
+    def _watch_native(self, suggestion: dict[str, Any], delivery: dict[str, Any], *,
+                      by_card: bool) -> None:
+        """A queued send holds its reservation, but is not yet a shown card."""
+        self.store.set_pending_state(suggestion["id"], "delivering")
+        completion = delivery.get("completion")
+        if isinstance(completion, Future):
+            completion.add_done_callback(
+                lambda result: self._native_delivered(suggestion, result.result(), by_card=by_card))
+
+    def _native_delivered(self, suggestion: dict[str, Any], outcome: str, *, by_card: bool) -> None:
+        """Settle once from the supervised send. An unknown result never permits a retry."""
+        identity, name = suggestion["id"], suggestion["skill"]
+        if outcome == "uncertain":
+            return
+        state = "presented" if outcome == "delivered" else "undelivered"
+        if self.store.transition(identity, "delivering", state) is None:
+            return
+        if outcome != "delivered":
+            self.store.unreserve(identity, suggestion["reserved_day"])
+            self.store.forget_seen(name, suggestion["content_hash"])
+            self.store.block_today()
+            self.store.record("not_shown", name, why="card_unavailable")
+            return
+        route = suggestion["route"]
+        self.store.record("shown", name, surface=route.get("platform"),
+                          via="card" if by_card else None)
+        if by_card and self._fence.enter():
+            try:
+                assert self.cards is not None
+                if self.cards.post(identity, chat_card_line(suggestion),
+                                   session_key=str(route["session_key"])) == CARD_REFUSED:
+                    logger.info("Collective Wisdom: the suggestion card was sent but not recorded "
+                                "in the session history")
+            finally:
+                self._fence.leave()
 
     def _unloaded(self, name: str, content_hash: str) -> bool:
         """No turn after unload; the revision is asked about again after a reload."""
@@ -971,7 +1005,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
                 self.store.set_pending_state(suggestion["id"], "undelivered")
                 self.store.record("not_shown", skill, why="card_unavailable")
                 raise PermissionError("The Collective Wisdom card could not be shown here.")
-            self.store.record("shown", skill, surface=route.get("platform"))
+            self._watch_native(suggestion, delivery, by_card=False)
             return json.dumps({
                 "status": "queued", "executed": False,
                 "instruction": ("The Collective Wisdom card appears after your reply. Tell the "
