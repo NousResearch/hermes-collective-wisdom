@@ -246,6 +246,14 @@ class CatalogReviews(WisdomCatalog):
         plan = receipts.load(record["native_receipt_id"], allow_started=True)
         if digest(plan) != record["plan_digest"]:
             return failure("review_changed", "The reviewed facts changed; review the skill again.")
+        # Preview planning may accept partial compatibility to expose the full review.
+        # A retained generic review cannot turn that preview choice into user consent.
+        compatibility = {row["id"] for row in findings(plan)
+                         if row["category"] == "compatibility"
+                         and row["acknowledgement_required"]}
+        if not compatibility.issubset(acknowledgements):
+            return failure("acknowledgement_required",
+                           "Acknowledge the compatibility requirements.")
         return None
 
     def project_operation(self, service, row):
