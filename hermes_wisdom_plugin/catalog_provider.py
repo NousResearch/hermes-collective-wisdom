@@ -98,8 +98,11 @@ class CatalogProvider(CatalogReviews):
                 action = record["action"]
                 executor = (service._update_services()[1] if action == "update"
                             else service._installation_services()[1])
+                # A done row returned above, so a row here is a durable pending operation
+                # that core re-admitted as recovery; it must take the journal recovery hold.
                 executor.catalog = CatalogMutation(self.mutations, admission, action,
-                                                   review["identifier"], plan, self.host)
+                                                   review["identifier"], plan, self.host,
+                                                   recovery=row is not None)
                 receipt = record["native_receipt_id"]
                 if action == "uninstall":
                     executor.uninstall_reviewed(receipt, receipts=receipts)
