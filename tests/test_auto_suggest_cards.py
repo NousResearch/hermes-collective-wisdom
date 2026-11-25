@@ -12,6 +12,7 @@ import importlib
 import json
 from concurrent.futures import Future
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from test_auto_suggest import DUE, SLACK_DM
@@ -163,9 +164,18 @@ def test_a_controller_without_a_card_poster_is_unchanged(tmp_path):
     assert host.injected == [(approval_prompt("incident"), "user", {})]
 
 
-def test_the_classic_cli_without_a_session_key_keeps_the_injected_turn(tmp_path):
+def test_the_classic_cli_without_a_session_key_keeps_the_injected_turn(tmp_path, monkeypatch):
     host, cards, controller = _build(tmp_path, surface={"source": "cli"})
+    states_at_save = []
+    original = host.store.add_pending
+
+    def capture(row):
+        states_at_save.append(row["state"])
+        original(row)
+
+    monkeypatch.setattr(host.store, "add_pending", capture)
     _suggest(controller, platform="cli")
+    assert states_at_save == ["pending"]
     assert not cards.posted
     assert host.injected == [(approval_prompt("incident"), "user", {})]
 
@@ -238,6 +248,7 @@ def test_unload_during_delivery_posts_nothing(tmp_path, boundary):
 @pytest.mark.parametrize(("result", "outcome"), [
     ({"ok": True, "status": "queued"}, POSTED), ({"ok": True, "status": "posted"}, POSTED),
     ({"ok": True, "status": "duplicate"}, POSTED), ({"ok": True, "status": "odd"}, REFUSED),
+    ({"ok": False, "status": "queued", "error": "consent_required"}, REFUSED),
     ({"ok": False, "error": "timeout"}, UNCERTAIN),
     ({"ok": False, "error": "cancelled"}, UNCERTAIN),
     ({"ok": False, "error": "post_failed"}, UNCERTAIN),
@@ -261,9 +272,16 @@ def test_card_poster_needs_the_method_the_grant_and_a_session():
 
     assert CardPoster(None, lambda _name: True).ready() is False
     assert CardPoster(call, lambda name: name != CARD_CAPABILITY).ready() is False
+    assert CardPoster(call, Mock(return_value=1)).ready() is False
     assert CardPoster(call, _raises).ready() is False
     assert CardPoster(call, lambda name: name == CARD_CAPABILITY).ready() is True
     assert CardPoster(call, lambda _name: True).post("abcdefgh1", "t", session_key="") == REFUSED
+
+
+def test_no_card_method_is_a_clean_refusal_even_with_a_session(caplog):
+    poster = CardPoster(None, lambda _name: True)
+    assert poster.post("abcdefgh1", "t", session_key="k") == REFUSED
+    assert not caplog.records
 
 
 def test_register_wires_ctx_post_card_behind_the_grant(tmp_path, monkeypatch):

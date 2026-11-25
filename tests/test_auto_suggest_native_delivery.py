@@ -13,8 +13,9 @@ from test_restored_native_flow import Service
 @pytest.mark.parametrize("surface", [SlackHarness, TelegramHarness])
 @pytest.mark.parametrize("delivered", [False, True])
 @pytest.mark.parametrize("by_card", [False, True])
-def test_native_suggestion_settles_only_after_supervised_send(
-    tmp_path, monkeypatch, surface, delivered, by_card,
+@pytest.mark.parametrize("worker", [False, True])
+def test_native_suggestion_settles_only_after_supervised_send(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    tmp_path, monkeypatch, surface, delivered, by_card, worker,
 ):
     async def scenario():
         ui = surface(tmp_path, Service())
@@ -31,9 +32,15 @@ def test_native_suggestion_settles_only_after_supervised_send(
         host, cards, controller = _build(
             tmp_path, surface=route, present=ui.runtime.present_auto_suggest, api=by_card,
         )
-        _suggest(controller, platform=ui.caller.platform)
-        if not by_card:
-            controller.tool({"skill": "incident"}, session_id="s1")
+        def suggest():
+            _suggest(controller, platform=ui.caller.platform)
+            if not by_card:
+                controller.tool({"skill": "incident"}, session_id="s1")
+        if worker:
+            await asyncio.to_thread(suggest)
+            await asyncio.sleep(0)
+        else:
+            suggest()
         assert len(ui.tasks) == 1
         assert not cards.posted, "queueing must not write 'card posted' to history"
         assert not any(event == "shown" for event, _, _ in _decisions(host)), (
