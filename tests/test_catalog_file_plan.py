@@ -105,6 +105,7 @@ def test_update_refuses_untrustworthy_incoming_inventory(plan, inventory):
 
 def test_update_refuses_omitted_incoming_inventory(plan):
     del plan["files"]
+    plan["baseline"] = {}
     _incomplete(_review(plan))
 
 
@@ -138,7 +139,7 @@ def test_update_refuses_missing_comparison_identity(plan, field):
 
 
 def test_update_refuses_duplicate_incoming_paths(plan):
-    plan["files"].append(_file("SKILL.md", identity="different"))
+    plan["files"].append(dict(plan["files"][0]))
     _incomplete(_review(plan))
 
 
