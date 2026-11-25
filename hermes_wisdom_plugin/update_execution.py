@@ -219,13 +219,15 @@ class UpdateExecutor:  # pylint: disable=too-many-instance-attributes
             )
             before_preserve()
 
-        self._approve_catalog_staging(payload, staging, approve_staged)
         hold = (self.catalog.commit(operation_id, payload, self.store,
                                     paths={"target": target, "staging": staging,
                                            "recovery": recovery})
                 if self.catalog is not None else nullcontext())
         with hold as files:
             if self.catalog is not None:
+                # CatalogFiles validates operation-bound identity inside the writer hold.
+                scan_path = target if files.phase == "files_committed" else staging
+                self._approve_catalog_staging(payload, scan_path, approve_staged)
                 files.apply(before_preserve)
             else:
                 _replace_package((staging, target, recovery), (old, new),

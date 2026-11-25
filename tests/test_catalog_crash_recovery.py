@@ -161,3 +161,52 @@ def test_recovery_revalidates_evidence_inside_current_writer_hold(
     with pytest.raises(PackagePolicyError, match="changed|evidence"):
         run_action(executor, receipts, plan, action)
     assert (target / "SKILL.md").read_text() == "writer won before recovery"
+
+
+def test_committed_update_recovery_scans_target_with_acknowledged_findings(
+    request, tmp_path, monkeypatch,
+):
+    from hermes_wisdom_plugin import package_application
+    from test_update_execution import V2
+
+    executor, store, _client, receipts, original, target, api, _admission = scenario(
+        "update", request, tmp_path)
+    warning = {"available": True, "allowed": False, "verdict": "caution",
+               "summary": "reviewed warning", "findings": [{"description": "network access"}]}
+    plan = receipts.create({**original, "local_scan": warning, "policy": {
+        "warning_acceptance": {"accepted": True, "operation": "update",
+                               "content_hash": original["content_hash"]}}})
+    executor.catalog.plan = plan
+    scans = []
+
+    def scan(path):
+        scans.append(path)
+        # The real host reports a missing directory as a clean, empty scan.
+        return dict(warning) if path.exists() else dict(executor.host.scan_result)
+
+    monkeypatch.setattr(executor.host, "scan", scan)
+    replace = package_application.os.replace
+
+    def crash_after_promotion(source, destination):
+        replace(source, destination)
+        if destination == target:
+            raise RuntimeError("crash after promotion")
+
+    monkeypatch.setattr(package_application.os, "replace", crash_after_promotion)
+    with pytest.raises(RuntimeError, match="crash after promotion"):
+        run_action(executor, receipts, plan, "update")
+    pending, = store.pending_operations("skill-1")
+    assert not pending["payload"].get("catalog_local_committed")
+    staging = executor._paths(pending["id"], pending["payload"])["staging_path"]
+    assert not staging.exists() and target.joinpath("SKILL.md").read_bytes() == V2
+    monkeypatch.setattr(package_application.os, "replace", replace)
+    executor.catalog = None
+    admission = _admission
+    api.admit_native = lambda *_a: {"admission": admission, "operation_id": pending["id"]}
+    executor.admitter = NativeCatalog(api, "collective-wisdom", executor.host)
+    scans.clear()
+    assert run_action(executor, receipts, plan, "update")["updated"]
+    assert scans == [target]
+    completed = store.operation(pending["id"])
+    assert completed["status"] == "done" and completed["payload"]["catalog_local_committed"]
+    assert not store.pending_operations("skill-1")
