@@ -57,7 +57,8 @@ class NativeCatalog:
         if operation_id is not None and result["operation_id"] != operation_id:
             raise PackagePolicyError("catalog recovery operation changed")
         executor.catalog = CatalogMutation(self.api, result["admission"], action,
-                                           source + ":" + plan["skill_id"], plan, self.host)
+                                           source + ":" + plan["skill_id"], plan, self.host,
+                                           recovery=operation_id is not None)
         executor.catalog.native = retained
         if payload is not None:
             payload["catalog_native"] = retained

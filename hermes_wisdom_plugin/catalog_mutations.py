@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments
-# The six constructor fields mirror one core admission and one native plan.
+# The six constructor fields mirror one core admission and one native plan; the
+# keyword records whether core re-admitted a durable pending operation.
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,13 +16,14 @@ from .skill_catalog import digest
 class CatalogMutation:
     """One reservation, one filesystem phase, then read/network-only reconciliation."""
 
-    def __init__(self, api, admission, action, identifier, plan, host):
+    def __init__(self, api, admission, action, identifier, plan, host, *, recovery=False):
         self.api = api
         self.admission = admission
         self.action = action
         self.identifier = identifier
         self.plan = plan
         self.host = host
+        self.recovery = recovery
 
     def operation(self, operation_id, record, *, state="pending", failed=False):
         """Project local state; pending uses a revision with no terminal outcome."""
@@ -73,8 +75,10 @@ class CatalogMutation:
         """Core locks the target before checking exact operation-bound rename evidence."""
         from .catalog_files import CatalogFiles  # pylint: disable=import-outside-toplevel
         self._bind(operation_id)
+        # A re-admitted durable operation is bound as recovery by core even before
+        # this journal persisted any filesystem intent; only the first admission commits.
         recovery = (getattr(self.api, "recover", None)
-                    if payload.get("catalog_files") is not None else None)
+                    if self.recovery or payload.get("catalog_files") is not None else None)
         hold = recovery(operation_id) if callable(recovery) else self.api.commit(
             self.admission, operation_id)
         with hold as commit:

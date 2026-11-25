@@ -113,6 +113,70 @@ def test_death_at_rename_re_registers_without_repeating_effect(
 
 
 @pytest.mark.parametrize("action", ["install", "update", "uninstall"])
+def test_death_inside_first_hold_before_journal_resumes_under_recovery_hold(
+    action, request, tmp_path, monkeypatch,
+):
+    from hermes_wisdom_plugin.package_application import tree_hashes
+
+    executor, store, _client, receipts, plan, target, api, admission = scenario(
+        action, request, tmp_path)
+    pid = os.fork()
+    if pid == 0:
+        original = api.commit
+
+        @contextmanager
+        def die_inside_hold(*args):
+            with original(*args):
+                os._exit(73)
+                yield  # pylint: disable=unreachable
+
+        api.commit = die_inside_hold
+        try:
+            run_action(executor, receipts, plan, action)
+        finally:
+            os._exit(74)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 73
+    pending, = store.pending_operations("skill-1")
+    # The durable operation exists, but no filesystem intent was ever persisted.
+    assert pending["payload"].get("catalog_files") is None
+    assert not pending["payload"].get("catalog_local_committed")
+    executor.catalog = None
+    api.admit_native = lambda *_a: {"admission": admission, "operation_id": pending["id"]}
+    executor.admitter = NativeCatalog(api, "collective-wisdom", executor.host)
+
+    def refuse_ordinary_commit(*_args):
+        # Core binds a re-admitted pending operation as recovery and rejects acquire().
+        raise PackagePolicyError("Pending recovery requires the journal recovery hold.")
+
+    monkeypatch.setattr(api, "commit", refuse_ordinary_commit)
+    expected = pending["payload"].get("baseline")
+    result = run_action(executor, receipts, plan, action)
+    assert result[{"install": "installed", "update": "updated", "uninstall": "uninstalled"}[action]]
+    assert ("recover", pending["id"]) in api.calls
+    assert api.decisions == [{"kind": "retry_effect"}]
+    assert tree_hashes(target) == (None if action == "uninstall" else expected)
+    assert not store.pending_operations("skill-1")
+    completed = store.operation(pending["id"])
+    assert completed["status"] == "done" and completed["payload"]["catalog_local_committed"]
+    assert completed["payload"]["catalog_files"]["phase"] == "files_committed"
+
+
+@pytest.mark.parametrize("action", ["install", "update", "uninstall"])
+def test_first_admission_commits_under_the_ordinary_hold(action, request, tmp_path):
+    executor, store, _client, receipts, plan, _target, api, admission = scenario(
+        action, request, tmp_path)
+    executor.catalog = None
+    api.admit_native = lambda *_a: {"admission": admission, "operation_id": "core_first_00001"}
+    executor.admitter = NativeCatalog(api, "collective-wisdom", executor.host)
+    result = run_action(executor, receipts, plan, action)
+    assert result[{"install": "installed", "update": "updated", "uninstall": "uninstalled"}[action]]
+    assert ("enter", "core_first_00001") in api.calls
+    assert not [call for call in api.calls if call[0] == "recover"] and not api.decisions
+    assert store.operation("core_first_00001")["status"] == "done"
+
+
+@pytest.mark.parametrize("action", ["install", "update", "uninstall"])
 def test_local_marker_never_precedes_core_pending_settlement(
     action, request, tmp_path, monkeypatch,
 ):
