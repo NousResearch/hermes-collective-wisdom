@@ -173,7 +173,27 @@ def _now_iso(clock: Callable[[], float]) -> str:
 
 
 def _day(clock: Callable[[], float]) -> str:
-    return datetime.fromtimestamp(clock()).date().isoformat()
+    return _day_of(clock())
+
+
+def _day_of(stamp: float) -> str:
+    return datetime.fromtimestamp(stamp).date().isoformat()
+
+
+def _counted_day(suggestion: Mapping[str, Any]) -> str | None:
+    """The day a suggestion was counted against the daily limit, or None when unknown.
+
+    Rows written before ``reserved_day`` existed were counted on the day they were created:
+    that writer reserved and created in one step. Reading ``created_at`` back refunds that day,
+    never today's quota for a suggestion counted on another day.
+    """
+    day = suggestion.get("reserved_day")
+    if isinstance(day, str) and day:
+        return day
+    created = suggestion.get("created_at")
+    if isinstance(created, (int, float)) and not isinstance(created, bool):
+        return _day_of(float(created))
+    return None
 
 
 def _name(value: object) -> str:
@@ -307,12 +327,13 @@ class SuggestionStore:  # pylint: disable=too-many-public-methods
             day = value["day"] if value["day"].get("date") == today else {"date": today}
             value["day"] = {**day, "blocked": True}
 
-    def unreserve(self, suggestion_id: str, day: str) -> None:
-        """Undo a delivery that never started: drop its pending row and its count on ``day``."""
+    def unreserve(self, suggestion_id: str, day: str | None) -> None:
+        """Undo a delivery that never started: drop its pending row and its count on ``day``
+        (``None`` when the counted day is unknown: the row goes, no day is refunded)."""
         with self.change() as value:
             value["pending"].pop(suggestion_id, None)
             counted = value["day"]
-            if counted.get("date") == day and int(counted.get("shown") or 0) > 0:
+            if day and counted.get("date") == day and int(counted.get("shown") or 0) > 0:
                 value["day"] = {**counted, "shown": int(counted["shown"]) - 1}
 
     # Pending suggestions waiting for the model's tool call.
@@ -955,8 +976,8 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         state = "presented" if outcome == "delivered" else "undelivered"
         if self.store.transition(identity, "delivering", state) is None:
             return
-        if outcome != "delivered":
-            self.store.unreserve(identity, suggestion["reserved_day"])
+        if outcome != "delivered":  # Rows from before ``reserved_day``: see ``_counted_day``.
+            self.store.unreserve(identity, _counted_day(suggestion))
             self.store.forget_seen(name, suggestion["content_hash"])
             self.store.block_today()
             self.store.record("not_shown", name, why="card_unavailable")
