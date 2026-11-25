@@ -933,6 +933,7 @@ class AutoSuggest:  # pylint: disable=too-many-instance-attributes
         except Exception:  # pylint: disable=broad-exception-caught
             delivery = None
         if not isinstance(delivery, dict) or delivery.get("state") != "queued":
+            # No injection fallback: the tool would call this same unavailable presenter.
             return "card_unavailable"
         self._watch_native(suggestion, delivery, by_card=True)
         return "delivering"
