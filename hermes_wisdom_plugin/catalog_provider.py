@@ -104,7 +104,11 @@ class CatalogProvider(CatalogReviews):
                 if action == "uninstall":
                     executor.uninstall_reviewed(receipt, receipts=receipts)
                 elif action == "install":
-                    executor.apply(receipt, accept_partial=True)
+                    executor.apply(receipt, accept_partial=any(
+                        finding["category"] == "compatibility"
+                        and finding["acknowledgement_required"]
+                        and finding["id"] in request["acknowledgements"]
+                        for finding in review["scan"]["findings"]))
                 else:
                     executor.apply(receipt)
                 _plan, native = receipts._read(receipt)

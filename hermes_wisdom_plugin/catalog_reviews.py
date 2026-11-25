@@ -40,11 +40,17 @@ def findings(plan):
                        "description": scan.get("summary") or "Review the scanner warning.",
                        "acknowledgement_required": True})
     compatibility = plan.get("compatibility") or {}
-    for index, text in enumerate(compatibility.get("limitations") or []):
-        result.append({"id": "compatibility-" + digest([index, text]), "severity": "info",
+    if compatibility.get("outcome") in {"partial", "compatible_after_setup"}:
+        details = [compatibility["outcome"], *(compatibility.get("setup_actions") or []),
+                   *(compatibility.get("limitations") or [])]
+        result.append({"id": "compatibility-" + digest(compatibility), "severity": "info",
                        "category": "compatibility", "file": None, "line": None,
-                       "description": text, "acknowledgement_required":
-                       compatibility.get("outcome") in {"partial", "compatible_after_setup"}})
+                       "description": "\n".join(details), "acknowledgement_required": True})
+    else:
+        for index, text in enumerate(compatibility.get("limitations") or []):
+            result.append({"id": "compatibility-" + digest([index, text]), "severity": "info",
+                           "category": "compatibility", "file": None, "line": None,
+                           "description": text, "acknowledgement_required": False})
     for index, text in enumerate(plan.get("sensitive_expansion") or []):
         result.append({"id": "sensitive-" + digest([index, text]), "severity": "medium",
                        "category": "sensitive_expansion", "file": None, "line": None,
