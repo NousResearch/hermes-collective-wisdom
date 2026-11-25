@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from .catalog_mutations import CatalogMutation
 from .catalog_reviews import CatalogReviews
-from .errors import WisdomValidationError
+from .errors import WisdomNotFound, WisdomValidationError
 from .setup_lock import managed_operation_guard
 from .skill_catalog import endpoint, digest, _ID
 
@@ -62,7 +62,7 @@ class CatalogProvider(CatalogReviews):
         with self.opened() as (service, owner):
             row = service.installed.operation(request["operation_id"])
             if row is None or row["payload"].get("owner") != owner:
-                raise WisdomValidationError("unknown operation")
+                raise WisdomNotFound("unknown operation")
             return self.project_operation(service, row)
 
     @endpoint("action", "id", "review_token", "acknowledgements", "admission")

@@ -185,6 +185,19 @@ def test_changed_managed_bytes_map_to_safe_review_changed(reviews):
         assert "private" not in response["error"]["message"]
 
 
+def test_unknown_and_foreign_operations_are_indistinguishable_not_found(reviews):
+    adapter, service, _reviewer, _host, _client, _clock = reviews
+    missing = adapter.operation(request(operation_id="unknown_operation_00001"))
+    foreign = service.installed.begin("install", "skill-1", {
+        "owner": {**service.native_owner(), "account_id": "another-owner"},
+    })
+    before = service.installed.operation(foreign)
+    assert adapter.operation(request(operation_id=foreign)) == missing
+    assert missing["error"]["code"] == "not_found"
+    assert service.installed.operation(foreign) == before
+    assert "another-owner" not in str(missing)
+
+
 def test_projection_normalizes_host_allow_verdict_to_catalog_safe():
     from pathlib import Path
     from hermes_wisdom_plugin.catalog_reviews import project_review
