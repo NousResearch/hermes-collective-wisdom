@@ -177,9 +177,15 @@ def test_a_refused_card_falls_back_to_the_injected_turn(tmp_path, result):
     assert shown["status"] == "shown"
 
 
-def test_a_timed_out_card_is_not_shown_a_second_way(tmp_path):
+@pytest.mark.parametrize("result", [
+    {"ok": False, "error": "timeout"},
+    {"ok": False, "error": "cancelled"},
+    {"ok": False, "error": "post_failed"},
+    {"ok": False, "error": "future_error", "certain": False},
+])
+def test_an_uncertain_card_is_not_shown_a_second_way(tmp_path, result):
     host, cards, controller = _build(tmp_path)
-    cards.result = {"ok": False, "error": "timeout"}
+    cards.result = result
     _suggest(controller)
     assert len(cards.posted) == 1 and not host.injected
     assert _rows(host)[0]["state"] == "presented"
@@ -225,6 +231,11 @@ def test_unload_during_delivery_posts_nothing(tmp_path, boundary):
     ({"ok": True, "status": "queued"}, POSTED), ({"ok": True, "status": "posted"}, POSTED),
     ({"ok": True, "status": "duplicate"}, POSTED), ({"ok": True, "status": "odd"}, REFUSED),
     ({"ok": False, "error": "timeout"}, UNCERTAIN),
+    ({"ok": False, "error": "cancelled"}, UNCERTAIN),
+    ({"ok": False, "error": "post_failed"}, UNCERTAIN),
+    ({"ok": False, "error": "future_error", "certain": False}, UNCERTAIN),
+    ({"ok": False, "error": "timeout", "certain": True}, REFUSED),
+    ({"ok": True, "status": "queued", "certain": False}, UNCERTAIN),
     ({"ok": False, "error": "card_conflict"}, REFUSED), (None, REFUSED), ("yes", REFUSED),
 ])
 def test_card_poster_maps_core_results(result, outcome):

@@ -27,7 +27,7 @@ UNCERTAIN = "uncertain"
 _ACCEPTED = frozenset({"queued", "posted", "duplicate"})
 # Core may have written the card before the hand-off timed out; the card id makes a re-post a
 # duplicate, so the caller must not deliver the same suggestion another way.
-_UNCERTAIN_ERRORS = frozenset({"timeout"})
+_UNCERTAIN_ERRORS = frozenset({"timeout", "cancelled", "post_failed"})
 
 
 class CardPoster:  # pylint: disable=too-few-public-methods
@@ -66,8 +66,10 @@ class CardPoster:  # pylint: disable=too-few-public-methods
             return REFUSED
         if not isinstance(result, Mapping):
             return REFUSED
+        if result.get("certain") is False:
+            return UNCERTAIN
         if result.get("ok") is True and result.get("status") in _ACCEPTED:
             return POSTED
         error = str(result.get("error") or "unknown")
         logger.info("Collective Wisdom: card not posted (%s)", error)
-        return UNCERTAIN if error in _UNCERTAIN_ERRORS else REFUSED
+        return UNCERTAIN if ("certain" not in result and error in _UNCERTAIN_ERRORS) else REFUSED
