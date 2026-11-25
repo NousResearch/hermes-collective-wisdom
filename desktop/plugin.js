@@ -857,7 +857,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
     review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: review.operation, onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, cancelLabel: dialog ? 'Back' : undefined, kind: review.operation, onCancel: back, onConfirm: () => confirm.mutate(review), review }) : null,
     jsx(SetupPermission, { pending: setupPermission, busy: runSetup.isPending, onDefer: () => setSetupPermission(null), onRun: () => runSetup.mutate(setupPermission) }),
-    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (dialog || selected || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
+    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (selected ? outcome.result?.skill_id === selected : dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
   ] })
 }
 

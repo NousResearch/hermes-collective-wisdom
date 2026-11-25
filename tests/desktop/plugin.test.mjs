@@ -782,6 +782,35 @@ test('catalog page View shows the skill in place of the list, and Back returns t
   await mounted.cleanup()
 })
 
+test('catalog page scopes a pending install outcome to the selected skill', async t => {
+  const skills = ['one', 'two'].map((slug, index) => ({
+    id: `skill-${index + 1}`, slug, latest_version: 2,
+    installation_status: { state: 'not_installed', text: 'Not installed', latest_version: 2 }
+  }))
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills }
+    if (path === '/catalog/skill-2') return skills[1]
+    if (path === '/catalog/skill-2/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/install/review') return installReview()
+    if (path === '/install/confirm') return { pending: true, operation_id: 'pending-one', skill_id: 'skill-1' }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  const row = id => mounted.container.querySelector(`[data-testid="catalog-skill-${id}"]`)
+  await click([...row('skill-1').querySelectorAll('button')].find(item => item.textContent === 'Install'))
+  assert.match(row('skill-1').textContent, /pending-one/)
+  assert.doesNotMatch(row('skill-2').textContent, /pending-one/)
+  await click([...row('skill-2').querySelectorAll('button')].find(item => item.textContent === 'View'))
+  assert.match(mounted.container.textContent, /Details — two/)
+  assert.doesNotMatch(mounted.container.textContent, /pending-one|Install requires attention for one/)
+  await click(button(mounted, 'Back'))
+  await click([...row('skill-1').querySelectorAll('button')].find(item => item.textContent === 'Install'))
+  await click([...row('skill-1').querySelectorAll('button')].find(item => item.textContent === 'View'))
+  assert.match(mounted.container.textContent, /Details — one/)
+  assert.match(mounted.container.textContent, /pending-one/)
+})
+
 test('catalog page shows unavailable status without offering an install fallback', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2 }] }
