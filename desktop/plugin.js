@@ -60,7 +60,7 @@ const CHOICE_FAILED = "Couldn't complete that. Please try again."
 function ReadFailure({ error, onRetry, title }) {
   return jsxs('div', { className: 'space-y-3', children: [
     jsx(EmptyState, { title, description: isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
-    onRetry ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
+    onRetry && !isAuthError(error) ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
   ] })
 }
 
