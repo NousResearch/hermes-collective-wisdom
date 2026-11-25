@@ -60,7 +60,7 @@ const CHOICE_FAILED = "Couldn't complete that. Please try again."
 function ReadFailure({ error, onRetry, title }) {
   return jsxs('div', { className: 'space-y-3', children: [
     jsx(EmptyState, { title, description: isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
-    isUnavailable(error) ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
+    onRetry ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
   ] })
 }
 
@@ -839,6 +839,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
       jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: `${page + 1} / ${pageCount}` }),
       jsx(Button, { disabled: page + 1 >= pageCount, onClick: () => setPage(value => value + 1), size: 'sm', type: 'button', variant: 'secondary', children: 'Next' })
     ] }) : null,
+    selected && !review ? jsx(Button, { onClick: back, size: 'sm', type: 'button', variant: 'secondary', children: 'Back' }) : null,
     selected && !review && !catalogFailure ? jsxs(Section, { title: `${dialog ? '' : 'Details — '}${label(detailItem)}`, children: [
       jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: detailItem?.author_description || detail.data?.latest_version_detail?.version?.author_description || 'No description supplied.' }),
       jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(catalogStatus(detailItem).text || 'Installation status unavailable') }),
@@ -850,7 +851,6 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
           : jsx(Badge, { children: `v${item.version}` })
       }, `${item.version}-${item.state}`)) }),
       jsxs('div', { className: 'flex justify-between gap-2', children: [
-        jsx(Button, { onClick: back, size: 'sm', type: 'button', variant: 'secondary', children: 'Back' }),
         detailAction ? jsx(Button, { disabled: prepare.isPending, loading: prepare.isPending, onClick: () => prepare.mutate({ item: detailItem, action: detailAction }), size: 'sm', type: 'button', children: detailAction === 'update' ? 'Update' : 'Install' }) : null
       ] })
     ] }) : null,

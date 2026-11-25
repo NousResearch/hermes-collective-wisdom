@@ -811,6 +811,28 @@ test('catalog page scopes a pending install outcome to the selected skill', asyn
   assert.match(mounted.container.textContent, /pending-one/)
 })
 
+for (const failingRead of ['detail', 'versions']) test(`catalog page keeps Back and Retry after a ${failingRead} read failure`, async t => {
+  let failed = true
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === (failingRead === 'detail' ? '/catalog/skill-1' : '/catalog/skill-1/versions') && failed) {
+      throw new Error('Read failed')
+    }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Read failed/)
+  assert.ok(button(mounted, 'Back'), 'a failed read must not strand the selected skill')
+  assert.ok(button(mounted, 'Retry'), 'read failures have a safe retry')
+  failed = false
+  await click(button(mounted, 'Retry'))
+  assert.match(mounted.container.textContent, /Details — one/)
+  assert.doesNotMatch(mounted.container.textContent, /Read failed/)
+  await click(button(mounted, 'Back'))
+  assert.ok(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'))
+})
+
 test('catalog page shows unavailable status without offering an install fallback', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2 }] }
