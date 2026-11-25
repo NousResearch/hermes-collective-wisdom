@@ -184,6 +184,19 @@ def _share_name_ok(name: Any) -> bool:
             and "/" not in name and "\\" not in name and name not in {".", ".."})
 
 
+def _owned_sources(
+    roots: list[tuple[int, Path]], core: _Core,
+) -> Iterator[tuple[int, Path, Path, Path]]:
+    """One row per resolved SKILL.md, owned by its most specific containing root."""
+    tier_of = {Path(root).resolve(): tier for tier, root in roots}
+    sources = {skill_md: source for _tier, root in roots
+               for source, skill_md in _safe_sources(Path(root), core)}
+    for skill_md, source in sources.items():
+        owner = max((root for root in tier_of if skill_md.is_relative_to(root)),
+                    key=lambda root: len(root.parts))
+        yield tier_of[owner], owner, source, skill_md
+
+
 class ShareSources:
     """Resolve share names with core precedence, refusing same-tier ambiguity."""
 
@@ -195,17 +208,15 @@ class ShareSources:
         # alias -> (tier, resolved root, rank, SKILL.md, skill dir), one row per source.
         self._names: dict[str, list[tuple[Any, ...]]] = defaultdict(list)
         self._canonical: set[str] = set()
-        for tier, root in self.roots:
-            real_root = Path(root).resolve()
-            for source, skill_md in _safe_sources(Path(root), core):
-                declared = core.declared_name(skill_md)
-                canonical = declared if declared is not None and _share_name_ok(declared) \
-                    else source.name
-                self._canonical.add(canonical)
-                row = (tier, str(real_root), core.rank(skill_md, real_root), skill_md, source)
-                for alias in (source.name, declared):
-                    if alias is not None and row not in self._names[alias]:
-                        self._names[alias].append(row)
+        for tier, real_root, source, skill_md in _owned_sources(self.roots, core):
+            declared = core.declared_name(skill_md)
+            canonical = declared if declared is not None and _share_name_ok(declared) \
+                else source.name
+            self._canonical.add(canonical)
+            row = (tier, str(real_root), core.rank(skill_md, real_root), skill_md, source)
+            for alias in dict.fromkeys((source.name, declared)):
+                if alias is not None:
+                    self._names[alias].append(row)
 
     def names(self) -> list[str]:
         """Canonical names, including ambiguous ones which resolve() will refuse."""

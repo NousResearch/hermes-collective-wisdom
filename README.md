@@ -132,8 +132,9 @@ Sharing searches your profile's skills folder, `skills.create_dir` and
 `skills.external_dirs` in Hermes's precedence order, finding the same skill
 folders Hermes loads: nested at any depth, with dependency, cache and
 package-support folders left out. Symlinked skill folders and `SKILL.md` files
-are refused. Identical copies under one root share the shallower copy; two
-different skills with one name in one tier must be resolved before sharing.
+are refused. Overlapping search roots count each skill once, under its most
+specific containing root. Identical copies under one root share the shallower
+copy. Two different skills with one name in one tier must be resolved before sharing.
 Installing a teammate's skill still writes only to this profile's skills folder.
 
 Share builds the exact package and shows one review: the team, who will see it, the version, the
