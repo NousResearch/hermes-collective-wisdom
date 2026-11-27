@@ -766,6 +766,73 @@ test('desktop slash dialog offers local updates and blocks unavailable installs'
   await mounted.cleanup()
 })
 
+test('catalog page View shows the skill in place of the list, and Back returns to it', async () => {
+  const loaded = await loadPlugin(baseHandler)
+  const mounted = await renderPage(loaded)
+  assert.ok(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'))
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Details — one/)
+  assert.match(mounted.container.textContent, /Version history/)
+  assert.equal(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'), null, 'the list gives way to the details')
+  assert.equal(mounted.container.querySelector('input[aria-label="Search shared skills"]'), null)
+  assert.ok(button(mounted, 'Install'), 'the skill keeps its Install action in the details')
+  await click(button(mounted, 'Back'))
+  assert.ok(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'))
+  assert.doesNotMatch(mounted.container.textContent, /Details — /)
+  await mounted.cleanup()
+})
+
+test('catalog page scopes a pending install outcome to the selected skill', async t => {
+  const skills = ['one', 'two'].map((slug, index) => ({
+    id: `skill-${index + 1}`, slug, latest_version: 2,
+    installation_status: { state: 'not_installed', text: 'Not installed', latest_version: 2 }
+  }))
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path.startsWith('/catalog?')) return { skills }
+    if (path === '/catalog/skill-2') return skills[1]
+    if (path === '/catalog/skill-2/versions') return { versions: [{ version: 2, state: 'published' }] }
+    if (path === '/install/review') return installReview()
+    if (path === '/install/confirm') return { pending: true, operation_id: 'pending-one', skill_id: 'skill-1' }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  const row = id => mounted.container.querySelector(`[data-testid="catalog-skill-${id}"]`)
+  await click([...row('skill-1').querySelectorAll('button')].find(item => item.textContent === 'Install'))
+  assert.match(row('skill-1').textContent, /pending-one/)
+  assert.doesNotMatch(row('skill-2').textContent, /pending-one/)
+  await click([...row('skill-2').querySelectorAll('button')].find(item => item.textContent === 'View'))
+  assert.match(mounted.container.textContent, /Details — two/)
+  assert.doesNotMatch(mounted.container.textContent, /pending-one|Install requires attention for one/)
+  await click(button(mounted, 'Back'))
+  await click([...row('skill-1').querySelectorAll('button')].find(item => item.textContent === 'Install'))
+  await click([...row('skill-1').querySelectorAll('button')].find(item => item.textContent === 'View'))
+  assert.match(mounted.container.textContent, /Details — one/)
+  assert.match(mounted.container.textContent, /pending-one/)
+})
+
+for (const failingRead of ['detail', 'versions']) test(`catalog page keeps Back and Retry after a ${failingRead} read failure`, async t => {
+  let failed = true
+  const loaded = await loadPlugin((path, options, owner) => {
+    if (path === (failingRead === 'detail' ? '/catalog/skill-1' : '/catalog/skill-1/versions') && failed) {
+      throw new Error('Read failed')
+    }
+    return baseHandler(path, options, owner)
+  })
+  const mounted = await renderPage(loaded)
+  t.after(() => mounted.cleanup())
+  await click(button(mounted, 'View'))
+  assert.match(mounted.container.textContent, /Read failed/)
+  assert.ok(button(mounted, 'Back'), 'a failed read must not strand the selected skill')
+  assert.ok(button(mounted, 'Retry'), 'read failures have a safe retry')
+  failed = false
+  await click(button(mounted, 'Retry'))
+  assert.match(mounted.container.textContent, /Details — one/)
+  assert.doesNotMatch(mounted.container.textContent, /Read failed/)
+  await click(button(mounted, 'Back'))
+  assert.ok(mounted.container.querySelector('[data-testid="catalog-skill-skill-1"]'))
+})
+
 test('catalog page shows unavailable status without offering an install fallback', async () => {
   const loaded = await loadPlugin((path, options, owner) => {
     if (path.startsWith('/catalog?')) return { skills: [{ id: 'skill-1', slug: 'one', latest_version: 2 }] }
@@ -1942,7 +2009,7 @@ test('auth failure in slash catalog is not treated as transient Retry', async ()
   const mounted = await renderComposerContribution(loaded)
   await submitComposer(loaded, { text: '/wisdom' })
   assert.match(mounted.container.textContent, /401 owner changed/)
-  assert.equal(button(mounted, 'Retry'), undefined)
+  assert.ok(!button(mounted, 'Retry'), 'an owner-auth failure must not offer Retry')
   assert.equal(loaded.calls.rest.filter(([path]) => path.startsWith('/catalog?')).length, 1)
   await mounted.cleanup()
 })

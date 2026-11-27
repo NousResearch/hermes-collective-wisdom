@@ -60,7 +60,7 @@ const CHOICE_FAILED = "Couldn't complete that. Please try again."
 function ReadFailure({ error, onRetry, title }) {
   return jsxs('div', { className: 'space-y-3', children: [
     jsx(EmptyState, { title, description: isUnavailable(error) ? UNAVAILABLE_MESSAGE : text(error?.message || error) }),
-    isUnavailable(error) ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
+    onRetry && !isAuthError(error) ? jsx(Button, { onClick: onRetry, type: 'button', variant: 'secondary', children: 'Retry' }) : null
   ] })
 }
 
@@ -808,14 +808,14 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
   }
 
   return jsxs('div', { className: 'space-y-5', children: [
-    (!dialog || (!selected && !review)) ? jsx(Input, { 'aria-label': 'Search shared skills', onChange: event => setSearch(event.target.value), placeholder: 'Search shared skills', type: 'search', value: search }) : null,
+    !selected && (!dialog || !review) ? jsx(Input, { 'aria-label': 'Search shared skills', onChange: event => setSearch(event.target.value), placeholder: 'Search shared skills', type: 'search', value: search }) : null,
     catalogFailure ? jsx(ReadFailure, { error: catalogFailure, title: 'Catalog unavailable', onRetry: () => {
       if (catalog.error) catalog.refetch()
       if (detail.error) detail.refetch()
       if (versions.error) versions.refetch()
     } }) : null,
     !catalog.isLoading && !catalogFailure && skills.length === 0 ? jsx(EmptyState, { title: 'No shared skills', description: 'No published skills match this search.' }) : null,
-    !catalogFailure && (!dialog || (!selected && !review)) ? jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: visibleSkills.map(item => {
+    !catalogFailure && !selected && (!dialog || !review) ? jsx('ul', { className: 'divide-y divide-(--ui-stroke-secondary)', children: visibleSkills.map(item => {
       const status = catalogStatus(item)
       const action = catalogAction(item)
       return (
@@ -839,6 +839,7 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
       jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: `${page + 1} / ${pageCount}` }),
       jsx(Button, { disabled: page + 1 >= pageCount, onClick: () => setPage(value => value + 1), size: 'sm', type: 'button', variant: 'secondary', children: 'Next' })
     ] }) : null,
+    selected && !review ? jsx(Button, { onClick: back, size: 'sm', type: 'button', variant: 'secondary', children: 'Back' }) : null,
     selected && !review && !catalogFailure ? jsxs(Section, { title: `${dialog ? '' : 'Details — '}${label(detailItem)}`, children: [
       jsx('p', { className: 'text-xs leading-5 text-(--ui-text-secondary)', children: detailItem?.author_description || detail.data?.latest_version_detail?.version?.author_description || 'No description supplied.' }),
       jsx('p', { className: 'text-xs text-(--ui-text-secondary)', children: text(catalogStatus(detailItem).text || 'Installation status unavailable') }),
@@ -850,14 +851,13 @@ function Catalog({ client, dialog = false, initialSearch = '', initialSelected =
           : jsx(Badge, { children: `v${item.version}` })
       }, `${item.version}-${item.state}`)) }),
       jsxs('div', { className: 'flex justify-between gap-2', children: [
-        dialog ? jsx(Button, { onClick: back, size: 'sm', type: 'button', variant: 'secondary', children: 'Back' }) : null,
-        dialog && detailAction ? jsx(Button, { disabled: prepare.isPending, loading: prepare.isPending, onClick: () => prepare.mutate({ item: detailItem, action: detailAction }), size: 'sm', type: 'button', children: detailAction === 'update' ? 'Update' : 'Install' }) : null
+        detailAction ? jsx(Button, { disabled: prepare.isPending, loading: prepare.isPending, onClick: () => prepare.mutate({ item: detailItem, action: detailAction }), size: 'sm', type: 'button', children: detailAction === 'update' ? 'Update' : 'Install' }) : null
       ] })
     ] }) : null,
     review ? jsx(ReviewAcknowledgements, { busy: reReview.isPending, kind: review.operation, onChange: setAcknowledgements, onReview: () => reReview.mutate(review), review, value: acknowledgements }) : null,
     review ? jsx(ReviewPanel, { acknowledgements, busy: confirm.isPending, cancelLabel: dialog ? 'Back' : undefined, kind: review.operation, onCancel: back, onConfirm: () => confirm.mutate(review), review }) : null,
     jsx(SetupPermission, { pending: setupPermission, busy: runSetup.isPending, onDefer: () => setSetupPermission(null), onRun: () => runSetup.mutate(setupPermission) }),
-    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
+    jsx(OperationOutcome, { kind: outcome?.operation === 'update' ? 'Update' : 'Install', result: outcome && (selected ? outcome.result?.skill_id === selected : dialog || !skills.some(item => item.id === outcome.result?.skill_id)) ? outcome.result : null })
   ] })
 }
 
