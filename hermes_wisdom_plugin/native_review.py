@@ -770,8 +770,15 @@ def _apply_review_action(  # pylint: disable=too-many-return-statements
     if operation == "setup":
         return service.installed_setup_apply(plan["receipt"], may_apply=may_apply)
     if operation == "uninstall":
-        return service.uninstall(plan["skill_id"], may_apply=may_apply)
+        return _apply_uninstall(plan, service, may_apply)
     raise WisdomValidationError("This review has no effect to confirm")
+
+def _apply_uninstall(plan, service, may_apply):
+    """Keep catalog-specific admission separate from the native sequence."""
+    if plan.get("catalog_uninstall_receipt"):
+        return service.uninstall_apply(plan["catalog_uninstall_receipt"], may_apply=may_apply)
+    return service.uninstall(plan["skill_id"], may_apply=may_apply)
+
 
 
 def _settings_result_view(result: dict[str, Any]) -> NativeView:
@@ -1835,8 +1842,11 @@ class NativeReviewController:
                     and item.get("state") in {"active", "removed"}), None)
         if row is None:
             raise WisdomNotFound("Managed skill not found")
+        removal = (service.uninstall_plan(skill_id)
+                   if getattr(service, "catalog_available", lambda: False)() else None)
         version = row.get("version")
         return self._insert(service, invocation, "uninstall", {
+            **({"catalog_uninstall_receipt": removal["receipt"]} if removal else {}),
             "operation": "uninstall", "skill_id": skill_id,
             "slug": row.get("slug") or reference,
             "version": version if isinstance(version, int) else None,

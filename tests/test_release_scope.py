@@ -126,7 +126,9 @@ def test_host_without_side_question_registers_only_the_slash_dispatch_hook(
         manifest = yaml.safe_load((PROJECT_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
         assert manifest.get("provides_hooks") == list(release_scope.ACTIVE.hooks)
         assert manifest.get("provides_tools") == list(release_scope.ACTIVE.model_tools)
-        assert manifest.get("capabilities") == ["llm.session_fork", "llm.side_question"]
+        assert manifest.get("capabilities") == [
+            "llm.session_fork", "llm.side_question", "skills.catalog",
+        ]
         entries["unload"]()
     finally:
         _unload(module_name)

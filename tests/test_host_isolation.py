@@ -6,10 +6,10 @@ lists in ``HOST_UNSUPPORTED_CTX_METHODS`` (``register_platform_handler``,
 returns a callable that raises ``PluginHostUnsupported`` (a ``RuntimeError``). A host
 without session forks has no ``fork_session`` at all.
 
-Collective Wisdom's native Slack and Telegram cards need the Hermes process, so the host
-refuses the plugin; it does so before any suggestion hook exists. Independently, a
-``fork_session`` that raises is a refused fork: suggestions fall back to the side question
-and manual sharing registers exactly as with a working fork.
+Native Slack/Telegram registrations are optional: only the documented
+``PluginHostUnsupported`` from those two registrations is ignored, so other supported
+surfaces still register. Other exceptions propagate. Independently, a refused
+``fork_session`` falls back to a side question when available.
 """
 # pylint: disable=missing-function-docstring,protected-access
 
@@ -63,7 +63,7 @@ def _calls():
 
 
 @pytest.mark.parametrize("forks", [True, False], ids=["fork-core", "stock-core"])
-def test_the_isolated_host_refuses_the_plugin_before_any_suggestion_hook(
+def test_the_isolated_host_keeps_http_catalog_and_skips_only_native_handlers(
         tmp_path, monkeypatch, forks):
     module_name, plugin = _plugin(tmp_path, monkeypatch)
     calls = _calls()
@@ -73,11 +73,15 @@ def test_the_isolated_host_refuses_the_plugin_before_any_suggestion_hook(
         del context.fork_session
     context.register_platform_handler = _unsupported("register_platform_handler")
     context.register_telegram_handler = _unsupported("register_telegram_handler")
+    import sys  # pylint: disable=import-outside-toplevel
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugin_host_wire",
+                        SimpleNamespace(PluginHostUnsupported=PluginHostUnsupported))
     try:
-        with pytest.raises(PluginHostUnsupported):
-            plugin.register(context)
-        assert entries["hooks"] == ["pre_gateway_dispatch"]  # Core unwinds this one.
-        assert not entries["tools"] and not entries["auxiliary"] and not calls["forks"]
+        plugin.register(context)
+        assert "pre_gateway_dispatch" in entries["hooks"]
+        assert entries["cli"] == entries["slash"] == "wisdom"
+        assert not calls["forks"]
+        entries["unload"]()
     finally:
         _unload(module_name)
 

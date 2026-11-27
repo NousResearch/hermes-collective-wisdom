@@ -42,6 +42,26 @@ after slow head reads. Unknown outcomes remain explicit and reconcile against
 owner-private remote state rather than silently submitting a second draft.
 Those business-operation records are not advisory delivery queues.
 
+## Optional skill-catalog adapter
+
+`catalog_registration.py` feature-detects the host registrar and `skills.catalog` grant before
+importing the experimental provider base. The adapter maps discovery and review data to plain
+JSON; the host stamps source identity and owns target reservations. Importing or registering
+never opens credentials or contacts Gateway. Existing hosts keep their current surfaces.
+
+`CatalogReviews` binds generic tokens to the exact native install/update/uninstall receipt,
+owner, implementation revision and complete finding set. `CatalogProvider` delegates confirmation
+to the existing executors. `NativeCatalog` admits legacy effects through the same core facade.
+`CatalogMutation` repeats byte checks inside the core-owned target hold, journals local completion,
+then settles pending with `outcome: null` and the local installation revision. Gateway calls and
+terminal settlement happen outside the hold; retained terminal wire results precede receipt
+completion and support read-only replay after target reuse.
+
+Installed projection never claims an author's publication-only source. After disable, matching
+installed trees can be reclaimed on re-enable, while edited/replaced trees remain local. Catalog
+updates refuse local edits without writing a second preservation target. No Hub install bundle,
+model permission, automatic setup or new CLI surface is introduced.
+
 ## Best-effort notices and native reviews
 
 Each eligible end turn checks qualified local candidates; feed polling runs only
