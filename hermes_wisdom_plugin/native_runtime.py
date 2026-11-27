@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from dataclasses import replace
 from importlib import import_module
 import logging
@@ -576,11 +577,14 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         )
         if not all((invocation.chat_id, invocation.actor_id, invocation.session_key)):
             return {"state": "unavailable"}
-        return self._begin(
+        completion: Future = Future()
+        result = self._begin(
             invocation,
             lambda service: self.reviews.request_card(
                 service, invocation, AUTO_SUGGEST_OPERATION, card_plan(suggestion)),
+            completion=completion,
         )
+        return {**result, "completion": completion}
 
     def _check_lease(self, platform: str, adapter: Any, token: object) -> None:
         with self._lock:
@@ -943,17 +947,16 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
     async def _post_review(
         self, invocation: NativeInvocation, record: dict[str, Any], *,
         route_authority: Callable[[], bool] | None = None,
-    ) -> None:
+    ) -> bool:
+        if ((route_authority is not None and route_authority() is not True)
+                or not await asyncio.to_thread(self._post_owner_current, record["owner"])):
+            return False
         if route_authority is not None and route_authority() is not True:
-            return
-        if not await asyncio.to_thread(self._post_owner_current, record["owner"]):
-            return
-        if route_authority is not None and route_authority() is not True:
-            return
+            return False
         view = self.reviews.view(record)
         native = self._native.get((invocation.platform, id(invocation.adapter)))
         if native is None:
-            return
+            return False
         if invocation.platform == "slack":
             from .native_slack import blocks  # pylint: disable=import-outside-toplevel
             payload: dict[str, Any] = {
@@ -971,7 +974,7 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             )
         if not self._post_owner_current(record["owner"]):
             await self._discard_stale_post(invocation, native, response, record)
-            return
+            return False
         message_id = posted_message_id(
             response, platform=invocation.platform, chat_id=invocation.chat_id
         )
@@ -979,29 +982,52 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
             if self._closed or self._native.get(
                 (invocation.platform, id(invocation.adapter))
             ) is not native:
-                return
+                return False
         self.reviews.bind_message(record["id"], invocation, message_id)
+        return True
+
+    async def _review_delivery(self, invocation, record, authority, completion):
+        """Settle a suggestion from its supervised send, not queue admission."""
+        if completion is None:
+            await self._post_review(invocation, record, route_authority=authority)
+            return
+        outcome = "uncertain"
+        try:
+            delivered = await self._post_review(invocation, record, route_authority=authority)
+            outcome = "delivered" if delivered else "unavailable"
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            outcome = "failed"
+            logger.warning("Collective Wisdom review delivery failed (%s)", describe_exception(exc))
+        finally:
+            if completion is not None:
+                await asyncio.to_thread(completion.set_result, outcome)
 
     def _schedule_review_post(
         self, invocation: NativeInvocation, record: dict[str, Any],
-        native: Any, token: object, loop: asyncio.AbstractEventLoop,
+        native: Any, token: object, completion: Future | None = None,
     ) -> None:
         """Create the supervised review task on its adapter's event loop."""
+        loop = asyncio.get_running_loop()
         if not self._notice_route_current(invocation, native, token, loop):
+            if completion is not None:
+                completion.set_result("unavailable")
             return
-        coroutine = self._post_review(
+        coroutine = self._review_delivery(
             invocation, record,
-            route_authority=lambda: self._notice_route_current(invocation, native, token, loop),
+            lambda: self._notice_route_current(invocation, native, token, loop), completion,
         )
         try:
             self.spawn_task(coroutine, name=f"wisdom-review:{invocation.session_key}")
         except Exception as exc:  # pylint: disable=broad-exception-caught
             coroutine.close()
+            if completion is not None:
+                completion.set_result("unavailable")
             logger.warning("Collective Wisdom review dispatch failed (%s)", describe_exception(exc))
 
     def _begin(
         self, invocation: NativeInvocation, build: Callable[[Any], dict[str, Any]], *,
         expected_owner: dict[str, str] | None = None,
+        completion: Future | None = None,
     ) -> dict[str, str]:
         service = self.service_factory()
         try:
@@ -1023,11 +1049,11 @@ class NativeSurfaceRuntime:  # pylint: disable=too-many-instance-attributes,too-
         except RuntimeError:
             current_loop = None
         if current_loop is loop:
-            self._schedule_review_post(invocation, record, native, token, loop)
+            self._schedule_review_post(invocation, record, native, token, completion)
         else:
             try:
                 loop.call_soon_threadsafe(
-                    self._schedule_review_post, invocation, record, native, token, loop,
+                    self._schedule_review_post, invocation, record, native, token, completion,
                 )
             except RuntimeError:
                 return {"state": "unavailable"}
