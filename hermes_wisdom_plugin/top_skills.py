@@ -19,6 +19,11 @@ from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
+from types import SimpleNamespace
+
+from .errors import WisdomNotFound
+from .package import SkillRefusal
+from .share_sources import ShareSources, hermes_search_roots
 
 DEFAULT_PER_PAGE = 10
 MAX_PER_PAGE = 50
@@ -34,8 +39,8 @@ EMPTY_TEXT = (
     "No recorded usage for your own local skills yet. "
     "Use your skills in Hermes and try again."
 )
-# ``_iter_skill_mds`` and ``_find_skill_dir`` are private but already the
-# resolver ``/wisdom share`` uses (qualification.py); both exist from 0.21.5.
+# Skill usage is optional on older Hermes hosts. Source discovery is shared with
+# manual sharing rather than the usage module's private first-match resolver.
 _REQUIRED_API = ("load_usage", "is_bundled", "is_hub_installed", "_iter_skill_mds",
                  "_find_skill_dir")
 _PUBLISHER_KIND = "publisher_source"
@@ -140,13 +145,12 @@ def _profile_home(home: Path, override) -> Iterator[None]:
 class _Walk:
     """One profile's local skill walk: what is hidden, team-installed or shared."""
 
-    skills_root: Path
+    sources: ShareSources
     usage: dict[str, Any]
     hidden: set[str]
     team: dict[str, set[str]]
     shared: set[str]
     not_owned: Callable[[str, dict[str, Any]], bool]
-    resolver: Callable[[str], Path | None]
 
 
 def _walk(api: Any, home: Path, installations: Iterable[dict[str, Any]],
@@ -158,19 +162,18 @@ def _walk(api: Any, home: Path, installations: Iterable[dict[str, Any]],
     skills_root = home / "skills"
     team, shared = _managed_paths(installations)
     shared |= {_resolved(path) for path in published_paths if path}
+    sources = ShareSources(SimpleNamespace(
+        skills_root=skills_root, skill_search_roots=lambda: hermes_search_roots(skills_root)))
     return _Walk(
-        skills_root=skills_root, usage=usage,
+        sources=sources, usage=usage,
         hidden=(set(_call(api, "list_archived_skill_names", ()))
                 | set(_call(api, "read_suppressed_names", ()))),
         team=team, shared=shared, not_owned=_ownership_filter(api),
-        resolver=_skill_resolver(api, skills_root),
     )
 
 
 def _owned(walk: _Walk, name: str, *, require_usage: bool) -> tuple[TopSkill, Path] | None:
     """The owner's own shareable local skill ``name``, or ``None``."""
-    from .qualification import _eligible_path  # pylint: disable=import-outside-toplevel
-
     record = walk.usage.get(name)
     if record is None and not require_usage:
         record = {}  # A just-created skill has no usage record yet.
@@ -179,8 +182,11 @@ def _owned(walk: _Walk, name: str, *, require_usage: bool) -> tuple[TopSkill, Pa
     uses, edits = _count(record.get("use_count")), _count(record.get("patch_count"))
     if require_usage and not uses and not edits:
         return None
-    path = _eligible_path(name, skills_root=walk.skills_root, skill_resolver=walk.resolver)
-    if path is None or _team_installed(walk.team, name, path):
+    try:
+        path = walk.sources.resolve(name)
+    except (WisdomNotFound, SkillRefusal):
+        return None
+    if _team_installed(walk.team, name, path):
         return None
     return TopSkill(
         name=name, description=_description(path / "SKILL.md"),
@@ -212,10 +218,7 @@ def collect_top_skills(
             walk = _walk(api, home, installations, published_paths)
             if walk is None:
                 return TopSkills("unavailable")
-            candidates = (
-                sorted({name for name, _md in api._iter_skill_mds(  # pylint: disable=protected-access
-                    walk.skills_root, local_only=True)}) if walk.skills_root.is_dir() else []
-            )
+            candidates = walk.sources.names()
             items = [found[0] for name in candidates
                      if (found := _owned(walk, name, require_usage=True)) is not None]
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -237,7 +240,7 @@ def owner_skill(
     """One of the owner's own local skills by exact name, with or without usage.
 
     The same ownership rules as ``collect_top_skills``: never bundled, Hub,
-    archived, team-installed or outside the profile's own skills tree.
+    archived or team-installed. Configured external/create roots are eligible.
     """
     api = (usage_api or load_usage_api)()
     override = _home_override()
@@ -385,28 +388,6 @@ def _ownership_filter(api: Any) -> Callable[[str, dict[str, Any]], bool]:
         return bool(_call(api, "is_protected_builtin", False, name) or listed(name))
 
     return not_owned
-
-
-def _skill_resolver(api: Any, skills_root: Path) -> Callable[[str], Path | None]:
-    """First-match name → dir, built in one walk with the host's own ``_find_skill_dir`` parts.
-
-    ``_find_skill_dir`` walks the tree once per name. When the host exposes the
-    pieces it composes (``iter_skill_index_files``, ``_read_skill_name``,
-    ``is_external_skill_path``), build the same first-match map once instead.
-    """
-    try:
-        iterate = import_module("agent.skill_utils").iter_skill_index_files
-        read_name = api._read_skill_name  # pylint: disable=protected-access
-        external = api.is_external_skill_path
-    except (ImportError, AttributeError):
-        return api._find_skill_dir  # pylint: disable=protected-access
-    found: dict[str, Path] = {}
-    if skills_root.exists():
-        for skill_md in iterate(skills_root, "SKILL.md"):
-            if not external(skill_md):
-                found.setdefault(read_name(skill_md, fallback=skill_md.parent.name),
-                                 skill_md.parent)
-    return found.get
 
 
 def _resolved(path: str) -> str:

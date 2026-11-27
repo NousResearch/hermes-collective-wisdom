@@ -75,6 +75,15 @@ class InstallationHost:
 
         return self.profile_home / "skills"
 
+    def skill_search_roots(self) -> list[tuple[int, Path]]:
+        """Read Hermes' non-project share sources, without changing install targets."""
+        from .share_sources import hermes_search_roots  # pylint: disable=import-outside-toplevel
+
+        self._check_profile()
+        roots = hermes_search_roots(self.skills_root)
+        self._check_profile()
+        return roots
+
     def parse_skill_frontmatter(self, source: Path) -> dict[str, object]:
         """Parse one local SKILL.md through the supported host utility."""
 

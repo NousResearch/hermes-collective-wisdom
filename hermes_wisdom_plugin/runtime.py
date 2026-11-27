@@ -29,6 +29,7 @@ from .errors import (
 from .install_review import confirmed_file_change
 from .package import PackagePolicyError, SkillRefusal
 from .release_scope import active as release_scope
+from .share_sources import LocalSkillNotFound
 
 
 def _require_current(may_apply: Callable[[], bool] | None) -> None:
@@ -1897,12 +1898,14 @@ class CommandRuntime:  # pylint: disable=too-many-instance-attributes
                 reply = self._slash_native_review(invocation, command, args)
                 if reply is not None:
                     return reply
-            except SkillRefusal as exc:
-                # The skill's own files break a rule (plugin-authored text):
-                # say exactly why. Anything else, including Gateway-supplied
-                # validation text, keeps the generic reply below.
+            except (LocalSkillNotFound, SkillRefusal) as exc:
+                # These are plugin-authored source errors. Gateway-supplied
+                # validation text keeps the generic reply below.
                 logger.warning("Collective Wisdom review failed (%s)", describe_exception(exc))
-                return f"Couldn't open Collective Wisdom: {redacted_message(exc, limit=1000)}"
+                return (
+                    redacted_message(exc, limit=4096) if isinstance(exc, LocalSkillNotFound)
+                    else f"Couldn't open Collective Wisdom: {redacted_message(exc, limit=1000)}"
+                )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning("Collective Wisdom review failed (%s)", describe_exception(exc))
                 return _REVIEW_UNAVAILABLE
